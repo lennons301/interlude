@@ -56,6 +56,7 @@ Building the web UI and API layer. No agent execution yet — uses a mock agent 
 - Task lifecycle management
 - **Interactive chat:** pipe user messages into running agent (stdin), make the conversation bidirectional
 - **Chat UI improvements:** visual distinction between user/agent messages, action cards for commits/PRs/blockers, conversation-style layout (not terminal log)
+- **Live preview:** proxy container dev server through orchestrator, embed as iframe in task detail view. Real-time hot reload as agent writes code. Mobile-friendly preview pane.
 
 ### Phase 3: GitHub Integration
 - GitHub App setup and auth
