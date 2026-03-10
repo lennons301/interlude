@@ -54,6 +54,8 @@ Building the web UI and API layer. No agent execution yet — uses a mock agent 
 - Claude Code CLI execution inside containers
 - Output capture and streaming back to UI
 - Task lifecycle management
+- **Interactive chat:** pipe user messages into running agent (stdin), make the conversation bidirectional
+- **Chat UI improvements:** visual distinction between user/agent messages, action cards for commits/PRs/blockers, conversation-style layout (not terminal log)
 
 ### Phase 3: GitHub Integration
 - GitHub App setup and auth
