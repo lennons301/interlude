@@ -1,3 +1,6 @@
+// Initialize orchestrator (idempotent, runs once)
+import("@/lib/orchestrator/init").then((m) => m.initOrchestrator().catch(console.error));
+
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
