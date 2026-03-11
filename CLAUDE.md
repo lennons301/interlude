@@ -80,6 +80,7 @@ Phase 1 (Chat UI + API) is complete. Moving to agent execution.
 - Dockerise the stack
 - Deploy to Hetzner/DO VPS (~€5/mo idle)
 - SSL, domain, push notifications
+- Container resource limits (CPU/memory caps per agent container)
 
 ### Phase 6: On-Demand Remote Compute
 - Cloud provider API for machine provisioning
