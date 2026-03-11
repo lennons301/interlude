@@ -11,7 +11,7 @@ export async function GET() {
 
 export async function POST(request: Request) {
   const body = await request.json();
-  const { name, githubRepo } = body as { name: string; githubRepo?: string };
+  const { name, githubRepo, gitUrl } = body as { name: string; githubRepo?: string; gitUrl?: string };
 
   if (!name?.trim()) {
     return NextResponse.json({ error: "name is required" }, { status: 400 });
@@ -21,6 +21,7 @@ export async function POST(request: Request) {
     id: newId(),
     name: name.trim(),
     githubRepo: githubRepo ?? null,
+    gitUrl: gitUrl ?? null,
     createdAt: new Date(),
   };
 

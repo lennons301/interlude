@@ -9,12 +9,14 @@ type Project = {
   id: string;
   name: string;
   githubRepo: string | null;
+  gitUrl: string | null;
   createdAt: string;
 };
 
 export function ProjectList() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [name, setName] = useState("");
+  const [gitUrl, setGitUrl] = useState("");
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
@@ -34,9 +36,10 @@ export function ProjectList() {
     await fetch("/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: name.trim() }),
+      body: JSON.stringify({ name: name.trim(), gitUrl: gitUrl.trim() || undefined }),
     });
     setName("");
+    setGitUrl("");
     setCreating(false);
     loadProjects();
   }
@@ -48,6 +51,12 @@ export function ProjectList() {
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="Project name"
+          className="flex-1"
+        />
+        <Input
+          value={gitUrl}
+          onChange={(e) => setGitUrl(e.target.value)}
+          placeholder="https://github.com/user/repo.git"
           className="flex-1"
         />
         <Button type="submit" disabled={creating || !name.trim()}>
@@ -63,6 +72,9 @@ export function ProjectList() {
             <Card key={p.id}>
               <CardHeader className="py-3">
                 <span className="font-medium">{p.name}</span>
+                {p.gitUrl && (
+                  <span className="text-sm text-muted-foreground">{p.gitUrl}</span>
+                )}
               </CardHeader>
             </Card>
           ))}
