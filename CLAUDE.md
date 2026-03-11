@@ -36,27 +36,36 @@ pnpm build        # Production build
 pnpm lint         # Run ESLint
 ```
 
-## Current Status: Phase 1 (Chat UI + API)
+## Current Status: Phase 1 complete, starting Phase 2a
 
-Building the web UI and API layer. No agent execution yet — uses a mock agent for development.
+Phase 1 (Chat UI + API) is complete. Moving to agent execution.
 
 ## Roadmap
 
-### Phase 1: Chat UI + API (current)
+### Phase 1: Chat UI + API (done)
 - Task/chat interface with expandable feed layout
 - SQLite database for tasks, messages, logs
 - SSE streaming infrastructure
 - Mock agent for UI development
 - Mobile-friendly PWA
 
-### Phase 2: Agent Orchestrator + Local Docker
+### Phase 2a: Agent Orchestrator + Local Docker
 - Docker container provisioning for agent workspaces
 - Claude Code CLI execution inside containers
 - Output capture and streaming back to UI
-- Task lifecycle management
-- **Interactive chat:** pipe user messages into running agent (stdin), make the conversation bidirectional
-- **Chat UI improvements:** visual distinction between user/agent messages, action cards for commits/PRs/blockers, conversation-style layout (not terminal log)
-- **Live preview:** proxy container dev server through orchestrator, embed as iframe in task detail view. Real-time hot reload as agent writes code. Mobile-friendly preview pane.
+- Task lifecycle management (queue, run, complete, fail)
+
+### Phase 2b: Interactive Chat
+- Pipe user messages into running agent (stdin), bidirectional conversation
+- Chat UI improvements: visual distinction between user/agent messages
+- Action cards for commits, PRs, blockers
+- Conversation-style layout (not terminal log)
+
+### Phase 2c: Live Preview
+- Proxy container dev server through orchestrator
+- Embed as iframe in task detail view
+- Real-time hot reload as agent writes code
+- Mobile-friendly preview pane
 
 ### Phase 3: GitHub Integration
 - GitHub App setup and auth
