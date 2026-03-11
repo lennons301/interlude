@@ -4,6 +4,7 @@ export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   githubRepo: text("github_repo"),
+  gitUrl: text("git_url"),
   createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 
@@ -20,6 +21,8 @@ export const tasks = sqliteTable("tasks", {
     .notNull()
     .default("queued"),
   githubIssue: text("github_issue"),
+  containerId: text("container_id"),
+  branch: text("branch"),
   createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: int("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
