@@ -1,0 +1,118 @@
+import Docker from "dockerode";
+import { getDocker } from "./client";
+import { getImageName, ensureImage } from "./image-builder";
+import { getConfig } from "../config";
+
+export interface ContainerOptions {
+  taskId: string;
+  gitUrl: string;
+  branch: string;
+  prompt: string;
+}
+
+export interface RunningContainer {
+  container: Docker.Container;
+  id: string;
+}
+
+export async function createAgentContainer(
+  options: ContainerOptions
+): Promise<RunningContainer> {
+  const docker = getDocker();
+  const config = getConfig();
+
+  await ensureImage();
+
+  const container = await docker.createContainer({
+    Image: getImageName(),
+    name: `interlude-task-${options.taskId}`,
+    Env: [
+      `ANTHROPIC_API_KEY=${config.anthropicApiKey}`,
+      `GIT_TOKEN=${config.gitToken}`,
+      `GIT_URL=${options.gitUrl}`,
+      `GIT_BRANCH=${options.branch}`,
+      `GIT_USER_NAME=${config.gitUserName}`,
+      `GIT_USER_EMAIL=${config.gitUserEmail}`,
+      `TASK_PROMPT=${options.prompt}`,
+    ],
+    Cmd: [
+      "bash",
+      "-c",
+      [
+        // Configure git
+        'git config --global user.name "$GIT_USER_NAME"',
+        'git config --global user.email "$GIT_USER_EMAIL"',
+        // Clone repo using token
+        'git clone "https://${GIT_TOKEN}@${GIT_URL#https://}" /workspace/repo',
+        "cd /workspace/repo",
+        // Create branch
+        'git checkout -b "$GIT_BRANCH"',
+        // Run Claude Code
+        'claude -p "$TASK_PROMPT" --output-format stream-json',
+      ].join(" && "),
+    ],
+    WorkingDir: "/workspace",
+    HostConfig: {
+      NetworkMode: "bridge",
+    },
+  });
+
+  return { container, id: container.id };
+}
+
+export async function startAndAttach(
+  running: RunningContainer
+): Promise<NodeJS.ReadableStream> {
+  const stream = await running.container.attach({
+    stream: true,
+    stdout: true,
+    stderr: true,
+  });
+
+  await running.container.start();
+
+  return stream;
+}
+
+export async function waitForExit(
+  running: RunningContainer
+): Promise<{ StatusCode: number }> {
+  return running.container.wait();
+}
+
+export async function pushBranch(
+  running: RunningContainer
+): Promise<void> {
+  const exec = await running.container.exec({
+    Cmd: ["bash", "-c", "cd /workspace/repo && git push origin HEAD"],
+    AttachStdout: true,
+    AttachStderr: true,
+  });
+
+  const stream = await exec.start({});
+  // Wait for push to complete
+  await new Promise<void>((resolve) => {
+    stream.on("end", resolve);
+    stream.resume(); // drain the stream
+  });
+}
+
+export async function stopContainer(
+  running: RunningContainer
+): Promise<void> {
+  try {
+    await running.container.stop({ t: 5 });
+  } catch {
+    // Already stopped
+  }
+}
+
+export async function removeContainer(
+  running: RunningContainer
+): Promise<void> {
+  try {
+    await running.container.remove({ force: true });
+  } catch {
+    // Already removed
+  }
+}
