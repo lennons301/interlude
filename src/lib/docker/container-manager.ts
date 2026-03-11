@@ -23,18 +23,46 @@ export async function createAgentContainer(
 
   await ensureImage();
 
+  // Build env vars
+  const env = [
+    `GIT_TOKEN=${config.gitToken}`,
+    `GIT_URL=${options.gitUrl}`,
+    `GIT_BRANCH=${options.branch}`,
+    `GIT_USER_NAME=${config.gitUserName}`,
+    `GIT_USER_EMAIL=${config.gitUserEmail}`,
+    `TASK_PROMPT=${options.prompt}`,
+    `MAX_TURNS=${config.maxTurns}`,
+    `MAX_BUDGET_USD=${config.maxBudgetUsd}`,
+    // Disable telemetry and session persistence in ephemeral containers
+    "DISABLE_TELEMETRY=1",
+  ];
+
+  if (config.anthropicApiKey) {
+    env.push(`ANTHROPIC_API_KEY=${config.anthropicApiKey}`);
+  }
+
+  // Build volume mounts for OAuth credentials
+  const binds: string[] = [];
+  if (config.claudeCredentialsPath) {
+    // Mount credentials read-write so Claude Code can refresh OAuth tokens
+    binds.push(`${config.claudeCredentialsPath}:/home/agent/.claude/.credentials.json:rw`);
+  }
+
+  // Build the claude command with appropriate flags
+  const claudeCmd = [
+    'claude -p "$TASK_PROMPT"',
+    "--output-format stream-json",
+    "--verbose",
+    "--no-session-persistence",
+    "--dangerously-skip-permissions",
+    '--max-turns "$MAX_TURNS"',
+    '--max-budget-usd "$MAX_BUDGET_USD"',
+  ].join(" ");
+
   const container = await docker.createContainer({
     Image: getImageName(),
     name: `interlude-task-${options.taskId}`,
-    Env: [
-      `ANTHROPIC_API_KEY=${config.anthropicApiKey}`,
-      `GIT_TOKEN=${config.gitToken}`,
-      `GIT_URL=${options.gitUrl}`,
-      `GIT_BRANCH=${options.branch}`,
-      `GIT_USER_NAME=${config.gitUserName}`,
-      `GIT_USER_EMAIL=${config.gitUserEmail}`,
-      `TASK_PROMPT=${options.prompt}`,
-    ],
+    Env: env,
     Cmd: [
       "bash",
       "-c",
@@ -47,13 +75,14 @@ export async function createAgentContainer(
         "cd /workspace/repo",
         // Create branch
         'git checkout -b "$GIT_BRANCH"',
-        // Run Claude Code
-        'claude -p "$TASK_PROMPT" --output-format stream-json',
+        // Run Claude Code in headless mode
+        claudeCmd,
       ].join(" && "),
     ],
     WorkingDir: "/workspace",
     HostConfig: {
       NetworkMode: "bridge",
+      Binds: binds.length > 0 ? binds : undefined,
     },
   });
 

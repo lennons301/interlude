@@ -8,6 +8,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npm install -g @anthropic-ai/claude-code
 
 RUN useradd -m -u 1000 agent && mkdir -p /workspace && chown agent:agent /workspace
+
+# Pre-accept permissions bypass for headless operation
+RUN mkdir -p /home/agent/.claude && chown -R agent:agent /home/agent/.claude
+RUN echo '{"bypassPermissionsModeAccepted": true}' > /home/agent/.claude.json && chown agent:agent /home/agent/.claude.json
+
 USER agent
 
 WORKDIR /workspace
