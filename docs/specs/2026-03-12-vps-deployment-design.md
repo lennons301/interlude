@@ -140,8 +140,10 @@ DOMAIN=interlude.dev
 # App
 DATABASE_URL=/data/interlude.db
 
-# Agent credentials (injected into agent containers)
-ANTHROPIC_API_KEY=sk-ant-...
+# Agent credentials
+# OAuth credentials are mounted as a file (see auth section above)
+# ANTHROPIC_API_KEY is optional — only needed if NOT using OAuth
+# ANTHROPIC_API_KEY=sk-ant-...
 GIT_TOKEN=ghp_...
 GIT_USER_NAME=Interlude Agent
 GIT_USER_EMAIL=agent@interlude.dev
@@ -152,19 +154,45 @@ MAX_TURNS=50
 MAX_BUDGET_USD=5.00
 ```
 
-Note: The app uses `ANTHROPIC_API_KEY` for agent containers. The `claudeCredentialsPath` config (OAuth credentials file) is a local development concern only — on the VPS, the API key is the auth mechanism. The config module already falls back gracefully when the credentials file doesn't exist, as long as `ANTHROPIC_API_KEY` is set.
+### Authentication: Claude OAuth (not API key)
+
+The primary auth mechanism is **OAuth via Claude Pro/Max/Enterprise subscription**, avoiding separate API token costs. The credentials file (`~/.claude/.credentials.json`) is created once on the VPS via SSH tunnel, then mounted into agent containers.
+
+**One-time OAuth setup on VPS:**
+
+1. SSH in with port forward: `ssh -L 9999:localhost:9999 deploy@<vps-ip>`
+2. Run `claude` — it prints an OAuth URL
+3. Open that URL in your local browser, complete the login
+4. Browser redirects to `localhost:9999`, SSH tunnel forwards it to the VPS
+5. Claude Code receives the callback, saves credentials to `~/.claude/.credentials.json`
+
+**Credential mounting in Docker Compose:**
+
+The credentials file lives on the host at `/home/deploy/.claude/.credentials.json`. The `app` container mounts it read-write (so Claude Code can refresh tokens inside agent containers):
+
+```yaml
+volumes:
+  - /home/deploy/.claude/.credentials.json:/home/node/.claude/.credentials.json:rw
+```
+
+The app container then mounts this same path into each agent container via the `Binds` config in `container-manager.ts` (already implemented).
+
+`ANTHROPIC_API_KEY` remains supported as a fallback but is not the intended auth path — the config module already handles both (`src/lib/config.ts` requires one or the other).
 
 ## VPS Setup (One-Time)
 
 1. Create Hetzner CX22 instance (Ubuntu 24.04)
 2. SSH in, create `deploy` user with sudo
-3. Install Docker Engine + Docker Compose plugin
-4. Clone repo to `/opt/interlude`
-5. Create `.env` file with credentials
-6. Point domain DNS (A record) to VPS IP
-7. `docker compose up -d` — Caddy provisions SSL once DNS propagates
-8. Set up GitHub Actions secrets for deploy workflow
-9. Configure OAuth callback URLs to `https://<domain>/api/auth/callback`
+3. Harden SSH: disable password auth, install fail2ban
+4. Configure UFW: allow 22, 80, 443
+5. Install Docker Engine + Docker Compose plugin
+6. Clone repo to `/opt/interlude`
+7. Create `.env` file with GIT_TOKEN and other config
+8. Point domain DNS (A record) to VPS IP
+9. `docker compose up -d` — Caddy provisions SSL once DNS propagates
+10. Set up GitHub Actions secrets for deploy workflow
+11. **Claude OAuth setup:** SSH in with port forward (`ssh -L 9999:localhost:9999`), run `claude`, complete OAuth in local browser, verify credentials file created
+12. Verify end-to-end: create a project, create a task, trigger agent run
 
 ## Database Considerations
 
@@ -191,7 +219,8 @@ These changes to the existing codebase are needed before deployment works:
 
 1. **`src/db/index.ts`** — Read `DATABASE_URL` from environment instead of hardcoding `local.db`. Fall back to `local.db` for local dev.
 2. **`next.config.ts`** — Add `output: 'standalone'` for minimal production builds.
-3. **`src/lib/config.ts`** — Ensure `getConfig()` does not throw when OAuth credentials file is missing, as long as `ANTHROPIC_API_KEY` is set. (Verify current behavior; may already work.)
+
+Note: `src/lib/config.ts` already handles both auth paths correctly — it accepts either `ANTHROPIC_API_KEY` or the OAuth credentials file, and throws only if neither is present.
 
 ## What This Phase Does NOT Include
 
