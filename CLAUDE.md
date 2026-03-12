@@ -36,9 +36,9 @@ pnpm build        # Production build
 pnpm lint         # Run ESLint
 ```
 
-## Current Status: Phase 1 complete, starting Phase 2a
+## Current Status: Phase 2a code complete, deploying to VPS
 
-Phase 1 (Chat UI + API) is complete. Moving to agent execution.
+Phase 1 (Chat UI + API) is complete. Phase 2a (Agent Orchestrator) code is complete but untested end-to-end — WSL2 blocks OAuth callbacks and Docker networking. VPS deployment pulled forward to unblock testing.
 
 ## Roadmap
 
@@ -49,11 +49,19 @@ Phase 1 (Chat UI + API) is complete. Moving to agent execution.
 - Mock agent for UI development
 - Mobile-friendly PWA
 
-### Phase 2a: Agent Orchestrator + Local Docker
+### Phase 2a: Agent Orchestrator + Local Docker (code complete, needs VPS to test)
 - Docker container provisioning for agent workspaces
 - Claude Code CLI execution inside containers
 - Output capture and streaming back to UI
 - Task lifecycle management (queue, run, complete, fail)
+
+### Phase 2.5: Deploy to VPS (current — pulled forward from Phase 5)
+- Dockerise the Next.js app (multi-stage build)
+- Docker Compose stack: Caddy (reverse proxy + auto-SSL) + app
+- Deploy to Hetzner CX22 (~EUR4.50/mo)
+- Domain + HTTPS for OAuth callback URLs
+- GitHub Actions CI/CD (push to main -> auto-deploy)
+- End-to-end testing of Phase 2a on real infrastructure
 
 ### Phase 2b: Interactive Chat
 - Pipe user messages into running agent (stdin), bidirectional conversation
@@ -76,11 +84,11 @@ Phase 1 (Chat UI + API) is complete. Moving to agent execution.
 - Slack or Telegram bot for bidirectional messaging
 - Task dispatch from chat
 
-### Phase 5: Deploy to VPS
-- Dockerise the stack
-- Deploy to Hetzner/DO VPS (~€5/mo idle)
-- SSL, domain, push notifications
+### Phase 5: Production Hardening (was Phase 5, deployment moved to 2.5)
 - Container resource limits (CPU/memory caps per agent container)
+- Automated backups
+- Monitoring and alerting
+- Push notifications
 
 ### Phase 6: On-Demand Remote Compute
 - Cloud provider API for machine provisioning
@@ -91,4 +99,7 @@ Phase 1 (Chat UI + API) is complete. Moving to agent execution.
 
 - Design spec: `docs/specs/2026-03-10-phase1-chat-ui-api-design.md`
 - Implementation plan: `docs/plans/2026-03-10-phase1-chat-ui-api.md`
+- Phase 2a spec: `docs/specs/2026-03-11-phase2a-agent-orchestrator-design.md`
+- Phase 2a plan: `docs/plans/2026-03-11-phase2a-agent-orchestrator.md`
+- VPS deployment spec: `docs/specs/2026-03-12-vps-deployment-design.md`
 - Overall design: see `docs/plans/2026-03-10-remote-agent-dev-environment-design.md` (external)
