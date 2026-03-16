@@ -15,6 +15,11 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NODE_ENV=production
 RUN pnpm build
+# Flatten pnpm symlinks for native addon deps so they can be copied to the run stage
+RUN mkdir -p /native-deps/node_modules && \
+    cp -rL node_modules/better-sqlite3 /native-deps/node_modules/better-sqlite3 && \
+    cp -rL node_modules/.pnpm/better-sqlite3@*/node_modules/bindings /native-deps/node_modules/bindings && \
+    cp -rL node_modules/.pnpm/bindings@*/node_modules/file-uri-to-path /native-deps/node_modules/file-uri-to-path
 
 # --- Run ---
 FROM base AS run
@@ -26,10 +31,10 @@ COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
 COPY --from=build /app/public ./public
 
-# Copy native addon not reliably traced by Next.js standalone
-COPY --from=build /app/node_modules/better-sqlite3 ./node_modules/better-sqlite3
-COPY --from=build /app/node_modules/bindings ./node_modules/bindings
-COPY --from=build /app/node_modules/file-uri-to-path ./node_modules/file-uri-to-path
+# Copy native addon and its resolved dependencies
+COPY --from=build /native-deps/node_modules/better-sqlite3 ./node_modules/better-sqlite3
+COPY --from=build /native-deps/node_modules/bindings ./node_modules/bindings
+COPY --from=build /native-deps/node_modules/file-uri-to-path ./node_modules/file-uri-to-path
 
 # Copy files needed at runtime beyond Next.js standalone
 COPY --from=build /app/drizzle ./drizzle
