@@ -24,10 +24,15 @@ export function getConfig(): AppConfig {
   const anthropicApiKey = process.env.ANTHROPIC_API_KEY ?? null;
   const gitToken = process.env.GIT_TOKEN;
 
-  // Find Claude credentials file
-  const credentialsPath =
-    process.env.CLAUDE_CREDENTIALS_PATH ??
-    path.join(process.env.HOME ?? "/root", ".claude", ".credentials.json");
+  // Find Claude credentials file — check the container mount path first,
+  // then fall back to CLAUDE_CREDENTIALS_PATH or $HOME default
+  const candidatePaths = [
+    "/home/node/.claude/.credentials.json",
+    process.env.CLAUDE_CREDENTIALS_PATH,
+    path.join(process.env.HOME ?? "/root", ".claude", ".credentials.json"),
+  ].filter(Boolean) as string[];
+
+  const credentialsPath = candidatePaths.find((p) => fs.existsSync(p)) ?? candidatePaths[0];
 
   const claudeCredentialsPath =
     fs.existsSync(credentialsPath) ? credentialsPath : null;
