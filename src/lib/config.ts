@@ -4,8 +4,10 @@ import fs from "fs";
 export interface AppConfig {
   /** Anthropic API key (optional if using OAuth credentials) */
   anthropicApiKey: string | null;
-  /** Path to Claude OAuth credentials file (e.g. ~/.claude/.credentials.json) */
+  /** Path to Claude OAuth credentials file inside this container */
   claudeCredentialsPath: string | null;
+  /** Host path for mounting credentials into agent containers */
+  claudeCredentialsHostPath: string | null;
   gitToken: string;
   gitUserName: string;
   gitUserEmail: string;
@@ -46,9 +48,16 @@ export function getConfig(): AppConfig {
     throw new Error("GIT_TOKEN is required");
   }
 
+  // The host path is what docker-compose used to mount into this container
+  // It's the original CLAUDE_CREDENTIALS_PATH env var (set to the host path in .env)
+  const claudeCredentialsHostPath = claudeCredentialsPath
+    ? (process.env.CLAUDE_CREDENTIALS_PATH ?? null)
+    : null;
+
   _config = {
     anthropicApiKey,
     claudeCredentialsPath,
+    claudeCredentialsHostPath,
     gitToken,
     gitUserName: process.env.GIT_USER_NAME ?? "Interlude Agent",
     gitUserEmail: process.env.GIT_USER_EMAIL ?? "agent@interlude.dev",
