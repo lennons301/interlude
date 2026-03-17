@@ -52,7 +52,7 @@ export async function createWorkspaceContainer(
 
   const container = await docker.createContainer({
     Image: getImageName(),
-    name: `interlude-task-${options.taskId}`,
+    name: `interlude-task-${options.taskId}-${Date.now()}`,
     Env: env,
     Cmd: ["sleep", "infinity"],
     WorkingDir: "/workspace",
