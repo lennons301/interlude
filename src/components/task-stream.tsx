@@ -1,23 +1,62 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ChatMessage } from "./chat-message";
 
 type Message = {
   id: string;
   role: string;
+  type: string;
   content: string;
   createdAt: string;
 };
 
-export function TaskStream({ taskId }: { taskId: string }) {
+type TaskStatus = {
+  containerStatus: string | null;
+  status: string;
+  totalCostUsd: number;
+};
+
+interface TaskStreamProps {
+  taskId: string;
+  onStatusChange?: (status: TaskStatus) => void;
+}
+
+export function TaskStream({ taskId, onStatusChange }: TaskStreamProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const userScrolledUp = useRef(false);
+
+  const scrollToBottom = useCallback(() => {
+    if (!userScrolledUp.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, []);
+
+  useEffect(() => {
+    // Track whether user has scrolled up
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      userScrolledUp.current = scrollHeight - scrollTop - clientHeight > 100;
+    };
+
+    container.addEventListener("scroll", handleScroll);
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, []);
 
   useEffect(() => {
     // Load existing messages
     fetch(`/api/tasks/${taskId}/messages`)
       .then((r) => r.json())
-      .then((data) => setMessages(data));
+      .then((data: Message[]) => {
+        setMessages(data);
+        // Scroll after initial load
+        setTimeout(() => scrollToBottom(), 50);
+      });
 
     // Connect to SSE stream
     const eventSource = new EventSource(`/api/tasks/${taskId}/stream`);
@@ -25,36 +64,44 @@ export function TaskStream({ taskId }: { taskId: string }) {
     eventSource.addEventListener("message", (e) => {
       const msg = JSON.parse(e.data) as Message;
       setMessages((prev) => {
-        if (prev.some((m) => m.id === msg.id)) return prev;
+        if (prev.some((m) => m.id === msg.id)) {
+          // Update existing message (e.g., tool_result updating tool_use)
+          return prev.map((m) => (m.id === msg.id ? msg : m));
+        }
         return [...prev, msg];
       });
     });
 
+    eventSource.addEventListener("taskStatus", (e) => {
+      const status = JSON.parse(e.data) as TaskStatus;
+      onStatusChange?.(status);
+    });
+
     return () => eventSource.close();
-  }, [taskId]);
+  }, [taskId, onStatusChange, scrollToBottom]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    scrollToBottom();
+  }, [messages, scrollToBottom]);
 
   return (
-    <div className="max-h-64 overflow-y-auto rounded-md bg-black/30 p-3 font-mono text-sm">
+    <div
+      ref={containerRef}
+      className="flex-1 overflow-y-auto px-4 py-3 space-y-1"
+    >
       {messages.length === 0 && (
-        <p className="text-muted-foreground">Waiting for agent output...</p>
+        <div className="flex items-center justify-center h-full">
+          <p className="text-zinc-500 text-sm">Waiting for agent output...</p>
+        </div>
       )}
       {messages.map((msg) => (
-        <div
+        <ChatMessage
           key={msg.id}
-          className={
-            msg.role === "user"
-              ? "text-blue-400"
-              : msg.role === "system"
-                ? "text-muted-foreground"
-                : "text-foreground"
-          }
-        >
-          {msg.content}
-        </div>
+          id={msg.id}
+          role={msg.role}
+          type={msg.type ?? "text"}
+          content={msg.content}
+        />
       ))}
       <div ref={bottomRef} />
     </div>
