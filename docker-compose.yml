@@ -23,9 +23,9 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - app_data:/data
-      - ${CLAUDE_CREDENTIALS_PATH:-/dev/null}:/home/node/.claude/.credentials.json:rw
     environment:
       - HOSTNAME=0.0.0.0
+      - DATABASE_URL=/data/interlude.db
 
 volumes:
   caddy_data:
