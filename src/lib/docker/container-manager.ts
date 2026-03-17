@@ -3,11 +3,16 @@ import { getDocker } from "./client";
 import { getImageName, ensureImage } from "./image-builder";
 import { getConfig } from "../config";
 
-export interface ContainerOptions {
+export interface WorkspaceOptions {
   taskId: string;
   gitUrl: string;
   branch: string;
+}
+
+export interface TurnOptions {
+  container: Docker.Container;
   prompt: string;
+  sessionId?: string; // If set, uses --resume
 }
 
 export interface RunningContainer {
@@ -15,25 +20,20 @@ export interface RunningContainer {
   id: string;
 }
 
-export async function createAgentContainer(
-  options: ContainerOptions
+export async function createWorkspaceContainer(
+  options: WorkspaceOptions
 ): Promise<RunningContainer> {
   const docker = getDocker();
   const config = getConfig();
 
   await ensureImage();
 
-  // Build env vars
   const env = [
     `GIT_TOKEN=${config.gitToken}`,
     `GIT_URL=${options.gitUrl}`,
     `GIT_BRANCH=${options.branch}`,
     `GIT_USER_NAME=${config.gitUserName}`,
     `GIT_USER_EMAIL=${config.gitUserEmail}`,
-    `TASK_PROMPT=${options.prompt}`,
-    `MAX_TURNS=${config.maxTurns}`,
-    `MAX_BUDGET_USD=${config.maxBudgetUsd}`,
-    // Disable telemetry and session persistence in ephemeral containers
     "DISABLE_TELEMETRY=1",
   ];
 
@@ -41,49 +41,20 @@ export async function createAgentContainer(
     env.push(`ANTHROPIC_API_KEY=${config.anthropicApiKey}`);
   }
 
-  // Build volume mounts for OAuth credentials
-  // Mount the entire .claude directory so Claude Code can refresh expired tokens
   const binds: string[] = [];
   if (config.claudeCredentialsHostPath) {
-    const hostClaudeDir = config.claudeCredentialsHostPath.replace(/\/.credentials\.json$/, "");
+    const hostClaudeDir = config.claudeCredentialsHostPath.replace(
+      /\/.credentials\.json$/,
+      ""
+    );
     binds.push(`${hostClaudeDir}:/home/node/.claude:rw`);
   }
-
-  // Build the claude command with appropriate flags
-  const claudeCmd = [
-    'claude -p "$TASK_PROMPT"',
-    "--output-format stream-json",
-    "--verbose",
-    "--no-session-persistence",
-    "--dangerously-skip-permissions",
-    '--max-turns "$MAX_TURNS"',
-    '--max-budget-usd "$MAX_BUDGET_USD"',
-  ].join(" ");
 
   const container = await docker.createContainer({
     Image: getImageName(),
     name: `interlude-task-${options.taskId}`,
     Env: env,
-    Cmd: [
-      "bash",
-      "-c",
-      [
-        // Configure git
-        'git config --global user.name "$GIT_USER_NAME"',
-        'git config --global user.email "$GIT_USER_EMAIL"',
-        // Clone repo using token
-        'git clone "https://${GIT_TOKEN}@${GIT_URL#https://}" /workspace/repo',
-        "cd /workspace/repo",
-        // Create branch
-        'git checkout -b "$GIT_BRANCH"',
-        // Run Claude Code in headless mode
-        claudeCmd,
-        // Fallback commit if agent didn't commit its changes
-        'git add -A && git diff --cached --quiet || git commit -m "agent: uncommitted changes from task"',
-        // Push branch after agent completes
-        'git push origin "$GIT_BRANCH"',
-      ].join(" && "),
-    ],
+    Cmd: ["sleep", "infinity"],
     WorkingDir: "/workspace",
     HostConfig: {
       NetworkMode: "bridge",
@@ -94,40 +65,116 @@ export async function createAgentContainer(
   return { container, id: container.id };
 }
 
-export async function startAndAttach(
-  running: RunningContainer
-): Promise<NodeJS.ReadableStream> {
-  const stream = await running.container.attach({
-    stream: true,
-    stdout: true,
-    stderr: true,
-  });
-
-  await running.container.start();
-
-  return stream;
-}
-
-export async function waitForExit(
-  running: RunningContainer
-): Promise<{ StatusCode: number }> {
-  return running.container.wait();
-}
-
-export async function pushBranch(
+export async function execSetup(
   running: RunningContainer
 ): Promise<void> {
   const exec = await running.container.exec({
-    Cmd: ["bash", "-c", "cd /workspace/repo && git push origin HEAD"],
+    Cmd: [
+      "bash",
+      "-c",
+      [
+        'git config --global user.name "$GIT_USER_NAME"',
+        'git config --global user.email "$GIT_USER_EMAIL"',
+        'git clone "https://${GIT_TOKEN}@${GIT_URL#https://}" /workspace/repo',
+        "cd /workspace/repo",
+        'git checkout -b "$GIT_BRANCH"',
+      ].join(" && "),
+    ],
     AttachStdout: true,
     AttachStderr: true,
   });
 
   const stream = await exec.start({});
-  // Wait for push to complete
+  await new Promise<void>((resolve, reject) => {
+    stream.on("end", resolve);
+    stream.on("error", reject);
+    stream.resume();
+  });
+
+  const inspectResult = await exec.inspect();
+  if (inspectResult.ExitCode !== 0) {
+    throw new Error(`Workspace setup failed with exit code ${inspectResult.ExitCode}`);
+  }
+}
+
+export async function execClaudeTurn(
+  options: TurnOptions
+): Promise<{ stream: NodeJS.ReadableStream; exec: Docker.Exec }> {
+  const config = getConfig();
+  const docker = getDocker();
+
+  const cmdParts = [
+    "cd /workspace/repo",
+    "&&",
+    "claude",
+    "-p",
+    '"$CLAUDE_PROMPT"',
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--max-turns",
+    String(config.maxTurns),
+    "--max-budget-usd",
+    String(config.maxBudgetUsd),
+  ];
+
+  if (options.sessionId) {
+    cmdParts.push("--resume", options.sessionId);
+  }
+
+  const exec = await options.container.exec({
+    Cmd: ["bash", "-c", cmdParts.join(" ")],
+    Env: [`CLAUDE_PROMPT=${options.prompt}`],
+    AttachStdout: true,
+    AttachStderr: true,
+  });
+
+  const rawStream = await exec.start({});
+
+  // Demux the Docker multiplexed stream
+  const { PassThrough } = await import("stream");
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  docker.modem.demuxStream(rawStream, stdout, stderr);
+
+  // Merge stderr into stdout (Claude writes to both)
+  const merged = new PassThrough();
+  stdout.pipe(merged, { end: false });
+  stderr.pipe(merged, { end: false });
+
+  let endCount = 0;
+  const onEnd = () => {
+    endCount++;
+    if (endCount >= 2) merged.end();
+  };
+  stdout.on("end", onEnd);
+  stderr.on("end", onEnd);
+
+  return { stream: merged, exec };
+}
+
+export async function execFallbackCommitAndPush(
+  running: RunningContainer
+): Promise<void> {
+  const exec = await running.container.exec({
+    Cmd: [
+      "bash",
+      "-c",
+      [
+        "cd /workspace/repo",
+        'git add -A && git diff --cached --quiet || git commit -m "agent: uncommitted changes"',
+        "git push origin HEAD",
+      ].join(" && "),
+    ],
+    AttachStdout: true,
+    AttachStderr: true,
+  });
+
+  const stream = await exec.start({});
   await new Promise<void>((resolve) => {
     stream.on("end", resolve);
-    stream.resume(); // drain the stream
+    stream.resume();
   });
 }
 
