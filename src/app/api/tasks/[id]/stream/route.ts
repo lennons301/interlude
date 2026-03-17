@@ -1,5 +1,5 @@
 import { db } from "@/db";
-import { messages } from "@/db/schema";
+import { messages, tasks } from "@/db/schema";
 import { and, eq, gt, asc } from "drizzle-orm";
 import { createSSEStream } from "@/lib/sse";
 
@@ -15,8 +15,11 @@ export async function GET(
 
   return createSSEStream(request.signal, (send) => {
     let lastSeen = after ?? "";
+    let lastContainerStatus: string | null = null;
+    let lastTaskStatus: string | null = null;
 
     const poll = setInterval(() => {
+      // Send new messages
       const where = lastSeen
         ? and(eq(messages.taskId, id), gt(messages.id, lastSeen))
         : eq(messages.taskId, id);
@@ -31,6 +34,25 @@ export async function GET(
       for (const msg of newMessages) {
         send(msg, "message");
         lastSeen = msg.id;
+      }
+
+      // Send task status updates
+      const task = db.select().from(tasks).where(eq(tasks.id, id)).get();
+      if (task) {
+        const cs = task.containerStatus ?? null;
+        const ts = task.status;
+        if (cs !== lastContainerStatus || ts !== lastTaskStatus) {
+          lastContainerStatus = cs;
+          lastTaskStatus = ts;
+          send(
+            {
+              containerStatus: cs,
+              status: ts,
+              totalCostUsd: task.totalCostUsd ?? 0,
+            },
+            "taskStatus"
+          );
+        }
       }
     }, 500);
 
