@@ -2,9 +2,7 @@ import { db } from "@/db";
 import { tasks } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { notFound } from "next/navigation";
-import { StatusBadge } from "@/components/status-badge";
-import { TaskStream } from "@/components/task-stream";
-import { MessageInput } from "@/components/message-input";
+import { TaskChat } from "@/components/task-chat";
 
 export default async function TaskDetailPage({
   params,
@@ -17,21 +15,15 @@ export default async function TaskDetailPage({
   if (!task) notFound();
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">{task.title}</h1>
-        <StatusBadge status={task.status} />
-      </div>
-
-      {task.description && (
-        <p className="text-muted-foreground">{task.description}</p>
-      )}
-
-      <TaskStream taskId={task.id} />
-
-      {(task.status === "running" || task.status === "blocked") && (
-        <MessageInput taskId={task.id} />
-      )}
-    </div>
+    <TaskChat
+      task={{
+        id: task.id,
+        title: task.title,
+        status: task.status,
+        branch: task.branch,
+        containerStatus: task.containerStatus,
+        totalCostUsd: task.totalCostUsd ?? 0,
+      }}
+    />
   );
 }
