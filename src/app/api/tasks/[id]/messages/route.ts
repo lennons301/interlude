@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
-import { messages } from "@/db/schema";
+import { messages, tasks } from "@/db/schema";
 import { newId } from "@/lib/ulid";
 import { asc, eq } from "drizzle-orm";
 
@@ -28,17 +28,26 @@ export async function POST(
   const { content, role } = body as { content: string; role?: string };
 
   if (!content?.trim()) {
-    return NextResponse.json({ error: "content is required" }, { status: 400 });
+    return NextResponse.json(
+      { error: "content is required" },
+      { status: 400 }
+    );
   }
 
+  const trimmed = content.trim();
   const message = {
     id: newId(),
     taskId: id,
     role: (role ?? "user") as "user" | "agent" | "system",
-    content: content.trim(),
+    type: "text" as const,
+    content: JSON.stringify({ text: trimmed }),
     createdAt: new Date(),
   };
 
   db.insert(messages).values(message).run();
+
+  // No need to explicitly trigger — the queue polls every 2s
+  // and will pick up undelivered messages for idle tasks
+
   return NextResponse.json(message, { status: 201 });
 }
