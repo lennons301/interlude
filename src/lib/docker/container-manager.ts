@@ -176,6 +176,11 @@ export async function execFallbackCommitAndPush(
     stream.on("end", resolve);
     stream.resume();
   });
+
+  const inspectResult = await exec.inspect();
+  if (inspectResult.ExitCode !== 0) {
+    throw new Error(`Commit and push failed with exit code ${inspectResult.ExitCode}`);
+  }
 }
 
 export async function stopContainer(
