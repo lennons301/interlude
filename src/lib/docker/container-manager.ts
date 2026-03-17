@@ -42,11 +42,11 @@ export async function createAgentContainer(
   }
 
   // Build volume mounts for OAuth credentials
+  // Mount the entire .claude directory so Claude Code can refresh expired tokens
   const binds: string[] = [];
   if (config.claudeCredentialsHostPath) {
-    // Mount credentials read-write so Claude Code can refresh OAuth tokens
-    // Use the host path (not the app container path) as the bind mount source
-    binds.push(`${config.claudeCredentialsHostPath}:/home/agent/.claude/.credentials.json:rw`);
+    const hostClaudeDir = config.claudeCredentialsHostPath.replace(/\/.credentials\.json$/, "");
+    binds.push(`${hostClaudeDir}:/home/agent/.claude:rw`);
   }
 
   // Build the claude command with appropriate flags
