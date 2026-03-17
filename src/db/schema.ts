@@ -1,4 +1,4 @@
-import { int, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { int, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(),
@@ -23,6 +23,11 @@ export const tasks = sqliteTable("tasks", {
   githubIssue: text("github_issue"),
   containerId: text("container_id"),
   branch: text("branch"),
+  sessionId: text("session_id"),
+  containerStatus: text("container_status", {
+    enum: ["setup", "running", "idle", "completing"],
+  }),
+  totalCostUsd: real("total_cost_usd").notNull().default(0),
   createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: int("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
@@ -34,5 +39,11 @@ export const messages = sqliteTable("messages", {
     .references(() => tasks.id),
   role: text("role", { enum: ["user", "agent", "system"] }).notNull(),
   content: text("content").notNull(),
+  type: text("type", {
+    enum: ["text", "tool_use", "tool_result", "system"],
+  })
+    .notNull()
+    .default("text"),
+  deliveredAt: int("delivered_at", { mode: "timestamp_ms" }),
   createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
 });
