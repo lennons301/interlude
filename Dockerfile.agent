@@ -8,12 +8,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN npm install -g @anthropic-ai/claude-code
 
-RUN useradd -m agent && mkdir -p /workspace && chown agent:agent /workspace
+# Use the existing node user (uid 1000) which matches the deploy user on the host,
+# so mounted credential files retain correct ownership after token refresh
+RUN mkdir -p /workspace && chown node:node /workspace
 
 # Pre-accept permissions bypass for headless operation
-RUN mkdir -p /home/agent/.claude && chown -R agent:agent /home/agent/.claude
-RUN echo '{"bypassPermissionsModeAccepted": true}' > /home/agent/.claude.json && chown agent:agent /home/agent/.claude.json
+RUN mkdir -p /home/node/.claude && chown -R node:node /home/node/.claude
+RUN echo '{"bypassPermissionsModeAccepted": true}' > /home/node/.claude.json && chown node:node /home/node/.claude.json
 
-USER agent
+USER node
 
 WORKDIR /workspace

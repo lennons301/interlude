@@ -46,7 +46,7 @@ export async function createAgentContainer(
   const binds: string[] = [];
   if (config.claudeCredentialsHostPath) {
     const hostClaudeDir = config.claudeCredentialsHostPath.replace(/\/.credentials\.json$/, "");
-    binds.push(`${hostClaudeDir}:/home/agent/.claude:rw`);
+    binds.push(`${hostClaudeDir}:/home/node/.claude:rw`);
   }
 
   // Build the claude command with appropriate flags
