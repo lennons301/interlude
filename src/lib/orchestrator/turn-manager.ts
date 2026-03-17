@@ -87,9 +87,6 @@ export async function startTask(taskId: string): Promise<void> {
 
     // Run fallback commit after turn completes
     await runFallbackCommit(running);
-
-    // Check for queued messages immediately
-    await processQueuedMessages(taskId, running);
   } catch (err) {
     updateTask(taskId, { status: "failed", containerStatus: null });
     insertSystemMessage(
