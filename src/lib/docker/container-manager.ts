@@ -78,6 +78,8 @@ export async function createAgentContainer(
         'git checkout -b "$GIT_BRANCH"',
         // Run Claude Code in headless mode
         claudeCmd,
+        // Push branch after agent completes
+        'git push origin "$GIT_BRANCH"',
       ].join(" && "),
     ],
     WorkingDir: "/workspace",

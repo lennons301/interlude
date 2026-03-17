@@ -92,17 +92,8 @@ export async function runTask(taskId: string): Promise<void> {
     handler.flush();
 
     if (result.StatusCode === 0) {
-      // Success — push branch
-      insertSystemMessage(taskId, "Pushing branch...");
-      try {
-        await pushBranch(running);
-        insertSystemMessage(taskId, `✓ Branch '${branch}' pushed.`);
-      } catch (err) {
-        insertSystemMessage(
-          taskId,
-          `⚠ Branch push failed: ${err instanceof Error ? err.message : String(err)}`
-        );
-      }
+      // Container command includes git push, so branch is already pushed
+      insertSystemMessage(taskId, `✓ Branch '${branch}' pushed.`);
 
       db.update(tasks)
         .set({ status: "completed", updatedAt: new Date() })
