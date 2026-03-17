@@ -40,8 +40,9 @@ export function getConfig(): AppConfig {
     fs.existsSync(credentialsPath) ? credentialsPath : null;
 
   if (!anthropicApiKey && !claudeCredentialsPath) {
-    throw new Error(
-      "Either ANTHROPIC_API_KEY or Claude OAuth credentials (~/.claude/.credentials.json) is required"
+    console.warn(
+      "Warning: Neither ANTHROPIC_API_KEY nor Claude OAuth credentials (~/.claude/.credentials.json) found. " +
+        "Call resetConfig() after credentials are available."
     );
   }
   if (!gitToken) {
@@ -67,4 +68,9 @@ export function getConfig(): AppConfig {
   };
 
   return _config;
+}
+
+/** Clear cached config so next getConfig() re-reads from env/filesystem */
+export function resetConfig(): void {
+  _config = null;
 }
