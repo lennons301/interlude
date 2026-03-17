@@ -37,9 +37,10 @@ export async function runTask(taskId: string): Promise<void> {
   if (!project.gitUrl) throw new Error(`Project ${project.name} has no git URL`);
 
   const branch = `agent/${taskId}`;
-  const prompt = task.description
+  const userPrompt = task.description
     ? `${task.title}\n\n${task.description}`
     : task.title;
+  const prompt = `${userPrompt}\n\nWhen you are done, commit all your changes with a descriptive commit message.`;
 
   // Update task status
   db.update(tasks)

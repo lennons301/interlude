@@ -78,6 +78,8 @@ export async function createAgentContainer(
         'git checkout -b "$GIT_BRANCH"',
         // Run Claude Code in headless mode
         claudeCmd,
+        // Fallback commit if agent didn't commit its changes
+        'git add -A && git diff --cached --quiet || git commit -m "agent: uncommitted changes from task"',
         // Push branch after agent completes
         'git push origin "$GIT_BRANCH"',
       ].join(" && "),
