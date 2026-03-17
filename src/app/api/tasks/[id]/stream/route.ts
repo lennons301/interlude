@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { messages, tasks } from "@/db/schema";
-import { and, eq, gt, asc } from "drizzle-orm";
+import { and, eq, gt, lte, asc, isNotNull } from "drizzle-orm";
 import { createSSEStream } from "@/lib/sse";
 
 export const dynamic = "force-dynamic";
@@ -17,8 +17,11 @@ export async function GET(
     let lastSeen = after ?? "";
     let lastContainerStatus: string | null = null;
     let lastTaskStatus: string | null = null;
+    let lastPollTime = new Date();
 
     const poll = setInterval(() => {
+      const pollStart = new Date();
+
       // Send new messages
       const where = lastSeen
         ? and(eq(messages.taskId, id), gt(messages.id, lastSeen))
@@ -35,6 +38,29 @@ export async function GET(
         send(msg, "message");
         lastSeen = msg.id;
       }
+
+      // Send updates to already-seen messages (e.g. tool_use rows updated with tool_result output)
+      if (lastSeen) {
+        const updatedMessages = db
+          .select()
+          .from(messages)
+          .where(
+            and(
+              eq(messages.taskId, id),
+              lte(messages.id, lastSeen),
+              isNotNull(messages.updatedAt),
+              gt(messages.updatedAt, lastPollTime)
+            )
+          )
+          .orderBy(asc(messages.createdAt))
+          .all();
+
+        for (const msg of updatedMessages) {
+          send(msg, "message");
+        }
+      }
+
+      lastPollTime = pollStart;
 
       // Send task status updates
       const task = db.select().from(tasks).where(eq(tasks.id, id)).get();

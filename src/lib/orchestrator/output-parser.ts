@@ -138,7 +138,7 @@ export function createOutputHandler(taskId: string) {
               const output = (event.content as string) ?? (event.output as string) ?? "";
               parsed.output = typeof output === "string" ? output : JSON.stringify(output);
               db.update(messages)
-                .set({ content: JSON.stringify(parsed) })
+                .set({ content: JSON.stringify(parsed), updatedAt: new Date() })
                 .where(eq(messages.id, lastToolUseMessageId))
                 .run();
             } catch {

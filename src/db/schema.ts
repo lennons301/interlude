@@ -46,4 +46,5 @@ export const messages = sqliteTable("messages", {
     .default("text"),
   deliveredAt: int("delivered_at", { mode: "timestamp_ms" }),
   createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: int("updated_at", { mode: "timestamp_ms" }),
 });
