@@ -35,14 +35,23 @@ export function MessageInput({
     if (!canSend) return;
 
     setSending(true);
-    await fetch(`/api/tasks/${taskId}/messages`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: content.trim(), role: "user" }),
-    });
-    setContent("");
-    setSending(false);
-    textareaRef.current?.focus();
+    try {
+      const res = await fetch(`/api/tasks/${taskId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: content.trim(), role: "user" }),
+      });
+      if (!res.ok) {
+        console.error("Failed to send message:", res.status);
+        return;
+      }
+      setContent("");
+    } catch (err) {
+      console.error("Failed to send message:", err);
+    } finally {
+      setSending(false);
+      textareaRef.current?.focus();
+    }
   }
 
   async function handleComplete() {
