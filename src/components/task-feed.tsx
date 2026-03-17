@@ -8,6 +8,7 @@ type Task = {
   title: string;
   status: string;
   description: string;
+  containerStatus: string | null;
   updatedAt: string;
 };
 
@@ -15,17 +16,15 @@ export function TaskFeed() {
   const [tasks, setTasks] = useState<Task[]>([]);
 
   useEffect(() => {
-    loadTasks();
-    const interval = setInterval(loadTasks, 3000);
+    const fetchTasks = () => {
+      fetch("/api/tasks").then(async (res) => {
+        if (res.ok) setTasks(await res.json());
+      });
+    };
+    fetchTasks();
+    const interval = setInterval(fetchTasks, 3000);
     return () => clearInterval(interval);
   }, []);
-
-  async function loadTasks() {
-    const res = await fetch("/api/tasks");
-    if (res.ok) {
-      setTasks(await res.json());
-    }
-  }
 
   if (tasks.length === 0) {
     return (

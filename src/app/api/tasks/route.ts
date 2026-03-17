@@ -12,7 +12,7 @@ export async function GET(request: Request) {
   let query = db.select().from(tasks).orderBy(desc(tasks.updatedAt)).$dynamic();
 
   if (status) {
-    query = query.where(eq(tasks.status, status as any));
+    query = query.where(eq(tasks.status, status as "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled"));
   }
   if (projectId) {
     query = query.where(eq(tasks.projectId, projectId));

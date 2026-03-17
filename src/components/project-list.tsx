@@ -19,14 +19,13 @@ export function ProjectList() {
   const [gitUrl, setGitUrl] = useState("");
   const [creating, setCreating] = useState(false);
 
-  useEffect(() => {
-    loadProjects();
-  }, []);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  async function loadProjects() {
-    const res = await fetch("/api/projects");
-    if (res.ok) setProjects(await res.json());
-  }
+  useEffect(() => {
+    fetch("/api/projects").then(async (res) => {
+      if (res.ok) setProjects(await res.json());
+    });
+  }, [refreshKey]);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -41,7 +40,7 @@ export function ProjectList() {
     setName("");
     setGitUrl("");
     setCreating(false);
-    loadProjects();
+    setRefreshKey((k) => k + 1);
   }
 
   return (

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
-import { messages, tasks } from "@/db/schema";
+import { messages } from "@/db/schema";
 import { newId } from "@/lib/ulid";
 import { asc, eq } from "drizzle-orm";
 

@@ -287,10 +287,10 @@ async function runFallbackCommit(running: RunningContainer): Promise<void> {
 function updateTask(
   taskId: string,
   fields: Partial<{
-    status: string;
+    status: "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled";
     branch: string;
     containerId: string | null;
-    containerStatus: string | null;
+    containerStatus: "setup" | "running" | "idle" | "completing" | null;
     sessionId: string | null;
     totalCostUsd: number;
   }>

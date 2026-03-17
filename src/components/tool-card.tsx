@@ -50,11 +50,11 @@ export function ToolCard({ tool, filePath, input, output }: ToolCardProps) {
 
       {expanded && (
         <div className="border-t border-zinc-800 px-3 py-2 text-xs font-mono text-zinc-400 space-y-2">
-          {(tool === "Bash" || tool === "bash") && input.command && (
+          {(tool === "Bash" || tool === "bash") && !!input.command && (
             <pre className="whitespace-pre-wrap">$ {input.command as string}</pre>
           )}
 
-          {(tool === "Edit" || tool === "edit") && input.old_string && (
+          {(tool === "Edit" || tool === "edit") && !!input.old_string && (
             <div>
               <div className="text-red-400">- {input.old_string as string}</div>
               <div className="text-green-400">+ {input.new_string as string}</div>
