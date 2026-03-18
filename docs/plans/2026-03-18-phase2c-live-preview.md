@@ -138,10 +138,17 @@ In `src/lib/orchestrator/turn-manager.ts`, in `startTask`, after line 67 (`updat
     updateTask(taskId, { containerId: running.id, containerName: running.name });
 ```
 
-Also update the `updateTask` function's type to include `containerName`:
+Also update the `updateTask` function's type to include both new fields:
 
 ```typescript
     containerName: string | null;
+    devPort: number | null;
+```
+
+Update `completeTask` where it reconstructs `RunningContainer` — add the `name` field:
+
+```typescript
+      running = { container, id: task.containerId, name: task.containerName ?? "" };
 ```
 
 - [ ] **Step 4: Add iproute2 to agent Dockerfile**
@@ -281,6 +288,7 @@ export async function scanPorts(running: RunningContainer): Promise<number[]> {
       Cmd: ["ss", "-tlnp"],
       AttachStdout: true,
       AttachStderr: true,
+      Tty: true, // Prevents Docker stream multiplexing — gives raw output
     });
 
     const stream = await exec.start({});
@@ -376,6 +384,21 @@ Call `scanForDevServer` after each turn — in `startTask` after `runPostTurnCom
     await scanForDevServer(taskId, running);
 ```
 
+Also add a periodic idle scan in `queue.ts`. In the idle task polling section (where it checks for queued messages), add a dev server scan every 30s for idle tasks:
+
+```typescript
+      // 3. Periodic dev server port scan for idle tasks (every ~30s = 15 poll cycles)
+      if (pollCount % 15 === 0) {
+        for (const [taskId, entry] of activeTasks) {
+          if (entry.state !== "idle") continue;
+          if (processingTasks.has(taskId)) continue;
+          scanForDevServer(taskId, entry.container).catch(console.error);
+        }
+      }
+```
+
+Add a `pollCount` variable incremented each cycle, and import `scanForDevServer` from `turn-manager` (export it).
+
 - [ ] **Step 2: Add devPort to SSE taskStatus event**
 
 In `src/app/api/tasks/[id]/stream/route.ts`, update the taskStatus send block to include `devPort`:
@@ -466,7 +489,8 @@ async function proxyRequest(
     );
   }
 
-  const targetUrl = `http://${task.containerName}:${task.devPort}/${path}`;
+  const reqUrl = new URL(request.url);
+  const targetUrl = `http://${task.containerName}:${task.devPort}/${path}${reqUrl.search}`;
 
   try {
     // Forward the request to the container
@@ -481,6 +505,7 @@ async function proxyRequest(
         ? request.body
         : undefined,
       redirect: "manual",
+      signal: AbortSignal.timeout(10000), // 10s timeout → 504
     });
 
     // Build response headers, stripping iframe-blocking headers
@@ -510,7 +535,10 @@ async function proxyRequest(
       status: proxyRes.status,
       headers: responseHeaders,
     });
-  } catch {
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "TimeoutError") {
+      return NextResponse.json({ error: "Dev server timeout" }, { status: 504 });
+    }
     return NextResponse.json(
       { error: "Dev server unavailable" },
       { status: 502 }
@@ -556,6 +584,8 @@ git commit -m "feat: add HTTP proxy route for container dev servers"
 - Create: `custom-server.js`
 - Modify: `Dockerfile`
 
+**Architecture:** The Next.js standalone `server.js` auto-starts its own HTTP server — it cannot be `require`d as a handler. So we use an internal proxy approach: Next.js listens on an internal port (3001), and our custom server on the public port (3000) proxies all HTTP requests to Next.js and handles WebSocket upgrades for preview paths directly.
+
 - [ ] **Step 1: Create custom-server.js**
 
 Create `custom-server.js` at the project root:
@@ -563,81 +593,124 @@ Create `custom-server.js` at the project root:
 ```javascript
 const http = require("http");
 const net = require("net");
-const path = require("path");
+const { spawn } = require("child_process");
 const url = require("url");
+const path = require("path");
 
-// Load Next.js standalone server handler
-const nextHandler = require(path.join(__dirname, "server.js"));
+const PORT = parseInt(process.env.PORT || "3000", 10);
+const HOSTNAME = process.env.HOSTNAME || "0.0.0.0";
+const NEXT_PORT = PORT + 1; // Internal Next.js port
 
 // Regex to match preview WebSocket upgrade paths
 const PREVIEW_PATH_RE = /^\/api\/tasks\/([^/]+)\/preview\/(.*)/;
 
-// Import DB access for looking up task container info
-// In standalone mode, the Next.js server.js sets up the handler.
-// We create our own HTTP server and forward requests to it.
+// Persistent DB connection for WebSocket upgrade lookups
+const Database = require("better-sqlite3");
+const dbPath = process.env.DATABASE_URL || "local.db";
+let taskLookupDb;
+try {
+  taskLookupDb = new Database(dbPath, { readonly: true });
+} catch (err) {
+  console.error("[custom-server] Failed to open database:", err.message);
+}
 
+function lookupTask(taskId) {
+  if (!taskLookupDb) return null;
+  try {
+    return taskLookupDb.prepare(
+      "SELECT container_name, dev_port FROM tasks WHERE id = ?"
+    ).get(taskId);
+  } catch {
+    return null;
+  }
+}
+
+// Start Next.js as a child process on the internal port
+const nextServer = spawn("node", [path.join(__dirname, "server.js")], {
+  env: { ...process.env, PORT: String(NEXT_PORT), HOSTNAME: "127.0.0.1" },
+  stdio: "inherit",
+});
+
+nextServer.on("exit", (code) => {
+  console.error(`[custom-server] Next.js exited with code ${code}`);
+  process.exit(code ?? 1);
+});
+
+// Create the public-facing HTTP server
 const server = http.createServer((req, res) => {
-  // Let Next.js handle all HTTP requests
-  nextHandler(req, res);
+  // Proxy all HTTP requests to Next.js
+  const proxyReq = http.request(
+    {
+      hostname: "127.0.0.1",
+      port: NEXT_PORT,
+      path: req.url,
+      method: req.method,
+      headers: req.headers,
+    },
+    (proxyRes) => {
+      res.writeHead(proxyRes.statusCode || 500, proxyRes.headers);
+      proxyRes.pipe(res);
+    }
+  );
+
+  proxyReq.on("error", (err) => {
+    // Next.js not ready yet — return 503
+    if (!res.headersSent) {
+      res.writeHead(503, { "Content-Type": "text/plain" });
+      res.end("Service starting...");
+    }
+  });
+
+  req.pipe(proxyReq);
 });
 
 server.on("upgrade", (req, socket, head) => {
   const parsed = url.parse(req.url || "");
-  const match = (parsed.pathname || "").match(PREVIEW_PATH_RE);
+  const pathname = parsed.pathname || "";
+  const match = pathname.match(PREVIEW_PATH_RE);
 
   if (!match) {
-    // Not a preview WebSocket — let Next.js handle it (e.g., HMR for the app itself)
-    // Next.js standalone doesn't handle upgrades by default, so just destroy
-    socket.destroy();
+    // Not a preview WebSocket — proxy to Next.js (for app HMR in dev, etc.)
+    const proxySocket = net.connect(NEXT_PORT, "127.0.0.1", () => {
+      proxySocket.write(
+        `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`
+      );
+      for (let i = 0; i < req.rawHeaders.length; i += 2) {
+        proxySocket.write(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`);
+      }
+      proxySocket.write("\r\n");
+      if (head.length > 0) proxySocket.write(head);
+      proxySocket.pipe(socket);
+      socket.pipe(proxySocket);
+    });
+    proxySocket.on("error", () => socket.destroy());
+    socket.on("error", () => proxySocket.destroy());
     return;
   }
 
+  // Preview WebSocket — proxy to agent container
   const taskId = match[1];
-  const targetPath = "/" + (match[2] || "");
+  const targetPath = "/" + (match[2] || "") + (parsed.search || "");
 
-  // Look up task from DB to get containerName and devPort
-  // Use a simple synchronous DB read since we need it immediately
-  let containerName, devPort;
-  try {
-    const Database = require("better-sqlite3");
-    const dbPath = process.env.DATABASE_URL || "local.db";
-    const db = new Database(dbPath, { readonly: true });
-    const row = db.prepare("SELECT container_name, dev_port FROM tasks WHERE id = ?").get(taskId);
-    db.close();
-
-    if (!row || !row.container_name || !row.dev_port) {
-      socket.destroy();
-      return;
-    }
-    containerName = row.container_name;
-    devPort = row.dev_port;
-  } catch {
+  const row = lookupTask(taskId);
+  if (!row || !row.container_name || !row.dev_port) {
     socket.destroy();
     return;
   }
 
-  // Connect to the container's dev server
-  const proxySocket = net.connect(devPort, containerName, () => {
-    // Reconstruct the HTTP upgrade request to send to the container
-    const reqPath = targetPath + (parsed.search || "");
-    let rawReq = `${req.method} ${reqPath} HTTP/1.1\r\n`;
-
-    // Forward headers, rewriting Host
+  const proxySocket = net.connect(row.dev_port, row.container_name, () => {
+    let rawReq = `${req.method} ${targetPath} HTTP/${req.httpVersion}\r\n`;
     for (let i = 0; i < req.rawHeaders.length; i += 2) {
       const key = req.rawHeaders[i];
-      const val = req.rawHeaders[i + 1];
       if (key.toLowerCase() === "host") {
-        rawReq += `Host: ${containerName}:${devPort}\r\n`;
+        rawReq += `Host: ${row.container_name}:${row.dev_port}\r\n`;
       } else {
-        rawReq += `${key}: ${val}\r\n`;
+        rawReq += `${key}: ${req.rawHeaders[i + 1]}\r\n`;
       }
     }
     rawReq += "\r\n";
-
     proxySocket.write(rawReq);
     if (head.length > 0) proxySocket.write(head);
-
-    // Pipe bidirectionally
     proxySocket.pipe(socket);
     socket.pipe(proxySocket);
   });
@@ -648,20 +721,13 @@ server.on("upgrade", (req, socket, head) => {
   socket.on("close", () => proxySocket.destroy());
 });
 
-const port = parseInt(process.env.PORT || "3000", 10);
-const hostname = process.env.HOSTNAME || "0.0.0.0";
-
-server.listen(port, hostname, () => {
-  console.log(`Custom server listening on http://${hostname}:${port}`);
-});
-```
-
-**Important note for the implementer:** The Next.js standalone `server.js` normally creates its own HTTP server and starts listening. We need to prevent that and instead get just the request handler. Check the standalone `server.js` — it typically calls `app.prepare().then(() => { ... })`. We may need to modify the approach:
-
-- **Option A:** If standalone `server.js` exports a handler or can be `require`d without starting a listener, use it directly.
-- **Option B:** If standalone `server.js` auto-starts, set `PORT` to a different value (e.g., 3001), let it start, and proxy from our custom server on port 3000 to Next.js on 3001 for regular requests. WebSocket upgrades on preview paths go directly to containers.
-
-The implementer should check how `next start` / standalone `server.js` works and adjust accordingly. Option B is the simpler fallback if Option A isn't straightforward.
+// Wait a moment for Next.js to start, then listen
+setTimeout(() => {
+  server.listen(PORT, HOSTNAME, () => {
+    console.log(`[custom-server] Listening on http://${HOSTNAME}:${PORT}`);
+    console.log(`[custom-server] Proxying to Next.js on 127.0.0.1:${NEXT_PORT}`);
+  });
+}, 2000);
 
 - [ ] **Step 2: Update Dockerfile to copy and use custom-server.js**
 
@@ -745,9 +811,16 @@ export function PreviewPane({
     setStatus("active");
   }, []);
 
+  // Retry loading on error (dev server may still be starting)
+  const retryCountRef = useRef(0);
   const handleError = useCallback(() => {
-    setStatus("error");
-  }, []);
+    if (retryCountRef.current < 5 && devPort) {
+      retryCountRef.current++;
+      setTimeout(reload, 2000); // Retry after 2s
+    } else {
+      setStatus("error");
+    }
+  }, [devPort, reload]);
 
   // Update status when devPort changes
   useEffect(() => {
@@ -944,6 +1017,98 @@ Render the layout with responsive tabs/split. The full JSX should be:
 - If devPort on desktop: render side-by-side with `lg:flex-row` breakpoint
 
 Use Tailwind responsive classes: the tab bar is visible on small screens (`lg:hidden`), and on large screens both panes show side by side (`hidden lg:flex`).
+
+Here is the complete render JSX for the updated `TaskChat`:
+
+```tsx
+  return (
+    <div className="flex flex-col h-[calc(100vh-4rem)]">
+      {/* Header */}
+      <div className="border-b border-zinc-800 px-4 py-3 shrink-0">
+        <div className="flex items-center justify-between">
+          <h1 className="text-lg font-semibold text-zinc-100 truncate">
+            {initialTask.title}
+          </h1>
+          <div className="flex items-center gap-2">
+            {containerLabel && (
+              <span className={`text-xs ${taskStatus.containerStatus === "running" ? "text-green-400 animate-pulse" : "text-zinc-400"}`}>
+                {containerLabel}
+              </span>
+            )}
+            <StatusDot status={taskStatus.status} />
+          </div>
+        </div>
+        {initialTask.branch && (
+          <p className="text-xs text-zinc-500 mt-0.5 font-mono">{initialTask.branch}</p>
+        )}
+      </div>
+
+      {/* Mobile tabs — only show when preview available */}
+      {devPort && (
+        <div className="flex border-b border-zinc-800 lg:hidden shrink-0">
+          <button
+            onClick={() => setActiveTab("chat")}
+            className={`flex-1 py-2 text-sm font-medium ${activeTab === "chat" ? "text-zinc-100 border-b-2 border-purple-500" : "text-zinc-500"}`}
+          >
+            Chat
+          </button>
+          <button
+            onClick={() => setActiveTab("preview")}
+            className={`flex-1 py-2 text-sm font-medium ${activeTab === "preview" ? "text-zinc-100 border-b-2 border-purple-500" : "text-zinc-500"}`}
+          >
+            Preview
+          </button>
+        </div>
+      )}
+
+      {/* Content area — responsive */}
+      <div className="flex-1 flex flex-col lg:flex-row min-h-0">
+        {/* Chat pane */}
+        <div className={`flex-1 flex flex-col min-h-0 ${devPort && activeTab !== "chat" ? "hidden lg:flex" : ""} ${devPort ? "lg:w-1/2 lg:border-r lg:border-zinc-800" : ""}`}>
+          <TaskStream
+            taskId={initialTask.id}
+            onStatusChange={handleStatusChange}
+            onMessage={handleMessage}
+          />
+          {!isTerminal && (
+            <MessageInput
+              taskId={initialTask.id}
+              containerStatus={taskStatus.containerStatus}
+              taskStatus={taskStatus.status}
+            />
+          )}
+        </div>
+
+        {/* Preview pane */}
+        {devPort && (
+          <div className={`flex-1 min-h-0 ${activeTab !== "preview" ? "hidden lg:flex" : "flex"} flex-col ${devPort ? "lg:w-1/2" : ""}`}>
+            <PreviewPane
+              taskId={initialTask.id}
+              devPort={devPort}
+              lastActivityTimestamp={lastActivity}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Terminal state footer */}
+      {isTerminal && (
+        <div className="border-t border-zinc-800 px-4 py-3 text-center shrink-0">
+          <span className="text-xs text-zinc-500">
+            Task {taskStatus.status}
+            {taskStatus.totalCostUsd > 0 && ` · $${taskStatus.totalCostUsd.toFixed(4)}`}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+```
+
+Add the `PreviewPane` import at the top of the file:
+
+```typescript
+import { PreviewPane } from "./preview-pane";
+```
 
 - [ ] **Step 3: Verify build**
 
