@@ -36,9 +36,9 @@ pnpm build        # Production build
 pnpm lint         # Run ESLint
 ```
 
-## Current Status: Phase 2b code complete, review fixes applied
+## Current Status: Phase 2b complete, tested on VPS
 
-Phases 1, 2a, and 2.5 are done. Phase 2a tested end-to-end on VPS. Phase 2b (Interactive Chat) code is complete — multi-turn agent conversations, persistent containers with `--resume`, chat-first UI. Review fixes applied (race conditions, error handling, SSE updates, orphaned task recovery, docker-compose config).
+Phases 1, 2a, 2.5, and 2b are done and tested end-to-end on VPS. The full flow works: create task → agent runs in Docker → output streams to chat UI → branch pushed to GitHub after each turn → interactive follow-up messages → complete task.
 
 ## Roadmap
 
@@ -62,11 +62,11 @@ Phases 1, 2a, and 2.5 are done. Phase 2a tested end-to-end on VPS. Phase 2b (Int
 - GitHub Actions CI/CD (push to main -> auto-deploy)
 - End-to-end testing of Phase 2a on real infrastructure
 
-### Phase 2b: Interactive Chat (code complete, needs VPS testing)
+### Phase 2b: Interactive Chat (done)
 - Multi-turn agent conversations via persistent Docker containers + `--resume`
 - Chat-first task detail page with message queue
 - Turn manager, output parser with structured message types
-- Action cards for commits, PRs, blockers
+- Branch pushed after every turn for immediate PR creation
 
 ### Phase 2c: Live Preview
 - Proxy container dev server through orchestrator
