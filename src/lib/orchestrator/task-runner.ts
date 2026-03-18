@@ -1,3 +1,3 @@
-import { startTask, cancelTask, completeTask } from "./turn-manager";
+import { startTask, cancelTask, completeTask, getActiveTasks } from "./turn-manager";
 
-export { startTask as runTask, cancelTask, completeTask };
+export { startTask as runTask, cancelTask, completeTask, getActiveTasks };
