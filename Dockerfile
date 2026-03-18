@@ -39,6 +39,7 @@ COPY --from=build /native-deps/node_modules/file-uri-to-path ./node_modules/file
 # Copy files needed at runtime beyond Next.js standalone
 COPY --from=build /app/drizzle ./drizzle
 COPY --from=build /app/Dockerfile.agent ./Dockerfile.agent
+COPY --from=build /app/custom-server.js ./custom-server.js
 
 EXPOSE 3000
-CMD ["node", "server.js"]
+CMD ["node", "custom-server.js"]
