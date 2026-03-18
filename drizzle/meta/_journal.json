@@ -22,6 +22,13 @@
       "when": 1773789548960,
       "tag": "0002_cute_spitfire",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1773792429814,
+      "tag": "0003_wealthy_prism",
+      "breakpoints": true
     }
   ]
 }
