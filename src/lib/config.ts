@@ -39,21 +39,20 @@ export function getConfig(): AppConfig {
   const claudeCredentialsPath =
     fs.existsSync(credentialsPath) ? credentialsPath : null;
 
-  if (!anthropicApiKey && !claudeCredentialsPath) {
+  if (!anthropicApiKey && !claudeCredentialsPath && !process.env.CLAUDE_CREDENTIALS_PATH) {
     console.warn(
-      "Warning: Neither ANTHROPIC_API_KEY nor Claude OAuth credentials (~/.claude/.credentials.json) found. " +
-        "Call resetConfig() after credentials are available."
+      "Warning: No auth configured. Set ANTHROPIC_API_KEY, CLAUDE_CREDENTIALS_PATH, " +
+        "or ensure ~/.claude/.credentials.json exists."
     );
   }
   if (!gitToken) {
     throw new Error("GIT_TOKEN is required");
   }
 
-  // The host path is what docker-compose used to mount into this container
-  // It's the original CLAUDE_CREDENTIALS_PATH env var (set to the host path in .env)
-  const claudeCredentialsHostPath = claudeCredentialsPath
-    ? (process.env.CLAUDE_CREDENTIALS_PATH ?? null)
-    : null;
+  // The host path is used to mount credentials into agent containers.
+  // It comes directly from the env var — the app container itself may not
+  // be able to see the file (it's a host path, not a container path).
+  const claudeCredentialsHostPath = process.env.CLAUDE_CREDENTIALS_PATH ?? null;
 
   _config = {
     anthropicApiKey,
