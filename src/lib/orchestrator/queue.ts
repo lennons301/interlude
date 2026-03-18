@@ -2,9 +2,10 @@ import { db } from "@/db";
 import { tasks, messages } from "@/db/schema";
 import { eq, and, isNull, asc } from "drizzle-orm";
 import { startTask } from "./turn-manager";
-import { getActiveTasks, processQueuedMessages } from "./turn-manager";
+import { getActiveTasks, processQueuedMessages, scanForDevServer } from "./turn-manager";
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
+let pollCount = 0;
 
 /** Track which tasks are currently being processed to prevent double-dispatch */
 const processingTasks = new Set<string>();
@@ -16,6 +17,8 @@ export function startQueue(): void {
 
   pollInterval = setInterval(async () => {
     try {
+      pollCount++;
+
       // 1. Pick up new queued tasks
       const next = db
         .select()
@@ -69,6 +72,15 @@ export function startQueue(): void {
               )
             )
             .finally(() => processingTasks.delete(taskId));
+        }
+      }
+
+      // 3. Periodic dev server port scan for idle tasks (every ~30s = 15 poll cycles)
+      if (pollCount % 15 === 0) {
+        for (const [taskId, entry] of activeTasks) {
+          if (entry.state !== "idle") continue;
+          if (processingTasks.has(taskId)) continue;
+          scanForDevServer(taskId, entry.container).catch(console.error);
         }
       }
     } catch (err) {

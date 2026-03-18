@@ -12,6 +12,7 @@ import {
   type RunningContainer,
 } from "../docker/container-manager";
 import { createOutputHandler, type TurnResult } from "./output-parser";
+import { scanPorts } from "./port-scanner";
 import { getConfig } from "../config";
 import { getDocker } from "../docker/client";
 
@@ -88,6 +89,7 @@ export async function startTask(taskId: string): Promise<void> {
 
     // Commit and push after turn completes
     await runPostTurnCommitAndPush(taskId, running);
+    await scanForDevServer(taskId, running);
   } catch (err) {
     updateTask(taskId, { status: "failed", containerStatus: null });
     insertSystemMessage(
@@ -206,6 +208,7 @@ export async function processQueuedMessages(
 
     // Commit and push after each turn
     await runPostTurnCommitAndPush(taskId, running);
+    await scanForDevServer(taskId, running);
   }
 }
 
@@ -277,6 +280,34 @@ export async function cancelTask(taskId: string): Promise<void> {
     containerStatus: null,
   });
   insertSystemMessage(taskId, "Task cancelled by user.");
+}
+
+/**
+ * Scan for dev server ports after a turn completes.
+ * Retries once after 3s if no ports found (dev server may be starting).
+ */
+export async function scanForDevServer(taskId: string, running: RunningContainer): Promise<void> {
+  let ports = await scanPorts(running);
+
+  if (ports.length === 0) {
+    await new Promise((r) => setTimeout(r, 3000));
+    ports = await scanPorts(running);
+  }
+
+  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+  if (!task) return;
+
+  const newPort = ports.length > 0 ? ports[0] : null;
+  const currentPort = task.devPort ?? null;
+
+  if (newPort !== currentPort) {
+    updateTask(taskId, { devPort: newPort });
+    if (newPort && !currentPort) {
+      insertSystemMessage(taskId, `Dev server detected on port ${newPort}`);
+    } else if (!newPort && currentPort) {
+      insertSystemMessage(taskId, `Dev server on port ${currentPort} stopped`);
+    }
+  }
 }
 
 /**

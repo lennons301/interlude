@@ -17,6 +17,7 @@ export async function GET(
     let lastSeen = after ?? "";
     let lastContainerStatus: string | null = null;
     let lastTaskStatus: string | null = null;
+    let lastDevPort: number | null = null;
     let lastPollTime = new Date();
 
     const poll = setInterval(() => {
@@ -67,14 +68,17 @@ export async function GET(
       if (task) {
         const cs = task.containerStatus ?? null;
         const ts = task.status;
-        if (cs !== lastContainerStatus || ts !== lastTaskStatus) {
+        const dp = task.devPort ?? null;
+        if (cs !== lastContainerStatus || ts !== lastTaskStatus || dp !== lastDevPort) {
           lastContainerStatus = cs;
           lastTaskStatus = ts;
+          lastDevPort = dp;
           send(
             {
               containerStatus: cs,
               status: ts,
               totalCostUsd: task.totalCostUsd ?? 0,
+              devPort: dp,
             },
             "taskStatus"
           );
