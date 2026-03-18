@@ -20,15 +20,15 @@ jobs:
             git pull origin main
             docker compose up -d --build
 
-            # Health check — wait for HTTP server
+            # Health check — wait for app via Caddy (port 80)
             echo "Waiting for app to start..."
             for i in $(seq 1 12); do
-              if curl -sf http://localhost:3000/ > /dev/null 2>&1; then
+              if curl -sf http://localhost:80/ > /dev/null 2>&1; then
                 echo "App is healthy"
                 exit 0
               fi
               sleep 5
             done
             echo "ERROR: App failed health check after 60s"
-            docker compose logs app --tail 50
+            docker compose logs --tail 50
             exit 1
