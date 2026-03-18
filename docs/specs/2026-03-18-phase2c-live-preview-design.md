@@ -2,7 +2,7 @@
 
 ## Goal
 
-Show a live preview of the agent's dev server inside the task detail page. When an agent starts a dev server (e.g., `pnpm dev`), the preview appears automatically. The agent's edits trigger an iframe reload so you see changes quickly.
+Show a live preview of the agent's dev server inside the task detail page. When an agent starts a dev server (e.g., `pnpm dev`), the preview appears automatically with real-time hot module reload as the agent edits files.
 
 ## Architecture
 
@@ -12,15 +12,30 @@ Show a live preview of the agent's dev server inside the task detail page. When 
 Browser iframe → Caddy (HTTPS) → Next.js proxy route → Agent container:PORT
 ```
 
-All preview HTTP traffic flows through a single Next.js API route that proxies to the agent's container. No port binding to the host, no DNS changes needed.
+All preview traffic (HTTP and WebSocket) flows through the Next.js server to the agent's container. No port binding to the host, no DNS changes needed.
 
-### WebSocket / HMR — Deferred
+### WebSocket / HMR via Custom Server Wrapper
 
-Next.js App Router route handlers operate on the Web `Request`/`Response` API and cannot handle HTTP Upgrade requests for WebSockets. True HMR proxying would require either a custom Node.js server wrapping the Next.js standalone output, or a Caddy-level WebSocket route.
+Next.js App Router route handlers operate on the Web `Request`/`Response` API and cannot handle HTTP Upgrade requests for WebSockets. To support HMR (hot module reload), we wrap the Next.js standalone output with a thin custom server.
 
-**v1 approach:** No WebSocket proxying. Instead, the preview iframe reloads automatically when new agent messages arrive (indicating the agent edited files). A manual Reload button is also available. This gives near-live feedback without the complexity of WebSocket upgrade handling.
+**Approach:** Create `custom-server.js` that:
 
-**Future:** Add WebSocket proxying via a custom server wrapper around the Next.js standalone `server.js` to enable true HMR pass-through.
+1. Creates a Node.js `http.Server`
+2. Passes regular HTTP requests to the Next.js request handler (from standalone `server.js`)
+3. Listens for `upgrade` events on the HTTP server
+4. When the upgrade path matches `/api/tasks/*/preview/*`:
+   - Looks up the task's container name and dev port from the database
+   - Opens a raw TCP connection (`net.Socket`) to `{containerName}:{devPort}`
+   - Forwards the upgrade request headers to the container
+   - Pipes data bidirectionally between client socket and container socket
+5. All other upgrade requests pass through to Next.js as normal
+
+This is ~50-60 lines of code. The WebSocket proxy operates at the TCP level — no WebSocket library needed since we're forwarding raw frames, not interpreting them. Caddy already forwards WebSocket upgrades, so no Caddy changes are needed.
+
+**Changes to production setup:**
+- New file: `custom-server.js` at project root
+- `Dockerfile` entrypoint changes from `node server.js` to `node custom-server.js`
+- `custom-server.js` imports and wraps the Next.js standalone server handler
 
 ### Networking
 
@@ -84,6 +99,20 @@ Dev servers serve assets with absolute paths (e.g., `<script src="/main.js">`). 
 - Inject `<base href="/api/tasks/{id}/preview/">` into proxied HTML responses. This makes relative URLs resolve through the proxy.
 - **Known limitation:** Some dev servers emit absolute paths that bypass `<base>`. For most frameworks (Vite, Next.js, CRA), the `<base>` tag handles the common case. Edge cases may require opening the preview in a new tab (available via toolbar button).
 
+### WebSocket Proxying (via custom-server.js)
+
+Handled outside the Next.js route handler, at the Node.js HTTP server level:
+
+- Intercept `upgrade` events where the URL matches `/api/tasks/*/preview/*`
+- Parse the task ID from the URL
+- Look up `containerName` and `devPort` from the database
+- Open a `net.Socket` to `{containerName}:{devPort}`
+- Write the original HTTP upgrade request to the container socket
+- Pipe both sockets bidirectionally
+- Handle close/error on both ends
+
+This enables real HMR — when the agent edits a file, the dev server pushes the update through the WebSocket to the iframe, and changes appear instantly.
+
 ### Error Handling
 
 - Task not found → 404
@@ -138,9 +167,9 @@ Contains:
   - Stopped: "Dev server stopped" placeholder
   - Error: "Could not connect to dev server"
 
-### Auto-Reload on Agent Activity
+### Fallback Reload on Agent Activity
 
-Since WebSocket HMR is deferred, the preview pane listens to the SSE message stream. When a new `tool_use` message of type `Write`, `Edit`, or `Bash` arrives, the iframe reloads after a short debounce (500ms). This gives near-live feedback tied to actual file changes.
+If the WebSocket HMR connection fails or the dev server doesn't support HMR, the preview pane falls back to SSE-triggered reloads. When a new `tool_use` message of type `Write`, `Edit`, or `Bash` arrives, the iframe reloads after a short debounce (500ms). This gives near-live feedback tied to actual file changes even without a working HMR connection.
 
 ### SSE Updates
 
@@ -149,6 +178,8 @@ The existing `taskStatus` SSE event already sends `containerStatus`, `status`, a
 ## File Structure
 
 ```
+custom-server.js                       — Node.js server wrapping Next.js + WebSocket proxy
+Dockerfile                             — (modify) entrypoint to custom-server.js
 Dockerfile.agent                       — (modify) add iproute2
 docker-compose.yml                     — (modify) add explicit network name
 src/
@@ -157,7 +188,7 @@ src/
       tasks/[id]/
         preview/[...path]/route.ts     — HTTP proxy route
   components/
-    preview-pane.tsx                    — iframe + toolbar + auto-reload
+    preview-pane.tsx                    — iframe + toolbar + fallback reload
     task-chat.tsx                       — (modify) add tab/split responsive layout
   lib/
     docker/
@@ -173,17 +204,17 @@ drizzle/
 ## Scope Boundaries
 
 **In scope:**
-- HTTP proxy route (no WebSocket)
+- HTTP proxy route
+- WebSocket proxy via custom server wrapper (HMR support)
 - Port scanning after turns (with retry and periodic idle scan)
 - Tabbed (mobile) + split (desktop) responsive layout
 - Auto-appearing preview tab
-- Auto-reload on agent file changes
+- Fallback reload on agent file changes (when HMR unavailable)
 - Reload and open-in-new-tab toolbar
 - `<base>` tag injection for asset paths
 - iframe header stripping (`X-Frame-Options`)
 
 **Out of scope (future):**
-- WebSocket/HMR proxying (requires custom server wrapper)
 - Resizable split pane divider
 - Multiple dev server support (only one port per task)
 - Custom port configuration by user
