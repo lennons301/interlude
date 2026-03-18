@@ -201,49 +201,34 @@ export async function execFallbackCommitAndPush(
   });
 
   const stream = await exec.start({});
-  // DIAGNOSTIC: trace exec lifecycle
-  const execId = (exec as { id?: string }).id?.slice(0, 12) ?? "unknown";
-  console.log(`[exec-diag] ${execId} commitAndPush started`);
-
-  let streamEnded = false;
-  let pollChecks = 0;
 
   await new Promise<void>((resolve) => {
     let resolved = false;
     let poll: ReturnType<typeof setInterval> | null = null;
 
-    const done = (source: string) => {
+    const done = () => {
       if (resolved) return;
       resolved = true;
       if (poll) clearInterval(poll);
-      console.log(`[exec-diag] ${execId} resolved via ${source} after ${pollChecks} polls, streamEnded=${streamEnded}`);
       resolve();
     };
 
-    stream.on("end", () => {
-      streamEnded = true;
-      console.log(`[exec-diag] ${execId} stream ended`);
-      done("stream-end");
-    });
+    stream.on("end", done);
     stream.resume();
 
     poll = setInterval(async () => {
-      pollChecks++;
       try {
         const info = await exec.inspect();
-        console.log(`[exec-diag] ${execId} poll #${pollChecks}: Running=${info.Running}, ExitCode=${info.ExitCode}`);
         if (!info.Running) {
-          setTimeout(() => done("poll"), 500);
+          setTimeout(done, 500);
         }
-      } catch (err) {
-        console.log(`[exec-diag] ${execId} poll #${pollChecks}: inspect error: ${err}`);
-        done("poll-error");
+      } catch {
+        done();
       }
     }, 2000);
   });
 
   const inspectResult = await exec.inspect();
-  console.log(`[exec-diag] ${execId} final: ExitCode=${inspectResult.ExitCode}`);
   if (inspectResult.ExitCode !== 0) {
     throw new Error(`Commit and push failed with exit code ${inspectResult.ExitCode}`);
   }

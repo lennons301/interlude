@@ -77,9 +77,7 @@ export async function startTask(taskId: string): Promise<void> {
     activeTasks.get(taskId)!.state = "running";
 
     // Run initial turn
-    console.log(`[orchestrator] ${taskId} starting initial turn`);
     const turnResult = await runTurn(taskId, running, prompt);
-    console.log(`[orchestrator] ${taskId} initial turn complete, cost=$${turnResult.costUsd.toFixed(4)}`);
 
     // Store session ID and cost
     updateTask(taskId, {
@@ -90,11 +88,8 @@ export async function startTask(taskId: string): Promise<void> {
     activeTasks.get(taskId)!.state = "idle";
 
     // Commit and push after turn completes
-    console.log(`[orchestrator] ${taskId} starting post-turn commit+push`);
     await runPostTurnCommitAndPush(taskId, running);
-    console.log(`[orchestrator] ${taskId} starting port scan`);
     await scanForDevServer(taskId, running);
-    console.log(`[orchestrator] ${taskId} post-turn operations complete`);
   } catch (err) {
     updateTask(taskId, { status: "failed", containerStatus: null });
     insertSystemMessage(
@@ -195,14 +190,12 @@ export async function processQueuedMessages(
       // Plain text content — use as-is
     }
 
-    console.log(`[orchestrator] ${taskId} starting follow-up turn`);
     const turnResult = await runTurn(
       taskId,
       running,
       promptText,
       task.sessionId ?? undefined
     );
-    console.log(`[orchestrator] ${taskId} turn complete, cost=$${turnResult.costUsd.toFixed(4)}`);
 
     // Update cumulative cost and session
     const currentCost = task.totalCostUsd ?? 0;
@@ -214,11 +207,8 @@ export async function processQueuedMessages(
     activeTasks.get(taskId)!.state = "idle";
 
     // Commit and push after each turn
-    console.log(`[orchestrator] ${taskId} starting post-turn commit+push`);
     await runPostTurnCommitAndPush(taskId, running);
-    console.log(`[orchestrator] ${taskId} starting port scan`);
     await scanForDevServer(taskId, running);
-    console.log(`[orchestrator] ${taskId} post-turn operations complete`);
   }
 }
 
@@ -347,61 +337,41 @@ async function waitForExecStream(
   exec: { inspect: () => Promise<{ Running: boolean; ExitCode?: number }>; id?: string },
   onData?: (chunk: Buffer) => void
 ): Promise<void> {
-  const execId = (exec.id ?? "unknown").slice(0, 12);
-  let streamEnded = false;
-  let pollChecks = 0;
-  let lastDataTime = Date.now();
-
-  console.log(`[exec-diag] ${execId} waitForExecStream started`);
-
   await new Promise<void>((resolve, reject) => {
     let resolved = false;
     let poll: ReturnType<typeof setInterval> | null = null;
 
-    const done = (source: string) => {
+    const done = () => {
       if (resolved) return;
       resolved = true;
       if (poll) clearInterval(poll);
-      console.log(`[exec-diag] ${execId} resolved via ${source} after ${pollChecks} polls, streamEnded=${streamEnded}`);
       resolve();
     };
 
     if (onData) {
       stream.on("data", (chunk: Buffer) => {
-        lastDataTime = Date.now();
         onData(chunk);
       });
     } else {
       stream.resume();
     }
-    stream.on("end", () => {
-      streamEnded = true;
-      console.log(`[exec-diag] ${execId} stream ended`);
-      done("stream-end");
-    });
+    stream.on("end", done);
     stream.on("error", (err) => {
       if (resolved) return;
       resolved = true;
       if (poll) clearInterval(poll);
-      console.log(`[exec-diag] ${execId} stream error: ${err}`);
       reject(err);
     });
 
     // Fallback: poll exec status every 2s
     poll = setInterval(async () => {
-      pollChecks++;
       try {
         const info = await exec.inspect();
         if (!info.Running) {
-          console.log(`[exec-diag] ${execId} poll #${pollChecks}: not running, ExitCode=${info.ExitCode}, sinceLastData=${Date.now() - lastDataTime}ms`);
-          setTimeout(() => done("poll"), 500);
-        } else if (pollChecks % 10 === 0) {
-          // Log every 20s while still running
-          console.log(`[exec-diag] ${execId} poll #${pollChecks}: still running, sinceLastData=${Date.now() - lastDataTime}ms`);
+          setTimeout(done, 500);
         }
-      } catch (err) {
-        console.log(`[exec-diag] ${execId} poll error: ${err}`);
-        done("poll-error");
+      } catch {
+        done();
       }
     }, 2000);
   });
