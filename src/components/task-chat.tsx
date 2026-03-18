@@ -3,6 +3,7 @@
 import { useCallback, useState } from "react";
 import { TaskStream } from "./task-stream";
 import { MessageInput } from "./message-input";
+import { PreviewPane } from "./preview-pane";
 
 interface TaskData {
   id: string;
@@ -12,6 +13,13 @@ interface TaskData {
   containerStatus: string | null;
   totalCostUsd: number;
 }
+
+type TaskStatusUpdate = {
+  containerStatus: string | null;
+  status: string;
+  totalCostUsd: number;
+  devPort?: number | null;
+};
 
 const CONTAINER_STATUS_LABELS: Record<string, string> = {
   setup: "Setting up workspace...",
@@ -26,14 +34,32 @@ export function TaskChat({ task: initialTask }: { task: TaskData }) {
     containerStatus: initialTask.containerStatus,
     totalCostUsd: initialTask.totalCostUsd,
   });
+  const [devPort, setDevPort] = useState<number | null>(null);
+  const [activeTab, setActiveTab] = useState<"chat" | "preview">("chat");
+  const [lastActivity, setLastActivity] = useState<number>(0);
 
   const handleStatusChange = useCallback(
-    (status: {
-      containerStatus: string | null;
-      status: string;
-      totalCostUsd: number;
-    }) => {
+    (status: TaskStatusUpdate) => {
       setTaskStatus(status);
+      if (status.devPort !== undefined) {
+        setDevPort(status.devPort);
+      }
+    },
+    []
+  );
+
+  const handleMessage = useCallback(
+    (msg: { type: string; content: string }) => {
+      if (msg.type === "tool_use") {
+        try {
+          const parsed = JSON.parse(msg.content);
+          if (["Write", "Edit", "Bash"].includes(parsed.tool)) {
+            setLastActivity(Date.now());
+          }
+        } catch {
+          // ignore parse errors
+        }
+      }
     },
     []
   );
@@ -77,24 +103,73 @@ export function TaskChat({ task: initialTask }: { task: TaskData }) {
         )}
       </div>
 
-      {/* Messages */}
-      <TaskStream
-        taskId={initialTask.id}
-        onStatusChange={handleStatusChange}
-      />
-
-      {/* Input */}
-      {!isTerminal && (
-        <MessageInput
-          taskId={initialTask.id}
-          containerStatus={taskStatus.containerStatus}
-          taskStatus={taskStatus.status}
-        />
+      {/* Mobile tabs — only when preview available */}
+      {devPort && (
+        <div className="flex border-b border-zinc-800 lg:hidden shrink-0">
+          <button
+            onClick={() => setActiveTab("chat")}
+            className={`flex-1 py-2 text-sm font-medium ${
+              activeTab === "chat"
+                ? "text-zinc-100 border-b-2 border-purple-500"
+                : "text-zinc-500"
+            }`}
+          >
+            Chat
+          </button>
+          <button
+            onClick={() => setActiveTab("preview")}
+            className={`flex-1 py-2 text-sm font-medium ${
+              activeTab === "preview"
+                ? "text-zinc-100 border-b-2 border-purple-500"
+                : "text-zinc-500"
+            }`}
+          >
+            Preview
+          </button>
+        </div>
       )}
+
+      {/* Content area — responsive */}
+      <div className="flex-1 flex flex-col lg:flex-row min-h-0">
+        {/* Chat pane */}
+        <div
+          className={`flex-1 flex flex-col min-h-0 ${
+            devPort && activeTab !== "chat" ? "hidden lg:flex" : ""
+          } ${devPort ? "lg:w-1/2 lg:border-r lg:border-zinc-800" : ""}`}
+        >
+          <TaskStream
+            taskId={initialTask.id}
+            onStatusChange={handleStatusChange}
+            onMessage={handleMessage}
+          />
+          {!isTerminal && (
+            <MessageInput
+              taskId={initialTask.id}
+              containerStatus={taskStatus.containerStatus}
+              taskStatus={taskStatus.status}
+            />
+          )}
+        </div>
+
+        {/* Preview pane */}
+        {devPort && (
+          <div
+            className={`flex-1 min-h-0 ${
+              activeTab !== "preview" ? "hidden lg:flex" : "flex"
+            } flex-col ${devPort ? "lg:w-1/2" : ""}`}
+          >
+            <PreviewPane
+              taskId={initialTask.id}
+              devPort={devPort}
+              lastActivityTimestamp={lastActivity}
+            />
+          </div>
+        )}
+      </div>
 
       {/* Terminal state footer */}
       {isTerminal && (
-        <div className="border-t border-zinc-800 px-4 py-3 text-center">
+        <div className="border-t border-zinc-800 px-4 py-3 text-center shrink-0">
           <span className="text-xs text-zinc-500">
             Task {taskStatus.status}
             {taskStatus.totalCostUsd > 0 &&

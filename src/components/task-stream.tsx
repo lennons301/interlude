@@ -15,14 +15,16 @@ type TaskStatus = {
   containerStatus: string | null;
   status: string;
   totalCostUsd: number;
+  devPort?: number | null;
 };
 
 interface TaskStreamProps {
   taskId: string;
   onStatusChange?: (status: TaskStatus) => void;
+  onMessage?: (msg: Message) => void;
 }
 
-export function TaskStream({ taskId, onStatusChange }: TaskStreamProps) {
+export function TaskStream({ taskId, onStatusChange, onMessage }: TaskStreamProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -70,6 +72,7 @@ export function TaskStream({ taskId, onStatusChange }: TaskStreamProps) {
         }
         return [...prev, msg];
       });
+      onMessage?.(msg);
     });
 
     eventSource.addEventListener("taskStatus", (e) => {
@@ -78,7 +81,7 @@ export function TaskStream({ taskId, onStatusChange }: TaskStreamProps) {
     });
 
     return () => eventSource.close();
-  }, [taskId, onStatusChange, scrollToBottom]);
+  }, [taskId, onStatusChange, onMessage, scrollToBottom]);
 
   useEffect(() => {
     scrollToBottom();
