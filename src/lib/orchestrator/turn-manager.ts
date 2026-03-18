@@ -245,6 +245,7 @@ export async function processQueuedMessages(
  */
 export async function completeTask(taskId: string): Promise<void> {
   const entry = activeTasks.get(taskId);
+  console.log(`[orchestrator] completeTask ${taskId}: entry=${entry ? entry.state : "NOT_FOUND"}, activeTasks.size=${activeTasks.size}`);
   if (!entry) return;
 
   updateTask(taskId, { containerStatus: "completing" });
