@@ -65,7 +65,7 @@ export async function startTask(taskId: string): Promise<void> {
     running = await createWorkspaceContainer({ taskId, gitUrl: proj.gitUrl, branch });
     activeTasks.set(taskId, { container: running, state: "setup" });
 
-    updateTask(taskId, { containerId: running.id });
+    updateTask(taskId, { containerId: running.id, containerName: running.name });
 
     // Start container and run setup
     await running.container.start();
@@ -228,7 +228,7 @@ export async function completeTask(taskId: string): Promise<void> {
       const docker = getDocker();
       const container = docker.getContainer(task.containerId);
       await container.inspect(); // Verify it exists
-      running = { container, id: task.containerId };
+      running = { container, id: task.containerId, name: task.containerName ?? "" };
     } catch {
       // Container no longer exists
     }
@@ -350,9 +350,11 @@ function updateTask(
     status: "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled";
     branch: string;
     containerId: string | null;
+    containerName: string | null;
     containerStatus: "setup" | "running" | "idle" | "completing" | null;
     sessionId: string | null;
     totalCostUsd: number;
+    devPort: number | null;
   }>
 ): void {
   db.update(tasks)

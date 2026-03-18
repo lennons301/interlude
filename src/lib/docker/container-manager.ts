@@ -18,6 +18,7 @@ export interface TurnOptions {
 export interface RunningContainer {
   container: Docker.Container;
   id: string;
+  name: string;
 }
 
 export async function createWorkspaceContainer(
@@ -50,19 +51,21 @@ export async function createWorkspaceContainer(
     binds.push(`${hostClaudeDir}:/home/node/.claude:rw`);
   }
 
+  const containerName = `interlude-task-${options.taskId}-${Date.now()}`;
+
   const container = await docker.createContainer({
     Image: getImageName(),
-    name: `interlude-task-${options.taskId}-${Date.now()}`,
+    name: containerName,
     Env: env,
     Cmd: ["sleep", "infinity"],
     WorkingDir: "/workspace",
     HostConfig: {
-      NetworkMode: "bridge",
+      NetworkMode: "interlude",
       Binds: binds.length > 0 ? binds : undefined,
     },
   });
 
-  return { container, id: container.id };
+  return { container, id: container.id, name: containerName };
 }
 
 export async function execSetup(

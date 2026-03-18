@@ -31,3 +31,7 @@ volumes:
   caddy_data:
   caddy_config:
   app_data:
+
+networks:
+  default:
+    name: interlude
