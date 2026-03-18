@@ -115,17 +115,46 @@ async function runTurn(
 ): Promise<TurnResult> {
   const handler = createOutputHandler(taskId);
 
-  const { stream } = await execClaudeTurn({
+  const { stream, exec } = await execClaudeTurn({
     container: running.container,
     prompt,
     sessionId,
   });
 
-  // Stream output to handler
+  // Stream output to handler. Also poll exec status as fallback —
+  // Docker exec streams sometimes don't close after the process exits.
   await new Promise<void>((resolve, reject) => {
+    let resolved = false;
+    let poll: ReturnType<typeof setInterval> | null = null;
+
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      if (poll) clearInterval(poll);
+      resolve();
+    };
+
     stream.on("data", (chunk: Buffer) => handler.write(chunk));
-    stream.on("end", resolve);
-    stream.on("error", reject);
+    stream.on("end", done);
+    stream.on("error", (err) => {
+      if (resolved) return;
+      resolved = true;
+      if (poll) clearInterval(poll);
+      reject(err);
+    });
+
+    // Fallback: poll exec status every 2s
+    poll = setInterval(async () => {
+      try {
+        const info = await exec.inspect();
+        if (!info.Running) {
+          // Process exited — give stream 500ms to flush, then resolve
+          setTimeout(done, 500);
+        }
+      } catch {
+        done();
+      }
+    }, 2000);
   });
 
   return handler.flush();

@@ -36,9 +36,9 @@ pnpm build        # Production build
 pnpm lint         # Run ESLint
 ```
 
-## Current Status: Phase 2a code complete, deploying to VPS
+## Current Status: Phase 2b code complete, review fixes applied
 
-Phase 1 (Chat UI + API) is complete. Phase 2a (Agent Orchestrator) code is complete but untested end-to-end — WSL2 blocks OAuth callbacks and Docker networking. VPS deployment pulled forward to unblock testing.
+Phases 1, 2a, and 2.5 are done. Phase 2a tested end-to-end on VPS. Phase 2b (Interactive Chat) code is complete — multi-turn agent conversations, persistent containers with `--resume`, chat-first UI. Review fixes applied (race conditions, error handling, SSE updates, orphaned task recovery, docker-compose config).
 
 ## Roadmap
 
@@ -49,25 +49,24 @@ Phase 1 (Chat UI + API) is complete. Phase 2a (Agent Orchestrator) code is compl
 - Mock agent for UI development
 - Mobile-friendly PWA
 
-### Phase 2a: Agent Orchestrator + Local Docker (code complete, needs VPS to test)
+### Phase 2a: Agent Orchestrator + Local Docker (done)
 - Docker container provisioning for agent workspaces
 - Claude Code CLI execution inside containers
 - Output capture and streaming back to UI
 - Task lifecycle management (queue, run, complete, fail)
 
-### Phase 2.5: Deploy to VPS (current — pulled forward from Phase 5)
+### Phase 2.5: Deploy to VPS (done)
 - Dockerise the Next.js app (multi-stage build)
 - Docker Compose stack: Caddy (reverse proxy + auto-SSL) + app
-- Deploy to Hetzner CX22 (~EUR4.50/mo)
-- Domain + HTTPS for OAuth callback URLs
+- Deploy to Hetzner CX22 (~EUR4.50/mo), domain interludes.co.uk
 - GitHub Actions CI/CD (push to main -> auto-deploy)
 - End-to-end testing of Phase 2a on real infrastructure
 
-### Phase 2b: Interactive Chat
-- Pipe user messages into running agent (stdin), bidirectional conversation
-- Chat UI improvements: visual distinction between user/agent messages
+### Phase 2b: Interactive Chat (code complete, needs VPS testing)
+- Multi-turn agent conversations via persistent Docker containers + `--resume`
+- Chat-first task detail page with message queue
+- Turn manager, output parser with structured message types
 - Action cards for commits, PRs, blockers
-- Conversation-style layout (not terminal log)
 
 ### Phase 2c: Live Preview
 - Proxy container dev server through orchestrator
