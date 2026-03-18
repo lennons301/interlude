@@ -86,9 +86,35 @@ export async function execSetup(
 
   const stream = await exec.start({});
   await new Promise<void>((resolve, reject) => {
-    stream.on("end", resolve);
-    stream.on("error", reject);
+    let resolved = false;
+    let poll: ReturnType<typeof setInterval> | null = null;
+
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      if (poll) clearInterval(poll);
+      resolve();
+    };
+
+    stream.on("end", done);
+    stream.on("error", (err) => {
+      if (resolved) return;
+      resolved = true;
+      if (poll) clearInterval(poll);
+      reject(err);
+    });
     stream.resume();
+
+    poll = setInterval(async () => {
+      try {
+        const info = await exec.inspect();
+        if (!info.Running) {
+          setTimeout(done, 500);
+        }
+      } catch {
+        done();
+      }
+    }, 2000);
   });
 
   const inspectResult = await exec.inspect();
@@ -172,9 +198,32 @@ export async function execFallbackCommitAndPush(
   });
 
   const stream = await exec.start({});
+  // Wait for stream end, with exec polling fallback (Docker exec streams
+  // sometimes don't close after the process exits)
   await new Promise<void>((resolve) => {
-    stream.on("end", resolve);
+    let resolved = false;
+    let poll: ReturnType<typeof setInterval> | null = null;
+
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      if (poll) clearInterval(poll);
+      resolve();
+    };
+
+    stream.on("end", done);
     stream.resume();
+
+    poll = setInterval(async () => {
+      try {
+        const info = await exec.inspect();
+        if (!info.Running) {
+          setTimeout(done, 500);
+        }
+      } catch {
+        done();
+      }
+    }, 2000);
   });
 
   const inspectResult = await exec.inspect();
