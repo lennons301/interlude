@@ -30,14 +30,25 @@ export async function scanPorts(running: RunningContainer): Promise<number[]> {
     });
     const stream = await exec.start({});
     const chunks: Buffer[] = [];
+    let timedOut = false;
     await new Promise<void>((resolve) => {
       stream.on("data", (chunk: Buffer) => chunks.push(chunk));
-      stream.on("end", resolve);
-      setTimeout(resolve, 5000);
+      stream.on("end", () => {
+        console.log(`[exec-diag] scanPorts stream ended normally`);
+        resolve();
+      });
+      setTimeout(() => {
+        timedOut = true;
+        console.log(`[exec-diag] scanPorts timed out after 5s`);
+        resolve();
+      }, 5000);
     });
     const output = Buffer.concat(chunks).toString();
-    return parseListeningPorts(output);
-  } catch {
+    const ports = parseListeningPorts(output);
+    console.log(`[exec-diag] scanPorts result: timedOut=${timedOut}, output=${output.length}bytes, ports=[${ports}]`);
+    return ports;
+  } catch (err) {
+    console.log(`[exec-diag] scanPorts error: ${err}`);
     return [];
   }
 }

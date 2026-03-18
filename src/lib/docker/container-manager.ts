@@ -201,35 +201,49 @@ export async function execFallbackCommitAndPush(
   });
 
   const stream = await exec.start({});
-  // Wait for stream end, with exec polling fallback (Docker exec streams
-  // sometimes don't close after the process exits)
+  // DIAGNOSTIC: trace exec lifecycle
+  const execId = (exec as { id?: string }).id?.slice(0, 12) ?? "unknown";
+  console.log(`[exec-diag] ${execId} commitAndPush started`);
+
+  let streamEnded = false;
+  let pollChecks = 0;
+
   await new Promise<void>((resolve) => {
     let resolved = false;
     let poll: ReturnType<typeof setInterval> | null = null;
 
-    const done = () => {
+    const done = (source: string) => {
       if (resolved) return;
       resolved = true;
       if (poll) clearInterval(poll);
+      console.log(`[exec-diag] ${execId} resolved via ${source} after ${pollChecks} polls, streamEnded=${streamEnded}`);
       resolve();
     };
 
-    stream.on("end", done);
+    stream.on("end", () => {
+      streamEnded = true;
+      console.log(`[exec-diag] ${execId} stream ended`);
+      done("stream-end");
+    });
     stream.resume();
 
     poll = setInterval(async () => {
+      pollChecks++;
       try {
         const info = await exec.inspect();
+        console.log(`[exec-diag] ${execId} poll #${pollChecks}: Running=${info.Running}, ExitCode=${info.ExitCode}`);
         if (!info.Running) {
-          setTimeout(done, 500);
+          setTimeout(() => done("poll"), 500);
         }
-      } catch {
-        done();
+      } catch (err) {
+        console.log(`[exec-diag] ${execId} poll #${pollChecks}: inspect error: ${err}`);
+        done("poll-error");
       }
     }, 2000);
   });
 
   const inspectResult = await exec.inspect();
+  console.log(`[exec-diag] ${execId} final: ExitCode=${inspectResult.ExitCode}`);
   if (inspectResult.ExitCode !== 0) {
     throw new Error(`Commit and push failed with exit code ${inspectResult.ExitCode}`);
   }
