@@ -13,6 +13,7 @@ import {
 } from "../docker/container-manager";
 import { createOutputHandler, type TurnResult } from "./output-parser";
 import { getConfig } from "../config";
+import { getDocker } from "../docker/client";
 
 /** Track all active task containers for cancellation and idle polling */
 const activeTasks = new Map<
@@ -85,8 +86,8 @@ export async function startTask(taskId: string): Promise<void> {
     });
     activeTasks.get(taskId)!.state = "idle";
 
-    // Run fallback commit after turn completes
-    await runFallbackCommit(running);
+    // Commit and push after turn completes
+    await runPostTurnCommitAndPush(taskId, running);
   } catch (err) {
     updateTask(taskId, { status: "failed", containerStatus: null });
     insertSystemMessage(
@@ -123,39 +124,7 @@ async function runTurn(
 
   // Stream output to handler. Also poll exec status as fallback —
   // Docker exec streams sometimes don't close after the process exits.
-  await new Promise<void>((resolve, reject) => {
-    let resolved = false;
-    let poll: ReturnType<typeof setInterval> | null = null;
-
-    const done = () => {
-      if (resolved) return;
-      resolved = true;
-      if (poll) clearInterval(poll);
-      resolve();
-    };
-
-    stream.on("data", (chunk: Buffer) => handler.write(chunk));
-    stream.on("end", done);
-    stream.on("error", (err) => {
-      if (resolved) return;
-      resolved = true;
-      if (poll) clearInterval(poll);
-      reject(err);
-    });
-
-    // Fallback: poll exec status every 2s
-    poll = setInterval(async () => {
-      try {
-        const info = await exec.inspect();
-        if (!info.Running) {
-          // Process exited — give stream 500ms to flush, then resolve
-          setTimeout(done, 500);
-        }
-      } catch {
-        done();
-      }
-    }, 2000);
-  });
+  await waitForExecStream(stream, exec, (chunk) => handler.write(chunk));
 
   return handler.flush();
 }
@@ -235,26 +204,46 @@ export async function processQueuedMessages(
     });
     activeTasks.get(taskId)!.state = "idle";
 
-    // Fallback commit after each turn
-    await runFallbackCommit(running);
+    // Commit and push after each turn
+    await runPostTurnCommitAndPush(taskId, running);
   }
 }
 
 /**
- * Complete a task: fallback commit, push, cleanup.
+ * Complete a task: push final state, mark completed, cleanup.
+ * Works even if activeTasks is empty (e.g. after server restart) by
+ * reconnecting to the container via containerId from the database.
  */
 export async function completeTask(taskId: string): Promise<void> {
-  const entry = activeTasks.get(taskId);
-  console.log(`[orchestrator] completeTask ${taskId}: entry=${entry ? entry.state : "NOT_FOUND"}, activeTasks.size=${activeTasks.size}`);
-  if (!entry) return;
+  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+  if (!task) return;
+
+  // Get container — prefer in-memory, fall back to DB containerId
+  let entry = activeTasks.get(taskId);
+  let running: RunningContainer | null = entry?.container ?? null;
+
+  if (!running && task.containerId) {
+    // Reconnect to container from DB
+    try {
+      const docker = getDocker();
+      const container = docker.getContainer(task.containerId);
+      await container.inspect(); // Verify it exists
+      running = { container, id: task.containerId };
+    } catch {
+      // Container no longer exists
+    }
+  }
 
   updateTask(taskId, { containerStatus: "completing" });
-  entry.state = "completing";
+  if (entry) entry.state = "completing";
 
   try {
-    await execFallbackCommitAndPush(entry.container);
-    const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
-    insertSystemMessage(taskId, `Branch '${task?.branch}' pushed.`);
+    if (running) {
+      await execFallbackCommitAndPush(running);
+      insertSystemMessage(taskId, `Branch '${task.branch}' pushed.`);
+    } else {
+      insertSystemMessage(taskId, "Container no longer available — work was pushed after each turn.");
+    }
     updateTask(taskId, { status: "completed", containerStatus: null });
   } catch (err) {
     insertSystemMessage(
@@ -264,8 +253,8 @@ export async function completeTask(taskId: string): Promise<void> {
     updateTask(taskId, { status: "failed", containerStatus: null });
   } finally {
     activeTasks.delete(taskId);
-    if (!getConfig().keepContainers) {
-      await removeContainer(entry.container);
+    if (running && !getConfig().keepContainers) {
+      await removeContainer(running);
       updateTask(taskId, { containerId: null });
     }
   }
@@ -290,25 +279,69 @@ export async function cancelTask(taskId: string): Promise<void> {
   insertSystemMessage(taskId, "Task cancelled by user.");
 }
 
-async function runFallbackCommit(running: RunningContainer): Promise<void> {
+/**
+ * After each turn, commit any uncommitted changes and push the branch.
+ * This ensures work is always available on GitHub for PRs.
+ */
+async function runPostTurnCommitAndPush(taskId: string, running: RunningContainer): Promise<void> {
   try {
-    const exec = await running.container.exec({
-      Cmd: [
-        "bash",
-        "-c",
-        'cd /workspace/repo && git add -A && git diff --cached --quiet || git commit -m "agent: uncommitted changes"',
-      ],
-      AttachStdout: true,
-      AttachStderr: true,
-    });
-    const stream = await exec.start({});
-    await new Promise<void>((resolve) => {
-      stream.on("end", resolve);
-      stream.resume();
-    });
-  } catch {
-    // Non-fatal — commit may fail if nothing to commit
+    await execFallbackCommitAndPush(running);
+    const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+    insertSystemMessage(taskId, `Branch '${task?.branch}' pushed.`);
+  } catch (err) {
+    insertSystemMessage(
+      taskId,
+      `Push warning: ${err instanceof Error ? err.message : String(err)}`
+    );
+    // Non-fatal — don't fail the task for a push issue
   }
+}
+
+/**
+ * Wait for a Docker exec stream to complete, with polling fallback.
+ * Docker exec streams sometimes don't emit "end" after the process exits.
+ */
+async function waitForExecStream(
+  stream: NodeJS.ReadableStream,
+  exec: { inspect: () => Promise<{ Running: boolean }> },
+  onData?: (chunk: Buffer) => void
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let resolved = false;
+    let poll: ReturnType<typeof setInterval> | null = null;
+
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      if (poll) clearInterval(poll);
+      resolve();
+    };
+
+    if (onData) {
+      stream.on("data", (chunk: Buffer) => onData(chunk));
+    } else {
+      stream.resume();
+    }
+    stream.on("end", done);
+    stream.on("error", (err) => {
+      if (resolved) return;
+      resolved = true;
+      if (poll) clearInterval(poll);
+      reject(err);
+    });
+
+    // Fallback: poll exec status every 2s
+    poll = setInterval(async () => {
+      try {
+        const info = await exec.inspect();
+        if (!info.Running) {
+          setTimeout(done, 500);
+        }
+      } catch {
+        done();
+      }
+    }, 2000);
+  });
 }
 
 function updateTask(

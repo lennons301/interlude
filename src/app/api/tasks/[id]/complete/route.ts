@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { tasks } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { completeTask, getActiveTasks } from "@/lib/orchestrator/task-runner";
+import { completeTask } from "@/lib/orchestrator/task-runner";
 
 export async function POST(
   _request: Request,
@@ -20,18 +20,6 @@ export async function POST(
       { error: `Task is ${task.status}, can only complete running tasks` },
       { status: 400 }
     );
-  }
-
-  // Check active tasks state for debugging
-  const active = getActiveTasks();
-  const entry = active.get(id);
-  console.log(`[complete] task=${id} activeTasks.size=${active.size} entry=${entry ? entry.state : "NOT_FOUND"}`);
-
-  if (!entry) {
-    return NextResponse.json({
-      error: "Task has no active container (server may have restarted)",
-      activeTasks: active.size
-    }, { status: 409 });
   }
 
   // Fire-and-forget — completeTask handles the async lifecycle
