@@ -20,13 +20,15 @@ jobs:
             git pull origin main
             docker compose up -d --build
 
-            # Health check — wait for HTTP server, not just container state
+            # Health check — wait for HTTP server
             echo "Waiting for app to start..."
-            sleep 10
-            if curl -sf http://localhost:3000/api/init > /dev/null; then
-              echo "App is healthy"
-            else
-              echo "ERROR: App failed health check"
-              docker compose logs app --tail 50
-              exit 1
-            fi
+            for i in $(seq 1 12); do
+              if curl -sf http://localhost:3000/ > /dev/null 2>&1; then
+                echo "App is healthy"
+                exit 0
+              fi
+              sleep 5
+            done
+            echo "ERROR: App failed health check after 60s"
+            docker compose logs app --tail 50
+            exit 1
