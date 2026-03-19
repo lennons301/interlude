@@ -78,7 +78,7 @@ async function proxyRequest(
 
 export async function GET(
   request: Request,
-  { params }: { params: Promise<{ id: string; path: string[] }> }
+  { params }: { params: Promise<{ id: string; path?: string[] }> }
 ) {
   const { id, path } = await params;
   return proxyRequest(request, id, path?.join("/") ?? "");
@@ -86,7 +86,7 @@ export async function GET(
 
 export async function POST(
   request: Request,
-  { params }: { params: Promise<{ id: string; path: string[] }> }
+  { params }: { params: Promise<{ id: string; path?: string[] }> }
 ) {
   const { id, path } = await params;
   return proxyRequest(request, id, path?.join("/") ?? "");

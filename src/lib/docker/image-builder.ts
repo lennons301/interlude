@@ -30,6 +30,7 @@ export async function buildImage(
   const stream = await docker.buildImage(tarStream, {
     t: getImageName(),
     dockerfile: "Dockerfile.agent",
+    nocache: true,
   });
 
   await new Promise<void>((resolve, reject) => {

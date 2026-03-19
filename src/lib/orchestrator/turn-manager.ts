@@ -334,7 +334,8 @@ async function runPostTurnCommitAndPush(taskId: string, running: RunningContaine
  */
 async function waitForExecStream(
   stream: NodeJS.ReadableStream,
-  exec: { inspect: () => Promise<{ Running: boolean; ExitCode?: number }>; id?: string },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  exec: any,
   onData?: (chunk: Buffer) => void
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
