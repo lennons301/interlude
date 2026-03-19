@@ -30,7 +30,8 @@ export async function buildImage(
   const stream = await docker.buildImage(tarStream, {
     t: getImageName(),
     dockerfile: "Dockerfile.agent",
-    nocache: true,
+    // Note: to pick up Dockerfile.agent changes, delete the image first:
+    // docker rmi interlude-agent:latest
   });
 
   await new Promise<void>((resolve, reject) => {
