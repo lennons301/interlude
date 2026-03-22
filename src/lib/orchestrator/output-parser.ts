@@ -35,8 +35,12 @@ export function createOutputHandler(taskId: string) {
   let sessionId: string | null = null;
   let costUsd = 0;
   let lastToolUseMessageId: string | null = null;
+  let _onDone: (() => void) | null = null;
 
   return {
+    /** Register a callback fired when the "result" event arrives (turn complete). */
+    onDone(cb: () => void) { _onDone = cb; },
+
     write(chunk: Buffer | string): void {
       buffer += chunk.toString();
       const lines = buffer.split("\n");
@@ -187,6 +191,7 @@ export function createOutputHandler(taskId: string) {
             createdAt: new Date(),
           })
           .run();
+        if (_onDone) _onDone();
         return;
       }
 

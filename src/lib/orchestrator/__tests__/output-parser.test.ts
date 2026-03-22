@@ -165,6 +165,22 @@ describe("output-parser with real Claude Code stream-json", () => {
     expect(result.costUsd).toBeGreaterThan(0);
   });
 
+  it("fires onDone callback when result event is received", () => {
+    const handler = createOutputHandler(TASK_ID);
+    let doneFired = false;
+    handler.onDone(() => { doneFired = true; });
+
+    // Feed all lines except the result event
+    for (const line of fixtureLines.slice(0, -1)) {
+      handler.write(line + "\n");
+    }
+    expect(doneFired).toBe(false);
+
+    // Feed the result event
+    handler.write(fixtureLines[fixtureLines.length - 1] + "\n");
+    expect(doneFired).toBe(true);
+  });
+
   it("handles partial line buffering", () => {
     const handler = createOutputHandler(TASK_ID);
 

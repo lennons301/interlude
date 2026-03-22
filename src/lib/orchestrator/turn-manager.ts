@@ -124,9 +124,15 @@ async function runTurn(
     sessionId,
   });
 
-  // Stream output to handler. Also poll exec status as fallback —
-  // Docker exec streams sometimes don't close after the process exits.
-  await waitForExecStream(stream, exec, (chunk) => handler.write(chunk));
+  // Race: wait for the exec stream to close OR the "result" event from Claude.
+  // Background processes (e.g. dev servers) can keep the exec stream open
+  // long after Claude exits, so the result event is the reliable signal.
+  const resultReceived = new Promise<void>((resolve) => handler.onDone(resolve));
+
+  await Promise.race([
+    waitForExecStream(stream, exec, (chunk) => handler.write(chunk)),
+    resultReceived,
+  ]);
 
   return handler.flush();
 }

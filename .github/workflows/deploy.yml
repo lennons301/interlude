@@ -23,6 +23,8 @@ jobs:
             # Stop app before rebuild to free RAM for the Next.js build (4GB VPS)
             docker compose down
             docker image prune -f
+            # Force rebuild agent image so Dockerfile.agent changes take effect
+            docker rmi interlude-agent:latest 2>/dev/null || true
             docker compose build app
             docker compose up -d
 
