@@ -15,10 +15,16 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 15m
           script: |
             cd /opt/interlude
             git pull origin main
-            docker compose up -d --build
+
+            # Stop app before rebuild to free RAM for the Next.js build (4GB VPS)
+            docker compose down
+            docker image prune -f
+            docker compose build app
+            docker compose up -d
 
             # Health check — wait for app via Caddy (port 80)
             echo "Waiting for app to start..."

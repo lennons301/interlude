@@ -14,6 +14,7 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NODE_ENV=production
+ENV NODE_OPTIONS="--max-old-space-size=2048"
 RUN pnpm build
 # Flatten pnpm symlinks for native addon deps so they can be copied to the run stage
 RUN mkdir -p /native-deps/node_modules && \
