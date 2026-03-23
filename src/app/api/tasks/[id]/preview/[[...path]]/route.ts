@@ -63,29 +63,32 @@ async function proxyRequest(
       signal: AbortSignal.timeout(10000),
     });
 
-    console.log(`[preview-proxy] Response: ${proxyRes.status} ${proxyRes.statusText}`);
+    console.log(`[preview-proxy] Response: ${proxyRes.status} ${proxyRes.headers.get("content-type")}`);
 
-    const responseHeaders = new Headers(proxyRes.headers);
-    responseHeaders.delete("x-frame-options");
-    responseHeaders.delete("content-security-policy");
+    // Read entire response as text to avoid stream piping issues
+    const body = await proxyRes.text();
 
-    const contentType = responseHeaders.get("content-type") ?? "";
-    if (contentType.includes("text/html")) {
-      const html = await proxyRes.text();
-      const baseTag = `<base href="/api/tasks/${taskId}/preview/">`;
-      const modified = html.includes("<head>")
-        ? html.replace("<head>", `<head>${baseTag}`)
-        : html.includes("<head ")
-          ? html.replace(/<head\s[^>]*>/, `$&${baseTag}`)
-          : `${baseTag}${html}`;
-
-      return new Response(modified, {
-        status: proxyRes.status,
-        headers: responseHeaders,
-      });
+    const responseHeaders = new Headers();
+    responseHeaders.set("content-type", proxyRes.headers.get("content-type") ?? "text/html");
+    // Don't copy headers that block iframe embedding
+    for (const [key, value] of proxyRes.headers) {
+      if (["x-frame-options", "content-security-policy", "content-encoding", "transfer-encoding", "content-length"].includes(key.toLowerCase())) continue;
+      responseHeaders.set(key, value);
     }
 
-    return new Response(proxyRes.body, {
+    // Inject base tag for correct asset path resolution
+    const contentType = responseHeaders.get("content-type") ?? "";
+    let finalBody = body;
+    if (contentType.includes("text/html")) {
+      const baseTag = `<base href="/api/tasks/${taskId}/preview/">`;
+      finalBody = body.includes("<head>")
+        ? body.replace("<head>", `<head>${baseTag}`)
+        : body.includes("<head ")
+          ? body.replace(/<head\s[^>]*>/, `$&${baseTag}`)
+          : `${baseTag}${body}`;
+    }
+
+    return new Response(finalBody, {
       status: proxyRes.status,
       headers: responseHeaders,
     });
