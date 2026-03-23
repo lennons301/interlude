@@ -26,6 +26,8 @@ async function proxyRequest(
   const reqUrl = new URL(request.url);
   const targetUrl = `http://${task.containerName}:${task.devPort}/${path}${reqUrl.search}`;
 
+  console.log(`[preview-proxy] ${request.method} ${targetUrl}`);
+
   try {
     const headers = new Headers(request.headers);
     headers.set("Host", `${task.containerName}:${task.devPort}`);
@@ -40,6 +42,8 @@ async function proxyRequest(
       redirect: "manual",
       signal: AbortSignal.timeout(10000),
     });
+
+    console.log(`[preview-proxy] Response: ${proxyRes.status} ${proxyRes.statusText}`);
 
     const responseHeaders = new Headers(proxyRes.headers);
     responseHeaders.delete("x-frame-options");
@@ -66,11 +70,13 @@ async function proxyRequest(
       headers: responseHeaders,
     });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[preview-proxy] Error proxying to ${targetUrl}:`, msg);
     if (err instanceof DOMException && err.name === "TimeoutError") {
       return NextResponse.json({ error: "Dev server timeout" }, { status: 504 });
     }
     return NextResponse.json(
-      { error: "Dev server unavailable" },
+      { error: `Dev server unavailable: ${msg}` },
       { status: 502 }
     );
   }
@@ -80,14 +86,24 @@ export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string; path?: string[] }> }
 ) {
-  const { id, path } = await params;
-  return proxyRequest(request, id, path?.join("/") ?? "");
+  try {
+    const { id, path } = await params;
+    return await proxyRequest(request, id, path?.join("/") ?? "");
+  } catch (err) {
+    console.error("[preview-proxy] Unhandled error in GET:", err);
+    return NextResponse.json({ error: "Internal proxy error" }, { status: 500 });
+  }
 }
 
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string; path?: string[] }> }
 ) {
-  const { id, path } = await params;
-  return proxyRequest(request, id, path?.join("/") ?? "");
+  try {
+    const { id, path } = await params;
+    return await proxyRequest(request, id, path?.join("/") ?? "");
+  } catch (err) {
+    console.error("[preview-proxy] Unhandled error in POST:", err);
+    return NextResponse.json({ error: "Internal proxy error" }, { status: 500 });
+  }
 }
