@@ -24,9 +24,29 @@ async function proxyRequest(
   }
 
   const reqUrl = new URL(request.url);
-  const targetUrl = `http://${task.containerName}:${task.devPort}/${path}${reqUrl.search}`;
+  const debug = reqUrl.searchParams.has("_debug");
+  const targetUrl = `http://${task.containerName}:${task.devPort}/${path}`;
 
   console.log(`[preview-proxy] ${request.method} ${targetUrl}`);
+
+  if (debug) {
+    // Diagnostic mode — return connection test result as JSON
+    try {
+      const res = await fetch(targetUrl, { signal: AbortSignal.timeout(5000) });
+      return NextResponse.json({
+        ok: true,
+        targetUrl,
+        status: res.status,
+        contentType: res.headers.get("content-type"),
+      });
+    } catch (err) {
+      return NextResponse.json({
+        ok: false,
+        targetUrl,
+        error: err instanceof Error ? { name: err.constructor.name, message: err.message, cause: String(err.cause ?? "") } : String(err),
+      });
+    }
+  }
 
   try {
     const headers = new Headers(request.headers);
