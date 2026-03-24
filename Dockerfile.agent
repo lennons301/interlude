@@ -10,9 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN corepack enable && corepack prepare pnpm@latest --activate
 RUN npm install -g @anthropic-ai/claude-code
 
-# Install Doppler CLI for secrets injection
-RUN curl -sLf --retry 3 --tlsv1.2 --proto "=https" \
-    "https://cli.doppler.com/install.sh" | sh
+# Install Doppler CLI for secrets injection (binary download, no gnupg needed)
+RUN curl -sLf --retry 3 "https://cli.doppler.com/download?os=linux&arch=amd64&format=tar" \
+    | tar xz -C /usr/local/bin doppler
 
 # Use the existing node user (uid 1000) which matches the deploy user on the host,
 # so mounted credential files retain correct ownership after token refresh

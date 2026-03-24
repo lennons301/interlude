@@ -87,7 +87,7 @@ export async function execSetup(
         "cd /workspace/repo",
         'git checkout -b "$GIT_BRANCH"',
         // If Doppler token is set, download secrets to .env.local
-        'if [ -n "$DOPPLER_TOKEN" ]; then doppler secrets download --no-file --format env > .env.local 2>/dev/null && echo "Doppler: wrote .env.local"; fi',
+        'if [ -n "$DOPPLER_TOKEN" ] && command -v doppler >/dev/null 2>&1; then doppler secrets download --no-file --format env > .env.local && echo "Doppler: wrote .env.local"; fi',
       ].join(" && "),
     ],
     AttachStdout: true,
