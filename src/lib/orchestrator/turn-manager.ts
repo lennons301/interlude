@@ -63,7 +63,12 @@ export async function startTask(taskId: string): Promise<void> {
 
   try {
     // Create container
-    running = await createWorkspaceContainer({ taskId, gitUrl: proj.gitUrl, branch });
+    running = await createWorkspaceContainer({
+      taskId,
+      gitUrl: proj.gitUrl,
+      branch,
+      dopplerToken: proj.dopplerToken ?? undefined,
+    });
     activeTasks.set(taskId, { container: running, state: "setup" });
 
     updateTask(taskId, { containerId: running.id, containerName: running.name });

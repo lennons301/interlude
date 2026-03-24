@@ -1,0 +1,1 @@
+ALTER TABLE `projects` ADD `doppler_token` text;

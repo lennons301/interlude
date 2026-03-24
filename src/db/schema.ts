@@ -5,6 +5,7 @@ export const projects = sqliteTable("projects", {
   name: text("name").notNull(),
   githubRepo: text("github_repo"),
   gitUrl: text("git_url"),
+  dopplerToken: text("doppler_token"),
   createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 

@@ -7,6 +7,7 @@ export interface WorkspaceOptions {
   taskId: string;
   gitUrl: string;
   branch: string;
+  dopplerToken?: string;
 }
 
 export interface TurnOptions {
@@ -40,6 +41,10 @@ export async function createWorkspaceContainer(
 
   if (config.anthropicApiKey) {
     env.push(`ANTHROPIC_API_KEY=${config.anthropicApiKey}`);
+  }
+
+  if (options.dopplerToken) {
+    env.push(`DOPPLER_TOKEN=${options.dopplerToken}`);
   }
 
   const binds: string[] = [];
@@ -81,6 +86,8 @@ export async function execSetup(
         'git clone "https://${GIT_TOKEN}@${GIT_URL#https://}" /workspace/repo',
         "cd /workspace/repo",
         'git checkout -b "$GIT_BRANCH"',
+        // If Doppler token is set, download secrets to .env.local
+        'if [ -n "$DOPPLER_TOKEN" ]; then doppler secrets download --no-file --format env > .env.local 2>/dev/null && echo "Doppler: wrote .env.local"; fi',
       ].join(" && "),
     ],
     AttachStdout: true,
