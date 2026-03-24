@@ -36,9 +36,9 @@ pnpm build        # Production build
 pnpm lint         # Run ESLint
 ```
 
-## Current Status: Phase 2b complete, tested on VPS
+## Current Status: Phase 2c complete, tested on VPS
 
-Phases 1, 2a, 2.5, and 2b are done and tested end-to-end on VPS. The full flow works: create task → agent runs in Docker → output streams to chat UI → branch pushed to GitHub after each turn → interactive follow-up messages → complete task.
+Phases 1, 2a, 2.5, 2b, and 2c are done and tested end-to-end on VPS. The full flow works: create task → agent runs in Docker → output streams to chat UI → branch pushed to GitHub after each turn → interactive follow-up messages → live preview of dev server in iframe → complete task.
 
 ## Roadmap
 
@@ -68,11 +68,11 @@ Phases 1, 2a, 2.5, and 2b are done and tested end-to-end on VPS. The full flow w
 - Turn manager, output parser with structured message types
 - Branch pushed after every turn for immediate PR creation
 
-### Phase 2c: Live Preview
+### Phase 2c: Live Preview (done)
 - Proxy container dev server through orchestrator
 - Embed as iframe in task detail view
 - Real-time hot reload as agent writes code
-- Mobile-friendly preview pane
+- Mobile-friendly preview pane (tabs on mobile, split on desktop)
 
 ### Phase 3: GitHub Integration
 - GitHub App setup and auth
