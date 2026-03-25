@@ -1,7 +1,7 @@
 import Docker from "dockerode";
 import { getDocker } from "./client";
 import { getImageName, ensureImage } from "./image-builder";
-import { getConfig } from "../config";
+import { getConfig, PLATFORM_REPO_URL } from "../config";
 
 export interface WorkspaceOptions {
   taskId: string;
@@ -84,6 +84,7 @@ export async function execSetup(
         'git config --global user.name "$GIT_USER_NAME"',
         'git config --global user.email "$GIT_USER_EMAIL"',
         'git clone "https://${GIT_TOKEN}@${GIT_URL#https://}" /workspace/repo',
+        `git clone --depth 1 ${PLATFORM_REPO_URL} /workspace/platform 2>/dev/null || echo "WARN: platform repo clone failed, continuing without platform context"`,
         "cd /workspace/repo",
         'git checkout -b "$GIT_BRANCH"',
         // If Doppler token is set, download secrets to .env.local
