@@ -102,3 +102,9 @@ Phases 1, 2a, 2.5, 2b, and 2c are done and tested end-to-end on VPS. The full fl
 - Phase 2a plan: `docs/plans/2026-03-11-phase2a-agent-orchestrator.md`
 - VPS deployment spec: `docs/specs/2026-03-12-vps-deployment-design.md`
 - Overall design: see `docs/plans/2026-03-10-remote-agent-dev-environment-design.md` (external)
+
+## Platform Context
+
+Platform standards and choices: see /workspace/platform/ (in agent containers)
+or ~/code/platform/ (on local machines).
+This project's registry entry: products/interlude.yaml

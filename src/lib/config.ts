@@ -73,3 +73,6 @@ export function getConfig(): AppConfig {
 export function resetConfig(): void {
   _config = null;
 }
+
+// Platform repo URL — cloned into agent containers for estate-wide context
+export const PLATFORM_REPO_URL = process.env.PLATFORM_REPO_URL || 'https://github.com/lennons301/platform.git';
