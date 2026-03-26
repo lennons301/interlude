@@ -57,7 +57,7 @@ export async function startTask(taskId: string): Promise<void> {
 
   // Update task status
   updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
-  insertSystemMessage(taskId, "Provisioning agent container...");
+  insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
 
   let running: RunningContainer | null = null;
 
