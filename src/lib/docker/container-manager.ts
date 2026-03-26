@@ -88,7 +88,7 @@ export async function execSetup(
         "cd /workspace/repo",
         'git checkout -b "$GIT_BRANCH"',
         // If Doppler token is set, download secrets to .env.local
-        'if [ -n "$DOPPLER_TOKEN" ] && command -v doppler >/dev/null 2>&1; then doppler secrets download --no-file --format env > .env.local && echo "Doppler: wrote .env.local"; fi',
+        'if [ -n "$DOPPLER_TOKEN" ]; then if command -v doppler >/dev/null 2>&1; then doppler secrets download --no-file --format env > .env.local && echo "Doppler: wrote .env.local" || echo "Doppler: download failed"; else echo "Doppler: CLI not found in container"; fi; fi',
       ].join(" && "),
     ],
     AttachStdout: true,
@@ -96,6 +96,7 @@ export async function execSetup(
   });
 
   const stream = await exec.start({});
+  const outputChunks: Buffer[] = [];
   await new Promise<void>((resolve, reject) => {
     let resolved = false;
     let poll: ReturnType<typeof setInterval> | null = null;
@@ -107,6 +108,7 @@ export async function execSetup(
       resolve();
     };
 
+    stream.on("data", (chunk: Buffer) => outputChunks.push(chunk));
     stream.on("end", done);
     stream.on("error", (err) => {
       if (resolved) return;
@@ -114,7 +116,6 @@ export async function execSetup(
       if (poll) clearInterval(poll);
       reject(err);
     });
-    stream.resume();
 
     poll = setInterval(async () => {
       try {
@@ -128,9 +129,14 @@ export async function execSetup(
     }, 2000);
   });
 
+  const output = Buffer.concat(outputChunks).toString().trim();
+  if (output) {
+    console.log(`[setup] ${output}`);
+  }
+
   const inspectResult = await exec.inspect();
   if (inspectResult.ExitCode !== 0) {
-    throw new Error(`Workspace setup failed with exit code ${inspectResult.ExitCode}`);
+    throw new Error(`Workspace setup failed with exit code ${inspectResult.ExitCode}: ${output.slice(-500)}`);
   }
 }
 
