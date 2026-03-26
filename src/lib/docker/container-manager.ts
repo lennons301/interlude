@@ -87,8 +87,8 @@ export async function execSetup(
         `git clone --depth 1 ${PLATFORM_REPO_URL} /workspace/platform 2>/dev/null || echo "WARN: platform repo clone failed, continuing without platform context"`,
         "cd /workspace/repo",
         'git checkout -b "$GIT_BRANCH"',
-        // If Doppler token is set, download secrets to .env.local
-        'if [ -n "$DOPPLER_TOKEN" ]; then if command -v doppler >/dev/null 2>&1; then doppler secrets download --no-file --format env > .env.local && echo "Doppler: wrote .env.local" || echo "Doppler: download failed"; else echo "Doppler: CLI not found in container"; fi; fi',
+        // If Doppler token is set, fetch secrets via API and write .env.local (no CLI needed)
+        'if [ -n "$DOPPLER_TOKEN" ]; then curl -sf --request GET "https://api.doppler.com/v3/configs/config/secrets/download?format=env" --header "Authorization: Bearer $DOPPLER_TOKEN" > .env.local && echo "Doppler: wrote .env.local ($(wc -l < .env.local) vars)" || echo "Doppler: API request failed"; fi',
       ].join(" && "),
     ],
     AttachStdout: true,
