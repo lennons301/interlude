@@ -52,6 +52,21 @@ async function proxyRequest(
       responseHeaders.set(key, value);
     }
 
+    // Rewrite redirect Location headers to stay within the preview proxy
+    const location = responseHeaders.get("location");
+    if (location && proxyRes.status >= 300 && proxyRes.status < 400) {
+      const proxyBase = `/api/tasks/${taskId}/preview`;
+      try {
+        // Absolute URL pointing at the container — extract the path
+        const parsed = new URL(location);
+        responseHeaders.set("location", `${proxyBase}${parsed.pathname}${parsed.search}`);
+      } catch {
+        // Relative path — prefix with proxy base
+        const cleanPath = location.startsWith("/") ? location : `/${location}`;
+        responseHeaders.set("location", `${proxyBase}${cleanPath}`);
+      }
+    }
+
     // Inject base tag for correct asset path resolution
     const contentType = responseHeaders.get("content-type") ?? "";
     let finalBody = body;

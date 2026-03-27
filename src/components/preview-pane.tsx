@@ -23,7 +23,7 @@ export function PreviewPane({
   const reloadTimeoutRef = useRef<ReturnType<typeof setTimeout>>(null);
   const retryCountRef = useRef(0);
 
-  const previewUrl = `/api/tasks/${taskId}/preview/`;
+  const previewUrl = `/api/tasks/${taskId}/preview`;
 
   const reload = useCallback(() => {
     if (iframeRef.current) {
