@@ -67,16 +67,24 @@ async function proxyRequest(
       }
     }
 
-    // Inject base tag for correct asset path resolution
+    // Rewrite absolute paths in HTML to go through the preview proxy.
+    // The <base> tag only handles relative URLs; Next.js/Turbopack emits
+    // absolute paths like /_next/... which would hit Interlude's own assets.
     const contentType = responseHeaders.get("content-type") ?? "";
     let finalBody = body;
     if (contentType.includes("text/html")) {
-      const baseTag = `<base href="/api/tasks/${taskId}/preview/">`;
-      finalBody = body.includes("<head>")
-        ? body.replace("<head>", `<head>${baseTag}`)
-        : body.includes("<head ")
-          ? body.replace(/<head\s[^>]*>/, `$&${baseTag}`)
-          : `${baseTag}${body}`;
+      const proxyBase = `/api/tasks/${taskId}/preview`;
+      // Rewrite src="/_next/..." and href="/_next/..." to go through proxy
+      finalBody = finalBody.replace(
+        /((?:src|href|action)=["'])(\/_next\/)/g,
+        `$1${proxyBase}$2`
+      );
+      // Also rewrite any other absolute paths (e.g. /favicon.ico, /api/...)
+      // but not protocol-relative URLs (//cdn...) or data: URIs
+      finalBody = finalBody.replace(
+        /((?:src|href|action)=["'])(\/(?!\/|api\/tasks\/)[^"']*)/g,
+        `$1${proxyBase}$2`
+      );
     }
 
     return new Response(finalBody, {
