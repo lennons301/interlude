@@ -5,6 +5,11 @@ import { eq } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Path-based preview proxy — local dev fallback.
+ * In production, subdomain routing (custom-server.js) handles preview traffic
+ * directly, bypassing this route entirely.
+ */
 async function proxyRequest(
   request: Request,
   taskId: string,
@@ -41,53 +46,15 @@ async function proxyRequest(
       signal: AbortSignal.timeout(10000),
     });
 
-    // Read entire response as text to avoid stream piping issues
     const body = await proxyRes.text();
 
     const responseHeaders = new Headers();
-    responseHeaders.set("content-type", proxyRes.headers.get("content-type") ?? "text/html");
-    // Don't copy headers that block iframe embedding
     for (const [key, value] of proxyRes.headers) {
       if (["x-frame-options", "content-security-policy", "content-encoding", "transfer-encoding", "content-length"].includes(key.toLowerCase())) continue;
       responseHeaders.set(key, value);
     }
 
-    // Rewrite redirect Location headers to stay within the preview proxy
-    const location = responseHeaders.get("location");
-    if (location && proxyRes.status >= 300 && proxyRes.status < 400) {
-      const proxyBase = `/api/tasks/${taskId}/preview`;
-      try {
-        // Absolute URL pointing at the container — extract the path
-        const parsed = new URL(location);
-        responseHeaders.set("location", `${proxyBase}${parsed.pathname}${parsed.search}`);
-      } catch {
-        // Relative path — prefix with proxy base
-        const cleanPath = location.startsWith("/") ? location : `/${location}`;
-        responseHeaders.set("location", `${proxyBase}${cleanPath}`);
-      }
-    }
-
-    // Rewrite absolute paths in HTML to go through the preview proxy.
-    // The <base> tag only handles relative URLs; Next.js/Turbopack emits
-    // absolute paths like /_next/... which would hit Interlude's own assets.
-    const contentType = responseHeaders.get("content-type") ?? "";
-    let finalBody = body;
-    if (contentType.includes("text/html")) {
-      const proxyBase = `/api/tasks/${taskId}/preview`;
-      // Rewrite src="/_next/..." and href="/_next/..." to go through proxy
-      finalBody = finalBody.replace(
-        /((?:src|href|action)=["'])(\/_next\/)/g,
-        `$1${proxyBase}$2`
-      );
-      // Also rewrite any other absolute paths (e.g. /favicon.ico, /api/...)
-      // but not protocol-relative URLs (//cdn...) or data: URIs
-      finalBody = finalBody.replace(
-        /((?:src|href|action)=["'])(\/(?!\/|api\/tasks\/)[^"']*)/g,
-        `$1${proxyBase}$2`
-      );
-    }
-
-    return new Response(finalBody, {
+    return new Response(body, {
       status: proxyRes.status,
       headers: responseHeaders,
     });
@@ -108,24 +75,14 @@ export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string; path?: string[] }> }
 ) {
-  try {
-    const { id, path } = await params;
-    return await proxyRequest(request, id, path?.join("/") ?? "");
-  } catch (err) {
-    console.error("[preview-proxy] Unhandled error in GET:", err);
-    return NextResponse.json({ error: "Internal proxy error" }, { status: 500 });
-  }
+  const { id, path } = await params;
+  return proxyRequest(request, id, path?.join("/") ?? "");
 }
 
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string; path?: string[] }> }
 ) {
-  try {
-    const { id, path } = await params;
-    return await proxyRequest(request, id, path?.join("/") ?? "");
-  } catch (err) {
-    console.error("[preview-proxy] Unhandled error in POST:", err);
-    return NextResponse.json({ error: "Internal proxy error" }, { status: 500 });
-  }
+  const { id, path } = await params;
+  return proxyRequest(request, id, path?.join("/") ?? "");
 }

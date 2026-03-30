@@ -19,6 +19,9 @@ Interlude is a self-hosted, agent-first development platform. You dispatch tasks
 - API routes return JSON, validate input, return appropriate status codes
 - Components are client components (`"use client"`) when they need interactivity
 - File structure: pages in `src/app/`, components in `src/components/`, utilities in `src/lib/`, database in `src/db/`
+- Preview uses subdomain routing: `task-{shortId}.interludes.co.uk` (controlled by `DOMAIN` env var, path-based fallback when unset)
+- Container network aliases match subdomain prefixes for Docker DNS resolution
+- Caddy `on_demand_tls` provisions certs per-subdomain; validated via `/api/internal/validate-subdomain`
 
 ## Database
 
@@ -36,9 +39,9 @@ pnpm build        # Production build
 pnpm lint         # Run ESLint
 ```
 
-## Current Status: Phase 2d in progress
+## Current Status: Phase 2d complete, tested on VPS
 
-Phases 1, 2a, 2.5, 2b, and 2c are done and tested end-to-end on VPS. The full flow works: create task → agent runs in Docker → output streams to chat UI → branch pushed to GitHub after each turn → interactive follow-up messages → live preview of dev server in iframe → complete task. Phase 2d (subdomain-based preview) is in progress — the iframe proxy approach breaks auth, cookies, and client-side routing for real apps.
+Phases 1, 2a, 2.5, 2b, 2c, and 2d are done and tested end-to-end on VPS. The full flow works: create task → agent runs in Docker → output streams to chat UI → branch pushed to GitHub after each turn → interactive follow-up messages → live preview of dev server via subdomain → complete task.
 
 ## Roadmap
 
@@ -74,12 +77,13 @@ Phases 1, 2a, 2.5, 2b, and 2c are done and tested end-to-end on VPS. The full fl
 - Real-time hot reload as agent writes code
 - Mobile-friendly preview pane (tabs on mobile, split on desktop)
 
-### Phase 2d: Subdomain Preview (in progress)
+### Phase 2d: Subdomain Preview (done)
 - Each task gets `task-{shortId}.interludes.co.uk` — real browser origin
-- Caddy `on_demand_tls` for wildcard subdomain certs
-- Custom server routes by Host header, proxies to container via Docker network alias
+- Caddy `on_demand_tls` for wildcard subdomain certs (TLS-ALPN-01)
+- Custom server routes by Host header, proxies HTTP + WebSocket to container via Docker network alias
 - Auth, cookies, client-side routing, assets all work without rewriting
-- Code cleanup: remove HTML rewriting workarounds from iframe proxy era
+- Preview pane pre-warms TLS cert before loading iframe (avoids mobile error during provisioning)
+- Container reaper cleans up orphaned containers on restart + every 5 minutes
 - Plan: `docs/plans/2026-03-27-phase2d-subdomain-preview.md`
 
 ### Phase 3: GitHub Integration
