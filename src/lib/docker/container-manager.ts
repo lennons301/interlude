@@ -20,6 +20,7 @@ export interface RunningContainer {
   container: Docker.Container;
   id: string;
   name: string;
+  previewSubdomain: string;
 }
 
 export async function createWorkspaceContainer(
@@ -57,6 +58,8 @@ export async function createWorkspaceContainer(
   }
 
   const containerName = `interlude-task-${options.taskId}-${Date.now()}`;
+  // DNS-safe subdomain derived from task ID (last 8 chars of ULID, lowercased)
+  const previewSubdomain = `task-${options.taskId.slice(-8).toLowerCase()}`;
 
   const container = await docker.createContainer({
     Image: getImageName(),
@@ -68,9 +71,16 @@ export async function createWorkspaceContainer(
       NetworkMode: "interlude",
       Binds: binds.length > 0 ? binds : undefined,
     },
+    NetworkingConfig: {
+      EndpointsConfig: {
+        interlude: {
+          Aliases: [previewSubdomain],
+        },
+      },
+    },
   });
 
-  return { container, id: container.id, name: containerName };
+  return { container, id: container.id, name: containerName, previewSubdomain };
 }
 
 export async function execSetup(

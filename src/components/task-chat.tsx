@@ -19,6 +19,7 @@ type TaskStatusUpdate = {
   status: string;
   totalCostUsd: number;
   devPort?: number | null;
+  previewSubdomain?: string | null;
 };
 
 const CONTAINER_STATUS_LABELS: Record<string, string> = {
@@ -28,13 +29,14 @@ const CONTAINER_STATUS_LABELS: Record<string, string> = {
   completing: "Pushing changes...",
 };
 
-export function TaskChat({ task: initialTask }: { task: TaskData }) {
+export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain: string | null }) {
   const [taskStatus, setTaskStatus] = useState({
     status: initialTask.status,
     containerStatus: initialTask.containerStatus,
     totalCostUsd: initialTask.totalCostUsd,
   });
   const [devPort, setDevPort] = useState<number | null>(null);
+  const [previewSubdomain, setPreviewSubdomain] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"chat" | "preview">("chat");
   const [lastActivity, setLastActivity] = useState<number>(0);
 
@@ -43,6 +45,9 @@ export function TaskChat({ task: initialTask }: { task: TaskData }) {
       setTaskStatus(status);
       if (status.devPort !== undefined) {
         setDevPort(status.devPort);
+      }
+      if (status.previewSubdomain !== undefined) {
+        setPreviewSubdomain(status.previewSubdomain);
       }
     },
     []
@@ -161,6 +166,8 @@ export function TaskChat({ task: initialTask }: { task: TaskData }) {
             <PreviewPane
               taskId={initialTask.id}
               devPort={devPort}
+              previewSubdomain={previewSubdomain}
+              domain={domain}
               lastActivityTimestamp={lastActivity}
             />
           </div>

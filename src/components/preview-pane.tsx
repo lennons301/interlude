@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 interface PreviewPaneProps {
   taskId: string;
   devPort: number | null;
+  previewSubdomain: string | null;
+  domain: string | null;
   lastActivityTimestamp?: number;
 }
 
@@ -14,6 +16,8 @@ type PreviewStatus = "loading" | "active" | "stopped" | "error";
 export function PreviewPane({
   taskId,
   devPort,
+  previewSubdomain,
+  domain,
   lastActivityTimestamp,
 }: PreviewPaneProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -23,7 +27,9 @@ export function PreviewPane({
   const reloadTimeoutRef = useRef<ReturnType<typeof setTimeout>>(null);
   const retryCountRef = useRef(0);
 
-  const previewUrl = `/api/tasks/${taskId}/preview`;
+  const previewUrl = previewSubdomain && domain
+    ? `https://${previewSubdomain}.${domain}`
+    : `/api/tasks/${taskId}/preview`;
 
   const reload = useCallback(() => {
     if (iframeRef.current) {

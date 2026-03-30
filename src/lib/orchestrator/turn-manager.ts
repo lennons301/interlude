@@ -71,7 +71,11 @@ export async function startTask(taskId: string): Promise<void> {
     });
     activeTasks.set(taskId, { container: running, state: "setup" });
 
-    updateTask(taskId, { containerId: running.id, containerName: running.name });
+    updateTask(taskId, {
+      containerId: running.id,
+      containerName: running.name,
+      previewSubdomain: running.previewSubdomain,
+    });
 
     // Start container and run setup
     await running.container.start();
@@ -242,7 +246,7 @@ export async function completeTask(taskId: string): Promise<void> {
       const docker = getDocker();
       const container = docker.getContainer(task.containerId);
       await container.inspect(); // Verify it exists
-      running = { container, id: task.containerId, name: task.containerName ?? "" };
+      running = { container, id: task.containerId, name: task.containerName ?? "", previewSubdomain: task.previewSubdomain ?? "" };
     } catch {
       // Container no longer exists
     }
@@ -400,6 +404,7 @@ function updateTask(
     sessionId: string | null;
     totalCostUsd: number;
     devPort: number | null;
+    previewSubdomain: string | null;
   }>
 ): void {
   db.update(tasks)

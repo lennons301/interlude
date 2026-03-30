@@ -24,6 +24,7 @@ export default async function TaskDetailPage({
         containerStatus: task.containerStatus,
         totalCostUsd: task.totalCostUsd ?? 0,
       }}
+      domain={process.env.DOMAIN ?? null}
     />
   );
 }

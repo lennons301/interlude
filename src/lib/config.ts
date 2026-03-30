@@ -16,6 +16,8 @@ export interface AppConfig {
   maxTurns: number;
   /** Max budget in USD per task (default: 5.00) */
   maxBudgetUsd: number;
+  /** Domain for subdomain-based preview (e.g. "interludes.co.uk"). Null = path-based fallback */
+  domain: string | null;
 }
 
 let _config: AppConfig | null = null;
@@ -64,6 +66,7 @@ export function getConfig(): AppConfig {
     keepContainers: process.env.KEEP_CONTAINERS === "true",
     maxTurns: parseInt(process.env.MAX_TURNS ?? "50", 10),
     maxBudgetUsd: parseFloat(process.env.MAX_BUDGET_USD ?? "5.00"),
+    domain: process.env.DOMAIN ?? null,
   };
 
   return _config;

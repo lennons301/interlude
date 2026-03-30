@@ -31,6 +31,7 @@ export const tasks = sqliteTable("tasks", {
   totalCostUsd: real("total_cost_usd").notNull().default(0),
   devPort: int("dev_port"),
   containerName: text("container_name"),
+  previewSubdomain: text("preview_subdomain"),
   createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: int("updated_at", { mode: "timestamp_ms" }).notNull(),
 });

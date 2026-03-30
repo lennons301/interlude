@@ -1,3 +1,16 @@
+{
+    on_demand_tls {
+        ask http://app:3000/api/internal/validate-subdomain
+    }
+}
+
 {$DOMAIN:localhost} {
+    reverse_proxy app:3000
+}
+
+*.{$DOMAIN:localhost} {
+    tls {
+        on_demand
+    }
     reverse_proxy app:3000
 }

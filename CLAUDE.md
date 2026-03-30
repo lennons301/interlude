@@ -36,9 +36,9 @@ pnpm build        # Production build
 pnpm lint         # Run ESLint
 ```
 
-## Current Status: Phase 2c complete, tested on VPS
+## Current Status: Phase 2d in progress
 
-Phases 1, 2a, 2.5, 2b, and 2c are done and tested end-to-end on VPS. The full flow works: create task → agent runs in Docker → output streams to chat UI → branch pushed to GitHub after each turn → interactive follow-up messages → live preview of dev server in iframe → complete task.
+Phases 1, 2a, 2.5, 2b, and 2c are done and tested end-to-end on VPS. The full flow works: create task → agent runs in Docker → output streams to chat UI → branch pushed to GitHub after each turn → interactive follow-up messages → live preview of dev server in iframe → complete task. Phase 2d (subdomain-based preview) is in progress — the iframe proxy approach breaks auth, cookies, and client-side routing for real apps.
 
 ## Roadmap
 
@@ -73,6 +73,14 @@ Phases 1, 2a, 2.5, 2b, and 2c are done and tested end-to-end on VPS. The full fl
 - Embed as iframe in task detail view
 - Real-time hot reload as agent writes code
 - Mobile-friendly preview pane (tabs on mobile, split on desktop)
+
+### Phase 2d: Subdomain Preview (in progress)
+- Each task gets `task-{shortId}.interludes.co.uk` — real browser origin
+- Caddy `on_demand_tls` for wildcard subdomain certs
+- Custom server routes by Host header, proxies to container via Docker network alias
+- Auth, cookies, client-side routing, assets all work without rewriting
+- Code cleanup: remove HTML rewriting workarounds from iframe proxy era
+- Plan: `docs/plans/2026-03-27-phase2d-subdomain-preview.md`
 
 ### Phase 3: GitHub Integration
 - GitHub App setup and auth
