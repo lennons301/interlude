@@ -135,11 +135,14 @@ export function PreviewPane({
         <iframe
           ref={iframeRef}
           src={previewUrl}
-          className="w-full h-full border-0 bg-white"
+          className="w-full h-full border-0"
           onLoad={handleLoad}
           onError={handleError}
           title="Live Preview"
-          sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+          {...(!previewSubdomain || !domain
+            ? { sandbox: "allow-scripts allow-same-origin allow-forms allow-popups" }
+            : {}
+          )}
         />
       </div>
     </div>
