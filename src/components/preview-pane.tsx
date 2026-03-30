@@ -11,7 +11,7 @@ interface PreviewPaneProps {
   lastActivityTimestamp?: number;
 }
 
-type PreviewStatus = "loading" | "active" | "stopped" | "error";
+type PreviewStatus = "loading" | "active" | "stopped" | "error" | "provisioning";
 
 export function PreviewPane({
   taskId,
@@ -26,17 +26,48 @@ export function PreviewPane({
   );
   const reloadTimeoutRef = useRef<ReturnType<typeof setTimeout>>(null);
   const retryCountRef = useRef(0);
+  const certReadyRef = useRef(false);
 
-  const previewUrl = previewSubdomain && domain
+  const isSubdomain = !!(previewSubdomain && domain);
+  const previewUrl = isSubdomain
     ? `https://${previewSubdomain}.${domain}`
     : `/api/tasks/${taskId}/preview`;
 
+  // Pre-warm the TLS cert before loading the iframe (subdomain only).
+  // Caddy provisions the cert on first request (~5s), which causes the
+  // iframe to show a TLS error. We probe with fetch first.
+  const warmCertAndLoad = useCallback(async () => {
+    if (!iframeRef.current) return;
+    if (!isSubdomain || certReadyRef.current) {
+      iframeRef.current.src = previewUrl;
+      return;
+    }
+    setStatus("provisioning");
+    for (let i = 0; i < 10; i++) {
+      try {
+        await fetch(previewUrl, { mode: "no-cors", cache: "no-store" });
+        certReadyRef.current = true;
+        setStatus("loading");
+        iframeRef.current.src = previewUrl;
+        return;
+      } catch {
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+    // Give up after ~20s
+    setStatus("error");
+  }, [previewUrl, isSubdomain]);
+
   const reload = useCallback(() => {
     if (iframeRef.current) {
-      iframeRef.current.src = previewUrl;
       setStatus("loading");
+      if (isSubdomain && !certReadyRef.current) {
+        warmCertAndLoad();
+      } else {
+        iframeRef.current.src = previewUrl;
+      }
     }
-  }, [previewUrl]);
+  }, [previewUrl, isSubdomain, warmCertAndLoad]);
 
   const handleLoad = useCallback(() => {
     retryCountRef.current = 0;
@@ -57,11 +88,12 @@ export function PreviewPane({
   useEffect(() => {
     if (devPort) {
       retryCountRef.current = 0;
-      setStatus("loading");
+      certReadyRef.current = false;
+      warmCertAndLoad();
     } else {
       setStatus("stopped");
     }
-  }, [devPort]);
+  }, [devPort, warmCertAndLoad]);
 
   // Fallback: reload on agent activity (debounced 500ms)
   useEffect(() => {
@@ -115,10 +147,12 @@ export function PreviewPane({
 
       {/* iframe */}
       <div className="flex-1 relative">
-        {status === "loading" && (
+        {(status === "loading" || status === "provisioning") && (
           <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/50 z-10">
             <span className="text-zinc-500 text-sm">
-              Connecting to dev server...
+              {status === "provisioning"
+                ? "Provisioning preview certificate..."
+                : "Connecting to dev server..."}
             </span>
           </div>
         )}
@@ -134,7 +168,7 @@ export function PreviewPane({
         )}
         <iframe
           ref={iframeRef}
-          src={previewUrl}
+          src={isSubdomain ? "about:blank" : previewUrl}
           className="w-full h-full border-0"
           onLoad={handleLoad}
           onError={handleError}
