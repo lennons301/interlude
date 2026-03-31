@@ -32,6 +32,8 @@ export const tasks = sqliteTable("tasks", {
   devPort: int("dev_port"),
   containerName: text("container_name"),
   previewSubdomain: text("preview_subdomain"),
+  pullRequestNumber: int("pull_request_number"),
+  pullRequestUrl: text("pull_request_url"),
   createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: int("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
