@@ -140,7 +140,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
         <div
           className={`flex-1 flex flex-col min-h-0 ${
             devPort && activeTab !== "chat" ? "hidden lg:flex" : ""
-          } ${devPort ? "lg:w-1/2 lg:border-r lg:border-zinc-800" : ""}`}
+          } ${devPort ? "lg:w-2/5 lg:border-r lg:border-zinc-800" : ""}`}
         >
           <TaskStream
             taskId={initialTask.id}
@@ -161,7 +161,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
           <div
             className={`flex-1 min-h-0 ${
               activeTab !== "preview" ? "hidden lg:flex" : "flex"
-            } flex-col ${devPort ? "lg:w-1/2" : ""}`}
+            } flex-col ${devPort ? "lg:w-3/5" : ""}`}
           >
             <PreviewPane
               taskId={initialTask.id}
