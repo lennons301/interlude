@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import { newId } from "../ulid";
 import { getDocker, isDockerAvailable } from "../docker/client";
 import { startQueue } from "./queue";
+import { isGitHubConfigured } from "../github/client";
 
 let initialized = false;
 
@@ -106,6 +107,11 @@ export async function initOrchestrator(): Promise<void> {
   const dockerAvailable = await isDockerAvailable();
   if (dockerAvailable) {
     console.log("[orchestrator] Docker available, starting task queue");
+    if (isGitHubConfigured()) {
+      console.log("[orchestrator] GitHub App configured -- webhooks and PR creation enabled");
+    } else {
+      console.log("[orchestrator] GitHub App not configured -- running without GitHub integration");
+    }
     await recoverOrphanedTasks();
     await reapStaleContainers();
     startQueue();
