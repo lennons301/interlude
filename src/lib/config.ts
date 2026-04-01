@@ -18,6 +18,14 @@ export interface AppConfig {
   maxBudgetUsd: number;
   /** Domain for subdomain-based preview (e.g. "interludes.co.uk"). Null = path-based fallback */
   domain: string | null;
+  /** GitHub App ID (from app settings page) */
+  githubAppId: string | null;
+  /** GitHub App private key PEM content */
+  githubAppPrivateKey: string | null;
+  /** Secret for verifying webhook signatures */
+  githubWebhookSecret: string | null;
+  /** Installation ID for the GitHub App on your account */
+  githubAppInstallationId: string | null;
 }
 
 let _config: AppConfig | null = null;
@@ -67,6 +75,10 @@ export function getConfig(): AppConfig {
     maxTurns: parseInt(process.env.MAX_TURNS ?? "50", 10),
     maxBudgetUsd: parseFloat(process.env.MAX_BUDGET_USD ?? "5.00"),
     domain: process.env.DOMAIN ?? null,
+    githubAppId: process.env.GITHUB_APP_ID ?? null,
+    githubAppPrivateKey: process.env.GITHUB_APP_PRIVATE_KEY ?? null,
+    githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET ?? null,
+    githubAppInstallationId: process.env.GITHUB_APP_INSTALLATION_ID ?? null,
   };
 
   return _config;
