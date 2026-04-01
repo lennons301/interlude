@@ -22,6 +22,11 @@ Interlude is a self-hosted, agent-first development platform. You dispatch tasks
 - Preview uses subdomain routing: `task-{shortId}.interludes.co.uk` (controlled by `DOMAIN` env var, path-based fallback when unset)
 - Container network aliases match subdomain prefixes for Docker DNS resolution
 - Caddy `on_demand_tls` provisions certs per-subdomain; validated via `/api/internal/validate-subdomain`
+- GitHub App provides webhook-driven issue→task creation (label `interlude` triggers task)
+- Draft PRs auto-created on first branch push, marked ready for review on completion
+- GitHub config is optional — all features degrade gracefully when unconfigured
+- Webhook endpoint: `POST /api/webhooks/github`
+- GitHub library: `src/lib/github/` (client, webhooks, issues, pull-requests)
 
 ## Database
 
@@ -39,9 +44,9 @@ pnpm build        # Production build
 pnpm lint         # Run ESLint
 ```
 
-## Current Status: Phase 2d complete, tested on VPS
+## Current Status: Phase 3 complete, tested on VPS
 
-Phases 1, 2a, 2.5, 2b, 2c, and 2d are done and tested end-to-end on VPS. The full flow works: create task → agent runs in Docker → output streams to chat UI → branch pushed to GitHub after each turn → interactive follow-up messages → live preview of dev server via subdomain → complete task.
+Phases 1, 2a, 2.5, 2b, 2c, 2d, and 3 are done and tested end-to-end on VPS. The full flow works: create task → agent runs in Docker → output streams to chat UI → branch pushed to GitHub after each turn → interactive follow-up messages → live preview of dev server via subdomain → complete task. GitHub issues labeled `interlude` auto-create tasks, and agent work auto-produces draft PRs.
 
 ## Roadmap
 
@@ -86,10 +91,14 @@ Phases 1, 2a, 2.5, 2b, 2c, and 2d are done and tested end-to-end on VPS. The ful
 - Container reaper cleans up orphaned containers on restart + every 5 minutes
 - Plan: `docs/plans/2026-03-27-phase2d-subdomain-preview.md`
 
-### Phase 3: GitHub Integration
-- GitHub App setup and auth
-- Issue <-> task sync (bidirectional)
-- Agent branch/commit/PR workflow
+### Phase 3: GitHub Integration (done)
+- GitHub App auth (JWT → installation token, auto-refreshed)
+- Webhook receiver: issue labeled `interlude` → task created (queued)
+- Issue lifecycle comments (queued, working, PR opened, complete, failed)
+- Draft PR auto-created on first branch push, marked ready on task completion
+- Issue + PR links displayed in task UI header
+- Spec: `docs/specs/2026-03-27-phase3-github-integration-design.md`
+- Plan: `docs/plans/2026-03-27-phase3-github-integration.md`
 
 ### Phase 4: Notification Bot
 - Slack or Telegram bot for bidirectional messaging
@@ -105,6 +114,16 @@ Phases 1, 2a, 2.5, 2b, 2c, and 2d are done and tested end-to-end on VPS. The ful
 - Cloud provider API for machine provisioning
 - Orchestrator decides local vs remote
 - Auto-teardown after task completion
+
+### Phase 7: Multi-Agent Workflows (future, loosely sketched)
+- Multiple agents collaborating on a single goal
+- Agent roles and specialisation (e.g. architect, implementer, reviewer)
+- Task decomposition — break a high-level objective into subtasks assigned to different agents
+- Coordination layer: shared context, dependency ordering, merge conflict resolution
+- Pipeline/DAG execution — agent A's output feeds agent B's input
+- Agent-to-agent delegation (one agent spawning work for another)
+- Parallel agents working branches of the same repo with automated integration
+- Human-in-the-loop checkpoints for multi-agent plans before execution
 
 ## Specs and Plans
 
