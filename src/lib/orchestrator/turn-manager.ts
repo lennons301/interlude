@@ -15,6 +15,8 @@ import { createOutputHandler, type TurnResult } from "./output-parser";
 import { scanPorts } from "./port-scanner";
 import { getConfig } from "../config";
 import { getDocker } from "../docker/client";
+import { commentOnIssue, parseIssueRef } from "../github/issues";
+import { createDraftPr, markPrReady } from "../github/pull-requests";
 
 /** Track all active task containers for cancellation and idle polling */
 const activeTasks = new Map<
@@ -85,6 +87,15 @@ export async function startTask(taskId: string): Promise<void> {
     updateTask(taskId, { containerStatus: "running" });
     activeTasks.get(taskId)!.state = "running";
 
+    // Notify GitHub issue that agent has started
+    if (task.githubIssue) {
+      const domain = process.env.DOMAIN ?? "interludes.co.uk";
+      commentOnIssue(
+        task.githubIssue,
+        `Agent working\n\n[View in Interlude](https://${domain}/tasks/${taskId})`
+      ).catch(console.error);
+    }
+
     // Run initial turn
     const turnResult = await runTurn(taskId, running, prompt);
 
@@ -105,6 +116,14 @@ export async function startTask(taskId: string): Promise<void> {
       taskId,
       `Error: ${err instanceof Error ? err.message : String(err)}`
     );
+
+    if (task.githubIssue) {
+      const domain = process.env.DOMAIN ?? "interludes.co.uk";
+      commentOnIssue(
+        task.githubIssue,
+        `Task failed -- check [Interlude](https://${domain}/tasks/${taskId}) for details`
+      ).catch(console.error);
+    }
 
     if (running) {
       activeTasks.delete(taskId);
@@ -262,12 +281,35 @@ export async function completeTask(taskId: string): Promise<void> {
     } else {
       insertSystemMessage(taskId, "Container no longer available — work was pushed after each turn.");
     }
+
+    // Mark PR ready for review and post completion comment
+    if (task.pullRequestNumber && task.githubIssue) {
+      const parsed = parseIssueRef(task.githubIssue);
+      if (parsed) {
+        await markPrReady(parsed.owner, parsed.repo, task.pullRequestNumber);
+        const cost = (task.totalCostUsd ?? 0).toFixed(2);
+        await commentOnIssue(
+          task.githubIssue,
+          `Complete -- PR #${task.pullRequestNumber} ready for review ($${cost})`
+        );
+      }
+    }
+
     updateTask(taskId, { status: "completed", containerStatus: null });
   } catch (err) {
     insertSystemMessage(
       taskId,
       `Push failed: ${err instanceof Error ? err.message : String(err)}`
     );
+
+    if (task.githubIssue) {
+      const domain = process.env.DOMAIN ?? "interludes.co.uk";
+      commentOnIssue(
+        task.githubIssue,
+        `Task failed -- check [Interlude](https://${domain}/tasks/${taskId}) for details`
+      ).catch(console.error);
+    }
+
     updateTask(taskId, { status: "failed", containerStatus: null });
   } finally {
     activeTasks.delete(taskId);
@@ -334,12 +376,37 @@ async function runPostTurnCommitAndPush(taskId: string, running: RunningContaine
     await execFallbackCommitAndPush(running);
     const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
     insertSystemMessage(taskId, `Branch '${task?.branch}' pushed.`);
+
+    // Create draft PR on first push if none exists yet
+    if (task && !task.pullRequestNumber && task.branch && task.githubIssue) {
+      const parsed = parseIssueRef(task.githubIssue);
+      if (parsed) {
+        const domain = process.env.DOMAIN ?? "interludes.co.uk";
+        const body = `Closes #${parsed.number}\n\n[View in Interlude](https://${domain}/tasks/${taskId})`;
+
+        const pr = await createDraftPr({
+          owner: parsed.owner,
+          repo: parsed.repo,
+          title: task.title,
+          head: task.branch,
+          body,
+        });
+
+        if (pr) {
+          updateTask(taskId, {
+            pullRequestNumber: pr.number,
+            pullRequestUrl: pr.url,
+          });
+          await commentOnIssue(task.githubIssue, `Draft PR opened: #${pr.number}`);
+          console.log(`[github] Draft PR #${pr.number} created for task ${taskId}`);
+        }
+      }
+    }
   } catch (err) {
     insertSystemMessage(
       taskId,
       `Push warning: ${err instanceof Error ? err.message : String(err)}`
     );
-    // Non-fatal — don't fail the task for a push issue
   }
 }
 
@@ -405,6 +472,8 @@ function updateTask(
     totalCostUsd: number;
     devPort: number | null;
     previewSubdomain: string | null;
+    pullRequestNumber: number | null;
+    pullRequestUrl: string | null;
   }>
 ): void {
   db.update(tasks)
