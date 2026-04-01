@@ -19,6 +19,9 @@ export async function GET(
     let lastTaskStatus: string | null = null;
     let lastDevPort: number | null = null;
     let lastPreviewSubdomain: string | null = null;
+    let lastGithubIssue: string | null = null;
+    let lastPrNumber: number | null = null;
+    let lastPrUrl: string | null = null;
     let lastPollTime = new Date();
 
     const poll = setInterval(() => {
@@ -71,11 +74,17 @@ export async function GET(
         const ts = task.status;
         const dp = task.devPort ?? null;
         const ps = task.previewSubdomain ?? null;
-        if (cs !== lastContainerStatus || ts !== lastTaskStatus || dp !== lastDevPort || ps !== lastPreviewSubdomain) {
+        const gi = task.githubIssue ?? null;
+        const prn = task.pullRequestNumber ?? null;
+        const pru = task.pullRequestUrl ?? null;
+        if (cs !== lastContainerStatus || ts !== lastTaskStatus || dp !== lastDevPort || ps !== lastPreviewSubdomain || gi !== lastGithubIssue || prn !== lastPrNumber || pru !== lastPrUrl) {
           lastContainerStatus = cs;
           lastTaskStatus = ts;
           lastDevPort = dp;
           lastPreviewSubdomain = ps;
+          lastGithubIssue = gi;
+          lastPrNumber = prn;
+          lastPrUrl = pru;
           send(
             {
               containerStatus: cs,
@@ -83,6 +92,9 @@ export async function GET(
               totalCostUsd: task.totalCostUsd ?? 0,
               devPort: dp,
               previewSubdomain: ps,
+              githubIssue: gi,
+              pullRequestNumber: prn,
+              pullRequestUrl: pru,
             },
             "taskStatus"
           );

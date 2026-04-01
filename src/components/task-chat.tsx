@@ -12,6 +12,9 @@ interface TaskData {
   branch: string | null;
   containerStatus: string | null;
   totalCostUsd: number;
+  githubIssue: string | null;
+  pullRequestNumber: number | null;
+  pullRequestUrl: string | null;
 }
 
 type TaskStatusUpdate = {
@@ -20,6 +23,9 @@ type TaskStatusUpdate = {
   totalCostUsd: number;
   devPort?: number | null;
   previewSubdomain?: string | null;
+  githubIssue?: string | null;
+  pullRequestNumber?: number | null;
+  pullRequestUrl?: string | null;
 };
 
 const CONTAINER_STATUS_LABELS: Record<string, string> = {
@@ -37,6 +43,9 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
   });
   const [devPort, setDevPort] = useState<number | null>(null);
   const [previewSubdomain, setPreviewSubdomain] = useState<string | null>(null);
+  const [githubIssue, setGithubIssue] = useState<string | null>(initialTask.githubIssue);
+  const [pullRequestUrl, setPullRequestUrl] = useState<string | null>(initialTask.pullRequestUrl);
+  const [pullRequestNumber, setPullRequestNumber] = useState<number | null>(initialTask.pullRequestNumber);
   const [activeTab, setActiveTab] = useState<"chat" | "preview">("chat");
   const [lastActivity, setLastActivity] = useState<number>(0);
 
@@ -49,6 +58,9 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
       if (status.previewSubdomain !== undefined) {
         setPreviewSubdomain(status.previewSubdomain);
       }
+      if (status.githubIssue !== undefined) setGithubIssue(status.githubIssue);
+      if (status.pullRequestUrl !== undefined) setPullRequestUrl(status.pullRequestUrl);
+      if (status.pullRequestNumber !== undefined) setPullRequestNumber(status.pullRequestNumber);
     },
     []
   );
@@ -105,6 +117,30 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
           <p className="text-xs text-zinc-500 mt-0.5 font-mono">
             {initialTask.branch}
           </p>
+        )}
+        {(githubIssue || pullRequestUrl) && (
+          <div className="flex items-center gap-3 mt-0.5">
+            {githubIssue && (
+              <a
+                href={`https://github.com/${githubIssue.replace("#", "/issues/")}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-blue-400 hover:text-blue-300 font-mono"
+              >
+                {githubIssue}
+              </a>
+            )}
+            {pullRequestUrl && (
+              <a
+                href={pullRequestUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-blue-400 hover:text-blue-300 font-mono"
+              >
+                PR #{pullRequestNumber}
+              </a>
+            )}
+          </div>
         )}
       </div>
 

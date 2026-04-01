@@ -23,6 +23,9 @@ export default async function TaskDetailPage({
         branch: task.branch,
         containerStatus: task.containerStatus,
         totalCostUsd: task.totalCostUsd ?? 0,
+        githubIssue: task.githubIssue ?? null,
+        pullRequestNumber: task.pullRequestNumber ?? null,
+        pullRequestUrl: task.pullRequestUrl ?? null,
       }}
       domain={process.env.DOMAIN ?? null}
     />
