@@ -104,18 +104,7 @@ Phases 1, 2a, 2.5, 2b, 2c, 2d, and 3 are done and tested end-to-end on VPS. The 
 - Slack or Telegram bot for bidirectional messaging
 - Task dispatch from chat
 
-### Phase 5: Production Hardening (was Phase 5, deployment moved to 2.5)
-- Container resource limits (CPU/memory caps per agent container)
-- Automated backups
-- Monitoring and alerting
-- Push notifications
-
-### Phase 6: On-Demand Remote Compute
-- Cloud provider API for machine provisioning
-- Orchestrator decides local vs remote
-- Auto-teardown after task completion
-
-### Phase 7: Multi-Agent Workflows (future, loosely sketched)
+### Phase 5: Multi-Agent Workflows
 - Multiple agents collaborating on a single goal
 - Agent roles and specialisation (e.g. architect, implementer, reviewer)
 - Task decomposition — break a high-level objective into subtasks assigned to different agents
@@ -124,6 +113,17 @@ Phases 1, 2a, 2.5, 2b, 2c, 2d, and 3 are done and tested end-to-end on VPS. The 
 - Agent-to-agent delegation (one agent spawning work for another)
 - Parallel agents working branches of the same repo with automated integration
 - Human-in-the-loop checkpoints for multi-agent plans before execution
+
+### Phase 6: Production Hardening
+- Container resource limits (CPU/memory caps per agent container)
+- Automated backups
+- Monitoring and alerting
+- Push notifications
+
+### Phase 7: On-Demand Remote Compute
+- Cloud provider API for machine provisioning
+- Orchestrator decides local vs remote
+- Auto-teardown after task completion
 
 ## Specs and Plans
 
