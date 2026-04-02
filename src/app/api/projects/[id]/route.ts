@@ -25,9 +25,10 @@ export async function PATCH(
 ) {
   const { id } = await params;
   const body = await request.json();
-  const { name, gitUrl, dopplerToken } = body as {
+  const { name, gitUrl, githubRepo, dopplerToken } = body as {
     name?: string;
     gitUrl?: string;
+    githubRepo?: string | null;
     dopplerToken?: string | null;
   };
 
@@ -39,6 +40,7 @@ export async function PATCH(
   const updates: Record<string, unknown> = {};
   if (name !== undefined) updates.name = name.trim();
   if (gitUrl !== undefined) updates.gitUrl = gitUrl;
+  if (githubRepo !== undefined) updates.githubRepo = githubRepo;
   if (dopplerToken !== undefined) updates.dopplerToken = dopplerToken;
 
   if (Object.keys(updates).length > 0) {
