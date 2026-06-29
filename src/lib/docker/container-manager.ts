@@ -3,6 +3,34 @@ import { getDocker } from "./client";
 import { getImageName, ensureImage } from "./image-builder";
 import { getConfig, PLATFORM_REPO_URL } from "../config";
 
+/**
+ * Bash run at container setup: install an env-based git credential helper
+ * (token supplied at exec time via GIT_AUTH_TOKEN), clone the repo with a
+ * secret-free URL, clone the platform repo (best-effort), check out the task
+ * branch, and pull Doppler secrets if a token is present.
+ */
+export function buildSetupScript(platformRepoUrl: string): string {
+  return [
+    'git config --global user.name "$GIT_USER_NAME"',
+    'git config --global user.email "$GIT_USER_EMAIL"',
+    `git config --global credential.helper '!f() { test "$1" = get && echo username=x-access-token && echo "password=$GIT_AUTH_TOKEN"; }; f'`,
+    'git clone "$GIT_URL" /workspace/repo',
+    `git clone --depth 1 ${platformRepoUrl} /workspace/platform 2>/dev/null || echo "WARN: platform repo clone failed, continuing without platform context"`,
+    "cd /workspace/repo",
+    'git checkout -b "$GIT_BRANCH"',
+    'if [ -n "$DOPPLER_TOKEN" ]; then curl -sf --request GET "https://api.doppler.com/v3/configs/config/secrets/download?format=env" --header "Authorization: Bearer $DOPPLER_TOKEN" > .env.local && echo "Doppler: wrote .env.local ($(wc -l < .env.local) vars)" || echo "Doppler: API request failed"; fi',
+  ].join(" && ");
+}
+
+/** Bash run after each turn: commit any changes and push the branch via origin. */
+export function buildPushScript(): string {
+  return [
+    "cd /workspace/repo",
+    'git add -A && git diff --cached --quiet || git commit -m "agent: uncommitted changes"',
+    "git push origin HEAD",
+  ].join(" && ");
+}
+
 export interface WorkspaceOptions {
   taskId: string;
   gitUrl: string;
