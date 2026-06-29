@@ -24,7 +24,8 @@ Interlude is a self-hosted, agent-first development platform. You dispatch tasks
 - Caddy `on_demand_tls` provisions certs per-subdomain; validated via `/api/internal/validate-subdomain`
 - GitHub App provides webhook-driven issue→task creation (label `interlude` triggers task)
 - Draft PRs auto-created on first branch push, marked ready for review on completion
-- GitHub config is optional — all features degrade gracefully when unconfigured
+- GitHub App is REQUIRED for git auth — agent containers clone/push using short-lived App installation tokens (no PAT). Issue sync + PR features still degrade gracefully if webhook/installation are partially configured.
+- Git credential helper in agent containers reads a per-exec `GIT_AUTH_TOKEN` (minted fresh from the App); no token is persisted in `.git/config`.
 - Webhook endpoint: `POST /api/webhooks/github`
 - GitHub library: `src/lib/github/` (client, webhooks, issues, pull-requests)
 

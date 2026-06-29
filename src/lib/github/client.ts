@@ -2,7 +2,7 @@ import { Octokit } from "octokit";
 import jwt from "jsonwebtoken";
 import { getConfig } from "../config";
 
-let cachedOctokit: Octokit | null = null;
+let cachedToken: string | null = null;
 let tokenExpiresAt = 0;
 
 function createAppJwt(): string {
@@ -31,14 +31,22 @@ export function isGitHubConfigured(): boolean {
   );
 }
 
-export async function getOctokit(): Promise<Octokit> {
+/** Pure: is a cached token still safe to reuse (5-min margin before expiry)? */
+export function isTokenFresh(expiresAt: number, now: number): boolean {
+  return now < expiresAt - 5 * 60 * 1000;
+}
+
+/** Mint (or reuse a cached) GitHub App installation token for git + API use. */
+export async function getInstallationToken(): Promise<string> {
   const config = getConfig();
-  if (!config.githubAppInstallationId) {
-    throw new Error("GitHub App installation ID not configured");
+  if (!config.githubAppId || !config.githubAppPrivateKey || !config.githubAppInstallationId) {
+    throw new Error(
+      "GitHub App required for git operations (set GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY / GITHUB_APP_INSTALLATION_ID)"
+    );
   }
 
-  if (cachedOctokit && Date.now() < tokenExpiresAt - 5 * 60 * 1000) {
-    return cachedOctokit;
+  if (cachedToken && isTokenFresh(tokenExpiresAt, Date.now())) {
+    return cachedToken;
   }
 
   const appJwt = createAppJwt();
@@ -48,8 +56,13 @@ export async function getOctokit(): Promise<Octokit> {
     installation_id: parseInt(config.githubAppInstallationId, 10),
   });
 
-  cachedOctokit = new Octokit({ auth: installation.token });
+  cachedToken = installation.token;
   tokenExpiresAt = new Date(installation.expires_at).getTime();
 
-  return cachedOctokit;
+  return cachedToken;
+}
+
+export async function getOctokit(): Promise<Octokit> {
+  const token = await getInstallationToken();
+  return new Octokit({ auth: token });
 }
