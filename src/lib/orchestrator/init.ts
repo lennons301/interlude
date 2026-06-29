@@ -5,6 +5,7 @@ import { newId } from "../ulid";
 import { getDocker, isDockerAvailable } from "../docker/client";
 import { startQueue } from "./queue";
 import { isGitHubConfigured } from "../github/client";
+import { isDiscordConfigured, startDiscordBot } from "../discord/client";
 
 let initialized = false;
 
@@ -112,11 +113,13 @@ export async function initOrchestrator(): Promise<void> {
     } else {
       console.log("[orchestrator] GitHub App not configured -- running without GitHub integration");
     }
-    // Dynamically import Discord startup to isolate discord.js from build-time analysis
-    import("./discord-startup").then(({ initializeDiscordBot }) => {
-      initializeDiscordBot()
+    if (isDiscordConfigured()) {
+      startDiscordBot()
+        .then(() => console.log("[orchestrator] Discord bot started"))
         .catch((err) => console.error("[orchestrator] Discord bot failed to start:", err));
-    }).catch((err) => console.error("[orchestrator] Failed to load Discord client:", err));
+    } else {
+      console.log("[orchestrator] Discord bot not configured -- running without Discord integration");
+    }
     await recoverOrphanedTasks();
     await reapStaleContainers();
     startQueue();
