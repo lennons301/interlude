@@ -112,6 +112,11 @@ export async function initOrchestrator(): Promise<void> {
     } else {
       console.log("[orchestrator] GitHub App not configured -- running without GitHub integration");
     }
+    // Dynamically import Discord startup to isolate discord.js from build-time analysis
+    import("./discord-startup").then(({ initializeDiscordBot }) => {
+      initializeDiscordBot()
+        .catch((err) => console.error("[orchestrator] Discord bot failed to start:", err));
+    }).catch((err) => console.error("[orchestrator] Failed to load Discord client:", err));
     await recoverOrphanedTasks();
     await reapStaleContainers();
     startQueue();
