@@ -26,6 +26,10 @@ export interface AppConfig {
   githubWebhookSecret: string | null;
   /** Installation ID for the GitHub App on your account */
   githubAppInstallationId: string | null;
+  /** Discord bot token (from Developer Portal) */
+  discordBotToken: string | null;
+  /** Discord application ID */
+  discordApplicationId: string | null;
 }
 
 let _config: AppConfig | null = null;
@@ -79,6 +83,8 @@ export function getConfig(): AppConfig {
     githubAppPrivateKey: process.env.GITHUB_APP_PRIVATE_KEY ?? null,
     githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET ?? null,
     githubAppInstallationId: process.env.GITHUB_APP_INSTALLATION_ID ?? null,
+    discordBotToken: process.env.DISCORD_BOT_TOKEN ?? null,
+    discordApplicationId: process.env.DISCORD_APPLICATION_ID ?? null,
   };
 
   return _config;
