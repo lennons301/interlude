@@ -17,6 +17,7 @@ import { getConfig } from "../config";
 import { getDocker } from "../docker/client";
 import { commentOnIssue, parseIssueRef } from "../github/issues";
 import { createDraftPr, markPrReady } from "../github/pull-requests";
+import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed } from "../discord/notifications";
 
 /** Track all active task containers for cancellation and idle polling */
 const activeTasks = new Map<
@@ -60,6 +61,18 @@ export async function startTask(taskId: string): Promise<void> {
   // Update task status
   updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
   insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
+
+  // Notify Discord channel that task is queued — but not for tasks created
+  // from Discord, which already got their queued embed posted in client.ts.
+  if (proj.discordChannelId && !task.discordMessageId) {
+    notifyTaskQueued(proj.discordChannelId, {
+      id: taskId,
+      title: task.title,
+      projectName: proj.name,
+    }).then((msgId) => {
+      if (msgId) updateTask(taskId, { discordMessageId: msgId });
+    }).catch(console.error);
+  }
 
   let running: RunningContainer | null = null;
 
@@ -123,6 +136,14 @@ export async function startTask(taskId: string): Promise<void> {
         task.githubIssue,
         `Task failed -- check [Interlude](https://${domain}/tasks/${taskId}) for details`
       ).catch(console.error);
+    }
+
+    if (proj.discordChannelId) {
+      notifyTaskFailed(proj.discordChannelId, {
+        id: taskId,
+        title: task.title,
+        error: err instanceof Error ? err.message : String(err),
+      }).catch(console.error);
     }
 
     if (running) {
@@ -296,6 +317,17 @@ export async function completeTask(taskId: string): Promise<void> {
     }
 
     updateTask(taskId, { status: "completed", containerStatus: null });
+
+    // Notify Discord
+    const proj = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
+    if (proj?.discordChannelId) {
+      notifyTaskCompleted(proj.discordChannelId, {
+        id: taskId,
+        title: task.title,
+        totalCostUsd: task.totalCostUsd ?? 0,
+        pullRequestUrl: task.pullRequestUrl ?? null,
+      }).catch(console.error);
+    }
   } catch (err) {
     insertSystemMessage(
       taskId,
@@ -308,6 +340,15 @@ export async function completeTask(taskId: string): Promise<void> {
         task.githubIssue,
         `Task failed -- check [Interlude](https://${domain}/tasks/${taskId}) for details`
       ).catch(console.error);
+    }
+
+    const projForNotify = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
+    if (projForNotify?.discordChannelId) {
+      notifyTaskFailed(projForNotify.discordChannelId, {
+        id: taskId,
+        title: task.title,
+        error: err instanceof Error ? err.message : String(err),
+      }).catch(console.error);
     }
 
     updateTask(taskId, { status: "failed", containerStatus: null });
@@ -474,6 +515,7 @@ function updateTask(
     previewSubdomain: string | null;
     pullRequestNumber: number | null;
     pullRequestUrl: string | null;
+    discordMessageId: string | null;
   }>
 ): void {
   db.update(tasks)
