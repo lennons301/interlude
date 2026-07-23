@@ -8,7 +8,6 @@ export interface AppConfig {
   claudeCredentialsPath: string | null;
   /** Host path for mounting credentials into agent containers */
   claudeCredentialsHostPath: string | null;
-  gitToken: string;
   gitUserName: string;
   gitUserEmail: string;
   keepContainers: boolean;
@@ -38,7 +37,6 @@ export function getConfig(): AppConfig {
   if (_config) return _config;
 
   const anthropicApiKey = process.env.ANTHROPIC_API_KEY ?? null;
-  const gitToken = process.env.GIT_TOKEN;
 
   // Find Claude credentials file — check the container mount path first,
   // then fall back to CLAUDE_CREDENTIALS_PATH or $HOME default
@@ -59,9 +57,6 @@ export function getConfig(): AppConfig {
         "or ensure ~/.claude/.credentials.json exists."
     );
   }
-  if (!gitToken) {
-    throw new Error("GIT_TOKEN is required");
-  }
 
   // The host path is used to mount credentials into agent containers.
   // It comes directly from the env var — the app container itself may not
@@ -72,7 +67,6 @@ export function getConfig(): AppConfig {
     anthropicApiKey,
     claudeCredentialsPath,
     claudeCredentialsHostPath,
-    gitToken,
     gitUserName: process.env.GIT_USER_NAME ?? "Interlude Agent",
     gitUserEmail: process.env.GIT_USER_EMAIL ?? "agent@interlude.dev",
     keepContainers: process.env.KEEP_CONTAINERS === "true",

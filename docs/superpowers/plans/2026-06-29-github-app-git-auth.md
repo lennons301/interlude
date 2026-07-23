@@ -426,8 +426,8 @@ Expected: no matches.
 Run: `pnpm build`
 Expected: build succeeds.
 
-Run: `npx vitest run`
-Expected: all tests pass.
+Run: `npx vitest run src/lib/github/__tests__/client.test.ts src/lib/docker/__tests__/container-manager.test.ts`
+Expected: all pass (10 tests). NOTE: the full suite (`npx vitest run`) also has 6 PRE-EXISTING failures in `src/lib/orchestrator/__tests__/output-parser.test.ts` ("table tasks has no column named preview_subdomain") from drizzle migration drift, unrelated to this change — do not attempt to fix them here.
 
 Run: `pnpm lint`
 Expected: no errors.
