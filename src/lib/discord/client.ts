@@ -138,8 +138,19 @@ async function handleNewTask(
   const description = lines.slice(1).join("\n").trim();
 
   const taskId = newId();
-  const now = new Date();
 
+  // Post the queued notification BEFORE inserting the task row. The queue
+  // poller picks up any "queued" task within ~2s and startTask will post its
+  // own queued embed unless discordMessageId is already set — so the row must
+  // carry discordMessageId from the moment it exists, or we get a duplicate
+  // embed. taskId is a client-side ULID, so it's valid to reference before insert.
+  const discordMessageId = await notifyTaskQueued(message.channelId, {
+    id: taskId,
+    title,
+    projectName: project.name,
+  });
+
+  const now = new Date();
   db.insert(tasks)
     .values({
       id: taskId,
@@ -147,24 +158,11 @@ async function handleNewTask(
       title,
       description,
       status: "queued",
+      discordMessageId: discordMessageId ?? null,
       createdAt: now,
       updatedAt: now,
     })
     .run();
-
-  // Post queued notification and store the message ID
-  const discordMessageId = await notifyTaskQueued(message.channelId, {
-    id: taskId,
-    title,
-    projectName: project.name,
-  });
-
-  if (discordMessageId) {
-    db.update(tasks)
-      .set({ discordMessageId, updatedAt: new Date() })
-      .where(eq(tasks.id, taskId))
-      .run();
-  }
 
   console.log(`[discord] Message in #${message.channel} -> task ${taskId} (queued)`);
 }
