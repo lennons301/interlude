@@ -1,14 +1,20 @@
 import { Client, EmbedBuilder, TextChannel } from "discord.js";
 
-let botClient: Client | null = null;
+// The bot client is set once, in the instrumentation/orchestrator context where
+// the Discord bot connects (client.ts -> setBotClient). But notification helpers
+// are also called from App-Router route handlers (e.g. POST /api/tasks/[id]/complete),
+// which Next.js may load as a SEPARATE module instance. A module-level `let` would
+// be null in that instance, silently no-op'ing the notification. Backing it with
+// globalThis shares the single connected client across all module instances.
+const globalForBot = globalThis as unknown as { __interludeBotClient?: Client | null };
 
 /** Called by client.ts once the bot is ready */
 export function setBotClient(client: Client): void {
-  botClient = client;
+  globalForBot.__interludeBotClient = client;
 }
 
 export function getBotClient(): Client | null {
-  return botClient;
+  return globalForBot.__interludeBotClient ?? null;
 }
 
 /**
@@ -19,6 +25,7 @@ export async function notifyTaskQueued(
   channelId: string,
   task: { id: string; title: string; projectName: string }
 ): Promise<string | null> {
+  const botClient = getBotClient();
   if (!botClient) return null;
 
   try {
@@ -52,6 +59,7 @@ export async function notifyTaskCompleted(
     pullRequestUrl: string | null;
   }
 ): Promise<void> {
+  const botClient = getBotClient();
   if (!botClient) return;
 
   try {
@@ -85,6 +93,7 @@ export async function notifyTaskFailed(
   channelId: string,
   task: { id: string; title: string; error: string }
 ): Promise<void> {
+  const botClient = getBotClient();
   if (!botClient) return;
 
   try {
