@@ -42,5 +42,13 @@ COPY --from=build /app/drizzle ./drizzle
 COPY --from=build /app/Dockerfile.agent ./Dockerfile.agent
 COPY --from=build /app/custom-server.js ./custom-server.js
 
+# Install the Doppler CLI so the app boots via `doppler run`, pulling orchestrator
+# secrets from the Doppler `interlude/prd` config at runtime. DOPPLER_TOKEN (a prd
+# service token) is supplied by the container environment (compose env_file). This
+# keeps orchestrator secrets in Doppler rather than a plaintext VPS .env.
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg && \
+    curl -sLf --retry 3 --tlsv1.2 --proto "=https" https://cli.doppler.com/install.sh | sh && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 EXPOSE 3000
-CMD ["node", "custom-server.js"]
+CMD ["doppler", "run", "--project", "interlude", "--config", "prd", "--", "node", "custom-server.js"]
