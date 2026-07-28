@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { tasks, messages, projects } from "@/db/schema";
-import { eq, and, isNull, asc } from "drizzle-orm";
+import { eq, and, isNull, asc, desc } from "drizzle-orm";
 import { newId } from "../ulid";
 import {
   createWorkspaceContainer,
@@ -18,7 +18,7 @@ import { getDocker } from "../docker/client";
 import { commentOnIssue, parseIssueRef } from "../github/issues";
 import { parseRepoFromGitUrl } from "../github/repo";
 import { createDraftPr, markPrReady } from "../github/pull-requests";
-import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed } from "../discord/notifications";
+import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed, notifyTaskIdle } from "../discord/notifications";
 
 /** Track all active task containers for cancellation and idle polling */
 const activeTasks = new Map<
@@ -124,6 +124,7 @@ export async function startTask(taskId: string): Promise<void> {
     // Commit and push after turn completes
     await runPostTurnCommitAndPush(taskId, running);
     await scanForDevServer(taskId, running);
+    await postIdleNotification(taskId);
   } catch (err) {
     updateTask(taskId, { status: "failed", containerStatus: null });
     insertSystemMessage(
@@ -225,7 +226,11 @@ export async function processQueuedMessages(
       .orderBy(asc(messages.createdAt))
       .get();
 
-    if (!queued) break; // No queued messages — stay idle
+    if (!queued) {
+      // No more queued messages — agent is idle, notify Discord ("your move")
+      await postIdleNotification(taskId);
+      break;
+    }
 
     // Mark as delivered
     db.update(messages)
@@ -413,6 +418,48 @@ export async function scanForDevServer(taskId: string, running: RunningContainer
     } else if (!newPort && currentPort) {
       insertSystemMessage(taskId, `Dev server on port ${currentPort} stopped`);
     }
+  }
+}
+
+/**
+ * Post an "agent finished a turn" idle notification to the project's Discord
+ * channel (if linked) and store the message id as the task's current
+ * interactive message. Fire-and-forget safe: never throws to the caller.
+ */
+async function postIdleNotification(taskId: string): Promise<void> {
+  try {
+    const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+    if (!task) return;
+    const proj = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
+    if (!proj?.discordChannelId) return;
+
+    // Most recent agent text message = the turn's summary
+    const lastAgent = db
+      .select()
+      .from(messages)
+      .where(and(eq(messages.taskId, taskId), eq(messages.role, "agent"), eq(messages.type, "text")))
+      .orderBy(desc(messages.createdAt))
+      .get();
+
+    let summary = "";
+    if (lastAgent) {
+      try {
+        const parsed = JSON.parse(lastAgent.content);
+        summary = typeof parsed.text === "string" ? parsed.text : lastAgent.content;
+      } catch {
+        summary = lastAgent.content;
+      }
+    }
+
+    const msgId = await notifyTaskIdle(proj.discordChannelId, {
+      id: taskId,
+      title: task.title,
+      summary,
+      branch: task.branch ?? "",
+    });
+    if (msgId) updateTask(taskId, { discordMessageId: msgId });
+  } catch (err) {
+    console.error(`[discord] postIdleNotification failed:`, err);
   }
 }
 
