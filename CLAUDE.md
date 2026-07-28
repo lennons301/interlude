@@ -28,6 +28,10 @@ Interlude is a self-hosted, agent-first development platform. You dispatch tasks
 - Git credential helper in agent containers reads a per-exec `GIT_AUTH_TOKEN` (minted fresh from the App); no token is persisted in `.git/config`.
 - Webhook endpoint: `POST /api/webhooks/github`
 - GitHub library: `src/lib/github/` (client, webhooks, issues, pull-requests)
+- Discord bot (optional; degrades gracefully when unconfigured) maps each project to one channel via `!link <project>` / `!unlink`; new channel messages create tasks, replies deliver follow-ups
+- Discord lifecycle embeds: queued / completed / failed, plus an idle "agent finished a turn" notification (react ✅ to complete the task, reply to continue)
+- Draft PR is auto-created on first branch push for **any** task origin (issue, Discord, or UI) — not only issue-linked tasks — and marked ready for review on completion
+- Discord library: `src/lib/discord/` (client = gateway + message/reaction routing, notifications = embeds)
 
 ## Database
 
@@ -45,9 +49,18 @@ pnpm build        # Production build
 pnpm lint         # Run ESLint
 ```
 
-## Current Status: Phase 3 complete, tested on VPS
+### Running locally (outside Docker Compose)
+
+Local dev runs the orchestrator via `doppler run -- pnpm dev` — orchestrator secrets live in the Doppler `interlude/dev` config, not a `.env`. Two things Compose provides on the VPS that you must set up by hand locally:
+
+- **Agent-container network:** run `docker network create interlude` once. Agent containers attach to the `interlude` network, which Compose creates on the VPS but `pnpm dev` does not — without it, task runs fail with "network interlude not found".
+- **Claude credentials mount:** set `CLAUDE_CREDENTIALS_PATH` (in `interlude/dev`) to your host `~/.claude/.credentials.json` so agent containers get Claude auth — otherwise the agent errors with "Not logged in".
+
+## Current Status: Phase 4 implemented + locally verified; VPS deploy pending
 
 Phases 1, 2a, 2.5, 2b, 2c, 2d, and 3 are done and tested end-to-end on VPS. The full flow works: create task → agent runs in Docker → output streams to chat UI → branch pushed to GitHub after each turn → interactive follow-up messages → live preview of dev server via subdomain → complete task. GitHub issues labeled `interlude` auto-create tasks, and agent work auto-produces draft PRs.
+
+Phase 4 (Discord bot + Discord-first task lifecycle) is implemented and verified end-to-end on a local dev server; deploying and E2E-testing it on the VPS is the remaining step before it merges.
 
 ## Roadmap
 
@@ -101,9 +114,13 @@ Phases 1, 2a, 2.5, 2b, 2c, 2d, and 3 are done and tested end-to-end on VPS. The 
 - Spec: `docs/specs/2026-03-27-phase3-github-integration-design.md`
 - Plan: `docs/plans/2026-03-27-phase3-github-integration.md`
 
-### Phase 4: Notification Bot
-- Slack or Telegram bot for bidirectional messaging
-- Task dispatch from chat
+### Phase 4: Discord Bot + Discord-First Lifecycle (implemented, local E2E verified; VPS deploy pending)
+- Discord bot via discord.js Gateway for bidirectional messaging (chose Discord over Slack/Telegram)
+- Channel-per-project mapping via `!link` / `!unlink`; messages create tasks, replies deliver follow-ups, `cancel` cancels
+- Outbound lifecycle embeds: queued / completed / failed
+- Discord-first loop: idle "agent finished a turn" notification with summary; react ✅ to complete from Discord; auto-PR for any task origin; completion marks the PR ready
+- Spec: `docs/specs/2026-04-09-phase4-discord-bot-design.md`; enhancement spec: `docs/specs/2026-07-24-discord-first-lifecycle-design.md`
+- Plans: `docs/superpowers/plans/2026-04-09-phase4-discord-bot.md`, `docs/superpowers/plans/2026-07-24-discord-first-lifecycle.md`
 
 ### Phase 5: Multi-Agent Workflows
 - Multiple agents collaborating on a single goal
