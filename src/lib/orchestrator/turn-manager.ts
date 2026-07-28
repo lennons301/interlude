@@ -16,6 +16,7 @@ import { scanPorts } from "./port-scanner";
 import { getConfig } from "../config";
 import { getDocker } from "../docker/client";
 import { commentOnIssue, parseIssueRef } from "../github/issues";
+import { parseRepoFromGitUrl } from "../github/repo";
 import { createDraftPr, markPrReady } from "../github/pull-requests";
 import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed } from "../discord/notifications";
 
@@ -303,16 +304,23 @@ export async function completeTask(taskId: string): Promise<void> {
       insertSystemMessage(taskId, "Container no longer available — work was pushed after each turn.");
     }
 
-    // Mark PR ready for review and post completion comment
-    if (task.pullRequestNumber && task.githubIssue) {
-      const parsed = parseIssueRef(task.githubIssue);
-      if (parsed) {
-        await markPrReady(parsed.owner, parsed.repo, task.pullRequestNumber);
-        const cost = (task.totalCostUsd ?? 0).toFixed(2);
-        await commentOnIssue(
-          task.githubIssue,
-          `Complete -- PR #${task.pullRequestNumber} ready for review ($${cost})`
-        );
+    // Mark PR ready for review (any origin); comment on the issue only if there is one
+    if (task.pullRequestNumber) {
+      const proj = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
+      const repoRef = task.githubIssue
+        ? parseIssueRef(task.githubIssue)
+        : proj?.gitUrl
+          ? parseRepoFromGitUrl(proj.gitUrl)
+          : null;
+      if (repoRef) {
+        await markPrReady(repoRef.owner, repoRef.repo, task.pullRequestNumber);
+        if (task.githubIssue) {
+          const cost = (task.totalCostUsd ?? 0).toFixed(2);
+          await commentOnIssue(
+            task.githubIssue,
+            `Complete -- PR #${task.pullRequestNumber} ready for review ($${cost})`
+          );
+        }
       }
     }
 
@@ -418,16 +426,23 @@ async function runPostTurnCommitAndPush(taskId: string, running: RunningContaine
     const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
     insertSystemMessage(taskId, `Branch '${task?.branch}' pushed.`);
 
-    // Create draft PR on first push if none exists yet
-    if (task && !task.pullRequestNumber && task.branch && task.githubIssue) {
-      const parsed = parseIssueRef(task.githubIssue);
-      if (parsed) {
+    // Create draft PR on first push if none exists yet (any task origin)
+    if (task && !task.pullRequestNumber && task.branch) {
+      const proj = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
+      const repoRef = task.githubIssue
+        ? parseIssueRef(task.githubIssue)
+        : proj?.gitUrl
+          ? parseRepoFromGitUrl(proj.gitUrl)
+          : null;
+
+      if (repoRef) {
         const domain = process.env.DOMAIN ?? "interludes.co.uk";
-        const body = `Closes #${parsed.number}\n\n[View in Interlude](https://${domain}/tasks/${taskId})`;
+        const issueLine = task.githubIssue ? `Closes #${(repoRef as { number?: number }).number}\n\n` : "";
+        const body = `${issueLine}[View in Interlude](https://${domain}/tasks/${taskId})`;
 
         const pr = await createDraftPr({
-          owner: parsed.owner,
-          repo: parsed.repo,
+          owner: repoRef.owner,
+          repo: repoRef.repo,
           title: task.title,
           head: task.branch,
           body,
@@ -438,7 +453,9 @@ async function runPostTurnCommitAndPush(taskId: string, running: RunningContaine
             pullRequestNumber: pr.number,
             pullRequestUrl: pr.url,
           });
-          await commentOnIssue(task.githubIssue, `Draft PR opened: #${pr.number}`);
+          if (task.githubIssue) {
+            await commentOnIssue(task.githubIssue, `Draft PR opened: #${pr.number}`);
+          }
           console.log(`[github] Draft PR #${pr.number} created for task ${taskId}`);
         }
       }
