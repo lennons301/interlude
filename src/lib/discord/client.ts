@@ -1,4 +1,5 @@
-import { Client, GatewayIntentBits, Message } from "discord.js";
+import { Client, GatewayIntentBits, Message, Partials } from "discord.js";
+import type { MessageReaction, PartialMessageReaction, User, PartialUser } from "discord.js";
 import { db } from "@/db";
 import { projects, tasks, messages } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -24,7 +25,9 @@ export async function startDiscordBot(): Promise<void> {
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
+      GatewayIntentBits.GuildMessageReactions,
     ],
+    partials: [Partials.Message, Partials.Reaction, Partials.Channel],
   });
 
   client.on("ready", () => {
@@ -35,6 +38,12 @@ export async function startDiscordBot(): Promise<void> {
   client.on("messageCreate", (message) => {
     handleMessage(message).catch((err) =>
       console.error("[discord] Message handler error:", err)
+    );
+  });
+
+  client.on("messageReactionAdd", (reaction, user) => {
+    handleReactionAdd(reaction, user).catch((err) =>
+      console.error("[discord] Reaction handler error:", err)
     );
   });
 
@@ -216,4 +225,33 @@ async function handleReply(
 
   await message.react("👍");
   console.log(`[discord] Follow-up message for task ${task.id} from Discord`);
+}
+
+async function handleReactionAdd(
+  reaction: MessageReaction | PartialMessageReaction,
+  user: User | PartialUser
+): Promise<void> {
+  if (user.bot) return;
+
+  // Resolve partials (message/reaction may be uncached, e.g. after a restart)
+  if (reaction.partial) {
+    try {
+      await reaction.fetch();
+    } catch {
+      return;
+    }
+  }
+
+  if (reaction.emoji.name !== "✅") return;
+
+  const messageId = reaction.message.id;
+  const task = db.select().from(tasks).where(eq(tasks.discordMessageId, messageId)).get();
+  if (!task) return; // Reaction not on a task's interactive message
+
+  if (task.status !== "running") return; // Only running/idle tasks can be completed
+
+  // Dynamic import to avoid circular dependency with turn-manager
+  const { completeTask } = await import("../orchestrator/turn-manager");
+  await completeTask(task.id);
+  console.log(`[discord] Task ${task.id} completed via ✅ reaction`);
 }
