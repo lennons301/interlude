@@ -6,6 +6,7 @@ export const projects = sqliteTable("projects", {
   githubRepo: text("github_repo"),
   gitUrl: text("git_url"),
   dopplerToken: text("doppler_token"),
+  discordChannelId: text("discord_channel_id"),
   createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 
@@ -34,6 +35,7 @@ export const tasks = sqliteTable("tasks", {
   previewSubdomain: text("preview_subdomain"),
   pullRequestNumber: int("pull_request_number"),
   pullRequestUrl: text("pull_request_url"),
+  discordMessageId: text("discord_message_id"),
   createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: int("updated_at", { mode: "timestamp_ms" }).notNull(),
 });

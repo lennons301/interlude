@@ -14,6 +14,7 @@
     "better-sqlite3": "^12.6.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "discord.js": "^14.26.4",
     "dockerode": "^4.0.9",
     "drizzle-orm": "^0.45.1",
     "jsonwebtoken": "^9.0.3",

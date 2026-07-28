@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { tasks, messages, projects } from "@/db/schema";
-import { eq, and, isNull, asc } from "drizzle-orm";
+import { eq, and, isNull, asc, desc } from "drizzle-orm";
 import { newId } from "../ulid";
 import {
   createWorkspaceContainer,
@@ -16,7 +16,9 @@ import { scanPorts } from "./port-scanner";
 import { getConfig } from "../config";
 import { getDocker } from "../docker/client";
 import { commentOnIssue, parseIssueRef } from "../github/issues";
+import { parseRepoFromGitUrl } from "../github/repo";
 import { createDraftPr, markPrReady } from "../github/pull-requests";
+import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed, notifyTaskIdle } from "../discord/notifications";
 
 /** Track all active task containers for cancellation and idle polling */
 const activeTasks = new Map<
@@ -60,6 +62,18 @@ export async function startTask(taskId: string): Promise<void> {
   // Update task status
   updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
   insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
+
+  // Notify Discord channel that task is queued — but not for tasks created
+  // from Discord, which already got their queued embed posted in client.ts.
+  if (proj.discordChannelId && !task.discordMessageId) {
+    notifyTaskQueued(proj.discordChannelId, {
+      id: taskId,
+      title: task.title,
+      projectName: proj.name,
+    }).then((msgId) => {
+      if (msgId) updateTask(taskId, { discordMessageId: msgId });
+    }).catch(console.error);
+  }
 
   let running: RunningContainer | null = null;
 
@@ -110,6 +124,7 @@ export async function startTask(taskId: string): Promise<void> {
     // Commit and push after turn completes
     await runPostTurnCommitAndPush(taskId, running);
     await scanForDevServer(taskId, running);
+    await postIdleNotification(taskId);
   } catch (err) {
     updateTask(taskId, { status: "failed", containerStatus: null });
     insertSystemMessage(
@@ -123,6 +138,14 @@ export async function startTask(taskId: string): Promise<void> {
         task.githubIssue,
         `Task failed -- check [Interlude](https://${domain}/tasks/${taskId}) for details`
       ).catch(console.error);
+    }
+
+    if (proj.discordChannelId) {
+      notifyTaskFailed(proj.discordChannelId, {
+        id: taskId,
+        title: task.title,
+        error: err instanceof Error ? err.message : String(err),
+      }).catch(console.error);
     }
 
     if (running) {
@@ -203,7 +226,11 @@ export async function processQueuedMessages(
       .orderBy(asc(messages.createdAt))
       .get();
 
-    if (!queued) break; // No queued messages — stay idle
+    if (!queued) {
+      // No more queued messages — agent is idle, notify Discord ("your move")
+      await postIdleNotification(taskId);
+      break;
+    }
 
     // Mark as delivered
     db.update(messages)
@@ -282,20 +309,38 @@ export async function completeTask(taskId: string): Promise<void> {
       insertSystemMessage(taskId, "Container no longer available — work was pushed after each turn.");
     }
 
-    // Mark PR ready for review and post completion comment
-    if (task.pullRequestNumber && task.githubIssue) {
-      const parsed = parseIssueRef(task.githubIssue);
-      if (parsed) {
-        await markPrReady(parsed.owner, parsed.repo, task.pullRequestNumber);
-        const cost = (task.totalCostUsd ?? 0).toFixed(2);
-        await commentOnIssue(
-          task.githubIssue,
-          `Complete -- PR #${task.pullRequestNumber} ready for review ($${cost})`
-        );
+    // Mark PR ready for review (any origin); comment on the issue only if there is one
+    if (task.pullRequestNumber) {
+      const proj = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
+      const repoRef = task.githubIssue
+        ? parseIssueRef(task.githubIssue)
+        : proj?.gitUrl
+          ? parseRepoFromGitUrl(proj.gitUrl)
+          : null;
+      if (repoRef) {
+        await markPrReady(repoRef.owner, repoRef.repo, task.pullRequestNumber);
+        if (task.githubIssue) {
+          const cost = (task.totalCostUsd ?? 0).toFixed(2);
+          await commentOnIssue(
+            task.githubIssue,
+            `Complete -- PR #${task.pullRequestNumber} ready for review ($${cost})`
+          );
+        }
       }
     }
 
     updateTask(taskId, { status: "completed", containerStatus: null });
+
+    // Notify Discord
+    const proj = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
+    if (proj?.discordChannelId) {
+      notifyTaskCompleted(proj.discordChannelId, {
+        id: taskId,
+        title: task.title,
+        totalCostUsd: task.totalCostUsd ?? 0,
+        pullRequestUrl: task.pullRequestUrl ?? null,
+      }).catch(console.error);
+    }
   } catch (err) {
     insertSystemMessage(
       taskId,
@@ -308,6 +353,15 @@ export async function completeTask(taskId: string): Promise<void> {
         task.githubIssue,
         `Task failed -- check [Interlude](https://${domain}/tasks/${taskId}) for details`
       ).catch(console.error);
+    }
+
+    const projForNotify = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
+    if (projForNotify?.discordChannelId) {
+      notifyTaskFailed(projForNotify.discordChannelId, {
+        id: taskId,
+        title: task.title,
+        error: err instanceof Error ? err.message : String(err),
+      }).catch(console.error);
     }
 
     updateTask(taskId, { status: "failed", containerStatus: null });
@@ -368,6 +422,48 @@ export async function scanForDevServer(taskId: string, running: RunningContainer
 }
 
 /**
+ * Post an "agent finished a turn" idle notification to the project's Discord
+ * channel (if linked) and store the message id as the task's current
+ * interactive message. Fire-and-forget safe: never throws to the caller.
+ */
+async function postIdleNotification(taskId: string): Promise<void> {
+  try {
+    const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+    if (!task) return;
+    const proj = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
+    if (!proj?.discordChannelId) return;
+
+    // Most recent agent text message = the turn's summary
+    const lastAgent = db
+      .select()
+      .from(messages)
+      .where(and(eq(messages.taskId, taskId), eq(messages.role, "agent"), eq(messages.type, "text")))
+      .orderBy(desc(messages.createdAt))
+      .get();
+
+    let summary = "";
+    if (lastAgent) {
+      try {
+        const parsed = JSON.parse(lastAgent.content);
+        summary = typeof parsed.text === "string" ? parsed.text : lastAgent.content;
+      } catch {
+        summary = lastAgent.content;
+      }
+    }
+
+    const msgId = await notifyTaskIdle(proj.discordChannelId, {
+      id: taskId,
+      title: task.title,
+      summary,
+      branch: task.branch ?? "",
+    });
+    if (msgId) updateTask(taskId, { discordMessageId: msgId });
+  } catch (err) {
+    console.error(`[discord] postIdleNotification failed:`, err);
+  }
+}
+
+/**
  * After each turn, commit any uncommitted changes and push the branch.
  * This ensures work is always available on GitHub for PRs.
  */
@@ -377,16 +473,23 @@ async function runPostTurnCommitAndPush(taskId: string, running: RunningContaine
     const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
     insertSystemMessage(taskId, `Branch '${task?.branch}' pushed.`);
 
-    // Create draft PR on first push if none exists yet
-    if (task && !task.pullRequestNumber && task.branch && task.githubIssue) {
-      const parsed = parseIssueRef(task.githubIssue);
-      if (parsed) {
+    // Create draft PR on first push if none exists yet (any task origin)
+    if (task && !task.pullRequestNumber && task.branch) {
+      const proj = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
+      const repoRef = task.githubIssue
+        ? parseIssueRef(task.githubIssue)
+        : proj?.gitUrl
+          ? parseRepoFromGitUrl(proj.gitUrl)
+          : null;
+
+      if (repoRef) {
         const domain = process.env.DOMAIN ?? "interludes.co.uk";
-        const body = `Closes #${parsed.number}\n\n[View in Interlude](https://${domain}/tasks/${taskId})`;
+        const issueLine = task.githubIssue ? `Closes #${(repoRef as { number?: number }).number}\n\n` : "";
+        const body = `${issueLine}[View in Interlude](https://${domain}/tasks/${taskId})`;
 
         const pr = await createDraftPr({
-          owner: parsed.owner,
-          repo: parsed.repo,
+          owner: repoRef.owner,
+          repo: repoRef.repo,
           title: task.title,
           head: task.branch,
           body,
@@ -397,7 +500,9 @@ async function runPostTurnCommitAndPush(taskId: string, running: RunningContaine
             pullRequestNumber: pr.number,
             pullRequestUrl: pr.url,
           });
-          await commentOnIssue(task.githubIssue, `Draft PR opened: #${pr.number}`);
+          if (task.githubIssue) {
+            await commentOnIssue(task.githubIssue, `Draft PR opened: #${pr.number}`);
+          }
           console.log(`[github] Draft PR #${pr.number} created for task ${taskId}`);
         }
       }
@@ -474,6 +579,7 @@ function updateTask(
     previewSubdomain: string | null;
     pullRequestNumber: number | null;
     pullRequestUrl: string | null;
+    discordMessageId: string | null;
   }>
 ): void {
   db.update(tasks)

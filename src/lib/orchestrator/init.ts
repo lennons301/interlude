@@ -5,6 +5,7 @@ import { newId } from "../ulid";
 import { getDocker, isDockerAvailable } from "../docker/client";
 import { startQueue } from "./queue";
 import { isGitHubConfigured } from "../github/client";
+import { isDiscordConfigured, startDiscordBot } from "../discord/client";
 
 let initialized = false;
 
@@ -111,6 +112,13 @@ export async function initOrchestrator(): Promise<void> {
       console.log("[orchestrator] GitHub App configured -- webhooks and PR creation enabled");
     } else {
       console.log("[orchestrator] GitHub App not configured -- running without GitHub integration");
+    }
+    if (isDiscordConfigured()) {
+      startDiscordBot()
+        .then(() => console.log("[orchestrator] Discord bot started"))
+        .catch((err) => console.error("[orchestrator] Discord bot failed to start:", err));
+    } else {
+      console.log("[orchestrator] Discord bot not configured -- running without Discord integration");
     }
     await recoverOrphanedTasks();
     await reapStaleContainers();

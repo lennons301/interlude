@@ -11,6 +11,7 @@ type Project = {
   githubRepo: string | null;
   gitUrl: string | null;
   dopplerToken: string | null;
+  discordChannelId: string | null;
   createdAt: string;
 };
 
@@ -175,6 +176,18 @@ function ProjectEditForm({
             type="password"
           />
         </div>
+        {project.discordChannelId && (
+          <div>
+            <label className="text-xs text-muted-foreground">
+              Discord Channel <span className="text-green-400">(linked)</span>
+            </label>
+            <Input
+              value={project.discordChannelId}
+              disabled
+              className="font-mono text-xs opacity-60"
+            />
+          </div>
+        )}
       </div>
       <div className="flex items-center gap-2">
         <Button type="submit" size="sm" disabled={saving}>
