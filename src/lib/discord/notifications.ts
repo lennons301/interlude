@@ -1,4 +1,4 @@
-import { Client, EmbedBuilder, TextChannel } from "discord.js";
+import { Client, EmbedBuilder, TextChannel, type Message } from "discord.js";
 
 // The bot client is set once, in the instrumentation/orchestrator context where
 // the Discord bot connects (client.ts -> setBotClient). But notification helpers
@@ -15,6 +15,30 @@ export function setBotClient(client: Client): void {
 
 export function getBotClient(): Client | null {
   return globalForBot.__interludeBotClient ?? null;
+}
+
+/**
+ * Send an embed with a few retries + backoff, so a transient network blip
+ * (e.g. flaky connection) doesn't silently drop a notification. Throws if all
+ * attempts fail — callers already wrap sends in try/catch (fire-and-forget).
+ */
+async function sendWithRetry(
+  channel: TextChannel,
+  embed: EmbedBuilder,
+  attempts = 3
+): Promise<Message> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await channel.send({ embeds: [embed] });
+    } catch (err) {
+      lastErr = err;
+      if (i < attempts - 1) {
+        await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 /**
@@ -39,7 +63,7 @@ export async function notifyTaskQueued(
       .setURL(`https://${domain}/tasks/${task.id}`)
       .setColor(0x7b61ff);
 
-    const msg = await (channel as TextChannel).send({ embeds: [embed] });
+    const msg = await sendWithRetry(channel as TextChannel, embed);
     return msg.id;
   } catch (err) {
     console.error(`[discord] Failed to send queued notification:`, err);
@@ -80,7 +104,7 @@ export async function notifyTaskCompleted(
     }
     embed.setDescription(lines.join("\n"));
 
-    await (channel as TextChannel).send({ embeds: [embed] });
+    await sendWithRetry(channel as TextChannel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send completed notification:`, err);
   }
@@ -107,7 +131,7 @@ export async function notifyTaskFailed(
       .setURL(`https://${domain}/tasks/${task.id}`)
       .setColor(0xef4444);
 
-    await (channel as TextChannel).send({ embeds: [embed] });
+    await sendWithRetry(channel as TextChannel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send failed notification:`, err);
   }
@@ -142,7 +166,7 @@ export async function notifyTaskIdle(
       .setURL(`https://${domain}/tasks/${task.id}`)
       .setColor(0xf59e0b);
 
-    const msg = await (channel as TextChannel).send({ embeds: [embed] });
+    const msg = await sendWithRetry(channel as TextChannel, embed);
     return msg.id;
   } catch (err) {
     console.error(`[discord] Failed to send idle notification:`, err);
