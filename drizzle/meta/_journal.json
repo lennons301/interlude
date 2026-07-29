@@ -50,6 +50,13 @@
       "when": 1782716385652,
       "tag": "0006_wild_red_wolf",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1785888000000,
+      "tag": "0007_reconcile_task_columns",
+      "breakpoints": true
     }
   ]
 }
