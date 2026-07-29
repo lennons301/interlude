@@ -237,6 +237,7 @@ export async function execFallbackCommitAndPush(
   });
 
   const stream = await exec.start({});
+  let output = "";
 
   await new Promise<void>((resolve) => {
     let resolved = false;
@@ -249,6 +250,9 @@ export async function execFallbackCommitAndPush(
       resolve();
     };
 
+    stream.on("data", (chunk: Buffer) => {
+      output += chunk.toString();
+    });
     stream.on("end", done);
     stream.resume();
 
@@ -266,7 +270,10 @@ export async function execFallbackCommitAndPush(
 
   const inspectResult = await exec.inspect();
   if (inspectResult.ExitCode !== 0) {
-    throw new Error(`Commit and push failed with exit code ${inspectResult.ExitCode}`);
+    const detail = output.replace(/[^ -~]+/g, " ").trim().slice(-800);
+    throw new Error(
+      `Commit and push failed (exit ${inspectResult.ExitCode})${detail ? ": " + detail : ""}`
+    );
   }
 }
 

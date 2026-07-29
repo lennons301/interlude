@@ -34,6 +34,10 @@ describe("parseRepoFromGitUrl", () => {
     expect(parseRepoFromGitUrl("https://gitlab.com/lennons301/test-repo.git")).toBeNull();
   });
 
+  it("returns null for a browser-style URL with extra path segments", () => {
+    expect(parseRepoFromGitUrl("https://github.com/lennons301/test-repo/tree/main")).toBeNull();
+  });
+
   it("returns null for unparseable input", () => {
     expect(parseRepoFromGitUrl("not a url")).toBeNull();
     expect(parseRepoFromGitUrl("")).toBeNull();

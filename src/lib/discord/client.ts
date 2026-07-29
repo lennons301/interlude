@@ -30,7 +30,7 @@ export async function startDiscordBot(): Promise<void> {
     partials: [Partials.Message, Partials.Reaction, Partials.Channel],
   });
 
-  client.on("ready", () => {
+  client.on("clientReady", () => {
     console.log(`[discord] Bot connected as ${client!.user?.tag}`);
     setBotClient(client!);
   });
@@ -57,9 +57,9 @@ async function handleMessage(message: Message): Promise<void> {
   const content = message.content.trim();
   if (!content) return;
 
-  // Handle !link command
-  if (content.startsWith("!link ")) {
-    await handleLinkCommand(message, content.slice(6).trim());
+  // Handle !link command (with or without an argument — bare "!link" shows usage)
+  if (content === "!link" || content.startsWith("!link ")) {
+    await handleLinkCommand(message, content.slice("!link".length).trim());
     return;
   }
 
