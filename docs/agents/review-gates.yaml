@@ -1,0 +1,53 @@
+# Repo-specific human-sign-off gates — ADDITIVE extension of the estate
+# default (~/code/platform/standards/review-gates.yaml). A repo can add
+# gates, never remove estate ones. Same shape:
+#
+# human_signoff:
+#   <category>:
+#     - "<glob>"
+#
+# Glob semantics (bash [[ == ]]): '*' crosses '/', and a leading '**/' also
+# matches at the repo root. Estate defaults already gate visual UI
+# (components/**, app/**/page.*, app/**/layout.*, CSS), migrations and *.sql,
+# auth/** and middleware.*, .github/workflows/**, .env*, doppler.yaml, and
+# review-gates.yaml itself.
+#
+# Tuning loop: a gate that keeps firing on changes you'd happily auto-land →
+# delete the glob. A bad auto-merge → add one.
+human_signoff:
+  # Host-facing topology: the custom server routes by Host header and proxies
+  # into agent containers; Caddy terminates TLS and provisions certs on demand.
+  # A mistake here is reachable from the internet.
+  infrastructure:
+    - "custom-server.js"
+    - "Caddyfile"
+    - "docker-compose.yml"
+
+  # The agent sandbox boundary. The orchestrator mounts the host Docker socket,
+  # so container creation, mounts, network attachment and resource limits are
+  # the blast-radius controls for every agent that runs here.
+  agent-sandbox:
+    - "Dockerfile"
+    - "Dockerfile.agent"
+    - "src/lib/docker/**"
+
+  # Credential handling: GitHub App JWT/installation tokens, the git credential
+  # helper, Doppler wiring, and (Phase 5) the reviewer PAT that must never
+  # reach a container.
+  credentials:
+    - "src/lib/github/client.ts"
+    - "src/lib/config.ts"
+
+  # Persistence shape. Estate defaults gate **/migrations/** and *.sql; this
+  # adds the Drizzle schema and generated migration folder explicitly.
+  persistence:
+    - "src/db/schema.ts"
+    - "drizzle/**"
+
+  # Phase 5 autonomy control surface: what may be claimed, gated, armed or
+  # merged without a human. Never auto-merge a change to the thing that decides
+  # what auto-merges.
+  # NOTE: these paths are provisional until the Phase 5 tickets land — the
+  # ticket that creates the reducer must confirm or correct them in the same PR.
+  autonomy-control:
+    - "src/lib/orchestrator/autonomy/**"
