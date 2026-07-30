@@ -60,7 +60,11 @@ Local dev runs the orchestrator via `doppler run -- pnpm dev` — orchestrator s
 
 Phases 1, 2a, 2.5, 2b, 2c, 2d, and 3 are done and tested end-to-end on VPS. The full flow works: create task → agent runs in Docker → output streams to chat UI → branch pushed to GitHub after each turn → interactive follow-up messages → live preview of dev server via subdomain → complete task. GitHub issues labeled `interlude` auto-create tasks, and agent work auto-produces draft PRs.
 
-Phase 4 (Discord bot + Discord-first task lifecycle) is implemented and verified end-to-end on a local dev server; deploying and E2E-testing it on the VPS is the remaining step before it merges.
+Phase 4 (Discord bot + Discord-first task lifecycle) is merged (#8, plus backlog polish in #10) and deployed to the VPS. End-to-end verification of the Discord loop on the VPS — link a channel, dispatch, idle notification, ✅ complete — is the remaining confirmation.
+
+Phase 5 (autonomous ticket-loop + fleet observability) is specced —
+`docs/specs/2026-07-30-phase5-autonomous-ticket-loop-design.md` — and awaiting
+decomposition into tickets. It depends on Phase 4 being live on the VPS.
 
 ## Roadmap
 
@@ -122,26 +126,86 @@ Phase 4 (Discord bot + Discord-first task lifecycle) is implemented and verified
 - Spec: `docs/specs/2026-04-09-phase4-discord-bot-design.md`; enhancement spec: `docs/specs/2026-07-24-discord-first-lifecycle-design.md`
 - Plans: `docs/superpowers/plans/2026-04-09-phase4-discord-bot.md`, `docs/superpowers/plans/2026-07-24-discord-first-lifecycle.md`
 
-### Phase 5: Multi-Agent Workflows
-- Multiple agents collaborating on a single goal
-- Agent roles and specialisation (e.g. architect, implementer, reviewer)
-- Task decomposition — break a high-level objective into subtasks assigned to different agents
-- Coordination layer: shared context, dependency ordering, merge conflict resolution
-- Pipeline/DAG execution — agent A's output feeds agent B's input
-- Agent-to-agent delegation (one agent spawning work for another)
-- Parallel agents working branches of the same repo with automated integration
-- Human-in-the-loop checkpoints for multi-agent plans before execution
+### Phase 5: Autonomous Ticket-Loop + Fleet Observability (next)
+
+Interlude becomes a second executor of the estate's ticket-loop contract
+(`~/code/platform/choices/ai-dev-workflow.md`) — many independent per-ticket
+loops running unattended, with the tracker as the coordinator and no
+orchestrating agent. Autonomy is **additive**: interactive chat + live preview
+(the original lovable-style use case) stays first-class.
+
+- Pickup: `ready-for-agent` label webhook + reconciliation sweep; the tracker is
+  the queue. Only a human ever applies `ready-for-agent`
+- Per-project autonomy toggle + global kill switch; per-project preflight
+  (GitHub App, branch protection, reviewer collaborator) with a stated reason
+- Loop per ticket: implement pass in its own container on `agent/issue-<n>` →
+  draft PR marked ready → deterministic review-gate evaluation → review pass
+  (fresh context, `ticket-reviewer`) → auto-merge armed, or `human-signoff`
+- Reviewer identity: PAT never enters a container; the pass returns a structured
+  verdict (approve / request-changes / escalate) and the **orchestrator** posts
+  the review via Octokit
+- Deterministic skeleton: one pure reducer `decideNext(snapshot) → Action[]`
+  covers pickup, gating, arming, escalation, attempt accounting and pausing;
+  Docker/GitHub/Discord/DB work is a thin executor of Actions
+- Budgets: $20 per attempt (ticket-directive override capped at $75), ~$5 per
+  review, 3 attempts then `ready-for-human`, $500/day estate cap (interactive
+  work exempt)
+- Capacity: slots derived from the Docker daemon's CPU/memory at boot (VPS
+  resize understood automatically); hard per-container memory/CPU limits
+  (pulled forward from Phase 6); capacity expressed as a provider seam for
+  Phase 7
+- HITL: `checkpoint:` directive → supervised run (forced `human-signoff`);
+  mid-run `BLOCKED:` marker parks the run and asks the question in Discord,
+  where a reply becomes the next turn
+- Triage pass on `issues.opened`: recommend (human clicks the label) /
+  `needs-info` / `ready-for-human` + suggested grilling agenda. Never applies
+  `ready-for-agent`, never edits or closes issues
+- Observability: fleet dashboard as the home page (slots, active runs with
+  attempt/turn/spend, "needs you", recent completions, spend vs cap) over a new
+  `runs` ledger, via one pure `buildFleetView` read model shared with a
+  deterministic daily Discord digest. Discord stays push-only — no routine
+  success pings, no `!status` in v1
+- Schema: new `runs` table; `tasks` gains `runId` + `kind`
+  (interactive/implement/review/triage); `projects` gains autonomy + preflight
+- Restart safety: a run interrupted by an orchestrator restart is re-claimed
+  without consuming an attempt (bounded); live-run containers are reaper-exempt
+- Rollout: flip `products/interlude.yaml` to `ai_workflow: ticket-loop`, run the
+  repo's ticket-loop migration (triage labels, `docs/agents/`, review-gates
+  extension, `setup-reviewer.sh`); pilot on interlude (its own UI backlog),
+  lemons and last-person-standing
+- Spec: `docs/specs/2026-07-30-phase5-autonomous-ticket-loop-design.md`
+
+**Dropped from the original Phase 5** (contradicts the ratified estate
+workflow): agents collaborating on one goal, DAG/pipeline execution,
+agent-to-agent delegation, execution-time task decomposition, coordination
+layer. Parallelism is independent loops; dependency ordering happens at
+generation time.
+
+### Phase 5.5: Chief of Staff (candidate)
+- An agent that reads the fleet and tells me what matters / proposes priorities
+- Deliberately deferred: needs fleet volume to synthesise, and Phase 5's
+  deterministic digest + dashboard should suffice on a 2-slot box
+- If the digest reads too raw, prose-ifying it is a one-ticket upgrade first
 
 ### Phase 6: Production Hardening
-- Container resource limits (CPU/memory caps per agent container)
 - Automated backups
 - Monitoring and alerting
 - Push notifications
+- Deploy drain mode (pause a redeploy until active runs finish — Phase 5 handles
+  restarts by interrupting and re-claiming)
+- (Container resource limits moved into Phase 5 — a prerequisite for unattended
+  parallelism, not hardening)
 
 ### Phase 7: On-Demand Remote Compute
 - Cloud provider API for machine provisioning
-- Orchestrator decides local vs remote
+- Orchestrator decides local vs remote — plugs into Phase 5's capacity-provider
+  seam
 - Auto-teardown after task completion
+
+### Separate initiative: general UI upgrade
+Navigation, task-detail polish, project management screens, mobile ergonomics.
+Grilled and ticketed on its own; becomes the first autonomous workload for
+Phase 5's loop. Phase 5 itself ships only the fleet dashboard.
 
 ## Specs and Plans
 
@@ -150,6 +214,7 @@ Phase 4 (Discord bot + Discord-first task lifecycle) is implemented and verified
 - Phase 2a spec: `docs/specs/2026-03-11-phase2a-agent-orchestrator-design.md`
 - Phase 2a plan: `docs/plans/2026-03-11-phase2a-agent-orchestrator.md`
 - VPS deployment spec: `docs/specs/2026-03-12-vps-deployment-design.md`
+- Phase 5 spec: `docs/specs/2026-07-30-phase5-autonomous-ticket-loop-design.md`
 - Overall design: see `docs/plans/2026-03-10-remote-agent-dev-environment-design.md` (external)
 
 ## Platform Context
@@ -157,3 +222,21 @@ Phase 4 (Discord bot + Discord-first task lifecycle) is implemented and verified
 Platform standards and choices: see /workspace/platform/ (in agent containers)
 or ~/code/platform/ (on local machines).
 This project's registry entry: products/interlude.yaml
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues, operated via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary — the five canonical role names used as-is (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Review gates
+
+Repo-specific human-sign-off gates extend the estate defaults additively in `docs/agents/review-gates.yaml`. A PR touching a gated path is never auto-merged — it gets `human-signoff` and waits for a human. See `~/code/platform/standards/review-gates.md`.
