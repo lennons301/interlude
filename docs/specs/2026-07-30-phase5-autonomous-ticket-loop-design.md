@@ -39,7 +39,8 @@ Interlude becomes a **second executor of the platform's ticket-loop contract**,
 running the same loop the laptop runner runs, unattended, on the VPS.
 
 I arm work by applying `ready-for-agent` to an issue — that label is the launch
-button and only a human ever applies it. Interlude notices (webhook, backed by a
+button, and applying it always requires a human decision — mine directly, or my
+yes to an agent that asked. Interlude notices (webhook, backed by a
 reconciliation sweep), waits for a free slot, and runs the loop: implement pass
 in its own container on `agent/issue-<n>`, draft PR, deterministic review-gate
 evaluation, then a review pass with fresh context under the separate reviewer
@@ -62,7 +63,8 @@ acknowledge constantly isn't autonomy.
 Two smaller pieces complete the loop. An agent that hits a decision its ticket
 doesn't resolve **stops and asks** rather than guessing, using the existing
 idle-and-reply plumbing. And a **triage pass** meets handwritten issues as they
-arrive: it either recommends the ticket for arming (I click the label), asks for
+arrive: it either recommends the ticket for arming (I confirm — a label click, or
+a yes in Discord that the orchestrator acts on), asks for
 the missing information, or tells me this one needs a grilling session before
 anyone writes code.
 
@@ -698,8 +700,11 @@ They keep working exactly as they do today; this phase only adds beside them.
 
 ## Further Notes
 
-The security model reduces to one sentence: *only a human can arm work, and only
-trusted code can land it.* Everything else — the author allow-list, directive
+The security model reduces to one sentence: *arming always traces to a human
+decision, and only trusted code can land it.* An unattended pass may recommend
+but never arm, because it reads untrusted input; a human's yes — by label click
+or in Discord — is a decision and may be acted on. Everything else — the author
+allow-list, directive
 clamping, gate config read from the default branch, the reviewer PAT never
 entering a container, orchestrator-posted approvals, triage's inability to apply
 `ready-for-agent` — is defence in depth behind that sentence. Autonomous agents
