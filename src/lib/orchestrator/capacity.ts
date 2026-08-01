@@ -9,6 +9,9 @@
  * 1 GiB (orchestrator + Caddy + system headroom) instead.
  */
 
+import { getDocker } from "../docker/client";
+import { getConfig } from "../config";
+
 const MiB = 1024 * 1024;
 
 export const DEFAULT_ORCHESTRATOR_RESERVE_MB = 1024;
@@ -72,4 +75,23 @@ export function createLocalCapacityProvider(
     capacity,
     isSlotAvailable: async () => activeCount() < capacity.slots,
   };
+}
+
+let _capacity: DerivedCapacity | null = null;
+
+/**
+ * Capacity as derived at boot from the daemon's reported CPU and memory
+ * (first call queries `docker info`; a VPS resize is picked up on restart).
+ * `CAPACITY_SLOTS` overrides the slot count when the derivation is wrong
+ * for a workload.
+ */
+export async function getCapacity(): Promise<DerivedCapacity> {
+  if (_capacity) return _capacity;
+
+  const info = await getDocker().info();
+  _capacity = deriveCapacity(
+    { memTotalBytes: info.MemTotal, cpuCount: info.NCPU },
+    { slots: getConfig().capacitySlots ?? undefined }
+  );
+  return _capacity;
 }

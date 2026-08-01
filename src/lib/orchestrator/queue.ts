@@ -3,12 +3,34 @@ import { tasks, messages } from "@/db/schema";
 import { eq, and, isNull, asc } from "drizzle-orm";
 import { startTask } from "./turn-manager";
 import { getActiveTasks, processQueuedMessages, scanForDevServer } from "./turn-manager";
+import {
+  createLocalCapacityProvider,
+  getCapacity,
+  type CapacityProvider,
+} from "./capacity";
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let pollCount = 0;
 
 /** Track which tasks are currently being processed to prevent double-dispatch */
 const processingTasks = new Set<string>();
+
+let capacityProvider: CapacityProvider | null = null;
+let saturationLogged = false;
+
+/**
+ * Slots in use: live containers plus pickups still provisioning theirs
+ * (a task sits in processingTasks before it registers in activeTasks —
+ * without counting those, back-to-back polls could overfill the box).
+ */
+function occupiedSlots(): number {
+  const active = getActiveTasks();
+  let count = active.size;
+  for (const taskId of processingTasks) {
+    if (!active.has(taskId)) count++;
+  }
+  return count;
+}
 
 export function startQueue(): void {
   if (pollInterval) return;
@@ -19,7 +41,8 @@ export function startQueue(): void {
     try {
       pollCount++;
 
-      // 1. Pick up new queued tasks
+      // 1. Pick up new queued tasks — through the capacity provider seam,
+      // never a direct Docker query at the call site
       const next = db
         .select()
         .from(tasks)
@@ -28,15 +51,30 @@ export function startQueue(): void {
         .get();
 
       if (next && !processingTasks.has(next.id)) {
-        processingTasks.add(next.id);
-        console.log(
-          `[orchestrator] Picked up task: ${next.id} — ${next.title}`
-        );
-        startTask(next.id)
-          .catch((err) =>
-            console.error(`[orchestrator] Task ${next.id} failed:`, err)
-          )
-          .finally(() => processingTasks.delete(next.id));
+        if (!capacityProvider) {
+          capacityProvider = createLocalCapacityProvider(
+            await getCapacity(),
+            occupiedSlots
+          );
+        }
+
+        if (await capacityProvider.isSlotAvailable()) {
+          saturationLogged = false;
+          processingTasks.add(next.id);
+          console.log(
+            `[orchestrator] Picked up task: ${next.id} — ${next.title}`
+          );
+          startTask(next.id)
+            .catch((err) =>
+              console.error(`[orchestrator] Task ${next.id} failed:`, err)
+            )
+            .finally(() => processingTasks.delete(next.id));
+        } else if (!saturationLogged) {
+          saturationLogged = true;
+          console.log(
+            `[orchestrator] All ${capacityProvider.capacity.slots} slot(s) busy — task ${next.id} waits in queue`
+          );
+        }
       }
 
       // 2. Check idle tasks for queued messages
