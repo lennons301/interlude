@@ -41,6 +41,8 @@ COPY --from=build /native-deps/node_modules/file-uri-to-path ./node_modules/file
 COPY --from=build /app/drizzle ./drizzle
 COPY --from=build /app/Dockerfile.agent ./Dockerfile.agent
 COPY --from=build /app/custom-server.js ./custom-server.js
+# Vendored workflow skills, injected into autonomous pass prompts (issue #15)
+COPY --from=build /app/docs/agents/workflows ./docs/agents/workflows
 
 # Install the Doppler CLI so the app boots via `doppler run`, pulling orchestrator
 # secrets from the Doppler `interlude/prd` config at runtime. DOPPLER_TOKEN (a prd
