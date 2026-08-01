@@ -5,32 +5,19 @@ import { createOutputHandler } from "../output-parser";
 
 // Use an in-memory SQLite database for tests
 // We need to mock the db module before importing the parser
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import * as schema from "@/db/schema";
+import { createTestDb } from "@/test/create-test-db";
 
 import { vi } from "vitest";
 
 // Create a fresh in-memory DB for each test
-let testDb: ReturnType<typeof drizzle>;
+let testDb: ReturnType<typeof createTestDb>["db"];
 
 vi.mock("@/db", () => ({
   get db() {
     return testDb;
   },
 }));
-
-function createTestDb() {
-  const sqlite = new Database(":memory:");
-  sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("foreign_keys = ON");
-  const db = drizzle(sqlite, { schema });
-  migrate(db, {
-    migrationsFolder: path.join(process.cwd(), "drizzle"),
-  });
-  return db;
-}
 
 // Load the real fixture captured from Claude Code CLI
 const fixturePath = path.join(__dirname, "stream-fixture.ndjson");
@@ -43,7 +30,7 @@ describe("output-parser with real Claude Code stream-json", () => {
   const TASK_ID = "test-task-001";
 
   beforeEach(() => {
-    testDb = createTestDb();
+    testDb = createTestDb().db;
     // Insert a project and task so foreign keys work
     testDb
       .insert(schema.projects)
