@@ -127,3 +127,103 @@
     @apply font-sans;
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * Fleet dashboard tokens (issue #21) — the reference visual language for the
+ * wider UI refresh. Dark-first; light is re-tuned per ground, never inverted.
+ * Theme follows system preference, overridable via data-fleet-theme on <html>.
+ * Components reference tokens only.
+ * ------------------------------------------------------------------------ */
+
+.fleet,
+html[data-fleet-theme="dark"] .fleet {
+  --fl-ground: #100e0c;
+  --fl-surface: #171411;
+  --fl-card: #1d1915;
+  --fl-line: rgba(237, 230, 220, 0.1);
+  --fl-line-strong: rgba(237, 230, 220, 0.18);
+  --fl-ink: #ede6dc;
+  --fl-ink-2: #a89e90;
+  --fl-ink-3: #71685c;
+  --fl-amber: #e8a33d;
+  --fl-on-amber: #16120a;
+  --fl-green: #8fb573;
+  --fl-cool: #8faec7;
+  --fl-red: #d96a5b;
+}
+
+@media (prefers-color-scheme: light) {
+  html:not([data-fleet-theme="dark"]) .fleet {
+    --fl-ground: #eae5dc;
+    --fl-surface: #f4f0e8;
+    --fl-card: #fcfaf5;
+    --fl-line: rgba(38, 32, 25, 0.12);
+    --fl-line-strong: rgba(38, 32, 25, 0.24);
+    --fl-ink: #262019;
+    --fl-ink-2: #6e6457;
+    --fl-ink-3: #9c9285;
+    --fl-amber: #a2690f;
+    --fl-on-amber: #fff9ee;
+    --fl-green: #567e3d;
+    --fl-cool: #3e6787;
+    --fl-red: #b44a3b;
+  }
+}
+
+/* Identical to the prefers-color-scheme block above — CSS can't OR a media
+ * query with a selector, so the light palette exists twice. Keep in sync. */
+html[data-fleet-theme="light"] .fleet {
+  --fl-ground: #eae5dc;
+  --fl-surface: #f4f0e8;
+  --fl-card: #fcfaf5;
+  --fl-line: rgba(38, 32, 25, 0.12);
+  --fl-line-strong: rgba(38, 32, 25, 0.24);
+  --fl-ink: #262019;
+  --fl-ink-2: #6e6457;
+  --fl-ink-3: #9c9285;
+  --fl-amber: #a2690f;
+  --fl-on-amber: #fff9ee;
+  --fl-green: #567e3d;
+  --fl-cool: #3e6787;
+  --fl-red: #b44a3b;
+}
+
+@theme inline {
+  --color-fl-ground: var(--fl-ground);
+  --color-fl-surface: var(--fl-surface);
+  --color-fl-card: var(--fl-card);
+  --color-fl-line: var(--fl-line);
+  --color-fl-line-strong: var(--fl-line-strong);
+  --color-fl-ink: var(--fl-ink);
+  --color-fl-ink-2: var(--fl-ink-2);
+  --color-fl-ink-3: var(--fl-ink-3);
+  --color-fl-amber: var(--fl-amber);
+  --color-fl-on-amber: var(--fl-on-amber);
+  --color-fl-green: var(--fl-green);
+  --color-fl-cool: var(--fl-cool);
+  --color-fl-red: var(--fl-red);
+  --font-plex: var(--font-plex-sans);
+  --font-plex-mono: var(--font-plex-mono);
+}
+
+/* The one ambient animation: the SSE dot breathes. Everything else moves
+ * only when data does. */
+@keyframes fleet-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.fleet-dot-live {
+  animation: fleet-breathe 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fleet-dot-live {
+    animation: none;
+  }
+}
