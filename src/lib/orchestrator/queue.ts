@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { tasks, messages } from "@/db/schema";
-import { eq, and, isNull, asc } from "drizzle-orm";
+import { eq, and, isNull, asc, sql } from "drizzle-orm";
 import { startTask } from "./turn-manager";
 import { getActiveTasks, processQueuedMessages, scanForDevServer } from "./turn-manager";
 import {
@@ -23,7 +23,7 @@ let saturationLogged = false;
  * (a task sits in processingTasks before it registers in activeTasks —
  * without counting those, back-to-back polls could overfill the box).
  */
-function occupiedSlots(): number {
+export function occupiedSlots(): number {
   const active = getActiveTasks();
   let count = active.size;
   for (const taskId of processingTasks) {
@@ -42,12 +42,17 @@ export function startQueue(): void {
       pollCount++;
 
       // 1. Pick up new queued tasks — through the capacity provider seam,
-      // never a direct Docker query at the call site
+      // never a direct Docker query at the call site. Interactive tasks the
+      // owner dispatched outrank queued autonomous passes for the next slot
+      // (issue #15); within a kind, oldest first.
       const next = db
         .select()
         .from(tasks)
         .where(eq(tasks.status, "queued"))
-        .orderBy(asc(tasks.createdAt))
+        .orderBy(
+          sql`case when ${tasks.kind} = 'interactive' then 0 else 1 end`,
+          asc(tasks.createdAt)
+        )
         .get();
 
       if (next && !processingTasks.has(next.id)) {
