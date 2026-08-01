@@ -108,6 +108,29 @@ export type Action =
       question: string;
     };
 
+/**
+ * A snapshot for deciding one finished pass at the moment its turn ends,
+ * outside a sweep: every pickup and saturation input is inert, so the only
+ * possible decision is about the pass itself.
+ */
+export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnapshot {
+  return {
+    now,
+    autonomyEnabledGlobal: true,
+    attemptBudgetUsd: 0,
+    maxAttempts: 0,
+    allowedAuthors: [],
+    slots: { total: 0, occupied: 0, occupants: [] },
+    queuedInteractiveCount: 0,
+    queuedImplementCount: 0,
+    saturationAnnounced: true,
+    projects: [],
+    candidates: [],
+    inFlightClaims: [],
+    completedPasses: [pass],
+  };
+}
+
 /** Allowed by default: the repo owner; extended by the configured allow-list. */
 function isAuthorAllowed(candidate: CandidateIssue, allowedAuthors: string[]): boolean {
   const author = candidate.author.toLowerCase();

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   decideNext,
+  passOutcomeSnapshot,
   type AutonomySnapshot,
   type CandidateIssue,
   type PassOutcome,
@@ -556,6 +557,24 @@ describe("decideNext — blocked escalation", () => {
     );
 
     expect(escalations(actions)).toEqual([]);
+  });
+
+  it("decides a single pass via passOutcomeSnapshot: escalate when blocked, nothing when healthy", () => {
+    const blocked = decideNext(
+      passOutcomeSnapshot(NOW, makePass({ finalMessage: "BLOCKED: Which retry policy?" }))
+    );
+    expect(blocked).toEqual([
+      {
+        type: "escalate",
+        reason: "blocked",
+        runId: "run-1",
+        taskId: "task-1",
+        issueRef: "acme/widgets#7",
+        question: "Which retry policy?",
+      },
+    ]);
+
+    expect(decideNext(passOutcomeSnapshot(NOW, makePass()))).toEqual([]);
   });
 
   it("escalates a blocked pass without stopping pickup of new work", () => {
