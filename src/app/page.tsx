@@ -1,19 +1,17 @@
-import Link from "next/link";
-import { TaskFeed } from "@/components/task-feed";
+import { FleetDashboard } from "@/components/fleet/fleet-dashboard";
+import { plexMono, plexSans } from "./fleet-fonts";
+
+// Apply a stored theme override before first paint so the dashboard never
+// flashes the wrong ground.
+const themeScript = `try{var t=localStorage.getItem("fleet-theme");if(t==="dark"||t==="light")document.documentElement.setAttribute("data-fleet-theme",t)}catch(e){}`;
 
 export default function Home() {
   return (
-    <div className="mx-auto max-w-2xl px-4 py-6 space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Tasks</h1>
-        <Link
-          href="/tasks/new"
-          className="inline-flex h-8 items-center justify-center rounded-lg bg-primary px-2.5 text-sm font-medium text-primary-foreground transition-all hover:bg-primary/80"
-        >
-          New Task
-        </Link>
-      </div>
-      <TaskFeed />
+    <div
+      className={`${plexSans.variable} ${plexMono.variable} fleet min-h-dvh bg-fl-ground font-plex text-fl-ink antialiased`}
+    >
+      <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+      <FleetDashboard />
     </div>
   );
 }
