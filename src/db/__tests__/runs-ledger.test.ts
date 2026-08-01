@@ -1,21 +1,11 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import fs from "fs";
 import path from "path";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import * as schema from "@/db/schema";
+import { createTestDb } from "@/test/create-test-db";
 
 const MIGRATIONS_DIR = path.join(process.cwd(), "drizzle");
-
-function createTestDb() {
-  const sqlite = new Database(":memory:");
-  sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("foreign_keys = ON");
-  const db = drizzle(sqlite, { schema });
-  migrate(db, { migrationsFolder: MIGRATIONS_DIR });
-  return { db, sqlite };
-}
 
 describe("runs ledger schema (fresh from-migrations DB)", () => {
   let db: ReturnType<typeof createTestDb>["db"];
@@ -160,6 +150,30 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
   });
 });
 
+describe("migration journal", () => {
+  // Drizzle's migrator only applies a migration whose "when" exceeds the last
+  // applied row's created_at. 0007 (#9) and 0008 (#13) are future-dated, so a
+  // freshly generated migration gets a real timestamp that sorts *before*
+  // them and would be silently skipped everywhere. This trips loudly instead:
+  // if it fails on your new migration, hand-bump its "when" in
+  // drizzle/meta/_journal.json past the previous entry's.
+  it("keeps journal timestamps strictly increasing", () => {
+    const journal = JSON.parse(
+      fs.readFileSync(path.join(MIGRATIONS_DIR, "meta", "_journal.json"), "utf-8")
+    ) as { entries: { tag: string; when: number }[] };
+
+    for (let i = 1; i < journal.entries.length; i++) {
+      const prev = journal.entries[i - 1];
+      const curr = journal.entries[i];
+      expect(
+        curr.when,
+        `${curr.tag} is stamped before ${prev.tag} (${prev.when}) and would be ` +
+          `silently skipped by the migrator — bump its "when" past ${prev.when}`
+      ).toBeGreaterThan(prev.when);
+    }
+  });
+});
+
 describe("latest migration on a populated previous-head DB (production path)", () => {
   // Simulate the VPS upgrade: a DB migrated to the previous head and holding
   // real rows, then the newest migration applied on top — the scenario that
@@ -193,14 +207,9 @@ describe("latest migration on a populated previous-head DB (production path)", (
       );
     }
 
-    const sqlite = new Database(":memory:");
-    sqlite.pragma("journal_mode = WAL");
-    sqlite.pragma("foreign_keys = ON");
-    const db = drizzle(sqlite, { schema });
-
     // Migrate to the previous head and populate it with pre-upgrade rows,
     // via raw SQL since schema.ts describes the *new* schema
-    migrate(db, { migrationsFolder: stagingDir });
+    const { db, sqlite } = createTestDb(stagingDir);
     sqlite
       .prepare("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)")
       .run("p1", "Existing project", Date.now());

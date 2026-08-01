@@ -1,30 +1,16 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import path from "path";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import * as schema from "@/db/schema";
+import { createTestDb } from "@/test/create-test-db";
 import { todayAutonomousSpendUsd, startOfLocalDay } from "../spend";
 
 // Use an in-memory SQLite database for tests
-let testDb: ReturnType<typeof drizzle>;
+let testDb: ReturnType<typeof createTestDb>["db"];
 
 vi.mock("@/db", () => ({
   get db() {
     return testDb;
   },
 }));
-
-function createTestDb() {
-  const sqlite = new Database(":memory:");
-  sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("foreign_keys = ON");
-  const db = drizzle(sqlite, { schema });
-  migrate(db, {
-    migrationsFolder: path.join(process.cwd(), "drizzle"),
-  });
-  return db;
-}
 
 // Fixed clock: noon local time, so "today" is unambiguous
 const NOW = new Date(2026, 7, 1, 12, 0, 0);
@@ -52,7 +38,7 @@ function insertRun(overrides: Partial<typeof schema.runs.$inferInsert> = {}) {
 
 describe("todayAutonomousSpendUsd", () => {
   beforeEach(() => {
-    testDb = createTestDb();
+    testDb = createTestDb().db;
     testDb
       .insert(schema.projects)
       .values({ id: "test-project", name: "Test", createdAt: new Date() })
