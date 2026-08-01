@@ -33,6 +33,8 @@ export interface AppConfig {
   discordBotToken: string | null;
   /** Discord application ID */
   discordApplicationId: string | null;
+  /** Discord guild (server) ID — used to deep-link into project channels */
+  discordGuildId: string | null;
 }
 
 let _config: AppConfig | null = null;
@@ -89,6 +91,7 @@ export function getConfig(): AppConfig {
     githubAppInstallationId: process.env.GITHUB_APP_INSTALLATION_ID ?? null,
     discordBotToken: process.env.DISCORD_BOT_TOKEN ?? null,
     discordApplicationId: process.env.DISCORD_APPLICATION_ID ?? null,
+    discordGuildId: process.env.DISCORD_GUILD_ID ?? null,
   };
 
   return _config;
