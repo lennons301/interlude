@@ -55,6 +55,10 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
   };
 }
 
+function claims(actions: ReturnType<typeof decideNext>) {
+  return actions.filter((a) => a.type === "claimIssue");
+}
+
 describe("decideNext — claiming", () => {
   it("claims an eligible issue when a slot is free", () => {
     const actions = decideNext(makeSnapshot());
@@ -73,5 +77,121 @@ describe("decideNext — claiming", () => {
         workflow: { source: "default" },
       },
     ]);
+  });
+
+  it("numbers the attempt after previously consumed attempts", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [makeCandidate({ attemptsMade: 1 })] })
+    );
+
+    expect(claims(actions)).toHaveLength(1);
+    expect(claims(actions)[0]).toMatchObject({ attempt: 2 });
+  });
+});
+
+describe("decideNext — eligibility", () => {
+  // One row per rule: every failure must independently prevent a claim.
+  const failures: Array<{
+    name: string;
+    snapshot: AutonomySnapshot;
+  }> = [
+    {
+      name: "project not registered",
+      snapshot: makeSnapshot({ projects: [] }),
+    },
+    {
+      name: "project preflight failing",
+      snapshot: makeSnapshot({
+        projects: [
+          makeProject({
+            preflightStatus: "failing",
+            preflightReason: "branch protection missing",
+          }),
+        ],
+      }),
+    },
+    {
+      name: "project preflight never run",
+      snapshot: makeSnapshot({
+        projects: [makeProject({ preflightStatus: null })],
+      }),
+    },
+    {
+      name: "project autonomy toggle off",
+      snapshot: makeSnapshot({
+        projects: [makeProject({ autonomyEnabled: false })],
+      }),
+    },
+    {
+      name: "global autonomy kill switch off",
+      snapshot: makeSnapshot({ autonomyEnabledGlobal: false }),
+    },
+    {
+      name: "author not allow-listed",
+      snapshot: makeSnapshot({
+        candidates: [makeCandidate({ author: "drive-by-account" })],
+      }),
+    },
+    {
+      name: "open blocker",
+      snapshot: makeSnapshot({
+        candidates: [makeCandidate({ hasOpenBlocker: true })],
+      }),
+    },
+    {
+      name: "active run already exists",
+      snapshot: makeSnapshot({
+        candidates: [makeCandidate({ hasActiveRun: true })],
+      }),
+    },
+    {
+      name: "attempts exhausted",
+      snapshot: makeSnapshot({
+        candidates: [makeCandidate({ attemptsMade: 3 })],
+      }),
+    },
+    {
+      name: "claim already in flight",
+      snapshot: makeSnapshot({ inFlightClaims: ["acme/widgets#7"] }),
+    },
+  ];
+
+  it.each(failures)("does not claim when $name", ({ snapshot }) => {
+    expect(claims(decideNext(snapshot))).toEqual([]);
+  });
+
+  it("allows the repo owner as author case-insensitively", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [makeCandidate({ author: "AcMe" })] })
+    );
+    expect(claims(actions)).toHaveLength(1);
+  });
+
+  it("allows an author from the configured allow-list", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        allowedAuthors: ["trusted-friend"],
+        candidates: [makeCandidate({ author: "Trusted-Friend" })],
+      })
+    );
+    expect(claims(actions)).toHaveLength(1);
+  });
+
+  it("skips an ineligible issue but still claims an eligible one", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [
+          makeCandidate({
+            issueRef: "acme/widgets#5",
+            number: 5,
+            hasOpenBlocker: true,
+            armedAt: new Date(2026, 7, 1, 8, 0, 0),
+          }),
+          makeCandidate(),
+        ],
+      })
+    );
+    expect(claims(actions)).toHaveLength(1);
+    expect(claims(actions)[0]).toMatchObject({ issueRef: "acme/widgets#7" });
   });
 });

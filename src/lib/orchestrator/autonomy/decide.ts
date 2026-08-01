@@ -69,12 +69,31 @@ export type Action = {
   workflow: WorkflowSelection;
 };
 
+/** Allowed by default: the repo owner; extended by the configured allow-list. */
+function isAuthorAllowed(candidate: CandidateIssue, allowedAuthors: string[]): boolean {
+  const author = candidate.author.toLowerCase();
+  const repoOwner = candidate.repo.split("/")[0].toLowerCase();
+  return author === repoOwner || allowedAuthors.some((a) => a.toLowerCase() === author);
+}
+
 export function decideNext(snapshot: AutonomySnapshot): Action[] {
   const actions: Action[] = [];
+
+  if (!snapshot.autonomyEnabledGlobal) return actions;
 
   for (const candidate of snapshot.candidates) {
     const project = snapshot.projects.find((p) => p.repo === candidate.repo);
     if (!project) continue;
+    if (!project.autonomyEnabled) continue;
+    // Fail closed: never-checked preflight is as ineligible as a failing one
+    if (project.preflightStatus !== "passing") continue;
+    if (!isAuthorAllowed(candidate, snapshot.allowedAuthors)) continue;
+    if (candidate.hasOpenBlocker) continue;
+    if (candidate.hasActiveRun) continue;
+    // Refuse a claim past the attempt budget even before #18's exhaust flow
+    // lands — an unattended claim-fail loop must be bounded from day one.
+    if (candidate.attemptsMade >= snapshot.maxAttempts) continue;
+    if (snapshot.inFlightClaims.includes(candidate.issueRef)) continue;
 
     actions.push({
       type: "claimIssue",
