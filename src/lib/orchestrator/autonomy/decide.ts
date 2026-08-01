@@ -81,6 +81,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
 
   if (!snapshot.autonomyEnabledGlobal) return actions;
 
+  const eligible: Array<{ candidate: CandidateIssue; project: ProjectSnapshot }> = [];
   for (const candidate of snapshot.candidates) {
     const project = snapshot.projects.find((p) => p.repo === candidate.repo);
     if (!project) continue;
@@ -94,7 +95,20 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     // lands — an unattended claim-fail loop must be bounded from day one.
     if (candidate.attemptsMade >= snapshot.maxAttempts) continue;
     if (snapshot.inFlightClaims.includes(candidate.issueRef)) continue;
+    eligible.push({ candidate, project });
+  }
 
+  // Oldest-armed-first, globally. Priority is expressed by when work is
+  // armed; there is deliberately no other ordering input.
+  eligible.sort(
+    (a, b) =>
+      a.candidate.armedAt.getTime() - b.candidate.armedAt.getTime() ||
+      a.candidate.issueRef.localeCompare(b.candidate.issueRef)
+  );
+
+  const freeSlots = Math.max(0, snapshot.slots.total - snapshot.slots.occupied);
+
+  for (const { candidate, project } of eligible.slice(0, freeSlots)) {
     actions.push({
       type: "claimIssue",
       issueRef: candidate.issueRef,

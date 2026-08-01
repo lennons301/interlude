@@ -177,6 +177,24 @@ describe("decideNext — eligibility", () => {
     expect(claims(actions)).toHaveLength(1);
   });
 
+  it("claims across projects when both are eligible", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        projects: [makeProject(), makeProject({ id: "proj-2", repo: "acme/gadgets" })],
+        candidates: [
+          makeCandidate(),
+          makeCandidate({
+            issueRef: "acme/gadgets#3",
+            repo: "acme/gadgets",
+            number: 3,
+            armedAt: new Date(2026, 7, 1, 10, 0, 0),
+          }),
+        ],
+      })
+    );
+    expect(claims(actions)).toHaveLength(2);
+  });
+
   it("skips an ineligible issue but still claims an eligible one", () => {
     const actions = decideNext(
       makeSnapshot({
@@ -191,6 +209,72 @@ describe("decideNext — eligibility", () => {
         ],
       })
     );
+    expect(claims(actions)).toHaveLength(1);
+    expect(claims(actions)[0]).toMatchObject({ issueRef: "acme/widgets#7" });
+  });
+});
+
+describe("decideNext — ordering and slots", () => {
+  it("claims oldest-armed-first, globally across projects", () => {
+    // Armed order is the reverse of both creation order and issue number,
+    // so the sort provably keys on armedAt alone — no priority mechanism.
+    const actions = decideNext(
+      makeSnapshot({
+        projects: [makeProject(), makeProject({ id: "proj-2", repo: "acme/gadgets" })],
+        slots: { total: 1, occupied: 0, occupants: [] },
+        candidates: [
+          makeCandidate({
+            issueRef: "acme/widgets#2",
+            number: 2,
+            armedAt: new Date(2026, 7, 1, 11, 0, 0),
+          }),
+          makeCandidate({
+            issueRef: "acme/gadgets#9",
+            repo: "acme/gadgets",
+            number: 9,
+            armedAt: new Date(2026, 7, 1, 8, 0, 0),
+          }),
+        ],
+      })
+    );
+
+    expect(claims(actions)).toHaveLength(1);
+    expect(claims(actions)[0]).toMatchObject({
+      issueRef: "acme/gadgets#9",
+      projectId: "proj-2",
+    });
+  });
+
+  it("breaks armed-at ties deterministically by issue ref", () => {
+    const tied = new Date(2026, 7, 1, 9, 30, 0);
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 1, occupied: 0, occupants: [] },
+        candidates: [
+          makeCandidate({ issueRef: "acme/widgets#12", number: 12, armedAt: tied }),
+          makeCandidate({ issueRef: "acme/widgets#11", number: 11, armedAt: tied }),
+        ],
+      })
+    );
+
+    expect(claims(actions)[0]).toMatchObject({ issueRef: "acme/widgets#11" });
+  });
+
+  it("claims at most as many issues as there are free slots", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 2, occupied: 1, occupants: ["implement: acme/widgets#1"] },
+        candidates: [
+          makeCandidate(),
+          makeCandidate({
+            issueRef: "acme/widgets#8",
+            number: 8,
+            armedAt: new Date(2026, 7, 1, 10, 0, 0),
+          }),
+        ],
+      })
+    );
+
     expect(claims(actions)).toHaveLength(1);
     expect(claims(actions)[0]).toMatchObject({ issueRef: "acme/widgets#7" });
   });
