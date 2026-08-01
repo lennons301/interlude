@@ -7,7 +7,62 @@ export const projects = sqliteTable("projects", {
   gitUrl: text("git_url"),
   dopplerToken: text("doppler_token"),
   discordChannelId: text("discord_channel_id"),
+  autonomyEnabled: int("autonomy_enabled", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  // Cached result of the last autonomy preflight; null = never checked
+  preflightStatus: text("preflight_status", {
+    enum: ["passing", "failing"],
+  }),
+  preflightReason: text("preflight_reason"),
   createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+// One row per attempt at one ticket. Tasks remain the container-and-
+// conversation unit; a run owns one or more of them. Interactive tasks have
+// no run, which is what exempts them from the daily autonomous spend cap.
+export const runs = sqliteTable("runs", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id")
+    .notNull()
+    .references(() => projects.id),
+  githubIssue: text("github_issue").notNull(), // owner/repo#n
+  attempt: int("attempt").notNull(),
+  mode: text("mode", { enum: ["autonomous", "supervised"] }).notNull(),
+  status: text("status", {
+    enum: [
+      "claimed",
+      "implementing",
+      "reviewing",
+      "gated",
+      "blocked",
+      "merged",
+      "failed",
+      "exhausted",
+      "interrupted",
+      "cancelled",
+    ],
+  })
+    .notNull()
+    .default("claimed"),
+  budgetUsd: real("budget_usd").notNull(),
+  totalCostUsd: real("total_cost_usd").notNull().default(0),
+  pullRequestNumber: int("pull_request_number"),
+  pullRequestUrl: text("pull_request_url"),
+  // Review-gate categories matched by the PR's changed paths; empty = ungated
+  gateCategories: text("gate_categories", { mode: "json" })
+    .$type<string[]>()
+    .notNull()
+    .default([]),
+  reviewVerdict: text("review_verdict", {
+    enum: ["approve", "request-changes", "escalate"],
+  }),
+  reviewCycleCount: int("review_cycle_count").notNull().default(0),
+  interruptionCount: int("interruption_count").notNull().default(0),
+  blockedQuestion: text("blocked_question"),
+  claimedAt: int("claimed_at", { mode: "timestamp_ms" }).notNull(),
+  startedAt: int("started_at", { mode: "timestamp_ms" }),
+  finishedAt: int("finished_at", { mode: "timestamp_ms" }),
 });
 
 export const tasks = sqliteTable("tasks", {
@@ -23,6 +78,12 @@ export const tasks = sqliteTable("tasks", {
     .notNull()
     .default("queued"),
   githubIssue: text("github_issue"),
+  kind: text("kind", {
+    enum: ["interactive", "implement", "review", "triage"],
+  })
+    .notNull()
+    .default("interactive"),
+  runId: text("run_id").references(() => runs.id),
   containerId: text("container_id"),
   branch: text("branch"),
   sessionId: text("session_id"),
