@@ -35,6 +35,12 @@ export interface AppConfig {
   discordApplicationId: string | null;
   /** Discord guild (server) ID — used to deep-link into project channels */
   discordGuildId: string | null;
+  /** Global autonomy kill switch — autonomous pickup runs only when true */
+  autonomyEnabled: boolean;
+  /** Extra GitHub logins allowed to author claimable issues (repo owners always are) */
+  autonomyAllowedAuthors: string[];
+  /** Discord channel for fleet-level events (e.g. slot saturation). Null = log only */
+  discordFleetChannelId: string | null;
 }
 
 let _config: AppConfig | null = null;
@@ -92,6 +98,12 @@ export function getConfig(): AppConfig {
     discordBotToken: process.env.DISCORD_BOT_TOKEN ?? null,
     discordApplicationId: process.env.DISCORD_APPLICATION_ID ?? null,
     discordGuildId: process.env.DISCORD_GUILD_ID ?? null,
+    autonomyEnabled: process.env.AUTONOMY_ENABLED === "true",
+    autonomyAllowedAuthors: (process.env.AUTONOMY_ALLOWED_AUTHORS ?? "")
+      .split(",")
+      .map((a) => a.trim())
+      .filter(Boolean),
+    discordFleetChannelId: process.env.DISCORD_FLEET_CHANNEL_ID ?? null,
   };
 
   return _config;

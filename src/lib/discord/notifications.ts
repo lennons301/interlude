@@ -138,6 +138,37 @@ export async function notifyTaskFailed(
 }
 
 /**
+ * Announce slot saturation to the fleet channel — sent once per transition
+ * (the autonomy sweep tracks the transition; this just delivers). No-op when
+ * no fleet channel is configured: the sweep already logged it.
+ */
+export async function notifySlotsSaturated(
+  channelId: string | null,
+  payload: { occupied: number; total: number; occupants: string[] }
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await botClient.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`All ${payload.total} agent slot(s) busy`)
+      .setDescription(
+        payload.occupants.length
+          ? payload.occupants.map((o) => `• ${o}`).join("\n")
+          : "New work waits for a free slot."
+      )
+      .setColor(0xf59e0b);
+
+    await sendWithRetry(channel as TextChannel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send saturation notification:`, err);
+  }
+}
+
+/**
  * Post an "agent finished a turn — your move" idle notification.
  * Returns the Discord message ID so it can become the task's current
  * interactive message (for ✅-to-complete and reply-to-continue).
