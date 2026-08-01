@@ -30,9 +30,9 @@ jobs:
             # Render the proxy's env from Doppler (interlude/prd) — the same config
             # the app boots with, making it the single source of truth for DOMAIN.
             # Caddy is a stock image that can't run under `doppler run`, so it gets
-            # a generated env file instead of a hand-maintained copy in .env — that
-            # copy going missing is what served localhost for 24h (issue #25).
-            DOMAIN=$(docker compose run --rm --no-deps -T app doppler secrets get DOMAIN --plain --project interlude --config prd)
+            # a generated env file instead of a hand-maintained copy in .env
+            # (issue #25 — see the caddy comment in docker-compose.yml).
+            DOMAIN=$(docker compose run --rm --no-deps -T app doppler secrets get DOMAIN --plain --project interlude --config prd || true)
             if [ -z "$DOMAIN" ]; then
               echo "ERROR: could not read DOMAIN from Doppler (interlude/prd) — refusing to deploy the proxy blind"
               exit 1
@@ -44,10 +44,13 @@ jobs:
 
             docker compose up -d
 
-            # Regression check: the proxy must actually have DOMAIN in its
-            # environment, or Caddy silently falls back to serving localhost
-            if ! docker compose exec -T caddy sh -c 'test -n "$DOMAIN"'; then
-              echo "ERROR: caddy is running without DOMAIN in its environment"
+            # Regression check: the proxy must be running with the same DOMAIN the
+            # app boots with, or Caddy silently falls back to serving localhost
+            CADDY_DOMAIN=$(docker compose exec -T caddy sh -c 'echo "$DOMAIN"' || true)
+            if [ "$CADDY_DOMAIN" != "$DOMAIN" ]; then
+              echo "ERROR: caddy's DOMAIN ('$CADDY_DOMAIN') does not match Doppler's ('$DOMAIN') — is the container running?"
+              docker compose ps
+              docker compose logs --tail 30 caddy
               exit 1
             fi
 
@@ -58,7 +61,7 @@ jobs:
             # hostname failed with a TLS error.
             echo "Waiting for https://$DOMAIN/ to answer over verified TLS..."
             for i in $(seq 1 24); do
-              if curl -sf --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/" -o /dev/null; then
+              if curl -sf --max-time 10 --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/" -o /dev/null; then
                 echo "App is healthy: https://$DOMAIN/ answered over verified TLS"
                 exit 0
               fi
