@@ -180,7 +180,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       attempt: candidate.attemptsMade + 1,
       mode: "autonomous",
       budgetUsd: snapshot.attemptBudgetUsd,
-      workflow: selectWorkflow(),
+      workflow: selectWorkflow(candidate.body, candidate.labels),
     });
   }
 

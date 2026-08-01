@@ -79,6 +79,20 @@ describe("decideNext — claiming", () => {
     ]);
   });
 
+  it("carries the ticket's workflow selection in the claim", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [
+          makeCandidate({ labels: ["ready-for-agent", "workflow:tdd"] }),
+        ],
+      })
+    );
+
+    expect(claims(actions)[0]).toMatchObject({
+      workflow: { source: "label", skill: "tdd" },
+    });
+  });
+
   it("numbers the attempt after previously consumed attempts", () => {
     const actions = decideNext(
       makeSnapshot({ candidates: [makeCandidate({ attemptsMade: 1 })] })
