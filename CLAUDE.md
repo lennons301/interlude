@@ -56,11 +56,11 @@ Local dev runs the orchestrator via `doppler run -- pnpm dev` — orchestrator s
 - **Agent-container network:** run `docker network create interlude` once. Agent containers attach to the `interlude` network, which Compose creates on the VPS but `pnpm dev` does not — without it, task runs fail with "network interlude not found".
 - **Claude credentials mount:** set `CLAUDE_CREDENTIALS_PATH` (in `interlude/dev`) to your host `~/.claude/.credentials.json` so agent containers get Claude auth — otherwise the agent errors with "Not logged in".
 
-## Current Status: Phase 4 implemented + locally verified; VPS deploy pending
+## Current Status: Phase 4 done and verified on VPS; Phase 5 next
 
 Phases 1, 2a, 2.5, 2b, 2c, 2d, and 3 are done and tested end-to-end on VPS. The full flow works: create task → agent runs in Docker → output streams to chat UI → branch pushed to GitHub after each turn → interactive follow-up messages → live preview of dev server via subdomain → complete task. GitHub issues labeled `interlude` auto-create tasks, and agent work auto-produces draft PRs.
 
-Phase 4 (Discord bot + Discord-first task lifecycle) is merged (#8, plus backlog polish in #10) and deployed to the VPS. End-to-end verification of the Discord loop on the VPS — link a channel, dispatch, idle notification, ✅ complete — is the remaining confirmation.
+Phase 4 (Discord bot + Discord-first task lifecycle) is merged (#8, plus backlog polish in #10), deployed to the VPS, and verified end to end there — link a channel, dispatch, idle notification, ✅ complete.
 
 Phase 5 (autonomous ticket-loop + fleet observability) is specced —
 `docs/specs/2026-07-30-phase5-autonomous-ticket-loop-design.md` — and awaiting
@@ -118,7 +118,7 @@ decomposition into tickets. It depends on Phase 4 being live on the VPS.
 - Spec: `docs/specs/2026-03-27-phase3-github-integration-design.md`
 - Plan: `docs/plans/2026-03-27-phase3-github-integration.md`
 
-### Phase 4: Discord Bot + Discord-First Lifecycle (implemented, local E2E verified; VPS deploy pending)
+### Phase 4: Discord Bot + Discord-First Lifecycle (done)
 - Discord bot via discord.js Gateway for bidirectional messaging (chose Discord over Slack/Telegram)
 - Channel-per-project mapping via `!link` / `!unlink`; messages create tasks, replies deliver follow-ups, `cancel` cancels
 - Outbound lifecycle embeds: queued / completed / failed
