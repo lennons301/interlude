@@ -20,6 +20,7 @@ Interlude is a self-hosted, agent-first development platform. You dispatch tasks
 - Components are client components (`"use client"`) when they need interactivity
 - File structure: pages in `src/app/`, components in `src/components/`, utilities in `src/lib/`, database in `src/db/`
 - Preview uses subdomain routing: `task-{shortId}.interludes.co.uk` (controlled by `DOMAIN` env var, path-based fallback when unset)
+- `DOMAIN`'s production source of truth is Doppler (`interlude/prd`): the app reads it via `doppler run`; the deploy renders `caddy.env` from the same config for Caddy. Never hand-set `DOMAIN` in the VPS `.env` (issue #25)
 - Container network aliases match subdomain prefixes for Docker DNS resolution
 - Caddy `on_demand_tls` provisions certs per-subdomain; validated via `/api/internal/validate-subdomain`
 - GitHub App provides webhook-driven issue→task creation (label `interlude` triggers task)
