@@ -1,5 +1,5 @@
 import { db } from "@/db";
-import { tasks, messages, projects } from "@/db/schema";
+import { tasks, messages, projects, runs } from "@/db/schema";
 import { eq, and, isNull, asc, desc } from "drizzle-orm";
 import { newId } from "../ulid";
 import {
@@ -53,19 +53,42 @@ export async function startTask(taskId: string): Promise<void> {
   if (!proj) throw new Error(`Project ${task.projectId} not found`);
   if (!proj.gitUrl) throw new Error(`Project ${proj.name} has no git URL`);
 
-  const branch = `agent/${taskId}`;
+  // Autonomous implement passes run on the ticket-loop contract branch and
+  // their description is the fully framed pass prompt, baked at claim time.
+  const isImplementPass = task.kind === "implement";
+  const issueNumber = task.githubIssue ? parseIssueRef(task.githubIssue)?.number : undefined;
+  if (isImplementPass && !issueNumber) {
+    throw new Error(`Implement task ${taskId} has no parsable GitHub issue ref`);
+  }
+  const branch = isImplementPass ? `agent/issue-${issueNumber}` : `agent/${taskId}`;
+
   const userPrompt = task.description
     ? `${task.title}\n\n${task.description}`
     : task.title;
-  const prompt = `${userPrompt}\n\nWhen you are done with each request, commit all your changes with a descriptive commit message. Stay ready for follow-up instructions.`;
+  const prompt = isImplementPass
+    ? task.description
+    : `${userPrompt}\n\nWhen you are done with each request, commit all your changes with a descriptive commit message. Stay ready for follow-up instructions.`;
+
+  const run = task.runId
+    ? db.select().from(runs).where(eq(runs.id, task.runId)).get()
+    : undefined;
 
   // Update task status
   updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
   insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
 
+  if (run) {
+    db.update(runs)
+      .set({ status: "implementing", startedAt: new Date() })
+      .where(eq(runs.id, run.id))
+      .run();
+  }
+
   // Notify Discord channel that task is queued — but not for tasks created
-  // from Discord, which already got their queued embed posted in client.ts.
-  if (proj.discordChannelId && !task.discordMessageId) {
+  // from Discord, which already got their queued embed posted in client.ts,
+  // and not for autonomous passes: their lifecycle lives on the issue thread
+  // and Discord stays push-only for exceptional events.
+  if (proj.discordChannelId && !task.discordMessageId && !isImplementPass) {
     notifyTaskQueued(proj.discordChannelId, {
       id: taskId,
       title: task.title,
@@ -101,8 +124,9 @@ export async function startTask(taskId: string): Promise<void> {
     updateTask(taskId, { containerStatus: "running" });
     activeTasks.get(taskId)!.state = "running";
 
-    // Notify GitHub issue that agent has started
-    if (task.githubIssue) {
+    // Notify GitHub issue that agent has started. Implement passes skip this:
+    // the claim comment already announced the run with the task link.
+    if (task.githubIssue && !isImplementPass) {
       const domain = process.env.DOMAIN ?? "interludes.co.uk";
       commentOnIssue(
         task.githubIssue,
@@ -110,8 +134,11 @@ export async function startTask(taskId: string): Promise<void> {
       ).catch(console.error);
     }
 
-    // Run initial turn
-    const turnResult = await runTurn(taskId, running, prompt);
+    // Run initial turn. An implement pass is one whole turn — its budget is
+    // the run's per-attempt budget, not the interactive per-task default.
+    const turnResult = await runTurn(taskId, running, prompt, undefined, {
+      maxBudgetUsd: run?.budgetUsd,
+    });
 
     // Store session ID and cost
     updateTask(taskId, {
@@ -119,14 +146,36 @@ export async function startTask(taskId: string): Promise<void> {
       containerStatus: "idle",
       totalCostUsd: turnResult.costUsd,
     });
+    if (run) {
+      db.update(runs)
+        .set({ totalCostUsd: turnResult.costUsd })
+        .where(eq(runs.id, run.id))
+        .run();
+    }
     activeTasks.get(taskId)!.state = "idle";
 
     // Commit and push after turn completes
     await runPostTurnCommitAndPush(taskId, running);
+
+    if (isImplementPass) {
+      // No human follows up on an autonomous pass: the initial turn is the
+      // whole pass. Complete now — final push, PR marked ready, container
+      // removed. The run stays `implementing` until #17's review machinery
+      // takes over from there.
+      await completeTask(taskId);
+      return;
+    }
+
     await scanForDevServer(taskId, running);
     await postIdleNotification(taskId);
   } catch (err) {
     updateTask(taskId, { status: "failed", containerStatus: null });
+    if (task.runId) {
+      db.update(runs)
+        .set({ status: "failed", finishedAt: new Date() })
+        .where(eq(runs.id, task.runId))
+        .run();
+    }
     insertSystemMessage(
       taskId,
       `Error: ${err instanceof Error ? err.message : String(err)}`
@@ -165,7 +214,8 @@ async function runTurn(
   taskId: string,
   running: RunningContainer,
   prompt: string,
-  sessionId?: string
+  sessionId?: string,
+  opts?: { maxBudgetUsd?: number }
 ): Promise<TurnResult> {
   const handler = createOutputHandler(taskId);
 
@@ -173,6 +223,7 @@ async function runTurn(
     container: running.container,
     prompt,
     sessionId,
+    maxBudgetUsd: opts?.maxBudgetUsd,
   });
 
   // Race: wait for the exec stream to close OR the "result" event from Claude.
@@ -283,7 +334,7 @@ export async function completeTask(taskId: string): Promise<void> {
   if (!task) return;
 
   // Get container — prefer in-memory, fall back to DB containerId
-  let entry = activeTasks.get(taskId);
+  const entry = activeTasks.get(taskId);
   let running: RunningContainer | null = entry?.container ?? null;
 
   if (!running && task.containerId) {
@@ -330,10 +381,21 @@ export async function completeTask(taskId: string): Promise<void> {
     }
 
     updateTask(taskId, { status: "completed", containerStatus: null });
+    if (task.runId) {
+      db.update(runs)
+        .set({
+          totalCostUsd: task.totalCostUsd ?? 0,
+          pullRequestNumber: task.pullRequestNumber,
+          pullRequestUrl: task.pullRequestUrl,
+        })
+        .where(eq(runs.id, task.runId))
+        .run();
+    }
 
-    // Notify Discord
+    // Notify Discord — but not for autonomous passes: routine success is
+    // deliberately silent, it belongs on the issue thread and the dashboard.
     const proj = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
-    if (proj?.discordChannelId) {
+    if (proj?.discordChannelId && task.kind !== "implement") {
       notifyTaskCompleted(proj.discordChannelId, {
         id: taskId,
         title: task.title,
@@ -365,6 +427,12 @@ export async function completeTask(taskId: string): Promise<void> {
     }
 
     updateTask(taskId, { status: "failed", containerStatus: null });
+    if (task.runId) {
+      db.update(runs)
+        .set({ status: "failed", finishedAt: new Date() })
+        .where(eq(runs.id, task.runId))
+        .run();
+    }
   } finally {
     activeTasks.delete(taskId);
     if (running && !getConfig().keepContainers) {
@@ -390,6 +458,14 @@ export async function cancelTask(taskId: string): Promise<void> {
     containerId: null,
     containerStatus: null,
   });
+  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+  if (task?.runId) {
+    // Owner-cancelled runs don't consume an attempt: cancelled is not failed
+    db.update(runs)
+      .set({ status: "cancelled", finishedAt: new Date() })
+      .where(eq(runs.id, task.runId))
+      .run();
+  }
   insertSystemMessage(taskId, "Task cancelled by user.");
 }
 

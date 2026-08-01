@@ -44,6 +44,8 @@ export interface TurnOptions {
   container: Docker.Container;
   prompt: string;
   sessionId?: string; // If set, uses --resume
+  /** Per-exec budget override (autonomous runs carry their attempt budget) */
+  maxBudgetUsd?: number;
 }
 
 export interface RunningContainer {
@@ -194,7 +196,7 @@ export async function execClaudeTurn(
     "--max-turns",
     String(config.maxTurns),
     "--max-budget-usd",
-    String(config.maxBudgetUsd),
+    String(options.maxBudgetUsd ?? config.maxBudgetUsd),
   ];
 
   if (options.sessionId) {
