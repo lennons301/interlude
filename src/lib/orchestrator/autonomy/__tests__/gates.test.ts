@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { matchesGateGlob, parseGateConfig } from "../gates";
+import {
+  evaluateGates,
+  matchesGateGlob,
+  parseGateConfig,
+  type GateConfig,
+} from "../gates";
 
 describe("matchesGateGlob — parity with the platform's bash evaluator", () => {
   // Every verdict below was produced by the bash evaluator itself:
@@ -100,5 +105,58 @@ describe("parseGateConfig", () => {
       ok: true,
       config: { "visual-ui": [] },
     });
+  });
+});
+
+describe("evaluateGates", () => {
+  // Estate categories as documented in the repo extension's header
+  const estate: GateConfig = {
+    "visual-ui": ["**/components/**", "**/app/**/page.*", "**/app/**/layout.*"],
+    persistence: ["**/migrations/**", "*.sql"],
+    "gate-config": ["**/review-gates.yaml"],
+  };
+  const extension: GateConfig = {
+    infrastructure: ["custom-server.js", "Caddyfile"],
+    persistence: ["src/db/schema.ts", "drizzle/**"],
+  };
+
+  it("returns no matches for paths no glob covers", () => {
+    expect(evaluateGates(estate, extension, ["src/lib/ulid.ts", "README.md"])).toEqual([]);
+  });
+
+  it("names every matched category once, sorted", () => {
+    const matches = evaluateGates(estate, extension, [
+      "src/components/Button.tsx",
+      "src/components/Card.tsx",
+      "custom-server.js",
+      "db/schema.sql",
+    ]);
+    expect(matches).toEqual(["infrastructure", "persistence", "visual-ui"]);
+  });
+
+  it("matches categories added by the repo extension", () => {
+    expect(evaluateGates(estate, extension, ["Caddyfile"])).toEqual(["infrastructure"]);
+  });
+
+  it("keeps estate globs live when the extension redefines their category", () => {
+    // Additive-only: the extension's own `persistence` globs cannot shadow
+    // the estate's — a *.sql change still gates even though the extension's
+    // persistence list doesn't mention it.
+    expect(evaluateGates(estate, extension, ["db/schema.sql"])).toEqual(["persistence"]);
+    expect(evaluateGates(estate, extension, ["src/db/schema.ts"])).toEqual(["persistence"]);
+  });
+
+  it("gates a PR that touches the gate config itself", () => {
+    expect(evaluateGates(estate, extension, ["docs/agents/review-gates.yaml"])).toEqual([
+      "gate-config",
+    ]);
+  });
+
+  it("evaluates with an empty extension against the estate alone", () => {
+    expect(evaluateGates(estate, {}, ["app/dashboard/page.tsx"])).toEqual(["visual-ui"]);
+  });
+
+  it("returns no matches for an empty change set", () => {
+    expect(evaluateGates(estate, extension, [])).toEqual([]);
   });
 });

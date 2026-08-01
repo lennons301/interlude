@@ -72,6 +72,34 @@ export function parseGateConfig(text: string): GateConfigResult {
 }
 
 /**
+ * Which gate categories do these changed paths trip? The estate config and
+ * the repo extension merge by glob-list union, so an extension can only ever
+ * add gates: a category redefined by the extension still carries every
+ * estate glob. Returns matched category names, sorted and unique — empty
+ * means the PR is ungated and may be armed.
+ */
+export function evaluateGates(
+  estateConfig: GateConfig,
+  repoExtension: GateConfig,
+  changedPaths: string[]
+): string[] {
+  const merged: GateConfig = {};
+  for (const source of [estateConfig, repoExtension]) {
+    for (const [category, globs] of Object.entries(source)) {
+      merged[category] = [...(merged[category] ?? []), ...globs];
+    }
+  }
+
+  const matched = new Set<string>();
+  for (const [category, globs] of Object.entries(merged)) {
+    if (changedPaths.some((path) => globs.some((glob) => matchesGateGlob(path, glob)))) {
+      matched.add(category);
+    }
+  }
+  return [...matched].sort();
+}
+
+/**
  * Translate one bash pattern to an anchored RegExp. Bash `[[ == ]]` matching
  * knows nothing about path separators: `*` and `?` match `/` like any other
  * character, and consecutive stars collapse to one.
