@@ -68,6 +68,13 @@ const inFlightClaims = new Set<string>();
 // Run IDs whose gate-config failure the owner has already been told about —
 // once per failure, not once per sweep. Pruned as runs leave the pending set.
 const announcedGateConfigErrors = new Set<string>();
+// Consecutive sweeps each config source has failed to read for reasons that
+// looked transient (keyed "owner/repo:path"). A network blip retries
+// silently, but a persistent failure — a permissions problem reads the same
+// as a timeout from here — must eventually fail closed and tell the owner
+// rather than loop quietly forever.
+const consecutiveTransientReads = new Map<string, number>();
+const TRANSIENT_READ_ESCALATION_SWEEPS = 10;
 
 export function startAutonomySweeps(): void {
   if (sweepInterval) return;
@@ -220,17 +227,32 @@ async function readGateConfigFile(
   path: string,
   label: string
 ): Promise<GateConfigRead> {
+  const sourceKey = `${owner}/${repo}:${path}`;
   const file = await fetchFileFromDefaultBranch(owner, repo, path);
   if (!file.ok) {
     if (file.missing) {
+      consecutiveTransientReads.delete(sourceKey);
       return {
         kind: "failed",
         reason: `${label} (${path} in ${owner}/${repo}) is missing from the default branch`,
       };
     }
-    console.error(`[autonomy] Could not read ${path} from ${owner}/${repo}: ${file.reason}`);
+    const failures = (consecutiveTransientReads.get(sourceKey) ?? 0) + 1;
+    consecutiveTransientReads.set(sourceKey, failures);
+    console.error(
+      `[autonomy] Could not read ${path} from ${owner}/${repo} (attempt ${failures}): ${file.reason}`
+    );
+    if (failures >= TRANSIENT_READ_ESCALATION_SWEEPS) {
+      return {
+        kind: "failed",
+        reason:
+          `${label} (${path} in ${owner}/${repo}) could not be read for ` +
+          `${failures} consecutive sweeps: ${file.reason}`,
+      };
+    }
     return { kind: "transient" };
   }
+  consecutiveTransientReads.delete(sourceKey);
   const parsed = parseGateConfig(file.text);
   if (!parsed.ok) {
     return {

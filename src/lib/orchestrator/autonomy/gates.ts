@@ -99,10 +99,22 @@ export function evaluateGates(
   return [...matched].sort();
 }
 
+/** Escape one character for use as a regex literal. */
+function escapeLiteral(c: string): string {
+  return c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Escape one character for use inside a regex character class. */
+function escapeForClass(c: string): string {
+  if (c === "-") return "-"; // keep ranges like 0-9 intact
+  return c.replace(/[\\^\]]/g, "\\$&").replace(/[.*+?()[{|$]/g, "\\$&");
+}
+
 /**
  * Translate one bash pattern to an anchored RegExp. Bash `[[ == ]]` matching
  * knows nothing about path separators: `*` and `?` match `/` like any other
- * character, and consecutive stars collapse to one.
+ * character, consecutive stars collapse to one, and a backslash escapes the
+ * following pattern character (the backslash itself is discarded).
  */
 function bashPatternToRegex(pattern: string): RegExp {
   let re = "";
@@ -115,6 +127,9 @@ function bashPatternToRegex(pattern: string): RegExp {
     } else if (c === "?") {
       re += ".";
       i++;
+    } else if (c === "\\" && i + 1 < pattern.length) {
+      re += escapeLiteral(pattern[i + 1]);
+      i += 2;
     } else if (c === "[") {
       // Bash class: `!` (or `^`) negates, a `]` in first position is literal,
       // an unterminated `[` is a literal bracket.
@@ -130,7 +145,7 @@ function bashPatternToRegex(pattern: string): RegExp {
         j++;
       }
       while (j < pattern.length && pattern[j] !== "]") {
-        body += pattern[j] === "-" ? "-" : pattern[j].replace(/[\\^\]]/g, "\\$&").replace(/[.*+?()[{|$]/g, "\\$&");
+        body += escapeForClass(pattern[j]);
         j++;
       }
       if (j >= pattern.length) {
@@ -141,7 +156,7 @@ function bashPatternToRegex(pattern: string): RegExp {
         i = j + 1;
       }
     } else {
-      re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      re += escapeLiteral(c);
       i++;
     }
   }

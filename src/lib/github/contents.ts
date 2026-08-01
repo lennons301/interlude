@@ -1,4 +1,4 @@
-import { getOctokit } from "./client";
+import { getOctokit, isGitHubConfigured } from "./client";
 
 /**
  * Reading a file from a repo's default branch. `missing` (a 404 or a
@@ -20,6 +20,10 @@ export async function fetchFileFromDefaultBranch(
   repo: string,
   path: string
 ): Promise<RepoFileResult> {
+  if (!isGitHubConfigured()) {
+    return { ok: false, missing: false, reason: "GitHub is not configured" };
+  }
+
   try {
     const octokit = await getOctokit();
     const { data } = await octokit.rest.repos.getContent({ owner, repo, path });
