@@ -12,6 +12,8 @@ export interface FleetRows {
   slots: number;
   /** Daily estate-wide autonomous spend cap in USD */
   dailyCapUsd: number;
+  /** Discord guild for deep links into project channels; null = no Discord */
+  discordGuildId: string | null;
   projects: FleetProjectRow[];
   runs: FleetRunRow[];
   tasks: FleetTaskRow[];
@@ -25,6 +27,7 @@ export interface FleetProjectRow {
   autonomyEnabled: boolean;
   preflightStatus: "passing" | "failing" | null;
   preflightReason: string | null;
+  discordChannelId: string | null;
 }
 
 export interface FleetRunRow {
@@ -72,6 +75,28 @@ export interface FleetTaskRow {
   updatedAt: Date;
 }
 
+/** One attempt is allowed 3 strikes before the ticket goes ready-for-human */
+export const MAX_ATTEMPTS = 3;
+
+export type NeedsYouCause =
+  | "blocked"
+  | "signoff"
+  | "exhausted"
+  | "cap"
+  | "preflight";
+
+export interface NeedsYouItem {
+  cause: NeedsYouCause;
+  /** Severity stripe: amber = waiting on you, red = cap breached / exhausted */
+  severity: "amber" | "red";
+  /** Mono context line, e.g. "lemons #34 · attempt 2/3" */
+  context: string;
+  /** One-line body */
+  body: string;
+  /** Read-and-route v1: exactly one link out, or none */
+  action: { label: string; href: string } | null;
+}
+
 export type SlotSegment =
   | { occupant: "free" }
   | {
@@ -95,7 +120,7 @@ export interface FleetView {
     capUsd: number;
     capPaused: boolean;
   };
-  needsYou: never[];
+  needsYou: NeedsYouItem[];
   running: never[];
   recent: { windowDays: number; totalUsd: number; items: never[] };
   queue: { readyForAgent: number | null };
@@ -114,6 +139,17 @@ function ticketLabel(githubIssue: string | null): string | null {
   const match = githubIssue?.match(/#(\d+)$/);
   return match ? `#${match[1]}` : null;
 }
+
+/** "owner/repo#34" -> "https://github.com/owner/repo/issues/34" */
+function issueUrl(githubIssue: string): string | null {
+  const match = githubIssue.match(/^([^/#]+)\/([^/#]+)#(\d+)$/);
+  return match
+    ? `https://github.com/${match[1]}/${match[2]}/issues/${match[3]}`
+    : null;
+}
+
+const RECENT_WINDOW_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 export function buildFleetView(rows: FleetRows): FleetView {
   const projectById = new Map(rows.projects.map((p) => [p.id, p]));
@@ -144,6 +180,121 @@ export function buildFleetView(rows: FleetRows): FleetView {
     .reduce((sum, r) => sum + r.totalCostUsd, 0);
   const capPaused = todayUsd >= rows.dailyCapUsd;
 
+  // A run's face in the UI is its latest task — the live container if one
+  // exists, otherwise the most recently created pass.
+  const tasksOfRun = (runId: string) =>
+    rows.tasks.filter((t) => t.runId === runId);
+  const currentTaskOf = (runId: string) => {
+    const owned = tasksOfRun(runId);
+    return (
+      owned.find((t) => t.containerStatus !== null) ??
+      owned.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] ??
+      null
+    );
+  };
+
+  const runContext = (run: FleetRunRow) =>
+    `${projectName(run.projectId)} ${ticketLabel(run.githubIssue) ?? run.githubIssue} · attempt ${run.attempt}/${MAX_ATTEMPTS}`;
+
+  // Decision locked in review: actions are read-and-route in v1. A blocked
+  // question deep-links to the Discord channel where a reply becomes the next
+  // turn; without a Discord route it falls back to the in-app task chat.
+  const blockedAction = (run: FleetRunRow): NeedsYouItem["action"] => {
+    const channelId = projectById.get(run.projectId)?.discordChannelId;
+    if (rows.discordGuildId && channelId) {
+      return {
+        label: "Answer in Discord",
+        href: `https://discord.com/channels/${rows.discordGuildId}/${channelId}`,
+      };
+    }
+    const task = currentTaskOf(run.id);
+    return task ? { label: "Open task", href: `/tasks/${task.id}` } : null;
+  };
+
+  // Ordered by what to do next: the fleet-wide pause first, then a parked
+  // agent waiting on an answer, then reviews, then post-mortems, then config.
+  const needsYou: NeedsYouItem[] = [];
+
+  if (capPaused) {
+    needsYou.push({
+      cause: "cap",
+      severity: "red",
+      context: `$${todayUsd.toFixed(2)} / $${rows.dailyCapUsd.toFixed(2)} today`,
+      body: "Autonomous pickup paused until midnight — interactive work unaffected",
+      action: null,
+    });
+  }
+
+  for (const run of rows.runs.filter((r) => r.status === "blocked")) {
+    needsYou.push({
+      cause: "blocked",
+      severity: "amber",
+      context: runContext(run),
+      body: run.blockedQuestion ?? "Agent asked a question",
+      action: blockedAction(run),
+    });
+  }
+
+  for (const run of rows.runs.filter((r) => r.status === "gated")) {
+    needsYou.push({
+      cause: "signoff",
+      severity: "amber",
+      context: runContext(run),
+      body: run.pullRequestNumber
+        ? `PR #${run.pullRequestNumber} waits for your sign-off`
+        : "PR waits for your sign-off",
+      action: run.pullRequestUrl
+        ? {
+            label: run.pullRequestNumber
+              ? `Review PR #${run.pullRequestNumber}`
+              : "Review PR",
+            href: run.pullRequestUrl,
+          }
+        : null,
+    });
+  }
+
+  // An exhausted ticket needs a human until either they re-arm it (a newer
+  // run exists for the issue) or it ages out of the recent window — the DB
+  // can't see the tracker, so the window is the release valve.
+  const windowStart = rows.now.getTime() - RECENT_WINDOW_DAYS * DAY_MS;
+  const exhausted = rows.runs.filter(
+    (r) =>
+      r.status === "exhausted" &&
+      (r.finishedAt?.getTime() ?? 0) >= windowStart &&
+      !rows.runs.some(
+        (newer) =>
+          newer.githubIssue === r.githubIssue &&
+          newer.claimedAt.getTime() > r.claimedAt.getTime()
+      )
+  );
+  for (const run of exhausted) {
+    const href = issueUrl(run.githubIssue);
+    needsYou.push({
+      cause: "exhausted",
+      severity: "red",
+      context: runContext(run),
+      body: "Attempts exhausted — ticket is ready-for-human",
+      action: href
+        ? { label: `Open issue ${ticketLabel(run.githubIssue)}`, href }
+        : null,
+    });
+  }
+
+  // Preflight only matters where autonomy is asked for — a dormant project
+  // failing preflight needs nothing from anyone.
+  for (const project of rows.projects.filter(
+    (p) => p.autonomyEnabled && p.preflightStatus === "failing"
+  )) {
+    needsYou.push({
+      cause: "preflight",
+      severity: "amber",
+      context: project.name,
+      body: `Preflight failing: ${project.preflightReason ?? "reason unknown"}`,
+      action: { label: "Open settings", href: "/settings" },
+    });
+  }
+
   return {
     generatedAt: rows.now.toISOString(),
     slots: {
@@ -153,7 +304,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
       segments,
     },
     spend: { todayUsd, capUsd: rows.dailyCapUsd, capPaused },
-    needsYou: [],
+    needsYou,
     running: [],
     recent: { windowDays: 7, totalUsd: 0, items: [] },
     queue: { readyForAgent: rows.readyForAgentCount },
