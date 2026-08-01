@@ -56,18 +56,26 @@ export interface AutonomySnapshot {
   inFlightClaims: string[];
 }
 
-export type Action = {
-  type: "claimIssue";
-  issueRef: string;
-  projectId: string;
-  issueNumber: number;
-  issueTitle: string;
-  issueBody: string;
-  attempt: number;
-  mode: "autonomous";
-  budgetUsd: number;
-  workflow: WorkflowSelection;
-};
+export type PauseReason =
+  | "autonomy-off-global"
+  | "autonomy-off-project"
+  | "preflight-failing"
+  | "no-slots";
+
+export type Action =
+  | {
+      type: "claimIssue";
+      issueRef: string;
+      projectId: string;
+      issueNumber: number;
+      issueTitle: string;
+      issueBody: string;
+      attempt: number;
+      mode: "autonomous";
+      budgetUsd: number;
+      workflow: WorkflowSelection;
+    }
+  | { type: "pausePickup"; reason: PauseReason; detail?: string };
 
 /** Allowed by default: the repo owner; extended by the configured allow-list. */
 function isAuthorAllowed(candidate: CandidateIssue, allowedAuthors: string[]): boolean {
@@ -79,15 +87,37 @@ function isAuthorAllowed(candidate: CandidateIssue, allowedAuthors: string[]): b
 export function decideNext(snapshot: AutonomySnapshot): Action[] {
   const actions: Action[] = [];
 
-  if (!snapshot.autonomyEnabledGlobal) return actions;
+  if (snapshot.candidates.length === 0) return actions;
+
+  if (!snapshot.autonomyEnabledGlobal) {
+    actions.push({ type: "pausePickup", reason: "autonomy-off-global" });
+    return actions;
+  }
+
+  const pausedProjects = new Set<string>();
+  const pauseProjectOnce = (project: ProjectSnapshot, reason: PauseReason, detail: string) => {
+    if (pausedProjects.has(project.repo)) return;
+    pausedProjects.add(project.repo);
+    actions.push({ type: "pausePickup", reason, detail });
+  };
 
   const eligible: Array<{ candidate: CandidateIssue; project: ProjectSnapshot }> = [];
   for (const candidate of snapshot.candidates) {
     const project = snapshot.projects.find((p) => p.repo === candidate.repo);
     if (!project) continue;
-    if (!project.autonomyEnabled) continue;
+    if (!project.autonomyEnabled) {
+      pauseProjectOnce(project, "autonomy-off-project", project.repo);
+      continue;
+    }
     // Fail closed: never-checked preflight is as ineligible as a failing one
-    if (project.preflightStatus !== "passing") continue;
+    if (project.preflightStatus !== "passing") {
+      pauseProjectOnce(
+        project,
+        "preflight-failing",
+        `${project.repo}: ${project.preflightReason ?? "preflight has never run"}`
+      );
+      continue;
+    }
     if (!isAuthorAllowed(candidate, snapshot.allowedAuthors)) continue;
     if (candidate.hasOpenBlocker) continue;
     if (candidate.hasActiveRun) continue;
@@ -106,9 +136,20 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       a.candidate.issueRef.localeCompare(b.candidate.issueRef)
   );
 
-  const freeSlots = Math.max(0, snapshot.slots.total - snapshot.slots.occupied);
+  if (eligible.length === 0) return actions;
 
-  for (const { candidate, project } of eligible.slice(0, freeSlots)) {
+  // Priority order: in-flight work already holds its slot (it is counted in
+  // `occupied`), a queued interactive task reserves the next free slot, and
+  // only what remains may go to new autonomous claims.
+  const freeSlots = Math.max(0, snapshot.slots.total - snapshot.slots.occupied);
+  const claimableSlots = Math.max(0, freeSlots - snapshot.queuedInteractiveCount);
+
+  if (claimableSlots === 0) {
+    actions.push({ type: "pausePickup", reason: "no-slots" });
+    return actions;
+  }
+
+  for (const { candidate, project } of eligible.slice(0, claimableSlots)) {
     actions.push({
       type: "claimIssue",
       issueRef: candidate.issueRef,

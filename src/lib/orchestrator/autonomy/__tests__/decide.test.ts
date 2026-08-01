@@ -214,6 +214,176 @@ describe("decideNext — eligibility", () => {
   });
 });
 
+describe("decideNext — priority order", () => {
+  it("reserves the next free slot for a queued interactive task", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 2, occupied: 1, occupants: ["interactive: Fix nav"] },
+        queuedInteractiveCount: 1,
+      })
+    );
+
+    expect(claims(actions)).toEqual([]);
+  });
+
+  it("claims with slots left over after interactive reservations", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 3, occupied: 1, occupants: ["interactive: Fix nav"] },
+        queuedInteractiveCount: 1,
+        candidates: [
+          makeCandidate(),
+          makeCandidate({
+            issueRef: "acme/widgets#8",
+            number: 8,
+            armedAt: new Date(2026, 7, 1, 10, 0, 0),
+          }),
+        ],
+      })
+    );
+
+    expect(claims(actions)).toHaveLength(1);
+    expect(claims(actions)[0]).toMatchObject({ issueRef: "acme/widgets#7" });
+  });
+
+  it("never claims past in-flight work — occupied slots stay occupied", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        slots: {
+          total: 2,
+          occupied: 2,
+          occupants: ["implement: acme/widgets#1", "interactive: Fix nav"],
+        },
+        queuedInteractiveCount: 1,
+      })
+    );
+
+    expect(claims(actions)).toEqual([]);
+  });
+});
+
+describe("decideNext — pause reasons", () => {
+  function pauses(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "pausePickup");
+  }
+
+  it("pauses with 'autonomy-off-global' when the kill switch is off", () => {
+    const actions = decideNext(makeSnapshot({ autonomyEnabledGlobal: false }));
+
+    expect(actions).toEqual([
+      { type: "pausePickup", reason: "autonomy-off-global" },
+    ]);
+  });
+
+  it("pauses a project with 'autonomy-off-project' without stopping others", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        projects: [
+          makeProject({ autonomyEnabled: false }),
+          makeProject({ id: "proj-2", repo: "acme/gadgets" }),
+        ],
+        candidates: [
+          makeCandidate(),
+          makeCandidate({
+            issueRef: "acme/gadgets#3",
+            repo: "acme/gadgets",
+            number: 3,
+            armedAt: new Date(2026, 7, 1, 10, 0, 0),
+          }),
+        ],
+      })
+    );
+
+    expect(pauses(actions)).toEqual([
+      {
+        type: "pausePickup",
+        reason: "autonomy-off-project",
+        detail: "acme/widgets",
+      },
+    ]);
+    expect(claims(actions)).toHaveLength(1);
+    expect(claims(actions)[0]).toMatchObject({ issueRef: "acme/gadgets#3" });
+  });
+
+  it("pauses a project with 'preflight-failing' and names the reason", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        projects: [
+          makeProject({
+            preflightStatus: "failing",
+            preflightReason: "reviewer is not a collaborator",
+          }),
+        ],
+      })
+    );
+
+    expect(pauses(actions)).toEqual([
+      {
+        type: "pausePickup",
+        reason: "preflight-failing",
+        detail: "acme/widgets: reviewer is not a collaborator",
+      },
+    ]);
+  });
+
+  it("pauses a never-checked preflight distinctly from a passing one", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        projects: [makeProject({ preflightStatus: null })],
+      })
+    );
+
+    expect(pauses(actions)).toEqual([
+      {
+        type: "pausePickup",
+        reason: "preflight-failing",
+        detail: "acme/widgets: preflight has never run",
+      },
+    ]);
+  });
+
+  it("pauses each project once, not once per candidate", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        projects: [makeProject({ autonomyEnabled: false })],
+        candidates: [
+          makeCandidate(),
+          makeCandidate({ issueRef: "acme/widgets#8", number: 8 }),
+        ],
+      })
+    );
+
+    expect(pauses(actions)).toHaveLength(1);
+  });
+
+  it("pauses with 'no-slots' when eligible work exists but no slot is claimable", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 2, occupied: 2, occupants: ["a", "b"] },
+        saturationAnnounced: true,
+      })
+    );
+
+    expect(actions).toEqual([{ type: "pausePickup", reason: "no-slots" }]);
+  });
+
+  it("does not pause with 'no-slots' when there is nothing eligible to claim", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 2, occupied: 2, occupants: ["a", "b"] },
+        saturationAnnounced: true,
+        candidates: [],
+      })
+    );
+
+    expect(pauses(actions)).toEqual([]);
+  });
+
+  it("emits no pause when everything is claimable", () => {
+    expect(pauses(decideNext(makeSnapshot()))).toEqual([]);
+  });
+});
+
 describe("decideNext — ordering and slots", () => {
   it("claims oldest-armed-first, globally across projects", () => {
     // Armed order is the reverse of both creation order and issue number,
