@@ -170,12 +170,7 @@ export async function startTask(taskId: string): Promise<void> {
     await postIdleNotification(taskId);
   } catch (err) {
     updateTask(taskId, { status: "failed", containerStatus: null });
-    if (task.runId) {
-      db.update(runs)
-        .set({ status: "failed", finishedAt: new Date() })
-        .where(eq(runs.id, task.runId))
-        .run();
-    }
+    if (task.runId) finishRun(task.runId, "failed");
     insertSystemMessage(
       taskId,
       `Error: ${err instanceof Error ? err.message : String(err)}`
@@ -427,12 +422,7 @@ export async function completeTask(taskId: string): Promise<void> {
     }
 
     updateTask(taskId, { status: "failed", containerStatus: null });
-    if (task.runId) {
-      db.update(runs)
-        .set({ status: "failed", finishedAt: new Date() })
-        .where(eq(runs.id, task.runId))
-        .run();
-    }
+    if (task.runId) finishRun(task.runId, "failed");
   } finally {
     activeTasks.delete(taskId);
     if (running && !getConfig().keepContainers) {
@@ -459,13 +449,8 @@ export async function cancelTask(taskId: string): Promise<void> {
     containerStatus: null,
   });
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
-  if (task?.runId) {
-    // Owner-cancelled runs don't consume an attempt: cancelled is not failed
-    db.update(runs)
-      .set({ status: "cancelled", finishedAt: new Date() })
-      .where(eq(runs.id, task.runId))
-      .run();
-  }
+  // Owner-cancelled runs don't consume an attempt: cancelled is not failed
+  if (task?.runId) finishRun(task.runId, "cancelled");
   insertSystemMessage(taskId, "Task cancelled by user.");
 }
 
@@ -661,6 +646,14 @@ function updateTask(
   db.update(tasks)
     .set({ ...fields, updatedAt: new Date() })
     .where(eq(tasks.id, taskId))
+    .run();
+}
+
+/** Terminalize a run: failed consumes an attempt, cancelled does not. */
+function finishRun(runId: string, status: "failed" | "cancelled"): void {
+  db.update(runs)
+    .set({ status, finishedAt: new Date() })
+    .where(eq(runs.id, runId))
     .run();
 }
 

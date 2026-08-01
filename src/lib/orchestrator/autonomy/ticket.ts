@@ -69,3 +69,13 @@ export function parseBlockedByRefs(body: string): number[] {
 export function shouldCreateInteractiveTask(labels: string[]): boolean {
   return !labels.includes(ARMING_LABEL);
 }
+
+/** GitHub delivers labels as strings or `{ name }` objects depending on the
+ * surface (webhook payload vs REST); normalize to plain names. */
+export function labelNames(
+  labels: Array<string | { name?: string | null }> | null | undefined
+): string[] {
+  return (labels ?? [])
+    .map((l) => (typeof l === "string" ? l : (l.name ?? "")))
+    .filter(Boolean);
+}

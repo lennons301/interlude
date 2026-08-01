@@ -9,12 +9,12 @@ import { isGitHubConfigured } from "@/lib/github/client";
 import { runAutonomySweep } from "@/lib/orchestrator/autonomy/sweep";
 import {
   ARMING_LABEL,
+  INTERACTIVE_TRIGGER_LABEL,
+  labelNames,
   shouldCreateInteractiveTask,
 } from "@/lib/orchestrator/autonomy/ticket";
 
 export const dynamic = "force-dynamic";
-
-const TRIGGER_LABEL = "interlude";
 
 export async function POST(request: Request) {
   if (!isGitHubConfigured()) {
@@ -44,7 +44,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, triggered: "autonomy-sweep" });
     }
 
-    if (label !== TRIGGER_LABEL) {
+    if (label !== INTERACTIVE_TRIGGER_LABEL) {
       return NextResponse.json({ ok: true, skipped: "wrong label" });
     }
 
@@ -53,10 +53,7 @@ export async function POST(request: Request) {
 
     // When both labels are present, ready-for-agent wins: the issue belongs
     // to the autonomy loop and no duplicate interactive task is created.
-    const labelNames: string[] = (issue.labels ?? []).map(
-      (l: { name?: string } | string) => (typeof l === "string" ? l : (l.name ?? ""))
-    );
-    if (!shouldCreateInteractiveTask(labelNames)) {
+    if (!shouldCreateInteractiveTask(labelNames(issue.labels))) {
       return NextResponse.json({ ok: true, skipped: "ready-for-agent wins" });
     }
     const repoFullName = repo.full_name; // "owner/repo"
