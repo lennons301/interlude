@@ -7,7 +7,7 @@
 
 import { db } from "@/db";
 import { projects, runs, tasks } from "@/db/schema";
-import { and, eq, isNotNull } from "drizzle-orm";
+import { eq, isNotNull } from "drizzle-orm";
 import { newId } from "../../ulid";
 import { getConfig } from "../../config";
 import { getOctokit, isGitHubConfigured } from "../../github/client";
@@ -102,10 +102,10 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     .where(isNotNull(projects.githubRepo))
     .all();
 
-  const queuedInteractive = db
-    .select({ id: tasks.id })
+  const queuedTasks = db
+    .select({ kind: tasks.kind })
     .from(tasks)
-    .where(and(eq(tasks.status, "queued"), eq(tasks.kind, "interactive")))
+    .where(eq(tasks.status, "queued"))
     .all();
 
   const allRuns = db.select().from(runs).all();
@@ -170,7 +170,8 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     maxAttempts: MAX_ATTEMPTS,
     allowedAuthors: config.autonomyAllowedAuthors,
     slots: { total: capacity.slots, occupied: occupiedSlots(), occupants },
-    queuedInteractiveCount: queuedInteractive.length,
+    queuedInteractiveCount: queuedTasks.filter((t) => t.kind === "interactive").length,
+    queuedImplementCount: queuedTasks.filter((t) => t.kind === "implement").length,
     saturationAnnounced,
     projects: registered.map((p) => ({
       id: p.id,

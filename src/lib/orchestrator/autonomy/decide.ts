@@ -48,6 +48,9 @@ export interface AutonomySnapshot {
   slots: { total: number; occupied: number; occupants: string[] };
   /** Queued interactive tasks waiting for a slot — they outrank new claims */
   queuedInteractiveCount: number;
+  /** Implement tasks already claimed but not yet started — each has a slot
+   * spoken for, so new claims must not double-book it */
+  queuedImplementCount: number;
   /** Whether the current saturation transition was already announced */
   saturationAnnounced: boolean;
   projects: ProjectSnapshot[];
@@ -159,10 +162,14 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   if (eligible.length === 0) return actions;
 
   // Priority order: in-flight work already holds its slot (it is counted in
-  // `occupied`), a queued interactive task reserves the next free slot, and
+  // `occupied`), a queued interactive task reserves the next free slot, an
+  // already-claimed implement task reserves the slot it is waiting for, and
   // only what remains may go to new autonomous claims.
   const freeSlots = Math.max(0, snapshot.slots.total - snapshot.slots.occupied);
-  const claimableSlots = Math.max(0, freeSlots - snapshot.queuedInteractiveCount);
+  const claimableSlots = Math.max(
+    0,
+    freeSlots - snapshot.queuedInteractiveCount - snapshot.queuedImplementCount
+  );
 
   if (claimableSlots === 0) {
     actions.push({ type: "pausePickup", reason: "no-slots" });

@@ -47,6 +47,7 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     allowedAuthors: [],
     slots: { total: 2, occupied: 0, occupants: [] },
     queuedInteractiveCount: 0,
+    queuedImplementCount: 0,
     saturationAnnounced: false,
     projects: [makeProject()],
     candidates: [makeCandidate()],
@@ -258,6 +259,20 @@ describe("decideNext — priority order", () => {
 
     expect(claims(actions)).toHaveLength(1);
     expect(claims(actions)[0]).toMatchObject({ issueRef: "acme/widgets#7" });
+  });
+
+  it("reserves slots for implement tasks already claimed but not yet started", () => {
+    // A claim queues its task for the 2s poller; until the poller starts it,
+    // the slot it will take is not in `occupied`. A webhook-triggered sweep
+    // landing in that window must not claim a second issue for the same slot.
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 2, occupied: 1, occupants: ["implement: acme/widgets#1"] },
+        queuedImplementCount: 1,
+      })
+    );
+
+    expect(claims(actions)).toEqual([]);
   });
 
   it("never claims past in-flight work — occupied slots stay occupied", () => {
