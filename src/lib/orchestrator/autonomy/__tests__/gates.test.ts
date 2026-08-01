@@ -48,6 +48,9 @@ describe("matchesGateGlob — parity with the platform's bash evaluator", () => 
     ["a/b.txt", "a[/x]b.txt", true],
     ["file1.ts", "file[!0-9].ts", false],
     ["fileA.ts", "file[!0-9].ts", true],
+    // Bash * matches absolutely anything — a newline smuggled into a
+    // filename must not slip a gated path past its glob
+    ["evil\nname/schema.sql", "*.sql", true],
   ];
 
   it.each(verdicts)("%s vs %s -> %s", (path, glob, matches) => {

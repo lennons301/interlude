@@ -145,7 +145,10 @@ function bashPatternToRegex(pattern: string): RegExp {
       i++;
     }
   }
-  return new RegExp(`^${re}$`);
+  // The `s` flag keeps `.` matching newlines: bash patterns have no notion
+  // of a special character, and a newline smuggled into a filename must not
+  // slip a gated path past its glob (that would fail open).
+  return new RegExp(`^${re}$`, "s");
 }
 
 /**
