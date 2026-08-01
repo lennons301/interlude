@@ -54,13 +54,14 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     )
     .all();
 
-  // Turn counts only matter for live cards: the initial turn plus one per
-  // delivered follow-up message.
-  const liveIds = taskRows
-    .filter((t) => t.containerStatus !== null)
+  // Turns = the initial prompt plus one per delivered follow-up, counted for
+  // every started task — not just live containers, so a blocked run whose
+  // container died across a restart still shows its real turn count.
+  const startedIds = taskRows
+    .filter((t) => t.status !== "queued")
     .map((t) => t.id);
   const deliveredCounts = new Map<string, number>();
-  if (liveIds.length > 0) {
+  if (startedIds.length > 0) {
     const counted = db
       .select({
         taskId: messages.taskId,
@@ -69,7 +70,7 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
       .from(messages)
       .where(
         and(
-          inArray(messages.taskId, liveIds),
+          inArray(messages.taskId, startedIds),
           eq(messages.role, "user"),
           isNotNull(messages.deliveredAt)
         )
@@ -103,7 +104,7 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
       containerStatus: t.containerStatus,
       totalCostUsd: t.totalCostUsd,
       turns:
-        t.containerStatus !== null ? 1 + (deliveredCounts.get(t.id) ?? 0) : 0,
+        t.status === "queued" ? 0 : 1 + (deliveredCounts.get(t.id) ?? 0),
       githubIssue: t.githubIssue,
       pullRequestNumber: t.pullRequestNumber,
       pullRequestUrl: t.pullRequestUrl,
