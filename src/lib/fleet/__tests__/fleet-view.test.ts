@@ -200,3 +200,58 @@ describe("buildFleetView — slots", () => {
     expect(view.slots.segments).toHaveLength(2);
   });
 });
+
+describe("buildFleetView — spend", () => {
+  const YESTERDAY_11PM = new Date(2026, 6, 31, 23, 0, 0);
+
+  it("sums today's run spend against the cap", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          makeRun({ id: "r1", totalCostUsd: 12.5 }),
+          makeRun({ id: "r2", mode: "supervised", totalCostUsd: 7.25, status: "merged", finishedAt: TODAY_9AM }),
+        ],
+      })
+    );
+
+    expect(view.spend.todayUsd).toBeCloseTo(19.75);
+    expect(view.spend.capUsd).toBe(500);
+    expect(view.spend.capPaused).toBe(false);
+  });
+
+  it("excludes runs claimed before local midnight from today's spend", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          makeRun({ id: "r1", claimedAt: YESTERDAY_11PM, startedAt: YESTERDAY_11PM, totalCostUsd: 50 }),
+          makeRun({ id: "r2", totalCostUsd: 3 }),
+        ],
+      })
+    );
+
+    expect(view.spend.todayUsd).toBeCloseTo(3);
+  });
+
+  it("excludes interactive task spend — exempt by construction", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject()],
+        tasks: [makeTask({ totalCostUsd: 42.42 })],
+        runs: [makeRun({ id: "r1", totalCostUsd: 1.5 })],
+      })
+    );
+
+    expect(view.spend.todayUsd).toBeCloseTo(1.5);
+  });
+
+  it("pauses the fleet when today's spend reaches the cap", () => {
+    const view = buildFleetView(
+      baseRows({
+        dailyCapUsd: 500,
+        runs: [makeRun({ id: "r1", totalCostUsd: 500 })],
+      })
+    );
+
+    expect(view.spend.capPaused).toBe(true);
+  });
+});

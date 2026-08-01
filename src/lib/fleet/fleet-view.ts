@@ -101,6 +101,14 @@ export interface FleetView {
   queue: { readyForAgent: number | null };
 }
 
+/** Start of the local calendar day containing `now` — the daily autonomous
+ * spend cap resets at local midnight. */
+export function startOfLocalDay(now: Date): Date {
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  return start;
+}
+
 /** "owner/repo#34" -> "#34"; null when the ref has no issue number */
 function ticketLabel(githubIssue: string | null): string | null {
   const match = githubIssue?.match(/#(\d+)$/);
@@ -127,6 +135,15 @@ export function buildFleetView(rows: FleetRows): FleetView {
   });
   while (segments.length < rows.slots) segments.push({ occupant: "free" });
 
+  // Today's autonomous spend mirrors todayAutonomousSpendUsd: a sum over
+  // runs claimed since local midnight. Interactive tasks have no run, which
+  // exempts them by construction rather than by a filter.
+  const dayStart = startOfLocalDay(rows.now).getTime();
+  const todayUsd = rows.runs
+    .filter((r) => r.claimedAt.getTime() >= dayStart)
+    .reduce((sum, r) => sum + r.totalCostUsd, 0);
+  const capPaused = todayUsd >= rows.dailyCapUsd;
+
   return {
     generatedAt: rows.now.toISOString(),
     slots: {
@@ -135,7 +152,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
       saturated: occupants.length >= rows.slots,
       segments,
     },
-    spend: { todayUsd: 0, capUsd: rows.dailyCapUsd, capPaused: false },
+    spend: { todayUsd, capUsd: rows.dailyCapUsd, capPaused },
     needsYou: [],
     running: [],
     recent: { windowDays: 7, totalUsd: 0, items: [] },
