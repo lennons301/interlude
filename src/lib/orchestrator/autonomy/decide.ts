@@ -7,6 +7,7 @@
  * (sweep.ts) is a thin performer of the Actions returned here.
  */
 
+import { evaluateGates, type GateConfig } from "./gates";
 import { selectWorkflow, type WorkflowSelection } from "./ticket";
 
 export interface ProjectSnapshot {
@@ -38,6 +39,24 @@ export interface CandidateIssue {
   hasActiveRun: boolean;
 }
 
+/**
+ * A finished implement pass whose PR awaits its gate decision. The configs
+ * were read from default branches (never the PR's head) and parsed by the
+ * gatherer; a parse or read failure arrives as `ok: false` so the reducer
+ * can fail closed instead of guessing.
+ */
+export interface PendingGateEvaluation {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  prNumber: number;
+  /** Paths the PR changes, from the GitHub API */
+  changedPaths: string[];
+  gateConfig:
+    | { ok: true; estate: GateConfig; extension: GateConfig }
+    | { ok: false; reason: string };
+}
+
 export interface AutonomySnapshot {
   now: Date;
   autonomyEnabledGlobal: boolean;
@@ -57,6 +76,11 @@ export interface AutonomySnapshot {
   candidates: CandidateIssue[];
   /** Issue refs whose claim is currently being executed (idempotency) */
   inFlightClaims: string[];
+  /** Finished implement passes whose PRs await a gate decision */
+  pendingGateEvaluations: PendingGateEvaluation[];
+  /** Run IDs whose gate-config failure was already announced — the owner is
+   * told once per failure, not once per sweep */
+  announcedGateConfigErrors: string[];
 }
 
 export type PauseReason =
@@ -83,6 +107,19 @@ export type Action =
       type: "notify";
       event: "slots-saturated";
       payload: { occupied: number; total: number; occupants: string[] };
+    }
+  | {
+      type: "gatePr";
+      runId: string;
+      issueRef: string;
+      prNumber: number;
+      categories: string[];
+    }
+  | { type: "armAutoMerge"; runId: string; issueRef: string; prNumber: number }
+  | {
+      type: "notify";
+      event: "gate-config-error";
+      payload: { runId: string; issueRef: string; prNumber: number; reason: string };
     };
 
 /** Allowed by default: the repo owner; extended by the configured allow-list. */
@@ -108,6 +145,51 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
         occupants: snapshot.slots.occupants,
       },
     });
+  }
+
+  // Gate decisions come before new claims: finish in-flight work first.
+  // Whether an agent-authored PR may merge without a human is decided here,
+  // by data — changed paths against config from default branches. A config
+  // that is missing or unparseable fails closed: nothing armed, the owner
+  // told (once), and the run left pending so a config fix picks it up again.
+  for (const pending of snapshot.pendingGateEvaluations) {
+    if (!pending.gateConfig.ok) {
+      if (!snapshot.announcedGateConfigErrors.includes(pending.runId)) {
+        actions.push({
+          type: "notify",
+          event: "gate-config-error",
+          payload: {
+            runId: pending.runId,
+            issueRef: pending.issueRef,
+            prNumber: pending.prNumber,
+            reason: pending.gateConfig.reason,
+          },
+        });
+      }
+      continue;
+    }
+
+    const categories = evaluateGates(
+      pending.gateConfig.estate,
+      pending.gateConfig.extension,
+      pending.changedPaths
+    );
+    if (categories.length > 0) {
+      actions.push({
+        type: "gatePr",
+        runId: pending.runId,
+        issueRef: pending.issueRef,
+        prNumber: pending.prNumber,
+        categories,
+      });
+    } else {
+      actions.push({
+        type: "armAutoMerge",
+        runId: pending.runId,
+        issueRef: pending.issueRef,
+        prNumber: pending.prNumber,
+      });
+    }
   }
 
   if (snapshot.candidates.length === 0) return actions;
