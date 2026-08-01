@@ -35,7 +35,11 @@ Interlude is a self-hosted, agent-first development platform. You dispatch tasks
 
 ## Database
 
-Schema at `src/db/schema.ts`. Three tables: `projects`, `tasks`, `messages`.
+Schema at `src/db/schema.ts`. Four tables: `projects`, `tasks`, `messages`, `runs`.
+
+- `runs` is the Phase 5 autonomy ledger — one row per attempt at one ticket; a run owns one or more tasks. Interactive tasks have no run, which exempts them from the daily autonomous spend cap by construction (`src/lib/orchestrator/spend.ts`)
+- `tasks.kind` distinguishes interactive (default) / implement / review / triage; `tasks.runId` links a task to its run
+- `projects` carries `autonomyEnabled` (default off) plus cached `preflightStatus`/`preflightReason`
 
 - Run migrations: `npx drizzle-kit push`
 - Generate migrations: `npx drizzle-kit generate`
