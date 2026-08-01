@@ -6,6 +6,11 @@ import { newId } from "@/lib/ulid";
 import { verifyWebhookSignature } from "@/lib/github/webhooks";
 import { commentOnIssue } from "@/lib/github/issues";
 import { isGitHubConfigured } from "@/lib/github/client";
+import { runAutonomySweep } from "@/lib/orchestrator/autonomy/sweep";
+import {
+  ARMING_LABEL,
+  shouldCreateInteractiveTask,
+} from "@/lib/orchestrator/autonomy/ticket";
 
 export const dynamic = "force-dynamic";
 
@@ -28,12 +33,32 @@ export async function POST(request: Request) {
 
   if (event === "issues" && payload.action === "labeled") {
     const label = payload.label?.name;
+
+    // ready-for-agent is the launch button, only ever pressed by a human.
+    // The webhook is just latency: it kicks the same sweep -> reducer path
+    // the reconciliation interval uses, so there is one decision path.
+    if (label === ARMING_LABEL) {
+      runAutonomySweep().catch((err) =>
+        console.error("[autonomy] Webhook-triggered sweep failed:", err)
+      );
+      return NextResponse.json({ ok: true, triggered: "autonomy-sweep" });
+    }
+
     if (label !== TRIGGER_LABEL) {
       return NextResponse.json({ ok: true, skipped: "wrong label" });
     }
 
     const issue = payload.issue;
     const repo = payload.repository;
+
+    // When both labels are present, ready-for-agent wins: the issue belongs
+    // to the autonomy loop and no duplicate interactive task is created.
+    const labelNames: string[] = (issue.labels ?? []).map(
+      (l: { name?: string } | string) => (typeof l === "string" ? l : (l.name ?? ""))
+    );
+    if (!shouldCreateInteractiveTask(labelNames)) {
+      return NextResponse.json({ ok: true, skipped: "ready-for-agent wins" });
+    }
     const repoFullName = repo.full_name; // "owner/repo"
     const issueRef = `${repoFullName}#${issue.number}`;
 

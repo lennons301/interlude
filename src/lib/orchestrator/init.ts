@@ -5,6 +5,8 @@ import { newId } from "../ulid";
 import { getDocker, isDockerAvailable } from "../docker/client";
 import { startQueue } from "./queue";
 import { getCapacity } from "./capacity";
+import { startAutonomySweeps } from "./autonomy/sweep";
+import { getConfig } from "../config";
 import { isGitHubConfigured } from "../github/client";
 import { isDiscordConfigured, startDiscordBot } from "../discord/client";
 
@@ -131,6 +133,17 @@ export async function initOrchestrator(): Promise<void> {
     await recoverOrphanedTasks();
     await reapStaleContainers();
     startQueue();
+
+    // Autonomous pickup: boot sweep + reconciliation interval. The webhook
+    // is only latency on top of this — the sweep is the backbone.
+    if (getConfig().autonomyEnabled && isGitHubConfigured()) {
+      startAutonomySweeps();
+    } else {
+      console.log(
+        "[autonomy] Autonomous pickup disabled" +
+          (getConfig().autonomyEnabled ? " (GitHub App not configured)" : " (AUTONOMY_ENABLED != true)")
+      );
+    }
 
     // Run the reaper every 5 minutes to catch any leaked containers
     setInterval(() => reapStaleContainers().catch(console.error), 5 * 60 * 1000);
