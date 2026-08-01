@@ -384,6 +384,65 @@ describe("decideNext — pause reasons", () => {
   });
 });
 
+describe("decideNext — slot saturation announcement", () => {
+  const saturated = {
+    total: 2,
+    occupied: 2,
+    occupants: ["implement: acme/widgets#1", "implement: acme/gadgets#3"],
+  };
+
+  it("announces saturation once when all slots become busy", () => {
+    const actions = decideNext(
+      makeSnapshot({ slots: saturated, candidates: [] })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "notify",
+        event: "slots-saturated",
+        payload: {
+          occupied: 2,
+          total: 2,
+          occupants: ["implement: acme/widgets#1", "implement: acme/gadgets#3"],
+        },
+      },
+    ]);
+  });
+
+  it("stays quiet while the already-announced saturation persists", () => {
+    const actions = decideNext(
+      makeSnapshot({ slots: saturated, saturationAnnounced: true, candidates: [] })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("does not announce while a slot is free", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 2, occupied: 1, occupants: ["interactive: Fix nav"] },
+        candidates: [],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("announces even when the kill switch is off — busy is busy", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        slots: saturated,
+        autonomyEnabledGlobal: false,
+        candidates: [],
+      })
+    );
+
+    expect(
+      actions.filter((a) => a.type === "notify" && a.event === "slots-saturated")
+    ).toHaveLength(1);
+  });
+});
+
 describe("decideNext — ordering and slots", () => {
   it("claims oldest-armed-first, globally across projects", () => {
     // Armed order is the reverse of both creation order and issue number,

@@ -75,7 +75,12 @@ export type Action =
       budgetUsd: number;
       workflow: WorkflowSelection;
     }
-  | { type: "pausePickup"; reason: PauseReason; detail?: string };
+  | { type: "pausePickup"; reason: PauseReason; detail?: string }
+  | {
+      type: "notify";
+      event: "slots-saturated";
+      payload: { occupied: number; total: number; occupants: string[] };
+    };
 
 /** Allowed by default: the repo owner; extended by the configured allow-list. */
 function isAuthorAllowed(candidate: CandidateIssue, allowedAuthors: string[]): boolean {
@@ -86,6 +91,21 @@ function isAuthorAllowed(candidate: CandidateIssue, allowedAuthors: string[]): b
 
 export function decideNext(snapshot: AutonomySnapshot): Action[] {
   const actions: Action[] = [];
+
+  // Announced once per transition into saturation — the executor clears the
+  // flag when a slot frees, so "both slots busy" is a visible state, not spam.
+  const saturated = snapshot.slots.occupied >= snapshot.slots.total;
+  if (saturated && !snapshot.saturationAnnounced) {
+    actions.push({
+      type: "notify",
+      event: "slots-saturated",
+      payload: {
+        occupied: snapshot.slots.occupied,
+        total: snapshot.slots.total,
+        occupants: snapshot.slots.occupants,
+      },
+    });
+  }
 
   if (snapshot.candidates.length === 0) return actions;
 
