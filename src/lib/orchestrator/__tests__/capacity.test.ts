@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveCapacity } from "../capacity";
+import { createLocalCapacityProvider, deriveCapacity } from "../capacity";
 
 const MiB = 1024 * 1024;
 const GiB = 1024 * MiB;
@@ -33,6 +33,11 @@ describe("deriveCapacity", () => {
       daemon: { memTotalBytes: 2 * GiB, cpuCount: 1 },
       slots: 1,
     },
+    {
+      name: "a daemon reporting garbage still yields the minimum of 1, never NaN",
+      daemon: { memTotalBytes: NaN, cpuCount: 0 },
+      slots: 1,
+    },
   ])("$name", ({ daemon, slots }) => {
     expect(deriveCapacity(daemon).slots).toBe(slots);
   });
@@ -60,5 +65,27 @@ describe("deriveCapacity", () => {
     const capacity = deriveCapacity({ memTotalBytes: 4 * GiB, cpuCount: 2 });
     expect(capacity.perAgentMemory).toBe(1_258_291_200);
     expect(capacity.cpuQuota).toBe(1_000_000_000);
+  });
+});
+
+describe("capacity provider", () => {
+  const twoSlots = deriveCapacity({ memTotalBytes: 4 * GiB, cpuCount: 2 });
+
+  it("reports a slot available while active agents are below the slot count", async () => {
+    const provider = createLocalCapacityProvider(twoSlots, () => 1);
+    await expect(provider.isSlotAvailable()).resolves.toBe(true);
+  });
+
+  it("reports no slot once every slot is occupied", async () => {
+    const provider = createLocalCapacityProvider(twoSlots, () => 2);
+    await expect(provider.isSlotAvailable()).resolves.toBe(false);
+  });
+
+  it("frees a slot when an active agent finishes", async () => {
+    let active = 2;
+    const provider = createLocalCapacityProvider(twoSlots, () => active);
+    await expect(provider.isSlotAvailable()).resolves.toBe(false);
+    active = 1;
+    await expect(provider.isSlotAvailable()).resolves.toBe(true);
   });
 });

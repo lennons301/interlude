@@ -42,10 +42,9 @@ export function deriveCapacity(
 ): DerivedCapacity {
   const perAgentMemory = DEFAULT_AGENT_MEMORY_MB * MiB;
   const available = daemon.memTotalBytes - DEFAULT_ORCHESTRATOR_RESERVE_MB * MiB;
-  const derived = Math.max(
-    1,
-    Math.min(Math.floor(available / perAgentMemory), daemon.cpuCount)
-  );
+  const byMemory = Math.floor(available / perAgentMemory);
+  const capped = Math.min(byMemory, daemon.cpuCount);
+  const derived = Number.isFinite(capped) ? Math.max(1, capped) : 1;
   const override = overrides.slots;
   const slots =
     override !== undefined && Number.isInteger(override) && override >= 1
@@ -53,4 +52,24 @@ export function deriveCapacity(
       : derived;
 
   return { slots, perAgentMemory, cpuQuota: DEFAULT_AGENT_CPUS * 1e9 };
+}
+
+/**
+ * The seam callers consume instead of querying Docker directly — Phase 7's
+ * on-demand remote compute answers the same question differently, so the
+ * answer is async even though the local provider is not.
+ */
+export interface CapacityProvider {
+  capacity: DerivedCapacity;
+  isSlotAvailable(): Promise<boolean>;
+}
+
+export function createLocalCapacityProvider(
+  capacity: DerivedCapacity,
+  activeCount: () => number
+): CapacityProvider {
+  return {
+    capacity,
+    isSlotAvailable: async () => activeCount() < capacity.slots,
+  };
 }
