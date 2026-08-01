@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { matchesGateGlob } from "../gates";
+import { matchesGateGlob, parseGateConfig } from "../gates";
 
 describe("matchesGateGlob — parity with the platform's bash evaluator", () => {
   // Every verdict below was produced by the bash evaluator itself:
@@ -47,5 +47,58 @@ describe("matchesGateGlob — parity with the platform's bash evaluator", () => 
 
   it.each(verdicts)("%s vs %s -> %s", (path, glob, matches) => {
     expect(matchesGateGlob(path, glob)).toBe(matches);
+  });
+});
+
+describe("parseGateConfig", () => {
+  it("parses categories and their globs from the estate shape", () => {
+    const text = [
+      "human_signoff:",
+      "  visual-ui:",
+      '    - "**/components/**"',
+      '    - "**/app/**/page.*"',
+      "  persistence:",
+      '    - "**/migrations/**"',
+    ].join("\n");
+
+    expect(parseGateConfig(text)).toEqual({
+      ok: true,
+      config: {
+        "visual-ui": ["**/components/**", "**/app/**/page.*"],
+        persistence: ["**/migrations/**"],
+      },
+    });
+  });
+
+  it("accepts an empty human_signoff mapping as a config with no gates", () => {
+    // A migrated repo with nothing extra to gate ships exactly this file
+    expect(parseGateConfig("# nothing beyond the estate\nhuman_signoff:\n")).toEqual({
+      ok: true,
+      config: {},
+    });
+  });
+
+  it("rejects invalid YAML with a reason", () => {
+    const result = parseGateConfig("human_signoff:\n  visual-ui: [unclosed");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBeTruthy();
+  });
+
+  it("rejects a document without a human_signoff mapping", () => {
+    expect(parseGateConfig("signoff:\n  visual-ui:\n    - '*'\n").ok).toBe(false);
+    expect(parseGateConfig("").ok).toBe(false);
+  });
+
+  it("rejects a category whose globs are not a list of strings", () => {
+    expect(parseGateConfig("human_signoff:\n  visual-ui: '**/components/**'\n").ok).toBe(false);
+    expect(parseGateConfig("human_signoff:\n  visual-ui:\n    - 42\n").ok).toBe(false);
+  });
+
+  it("treats a category with no globs as empty rather than an error", () => {
+    // A commented-out category leaves `name:` with a null value behind
+    expect(parseGateConfig("human_signoff:\n  visual-ui:\n")).toEqual({
+      ok: true,
+      config: { "visual-ui": [] },
+    });
   });
 });

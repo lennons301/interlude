@@ -8,6 +8,8 @@
  * `**` + `/` also matches at the repo root.
  */
 
+import { parse as parseYaml } from "yaml";
+
 /** Label a gated PR receives; a human must approve and merge it. */
 export const HUMAN_SIGNOFF_LABEL = "human-signoff";
 
@@ -16,6 +18,58 @@ export const ESTATE_GATES_PATH = "standards/review-gates.yaml";
 
 /** A repo's additive extension, read from its own default branch. */
 export const REPO_GATES_PATH = "docs/agents/review-gates.yaml";
+
+/** Gate categories: name -> the globs that trip it. */
+export type GateConfig = Record<string, string[]>;
+
+export type GateConfigResult =
+  | { ok: true; config: GateConfig }
+  | { ok: false; reason: string };
+
+/**
+ * Parse one review-gates.yaml. The contract shape is a `human_signoff`
+ * mapping of category name to a list of globs; anything else is unparseable
+ * and the caller fails closed. Two deliberate leniencies match real files:
+ * an empty `human_signoff:` means "no gates here", and a category left with
+ * no globs (a commented-out list) means an empty category, not an error.
+ */
+export function parseGateConfig(text: string): GateConfigResult {
+  let doc: unknown;
+  try {
+    doc = parseYaml(text);
+  } catch (err) {
+    return { ok: false, reason: `invalid YAML: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  if (doc === null || doc === undefined || typeof doc !== "object" || Array.isArray(doc)) {
+    return { ok: false, reason: "document is not a mapping with a human_signoff key" };
+  }
+  if (!("human_signoff" in doc)) {
+    return { ok: false, reason: "document has no human_signoff key" };
+  }
+
+  const signoff = (doc as Record<string, unknown>).human_signoff;
+  if (signoff === null || signoff === undefined) return { ok: true, config: {} };
+  if (typeof signoff !== "object" || Array.isArray(signoff)) {
+    return { ok: false, reason: "human_signoff is not a mapping of categories" };
+  }
+
+  const config: GateConfig = {};
+  for (const [category, globs] of Object.entries(signoff as Record<string, unknown>)) {
+    if (globs === null || globs === undefined) {
+      config[category] = [];
+      continue;
+    }
+    if (!Array.isArray(globs) || globs.some((g) => typeof g !== "string" || g === "")) {
+      return {
+        ok: false,
+        reason: `category "${category}" is not a list of glob strings`,
+      };
+    }
+    config[category] = globs as string[];
+  }
+  return { ok: true, config };
+}
 
 /**
  * Translate one bash pattern to an anchored RegExp. Bash `[[ == ]]` matching
