@@ -664,3 +664,154 @@ describe("buildFleetView — running", () => {
     expect(view.running).toEqual([]);
   });
 });
+
+describe("buildFleetView — recent completions", () => {
+  it("windows completions to 7 days, newest first, with a week total", () => {
+    const JUST_INSIDE = new Date(2026, 6, 25, 13, 0, 0); // 6d23h before NOW
+    const JUST_OUTSIDE = new Date(2026, 6, 25, 11, 0, 0); // 7d1h before NOW
+
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [
+          makeRun({
+            id: "r-old",
+            projectId: "p1",
+            githubIssue: "o/r#1",
+            status: "merged",
+            totalCostUsd: 9,
+            claimedAt: JUST_OUTSIDE,
+            finishedAt: JUST_OUTSIDE,
+          }),
+          makeRun({
+            id: "r-week",
+            projectId: "p1",
+            githubIssue: "o/r#2",
+            status: "merged",
+            totalCostUsd: 11.5,
+            claimedAt: JUST_INSIDE,
+            finishedAt: JUST_INSIDE,
+            pullRequestNumber: 41,
+            pullRequestUrl: "https://github.com/o/r/pull/41",
+          }),
+          makeRun({
+            id: "r-today",
+            projectId: "p1",
+            githubIssue: "o/r#3",
+            status: "failed",
+            totalCostUsd: 4.25,
+            finishedAt: TODAY_9AM,
+          }),
+        ],
+      })
+    );
+
+    expect(view.recent.windowDays).toBe(7);
+    expect(view.recent.totalUsd).toBeCloseTo(15.75);
+    expect(view.recent.items.map((i) => i.outcome)).toEqual([
+      "failed",
+      "merged",
+    ]);
+    expect(view.recent.items[1]).toMatchObject({
+      projectName: "lemons",
+      costUsd: 11.5,
+      finishedAt: JUST_INSIDE.toISOString(),
+      prNumber: 41,
+      prUrl: "https://github.com/o/r/pull/41",
+    });
+  });
+
+  it("includes completed interactive tasks but not tasks owned by runs", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "interlude" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "merged",
+            totalCostUsd: 6,
+            finishedAt: TODAY_9AM,
+          }),
+        ],
+        tasks: [
+          makeTask({
+            id: "t-owned",
+            projectId: "p1",
+            runId: "r1",
+            kind: "implement",
+            title: "Ticket work",
+            status: "completed",
+            containerStatus: null,
+            totalCostUsd: 6,
+            updatedAt: TODAY_9AM,
+          }),
+          makeTask({
+            id: "t-chat",
+            projectId: "p1",
+            title: "Sofa session",
+            status: "completed",
+            containerStatus: null,
+            totalCostUsd: 2.5,
+            updatedAt: TODAY_9AM,
+            pullRequestNumber: 12,
+            pullRequestUrl: "https://github.com/o/r/pull/12",
+          }),
+        ],
+      })
+    );
+
+    expect(view.recent.items).toHaveLength(2);
+    expect(view.recent.items.map((i) => i.title).sort()).toEqual([
+      "Sofa session",
+      "Ticket work",
+    ]);
+    expect(view.recent.totalUsd).toBeCloseTo(8.5);
+  });
+
+  it("leaves cancelled work out of the ledger", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [
+          makeRun({ id: "r1", projectId: "p1", status: "cancelled", finishedAt: TODAY_9AM }),
+        ],
+        tasks: [
+          makeTask({
+            id: "t1",
+            projectId: "p1",
+            status: "cancelled",
+            containerStatus: null,
+            updatedAt: TODAY_9AM,
+          }),
+        ],
+      })
+    );
+
+    expect(view.recent.items).toEqual([]);
+  });
+});
+
+describe("buildFleetView — queue and autonomy", () => {
+  it("carries queue depth and whether any project has autonomy on", () => {
+    const view = buildFleetView(
+      baseRows({
+        readyForAgentCount: 3,
+        projects: [
+          makeProject({ id: "p1", autonomyEnabled: false }),
+          makeProject({ id: "p2", autonomyEnabled: true }),
+        ],
+      })
+    );
+
+    expect(view.queue.readyForAgent).toBe(3);
+    expect(view.autonomyOn).toBe(true);
+  });
+
+  it("reports unknown queue depth as null and autonomy off", () => {
+    const view = buildFleetView(baseRows());
+
+    expect(view.queue.readyForAgent).toBeNull();
+    expect(view.autonomyOn).toBe(false);
+  });
+});

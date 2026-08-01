@@ -117,6 +117,16 @@ export interface RunningCard {
   spend: { usd: number; budgetUsd: number | null };
 }
 
+export interface RecentItem {
+  title: string;
+  projectName: string;
+  costUsd: number;
+  finishedAt: string;
+  prNumber: number | null;
+  prUrl: string | null;
+  outcome: "merged" | "completed" | "failed" | "exhausted";
+}
+
 export type SlotSegment =
   | { occupant: "free" }
   | {
@@ -142,8 +152,10 @@ export interface FleetView {
   };
   needsYou: NeedsYouItem[];
   running: RunningCard[];
-  recent: { windowDays: number; totalUsd: number; items: never[] };
+  recent: { windowDays: number; totalUsd: number; items: RecentItem[] };
   queue: { readyForAgent: number | null };
+  /** True when any project has autonomy enabled */
+  autonomyOn: boolean;
 }
 
 /** Start of the local calendar day containing `now` — the daily autonomous
@@ -371,6 +383,47 @@ export function buildFleetView(rows: FleetRows): FleetView {
     });
   }
 
+  // The quiet 7-day ledger: terminal runs plus completed interactive
+  // sessions. Run-owned tasks are represented by their run, never listed
+  // twice; cancelled work was a deliberate human act, not a completion.
+  const RUN_OUTCOMES: Partial<Record<FleetRunRow["status"], RecentItem["outcome"]>> = {
+    merged: "merged",
+    failed: "failed",
+    exhausted: "exhausted",
+  };
+  const recentItems: RecentItem[] = [];
+  for (const run of rows.runs) {
+    const outcome = RUN_OUTCOMES[run.status];
+    const finishedAt = run.finishedAt;
+    if (!outcome || !finishedAt || finishedAt.getTime() < windowStart) continue;
+    const task = currentTaskOf(run.id);
+    recentItems.push({
+      title: task?.title ?? run.githubIssue,
+      projectName: projectName(run.projectId),
+      costUsd: run.totalCostUsd,
+      finishedAt: finishedAt.toISOString(),
+      prNumber: run.pullRequestNumber,
+      prUrl: run.pullRequestUrl,
+      outcome,
+    });
+  }
+  for (const task of rows.tasks) {
+    if (task.runId !== null) continue;
+    if (task.status !== "completed" && task.status !== "failed") continue;
+    if (task.updatedAt.getTime() < windowStart) continue;
+    recentItems.push({
+      title: task.title,
+      projectName: projectName(task.projectId),
+      costUsd: task.totalCostUsd,
+      finishedAt: task.updatedAt.toISOString(),
+      prNumber: task.pullRequestNumber,
+      prUrl: task.pullRequestUrl,
+      outcome: task.status === "completed" ? "completed" : "failed",
+    });
+  }
+  recentItems.sort((a, b) => b.finishedAt.localeCompare(a.finishedAt));
+  const recentTotalUsd = recentItems.reduce((sum, i) => sum + i.costUsd, 0);
+
   return {
     generatedAt: rows.now.toISOString(),
     slots: {
@@ -382,7 +435,12 @@ export function buildFleetView(rows: FleetRows): FleetView {
     spend: { todayUsd, capUsd: rows.dailyCapUsd, capPaused },
     needsYou,
     running,
-    recent: { windowDays: 7, totalUsd: 0, items: [] },
+    recent: {
+      windowDays: RECENT_WINDOW_DAYS,
+      totalUsd: recentTotalUsd,
+      items: recentItems,
+    },
     queue: { readyForAgent: rows.readyForAgentCount },
+    autonomyOn: rows.projects.some((p) => p.autonomyEnabled),
   };
 }
