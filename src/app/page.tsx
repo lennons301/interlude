@@ -1,5 +1,5 @@
 import { FleetDashboard } from "@/components/fleet/fleet-dashboard";
-import { plexMono, plexSans } from "./fleet-fonts";
+import { plexMono, plexSans } from "@/lib/fleet-fonts";
 
 // Apply a stored theme override before first paint so the dashboard never
 // flashes the wrong ground.

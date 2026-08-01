@@ -170,6 +170,8 @@ html[data-fleet-theme="dark"] .fleet {
   }
 }
 
+/* Identical to the prefers-color-scheme block above — CSS can't OR a media
+ * query with a selector, so the light palette exists twice. Keep in sync. */
 html[data-fleet-theme="light"] .fleet {
   --fl-ground: #eae5dc;
   --fl-surface: #f4f0e8;
