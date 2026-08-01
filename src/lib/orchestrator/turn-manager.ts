@@ -18,7 +18,8 @@ import { getDocker } from "../docker/client";
 import { commentOnIssue, parseIssueRef } from "../github/issues";
 import { parseRepoFromGitUrl } from "../github/repo";
 import { createDraftPr, markPrReady } from "../github/pull-requests";
-import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed, notifyTaskIdle } from "../discord/notifications";
+import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed, notifyTaskIdle, notifyRunBlocked } from "../discord/notifications";
+import { decideNext, passOutcomeSnapshot } from "./autonomy/decide";
 
 /** Track all active task containers for cancellation and idle polling */
 const activeTasks = new Map<
@@ -158,11 +159,12 @@ export async function startTask(taskId: string): Promise<void> {
     await runPostTurnCommitAndPush(taskId, running);
 
     if (isImplementPass) {
-      // No human follows up on an autonomous pass: the initial turn is the
-      // whole pass. Complete now — final push, PR marked ready, container
-      // removed. The run stays `implementing` until #17's review machinery
-      // takes over from there.
-      await completeTask(taskId);
+      // The pass's turn is over: park it if its final message leads with the
+      // BLOCKED marker (container kept alive, question escalated), otherwise
+      // complete now — final push, PR marked ready, container removed. The
+      // run stays `implementing` until #17's review machinery takes over.
+      const parked = await evaluatePassOutcome(taskId);
+      if (!parked) await completeTask(taskId);
       return;
     }
 
@@ -244,15 +246,21 @@ export async function processQueuedMessages(
   const config = getConfig();
 
   while (true) {
-    // Get current task state
+    // Get current task state. A blocked implement pass is resumable — the
+    // queued message is the answer to its question (issue #19).
     const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
-    if (!task || task.status !== "running") break;
+    if (!task || (task.status !== "running" && task.status !== "blocked")) break;
 
-    // Check budget
-    if (task.totalCostUsd && task.totalCostUsd >= config.maxBudgetUsd) {
+    // Check budget — a run-owned task is bounded by its run's attempt budget,
+    // an interactive task by the global per-task default
+    const run = task.runId
+      ? db.select().from(runs).where(eq(runs.id, task.runId)).get()
+      : undefined;
+    const budgetCapUsd = run?.budgetUsd ?? config.maxBudgetUsd;
+    if (task.totalCostUsd && task.totalCostUsd >= budgetCapUsd) {
       insertSystemMessage(
         taskId,
-        `Budget limit reached ($${task.totalCostUsd.toFixed(2)} / $${config.maxBudgetUsd.toFixed(2)})`
+        `Budget limit reached ($${task.totalCostUsd.toFixed(2)} / $${budgetCapUsd.toFixed(2)})`
       );
       await completeTask(taskId);
       break;
@@ -273,8 +281,10 @@ export async function processQueuedMessages(
       .get();
 
     if (!queued) {
-      // No more queued messages — agent is idle, notify Discord ("your move")
-      await postIdleNotification(taskId);
+      // No more queued messages. An interactive agent is idle — notify
+      // Discord ("your move"). A parked implement pass just stays parked:
+      // its blocked embed is already the outstanding ask.
+      if (task.kind !== "implement") await postIdleNotification(taskId);
       break;
     }
 
@@ -284,8 +294,17 @@ export async function processQueuedMessages(
       .where(eq(messages.id, queued.id))
       .run();
 
+    // An answer un-parks a blocked run: it resumes implementing and the
+    // reply becomes the next turn
+    if (task.status === "blocked" && run) {
+      db.update(runs)
+        .set({ status: "implementing", blockedQuestion: null })
+        .where(eq(runs.id, run.id))
+        .run();
+    }
+
     // Run next turn with the user message
-    updateTask(taskId, { containerStatus: "running" });
+    updateTask(taskId, { status: "running", containerStatus: "running" });
     activeTasks.get(taskId)!.state = "running";
 
     // Extract raw text from JSON content for the CLI prompt
@@ -301,7 +320,8 @@ export async function processQueuedMessages(
       taskId,
       running,
       promptText,
-      task.sessionId ?? undefined
+      task.sessionId ?? undefined,
+      { maxBudgetUsd: run?.budgetUsd }
     );
 
     // Update cumulative cost and session
@@ -311,10 +331,28 @@ export async function processQueuedMessages(
       containerStatus: "idle",
       totalCostUsd: currentCost + turnResult.costUsd,
     });
+    if (run) {
+      db.update(runs)
+        .set({ totalCostUsd: currentCost + turnResult.costUsd })
+        .where(eq(runs.id, run.id))
+        .run();
+    }
     activeTasks.get(taskId)!.state = "idle";
 
     // Commit and push after each turn
     await runPostTurnCommitAndPush(taskId, running);
+
+    if (task.kind === "implement") {
+      // Park-or-proceed again: the resumed pass may hit another unresolved
+      // decision, or run to a healthy finish — which completes it.
+      const parked = await evaluatePassOutcome(taskId);
+      if (!parked) {
+        await completeTask(taskId);
+        break;
+      }
+      continue;
+    }
+
     await scanForDevServer(taskId, running);
   }
 }
@@ -483,6 +521,94 @@ export async function scanForDevServer(taskId: string, running: RunningContainer
 }
 
 /**
+ * The turn's final message: the most recent agent text message of the task.
+ * Null when the turn produced no text at all.
+ */
+function lastAgentTextMessage(taskId: string): string | null {
+  const lastAgent = db
+    .select()
+    .from(messages)
+    .where(and(eq(messages.taskId, taskId), eq(messages.role, "agent"), eq(messages.type, "text")))
+    .orderBy(desc(messages.createdAt))
+    .get();
+
+  if (!lastAgent) return null;
+  try {
+    const parsed = JSON.parse(lastAgent.content);
+    return typeof parsed.text === "string" ? parsed.text : lastAgent.content;
+  } catch {
+    return lastAgent.content;
+  }
+}
+
+/**
+ * Park-or-proceed for an implement pass whose turn just ended (issue #19):
+ * ask the reducer about the turn's final message. Blocked — park the run
+ * with its container alive and post the question; returns true. Healthy —
+ * returns false and the caller proceeds to completion.
+ */
+async function evaluatePassOutcome(taskId: string): Promise<boolean> {
+  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+  if (!task?.runId) return false;
+
+  const actions = decideNext(
+    passOutcomeSnapshot(new Date(), {
+      runId: task.runId,
+      taskId,
+      issueRef: task.githubIssue ?? "",
+      finalMessage: lastAgentTextMessage(taskId),
+    })
+  );
+
+  for (const action of actions) {
+    if (action.type === "escalate" && action.reason === "blocked") {
+      await parkBlockedRun(taskId, action.runId, action.question);
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Park a blocked run: the run and task go `blocked`, the container stays
+ * alive holding its context, and the question is posted to the project's
+ * linked Discord channel — or the fleet channel when the project has none,
+ * so no question is silently lost. The posted message becomes the task's
+ * interactive message: a reply to it queues the answer as the next turn.
+ */
+async function parkBlockedRun(taskId: string, runId: string, question: string): Promise<void> {
+  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+  if (!task) return;
+
+  db.update(runs)
+    .set({ status: "blocked", blockedQuestion: question })
+    .where(eq(runs.id, runId))
+    .run();
+  updateTask(taskId, { status: "blocked" });
+  insertSystemMessage(taskId, `Run blocked — waiting for an answer: ${question}`);
+  console.log(`[autonomy] Run ${runId} blocked on: ${question}`);
+
+  const proj = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
+  const channelId = proj?.discordChannelId ?? getConfig().discordFleetChannelId;
+  if (!channelId) {
+    console.warn(
+      `[autonomy] Run ${runId} is blocked but no project or fleet Discord channel is ` +
+        `configured — the question waits on the dashboard and in the task chat`
+    );
+    return;
+  }
+
+  const msgId = await notifyRunBlocked(channelId, {
+    id: taskId,
+    title: task.title,
+    question,
+    issueRef: task.githubIssue,
+    projectName: proj?.name ?? null,
+  });
+  if (msgId) updateTask(taskId, { discordMessageId: msgId });
+}
+
+/**
  * Post an "agent finished a turn" idle notification to the project's Discord
  * channel (if linked) and store the message id as the task's current
  * interactive message. Fire-and-forget safe: never throws to the caller.
@@ -494,23 +620,7 @@ async function postIdleNotification(taskId: string): Promise<void> {
     const proj = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
     if (!proj?.discordChannelId) return;
 
-    // Most recent agent text message = the turn's summary
-    const lastAgent = db
-      .select()
-      .from(messages)
-      .where(and(eq(messages.taskId, taskId), eq(messages.role, "agent"), eq(messages.type, "text")))
-      .orderBy(desc(messages.createdAt))
-      .get();
-
-    let summary = "";
-    if (lastAgent) {
-      try {
-        const parsed = JSON.parse(lastAgent.content);
-        summary = typeof parsed.text === "string" ? parsed.text : lastAgent.content;
-      } catch {
-        summary = lastAgent.content;
-      }
-    }
+    const summary = lastAgentTextMessage(taskId) ?? "";
 
     const msgId = await notifyTaskIdle(proj.discordChannelId, {
       id: taskId,
