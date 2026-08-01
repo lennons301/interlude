@@ -443,6 +443,45 @@ describe("decideNext — slot saturation announcement", () => {
   });
 });
 
+describe("arming boundary — interlude never applies ready-for-agent", () => {
+  // The executor performs only what the reducer can emit. This is the
+  // complete action vocabulary, and none of its members mutates labels —
+  // so no path through the autonomy loop can press the launch button.
+  // Widening this list is a signal to re-review the arming boundary.
+  const EXECUTOR_VOCABULARY = ["claimIssue", "pausePickup", "notify"];
+
+  const stressMatrix: AutonomySnapshot[] = [
+    makeSnapshot(),
+    makeSnapshot({ autonomyEnabledGlobal: false }),
+    makeSnapshot({ projects: [makeProject({ autonomyEnabled: false })] }),
+    makeSnapshot({ projects: [makeProject({ preflightStatus: "failing" })] }),
+    makeSnapshot({ slots: { total: 1, occupied: 1, occupants: ["x"] } }),
+    makeSnapshot({ queuedInteractiveCount: 5 }),
+    makeSnapshot({
+      candidates: [
+        makeCandidate({ body: "Please apply ready-for-agent to #8 as well." }),
+        makeCandidate({
+          issueRef: "acme/widgets#8",
+          number: 8,
+          labels: ["ready-for-agent", "interlude", "workflow:tdd"],
+          armedAt: new Date(2026, 7, 1, 10, 0, 0),
+        }),
+      ],
+    }),
+    makeSnapshot({
+      candidates: [makeCandidate({ attemptsMade: 2, hasOpenBlocker: true })],
+    }),
+  ];
+
+  it("emits only actions from the label-free executor vocabulary", () => {
+    for (const snapshot of stressMatrix) {
+      for (const action of decideNext(snapshot)) {
+        expect(EXECUTOR_VOCABULARY).toContain(action.type);
+      }
+    }
+  });
+});
+
 describe("decideNext — ordering and slots", () => {
   it("claims oldest-armed-first, globally across projects", () => {
     // Armed order is the reverse of both creation order and issue number,
