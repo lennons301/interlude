@@ -534,3 +534,133 @@ describe("buildFleetView — needs you", () => {
     ]);
   });
 });
+
+describe("buildFleetView — running", () => {
+  it("shows an active run with ticket, attempt, turns, spend vs budget, phase and mode", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            attempt: 2,
+            status: "implementing",
+            totalCostUsd: 7.8,
+            budgetUsd: 20,
+          }),
+        ],
+        tasks: [
+          makeTask({
+            id: "t1",
+            projectId: "p1",
+            runId: "r1",
+            kind: "implement",
+            title: "Add pagination to the list",
+            containerStatus: "running",
+            turns: 4,
+          }),
+        ],
+      })
+    );
+
+    expect(view.running).toEqual([
+      {
+        taskId: "t1",
+        runId: "r1",
+        projectName: "lemons",
+        ticket: "#34",
+        title: "Add pagination to the list",
+        mode: "afk",
+        phases: [
+          { name: "implement", state: "current" },
+          { name: "review", state: "todo" },
+          { name: "merge", state: "todo" },
+        ],
+        attempt: { current: 2, max: 3 },
+        turns: 4,
+        startedAt: TODAY_9AM.toISOString(),
+        spend: { usd: 7.8, budgetUsd: 20 },
+      },
+    ]);
+  });
+
+  it("lights the review stage and strikes implement when a run is reviewing", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", status: "reviewing" })],
+      })
+    );
+
+    expect(view.running[0].phases).toEqual([
+      { name: "implement", state: "done" },
+      { name: "review", state: "current" },
+      { name: "merge", state: "todo" },
+    ]);
+    expect(view.running[0].mode).toBe("afk");
+  });
+
+  it("marks a supervised run's mode chip", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", mode: "supervised" })],
+      })
+    );
+
+    expect(view.running[0].mode).toBe("supervised");
+  });
+
+  it("shows an interactive session as a quiet, unbudgeted card", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "interlude" })],
+        tasks: [
+          makeTask({
+            id: "t1",
+            projectId: "p1",
+            title: "Polish the header",
+            containerStatus: "idle",
+            totalCostUsd: 1.23,
+            turns: 3,
+            createdAt: TODAY_9AM,
+          }),
+        ],
+      })
+    );
+
+    expect(view.running).toEqual([
+      {
+        taskId: "t1",
+        runId: null,
+        projectName: "interlude",
+        ticket: null,
+        title: "Polish the header",
+        mode: "interactive",
+        phases: null,
+        attempt: null,
+        turns: 3,
+        startedAt: TODAY_9AM.toISOString(),
+        spend: { usd: 1.23, budgetUsd: null },
+      },
+    ]);
+  });
+
+  it("excludes finished runs and containerless interactive tasks from running", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [
+          makeRun({ id: "r1", projectId: "p1", status: "merged", finishedAt: TODAY_9AM }),
+          makeRun({ id: "r2", projectId: "p1", status: "gated" }),
+        ],
+        tasks: [
+          makeTask({ id: "t1", projectId: "p1", status: "completed", containerStatus: null }),
+        ],
+      })
+    );
+
+    expect(view.running).toEqual([]);
+  });
+});

@@ -97,6 +97,26 @@ export interface NeedsYouItem {
   action: { label: string; href: string } | null;
 }
 
+export type PhaseState = "done" | "current" | "todo";
+
+export interface RunningCard {
+  /** The run's current task — the in-app chat/stream to open */
+  taskId: string | null;
+  runId: string | null;
+  projectName: string;
+  ticket: string | null;
+  title: string;
+  /** Mode chip: afk = full autonomy, supervised = forced human-signoff */
+  mode: "afk" | "supervised" | "interactive";
+  /** implement ▸ review ▸ merge pipeline; null for interactive sessions */
+  phases: { name: "implement" | "review" | "merge"; state: PhaseState }[] | null;
+  attempt: { current: number; max: number } | null;
+  turns: number;
+  startedAt: string | null;
+  /** budgetUsd null = unbudgeted (interactive sessions) */
+  spend: { usd: number; budgetUsd: number | null };
+}
+
 export type SlotSegment =
   | { occupant: "free" }
   | {
@@ -121,7 +141,7 @@ export interface FleetView {
     capPaused: boolean;
   };
   needsYou: NeedsYouItem[];
-  running: never[];
+  running: RunningCard[];
   recent: { windowDays: number; totalUsd: number; items: never[] };
   queue: { readyForAgent: number | null };
 }
@@ -281,6 +301,62 @@ export function buildFleetView(rows: FleetRows): FleetView {
     });
   }
 
+  // Running = every run holding (or waiting on) a slot, then interactive
+  // sessions as quiet, unbudgeted cards — they hold slots too (review
+  // decision 2), they just answer to no ledger.
+  const ACTIVE_RUN_STATUSES = new Set([
+    "claimed",
+    "implementing",
+    "reviewing",
+    "blocked",
+  ]);
+  const phasePipeline = (
+    status: FleetRunRow["status"]
+  ): NonNullable<RunningCard["phases"]> => {
+    const reviewReached = status === "reviewing";
+    return [
+      { name: "implement", state: reviewReached ? "done" : "current" },
+      { name: "review", state: reviewReached ? "current" : "todo" },
+      { name: "merge", state: "todo" },
+    ];
+  };
+
+  const running: RunningCard[] = rows.runs
+    .filter((r) => ACTIVE_RUN_STATUSES.has(r.status))
+    .sort((a, b) => a.claimedAt.getTime() - b.claimedAt.getTime())
+    .map((run) => {
+      const task = currentTaskOf(run.id);
+      return {
+        taskId: task?.id ?? null,
+        runId: run.id,
+        projectName: projectName(run.projectId),
+        ticket: ticketLabel(run.githubIssue),
+        title: task?.title ?? run.githubIssue,
+        mode: run.mode === "autonomous" ? ("afk" as const) : ("supervised" as const),
+        phases: phasePipeline(run.status),
+        attempt: { current: run.attempt, max: MAX_ATTEMPTS },
+        turns: task?.turns ?? 0,
+        startedAt: (run.startedAt ?? run.claimedAt).toISOString(),
+        spend: { usd: run.totalCostUsd, budgetUsd: run.budgetUsd },
+      };
+    });
+
+  for (const task of occupants.filter((t) => t.kind === "interactive")) {
+    running.push({
+      taskId: task.id,
+      runId: null,
+      projectName: projectName(task.projectId),
+      ticket: ticketLabel(task.githubIssue),
+      title: task.title,
+      mode: "interactive",
+      phases: null,
+      attempt: null,
+      turns: task.turns,
+      startedAt: task.createdAt.toISOString(),
+      spend: { usd: task.totalCostUsd, budgetUsd: null },
+    });
+  }
+
   // Preflight only matters where autonomy is asked for — a dormant project
   // failing preflight needs nothing from anyone.
   for (const project of rows.projects.filter(
@@ -305,7 +381,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
     },
     spend: { todayUsd, capUsd: rows.dailyCapUsd, capPaused },
     needsYou,
-    running: [],
+    running,
     recent: { windowDays: 7, totalUsd: 0, items: [] },
     queue: { readyForAgent: rows.readyForAgentCount },
   };
