@@ -180,6 +180,9 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     })),
     candidates,
     inFlightClaims: [...inFlightClaims],
+    // Turn ends are evaluated by the turn manager at the moment they happen,
+    // never discovered by a sweep — a sweep snapshot carries no pass outcomes.
+    completedPasses: [],
   };
 }
 

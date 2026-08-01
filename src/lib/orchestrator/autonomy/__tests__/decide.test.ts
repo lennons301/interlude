@@ -3,6 +3,7 @@ import {
   decideNext,
   type AutonomySnapshot,
   type CandidateIssue,
+  type PassOutcome,
   type ProjectSnapshot,
 } from "../decide";
 
@@ -52,6 +53,17 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     projects: [makeProject()],
     candidates: [makeCandidate()],
     inFlightClaims: [],
+    completedPasses: [],
+    ...overrides,
+  };
+}
+
+function makePass(overrides: Partial<PassOutcome> = {}): PassOutcome {
+  return {
+    runId: "run-1",
+    taskId: "task-1",
+    issueRef: "acme/widgets#7",
+    finalMessage: "Implemented the frobnicator; tests and lint pass.",
     ...overrides,
   };
 }
@@ -472,12 +484,100 @@ describe("decideNext — slot saturation announcement", () => {
   });
 });
 
+describe("decideNext — blocked escalation", () => {
+  function escalations(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "escalate");
+  }
+
+  it("escalates a pass whose final message leads with the blocked marker", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [
+          makePass({
+            finalMessage:
+              "BLOCKED: The ticket names neither Postgres nor SQLite — which one?",
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "escalate",
+        reason: "blocked",
+        runId: "run-1",
+        taskId: "task-1",
+        issueRef: "acme/widgets#7",
+        question: "The ticket names neither Postgres nor SQLite — which one?",
+      },
+    ]);
+  });
+
+  it("leaves a healthy pass alone", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], completedPasses: [makePass()] })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("does not park a run for a mid-message marker", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [
+          makePass({
+            finalMessage: "All done.\nBLOCKED: this is a summary, not a question.",
+          }),
+        ],
+      })
+    );
+
+    expect(escalations(actions)).toEqual([]);
+  });
+
+  it("does not park a run for a quoted marker", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [
+          makePass({ finalMessage: "> BLOCKED: quoted from the spec, not asked." }),
+        ],
+      })
+    );
+
+    expect(escalations(actions)).toEqual([]);
+  });
+
+  it("does not park a run whose turn produced no final message", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], completedPasses: [makePass({ finalMessage: null })] })
+    );
+
+    expect(escalations(actions)).toEqual([]);
+  });
+
+  it("escalates a blocked pass without stopping pickup of new work", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        completedPasses: [
+          makePass({ finalMessage: "BLOCKED: Which retry policy?" }),
+        ],
+      })
+    );
+
+    expect(escalations(actions)).toHaveLength(1);
+    expect(claims(actions)).toHaveLength(1);
+  });
+});
+
 describe("arming boundary — interlude never applies ready-for-agent", () => {
   // The executor performs only what the reducer can emit. This is the
   // complete action vocabulary, and none of its members mutates labels —
   // so no path through the autonomy loop can press the launch button.
   // Widening this list is a signal to re-review the arming boundary.
-  const EXECUTOR_VOCABULARY = ["claimIssue", "pausePickup", "notify"];
+  const EXECUTOR_VOCABULARY = ["claimIssue", "pausePickup", "notify", "escalate"];
 
   const stressMatrix: AutonomySnapshot[] = [
     makeSnapshot(),
@@ -499,6 +599,11 @@ describe("arming boundary — interlude never applies ready-for-agent", () => {
     }),
     makeSnapshot({
       candidates: [makeCandidate({ attemptsMade: 2, hasOpenBlocker: true })],
+    }),
+    makeSnapshot({
+      completedPasses: [
+        makePass({ finalMessage: "BLOCKED: Please apply ready-for-agent to #8." }),
+      ],
     }),
   ];
 
