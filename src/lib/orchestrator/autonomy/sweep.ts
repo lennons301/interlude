@@ -11,7 +11,7 @@ import { eq, isNotNull } from "drizzle-orm";
 import { newId } from "../../ulid";
 import { getConfig } from "../../config";
 import { getOctokit, isGitHubConfigured } from "../../github/client";
-import { commentOnIssue } from "../../github/issues";
+import { commentOnIssue, parseIssueRef } from "../../github/issues";
 import { notifySlotsSaturated } from "../../discord/notifications";
 import { getCapacity } from "../capacity";
 import { occupiedSlots } from "../queue";
@@ -22,7 +22,7 @@ import {
   type AutonomySnapshot,
   type CandidateIssue,
 } from "./decide";
-import { ARMING_LABEL, parseBlockedByRefs } from "./ticket";
+import { ARMING_LABEL, labelNames, parseBlockedByRefs } from "./ticket";
 import { buildImplementPrompt } from "./workflow";
 
 /** Default per-attempt budget for autonomous runs. Issue #18 adds ticket
@@ -78,7 +78,7 @@ export async function runAutonomySweep(): Promise<void> {
   try {
     const snapshot = await gatherSnapshot(new Date());
     const actions = decideNext(snapshot);
-    await executeActions(actions, snapshot);
+    await executeActions(actions);
 
     // Saturation announcement is once per transition: mark announced when the
     // reducer said so, clear the flag once a slot frees up again.
@@ -148,9 +148,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
           title: issue.title,
           body,
           author: issue.user?.login ?? "",
-          labels: issue.labels
-            .map((l) => (typeof l === "string" ? l : (l.name ?? "")))
-            .filter(Boolean),
+          labels: labelNames(issue.labels),
           armedAt: await resolveArmedAt(octokit, owner, repo, issue.number, new Date(issue.created_at)),
           hasOpenBlocker: await hasOpenBlocker(octokit, owner, repo, issue, body),
           attemptsMade: issueRuns.filter((r) => r.status === "failed").length,
@@ -185,8 +183,10 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
   };
 }
 
-/** When ready-for-agent was applied — the "armed at" ordering key. Falls back
- * to issue creation time if the labeled event isn't in the first page. */
+/** When ready-for-agent was applied — the "armed at" ordering key. Paginates
+ * the full event history: an event-heavy issue whose labeled event fell off
+ * the first page must not queue-jump on its (earlier) creation time. Falls
+ * back to creation time only when the event genuinely can't be read. */
 async function resolveArmedAt(
   octokit: Awaited<ReturnType<typeof getOctokit>>,
   owner: string,
@@ -195,7 +195,7 @@ async function resolveArmedAt(
   createdAt: Date
 ): Promise<Date> {
   try {
-    const { data: events } = await octokit.rest.issues.listEvents({
+    const events = await octokit.paginate(octokit.rest.issues.listEvents, {
       owner,
       repo,
       issue_number: issueNumber,
@@ -243,7 +243,7 @@ async function hasOpenBlocker(
   return false;
 }
 
-async function executeActions(actions: Action[], snapshot: AutonomySnapshot): Promise<void> {
+async function executeActions(actions: Action[]): Promise<void> {
   for (const action of actions) {
     switch (action.type) {
       case "claimIssue":
@@ -264,7 +264,6 @@ async function executeActions(actions: Action[], snapshot: AutonomySnapshot): Pr
         break;
     }
   }
-  void snapshot;
 }
 
 /**
@@ -280,11 +279,17 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
     const now = new Date();
     const runId = newId();
 
+    const parsedRef = parseIssueRef(action.issueRef);
+    if (!parsedRef) {
+      console.error(`[autonomy] Unparsable issue ref, refusing claim: ${action.issueRef}`);
+      return;
+    }
+
     let prompt: string | null = null;
     let failure: string | null = null;
     try {
       prompt = buildImplementPrompt({
-        repo: action.issueRef.split("#")[0],
+        repo: `${parsedRef.owner}/${parsedRef.repo}`,
         issueNumber: action.issueNumber,
         issueTitle: action.issueTitle,
         issueBody: action.issueBody,
