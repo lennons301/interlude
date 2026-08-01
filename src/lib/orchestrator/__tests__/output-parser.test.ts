@@ -168,6 +168,54 @@ describe("output-parser with real Claude Code stream-json", () => {
     expect(doneFired).toBe(true);
   });
 
+  it("returns the turn's final text message for a turn ending normally", () => {
+    const handler = createOutputHandler(TASK_ID);
+
+    for (const line of fixtureLines) {
+      handler.write(line + "\n");
+    }
+    const result = handler.flush();
+
+    expect(result.finalMessage).toBe("The file has **12 lines**.");
+  });
+
+  it("returns a blocked question as the final message of a turn ending blocked", () => {
+    const handler = createOutputHandler(TASK_ID);
+
+    const blockedTurn = [
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "Reading the ticket." }] },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            { type: "text", text: "BLOCKED: Postgres or SQLite for the cache?" },
+          ],
+        },
+      }),
+      JSON.stringify({ type: "result", session_id: "s-1", total_cost_usd: 0.02 }),
+    ];
+    for (const line of blockedTurn) {
+      handler.write(line + "\n");
+    }
+    const result = handler.flush();
+
+    expect(result.finalMessage).toBe("BLOCKED: Postgres or SQLite for the cache?");
+  });
+
+  it("returns a null final message for a turn with no text at all", () => {
+    const handler = createOutputHandler(TASK_ID);
+
+    handler.write(
+      JSON.stringify({ type: "result", session_id: "s-1", total_cost_usd: 0.01 }) + "\n"
+    );
+    const result = handler.flush();
+
+    expect(result.finalMessage).toBeNull();
+  });
+
   it("handles partial line buffering", () => {
     const handler = createOutputHandler(TASK_ID);
 

@@ -163,7 +163,7 @@ export async function startTask(taskId: string): Promise<void> {
       // BLOCKED marker (container kept alive, question escalated), otherwise
       // complete now — final push, PR marked ready, container removed. The
       // run stays `implementing` until #17's review machinery takes over.
-      const parked = await evaluatePassOutcome(taskId);
+      const parked = await evaluatePassOutcome(taskId, turnResult.finalMessage);
       if (!parked) await completeTask(taskId);
       return;
     }
@@ -345,7 +345,7 @@ export async function processQueuedMessages(
     if (task.kind === "implement") {
       // Park-or-proceed again: the resumed pass may hit another unresolved
       // decision, or run to a healthy finish — which completes it.
-      const parked = await evaluatePassOutcome(taskId);
+      const parked = await evaluatePassOutcome(taskId, turnResult.finalMessage);
       if (!parked) {
         await completeTask(taskId);
         break;
@@ -415,11 +415,19 @@ export async function completeTask(taskId: string): Promise<void> {
 
     updateTask(taskId, { status: "completed", containerStatus: null });
     if (task.runId) {
+      const run = db.select().from(runs).where(eq(runs.id, task.runId)).get();
       db.update(runs)
         .set({
           totalCostUsd: task.totalCostUsd ?? 0,
           pullRequestNumber: task.pullRequestNumber,
           pullRequestUrl: task.pullRequestUrl,
+          // A run completed while parked (e.g. budget cap hit before its
+          // answer arrived) is no longer waiting on anyone: un-block it so
+          // the ledger and the dashboard's needs-you stay truthful, and the
+          // gate machinery picks its PR up from `implementing`.
+          ...(run?.status === "blocked"
+            ? { status: "implementing" as const, blockedQuestion: null }
+            : {}),
         })
         .where(eq(runs.id, task.runId))
         .run();
@@ -543,20 +551,24 @@ function lastAgentTextMessage(taskId: string): string | null {
 
 /**
  * Park-or-proceed for an implement pass whose turn just ended (issue #19):
- * ask the reducer about the turn's final message. Blocked — park the run
- * with its container alive and post the question; returns true. Healthy —
+ * ask the reducer about the turn's final message — this turn's, from its
+ * TurnResult, never an earlier turn's re-read. Blocked — park the run with
+ * its container alive and post the question; returns true. Healthy —
  * returns false and the caller proceeds to completion.
  */
-async function evaluatePassOutcome(taskId: string): Promise<boolean> {
+async function evaluatePassOutcome(
+  taskId: string,
+  finalMessage: string | null
+): Promise<boolean> {
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
-  if (!task?.runId) return false;
+  if (!task?.runId || !task.githubIssue) return false;
 
   const actions = decideNext(
     passOutcomeSnapshot(new Date(), {
       runId: task.runId,
       taskId,
-      issueRef: task.githubIssue ?? "",
-      finalMessage: lastAgentTextMessage(taskId),
+      issueRef: task.githubIssue,
+      finalMessage,
     })
   );
 

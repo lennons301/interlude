@@ -208,7 +208,7 @@ export async function notifyGateConfigError(
  */
 export async function notifyRunBlocked(
   channelId: string,
-  info: {
+  task: {
     id: string;
     title: string;
     question: string;
@@ -224,15 +224,15 @@ export async function notifyRunBlocked(
     if (!channel || !channel.isTextBased()) return null;
 
     const domain = process.env.DOMAIN ?? "interludes.co.uk";
-    const lines = [info.question.trim().slice(0, 1000), ""];
-    if (info.projectName) lines.push(`Project: ${info.projectName}`);
-    if (info.issueRef) lines.push(`Ticket: ${info.issueRef}`);
+    const lines = [task.question.trim().slice(0, 1000), ""];
+    if (task.projectName) lines.push(`Project: ${task.projectName}`);
+    if (task.issueRef) lines.push(`Ticket: ${task.issueRef}`);
     lines.push("", "Reply to answer — your reply becomes the agent's next turn.");
 
     const embed = new EmbedBuilder()
-      .setTitle(`Agent blocked: ${info.title}`)
+      .setTitle(`Agent blocked: ${task.title}`)
       .setDescription(lines.join("\n"))
-      .setURL(`https://${domain}/tasks/${info.id}`)
+      .setURL(`https://${domain}/tasks/${task.id}`)
       .setColor(0xf59e0b);
 
     const msg = await sendWithRetry(channel as TextChannel, embed);

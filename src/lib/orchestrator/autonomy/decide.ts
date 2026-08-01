@@ -3,8 +3,9 @@
  * decide what the autonomy loop does next. Pure — time and all state arrive
  * in the snapshot, nothing inside reads a clock, a database, Docker, GitHub
  * or Discord. The webhook fast path and the reconciliation sweep both feed
- * this one function, so there is a single decision path, and the executor
- * (sweep.ts) is a thin performer of the Actions returned here.
+ * this one function, so there is a single decision path, and the executors
+ * — sweep.ts for pickup and gating, the turn manager for a finished pass's
+ * park-or-proceed — are thin performers of the Actions returned here.
  */
 
 import { detectBlockedQuestion } from "./blocked";
