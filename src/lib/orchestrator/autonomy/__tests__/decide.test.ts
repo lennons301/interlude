@@ -5,6 +5,7 @@ import {
   type AutonomySnapshot,
   type CandidateIssue,
   type PassOutcome,
+  type PendingGateEvaluation,
   type ProjectSnapshot,
 } from "../decide";
 
@@ -54,6 +55,8 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     projects: [makeProject()],
     candidates: [makeCandidate()],
     inFlightClaims: [],
+    pendingGateEvaluations: [],
+    announcedGateConfigErrors: [],
     completedPasses: [],
     ...overrides,
   };
@@ -65,6 +68,23 @@ function makePass(overrides: Partial<PassOutcome> = {}): PassOutcome {
     taskId: "task-1",
     issueRef: "acme/widgets#7",
     finalMessage: "Implemented the frobnicator; tests and lint pass.",
+    ...overrides,
+  };
+}
+
+function makePending(
+  overrides: Partial<PendingGateEvaluation> = {}
+): PendingGateEvaluation {
+  return {
+    runId: "run-1",
+    issueRef: "acme/widgets#7",
+    prNumber: 41,
+    changedPaths: ["src/lib/util.ts"],
+    gateConfig: {
+      ok: true,
+      estate: { "visual-ui": ["**/components/**"] },
+      extension: { infrastructure: ["Caddyfile"] },
+    },
     ...overrides,
   };
 }
@@ -485,6 +505,136 @@ describe("decideNext — slot saturation announcement", () => {
   });
 });
 
+describe("decideNext — gate evaluation of a finished implement pass", () => {
+  it("arms auto-merge for an ungated PR", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], pendingGateEvaluations: [makePending()] })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "armAutoMerge",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+      },
+    ]);
+  });
+
+  it("gates a PR whose changed paths match, naming the categories", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingGateEvaluations: [
+          makePending({
+            changedPaths: ["src/components/Button.tsx", "Caddyfile"],
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "gatePr",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        categories: ["infrastructure", "visual-ui"],
+      },
+    ]);
+  });
+
+  it("fails closed on missing or unparseable config: nothing armed, owner told", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingGateEvaluations: [
+          makePending({
+            gateConfig: { ok: false, reason: "estate config missing from default branch" },
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "notify",
+        event: "gate-config-error",
+        payload: {
+          runId: "run-1",
+          issueRef: "acme/widgets#7",
+          prNumber: 41,
+          reason: "estate config missing from default branch",
+        },
+      },
+    ]);
+  });
+
+  it("stays quiet about a config failure it has already announced", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingGateEvaluations: [
+          makePending({ gateConfig: { ok: false, reason: "invalid YAML" } }),
+        ],
+        announcedGateConfigErrors: ["run-1"],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("decides each pending PR independently", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingGateEvaluations: [
+          makePending(),
+          makePending({
+            runId: "run-2",
+            issueRef: "acme/widgets#9",
+            prNumber: 44,
+            changedPaths: ["src/components/Nav.tsx"],
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      { type: "armAutoMerge", runId: "run-1", issueRef: "acme/widgets#7", prNumber: 41 },
+      {
+        type: "gatePr",
+        runId: "run-2",
+        issueRef: "acme/widgets#9",
+        prNumber: 44,
+        categories: ["visual-ui"],
+      },
+    ]);
+  });
+
+  it("finishes gate decisions before starting new claims", () => {
+    // Reducer priority order: in-flight work first, then a new claim
+    const actions = decideNext(
+      makeSnapshot({ pendingGateEvaluations: [makePending()] })
+    );
+
+    expect(actions.map((a) => a.type)).toEqual(["armAutoMerge", "claimIssue"]);
+  });
+
+  it("gate decisions do not consume claimable slots", () => {
+    // Gate evaluation is orchestrator work, not container work — a pending
+    // decision must not block the last free slot from a new claim.
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 2, occupied: 1, occupants: ["implement: acme/widgets#7"] },
+        pendingGateEvaluations: [makePending()],
+      })
+    );
+
+    expect(actions.filter((a) => a.type === "claimIssue")).toHaveLength(1);
+  });
+});
+
 describe("decideNext — blocked escalation", () => {
   function escalations(actions: ReturnType<typeof decideNext>) {
     return actions.filter((a) => a.type === "escalate");
@@ -593,10 +743,23 @@ describe("decideNext — blocked escalation", () => {
 
 describe("arming boundary — interlude never applies ready-for-agent", () => {
   // The executor performs only what the reducer can emit. This is the
-  // complete action vocabulary, and none of its members mutates labels —
-  // so no path through the autonomy loop can press the launch button.
-  // Widening this list is a signal to re-review the arming boundary.
-  const EXECUTOR_VOCABULARY = ["claimIssue", "pausePickup", "notify", "escalate"];
+  // complete action vocabulary, and none of its members mutates the
+  // ready-for-agent label — so no path through the autonomy loop can press
+  // the launch button. gatePr and armAutoMerge joined with issue #16:
+  // gatePr only ever *adds* human oversight (the human-signoff label), and
+  // armAutoMerge is reachable solely through the deterministic gate
+  // evaluator over config read from the default branch — never from issue
+  // text. escalate joined with issue #19: it only parks a run and asks the
+  // owner a question. Widening this list is a signal to re-review the
+  // arming boundary.
+  const EXECUTOR_VOCABULARY = [
+    "claimIssue",
+    "pausePickup",
+    "notify",
+    "gatePr",
+    "armAutoMerge",
+    "escalate",
+  ];
 
   const stressMatrix: AutonomySnapshot[] = [
     makeSnapshot(),
@@ -618,6 +781,23 @@ describe("arming boundary — interlude never applies ready-for-agent", () => {
     }),
     makeSnapshot({
       candidates: [makeCandidate({ attemptsMade: 2, hasOpenBlocker: true })],
+    }),
+    makeSnapshot({
+      pendingGateEvaluations: [
+        makePending(),
+        makePending({
+          runId: "run-2",
+          issueRef: "acme/widgets#8",
+          prNumber: 42,
+          changedPaths: ["src/components/Nav.tsx", "drizzle/0001.sql"],
+        }),
+        makePending({
+          runId: "run-3",
+          issueRef: "acme/widgets#9",
+          prNumber: 43,
+          gateConfig: { ok: false, reason: "invalid YAML" },
+        }),
+      ],
     }),
     makeSnapshot({
       completedPasses: [

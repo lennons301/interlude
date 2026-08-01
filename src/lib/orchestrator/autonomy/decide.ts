@@ -8,6 +8,7 @@
  */
 
 import { detectBlockedQuestion } from "./blocked";
+import { evaluateGates, type GateConfig } from "./gates";
 import { selectWorkflow, type WorkflowSelection } from "./ticket";
 
 export interface ProjectSnapshot {
@@ -39,6 +40,24 @@ export interface CandidateIssue {
   hasActiveRun: boolean;
 }
 
+/**
+ * A finished implement pass whose PR awaits its gate decision. The configs
+ * were read from default branches (never the PR's head) and parsed by the
+ * gatherer; a parse or read failure arrives as `ok: false` so the reducer
+ * can fail closed instead of guessing.
+ */
+export interface PendingGateEvaluation {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  prNumber: number;
+  /** Paths the PR changes, from the GitHub API */
+  changedPaths: string[];
+  gateConfig:
+    | { ok: true; estate: GateConfig; extension: GateConfig }
+    | { ok: false; reason: string };
+}
+
 /** An implement turn that just finished, up for a park-or-proceed decision. */
 export interface PassOutcome {
   runId: string;
@@ -68,6 +87,11 @@ export interface AutonomySnapshot {
   candidates: CandidateIssue[];
   /** Issue refs whose claim is currently being executed (idempotency) */
   inFlightClaims: string[];
+  /** Finished implement passes whose PRs await a gate decision */
+  pendingGateEvaluations: PendingGateEvaluation[];
+  /** Run IDs whose gate-config failure was already announced — the owner is
+   * told once per failure, not once per sweep */
+  announcedGateConfigErrors: string[];
   /** Implement turns that just ended, awaiting park-or-proceed. The sweep
    * always passes []; the turn manager evaluates each outcome at the moment
    * the turn finishes. */
@@ -100,6 +124,19 @@ export type Action =
       payload: { occupied: number; total: number; occupants: string[] };
     }
   | {
+      type: "gatePr";
+      runId: string;
+      issueRef: string;
+      prNumber: number;
+      categories: string[];
+    }
+  | { type: "armAutoMerge"; runId: string; issueRef: string; prNumber: number }
+  | {
+      type: "notify";
+      event: "gate-config-error";
+      payload: { runId: string; issueRef: string; prNumber: number; reason: string };
+    }
+  | {
       type: "escalate";
       reason: "blocked";
       runId: string;
@@ -110,8 +147,8 @@ export type Action =
 
 /**
  * A snapshot for deciding one finished pass at the moment its turn ends,
- * outside a sweep: every pickup and saturation input is inert, so the only
- * possible decision is about the pass itself.
+ * outside a sweep: every pickup, gating and saturation input is inert, so
+ * the only possible decision is about the pass itself.
  */
 export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnapshot {
   return {
@@ -127,6 +164,8 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     projects: [],
     candidates: [],
     inFlightClaims: [],
+    pendingGateEvaluations: [],
+    announcedGateConfigErrors: [],
     completedPasses: [pass],
   };
 }
@@ -140,6 +179,21 @@ function isAuthorAllowed(candidate: CandidateIssue, allowedAuthors: string[]): b
 
 export function decideNext(snapshot: AutonomySnapshot): Action[] {
   const actions: Action[] = [];
+
+  // Announced once per transition into saturation — the executor clears the
+  // flag when a slot frees, so "both slots busy" is a visible state, not spam.
+  const saturated = snapshot.slots.occupied >= snapshot.slots.total;
+  if (saturated && !snapshot.saturationAnnounced) {
+    actions.push({
+      type: "notify",
+      event: "slots-saturated",
+      payload: {
+        occupied: snapshot.slots.occupied,
+        total: snapshot.slots.total,
+        occupants: snapshot.slots.occupants,
+      },
+    });
+  }
 
   // A finished pass that leads with the blocked marker is parked and its
   // question escalated; a healthy pass gets no action here — the turn
@@ -158,19 +212,49 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     }
   }
 
-  // Announced once per transition into saturation — the executor clears the
-  // flag when a slot frees, so "both slots busy" is a visible state, not spam.
-  const saturated = snapshot.slots.occupied >= snapshot.slots.total;
-  if (saturated && !snapshot.saturationAnnounced) {
-    actions.push({
-      type: "notify",
-      event: "slots-saturated",
-      payload: {
-        occupied: snapshot.slots.occupied,
-        total: snapshot.slots.total,
-        occupants: snapshot.slots.occupants,
-      },
-    });
+  // Gate decisions come before new claims: finish in-flight work first.
+  // Whether an agent-authored PR may merge without a human is decided here,
+  // by data — changed paths against config from default branches. A config
+  // that is missing or unparseable fails closed: nothing armed, the owner
+  // told (once), and the run left pending so a config fix picks it up again.
+  for (const pending of snapshot.pendingGateEvaluations) {
+    if (!pending.gateConfig.ok) {
+      if (!snapshot.announcedGateConfigErrors.includes(pending.runId)) {
+        actions.push({
+          type: "notify",
+          event: "gate-config-error",
+          payload: {
+            runId: pending.runId,
+            issueRef: pending.issueRef,
+            prNumber: pending.prNumber,
+            reason: pending.gateConfig.reason,
+          },
+        });
+      }
+      continue;
+    }
+
+    const categories = evaluateGates(
+      pending.gateConfig.estate,
+      pending.gateConfig.extension,
+      pending.changedPaths
+    );
+    if (categories.length > 0) {
+      actions.push({
+        type: "gatePr",
+        runId: pending.runId,
+        issueRef: pending.issueRef,
+        prNumber: pending.prNumber,
+        categories,
+      });
+    } else {
+      actions.push({
+        type: "armAutoMerge",
+        runId: pending.runId,
+        issueRef: pending.issueRef,
+        prNumber: pending.prNumber,
+      });
+    }
   }
 
   if (snapshot.candidates.length === 0) return actions;

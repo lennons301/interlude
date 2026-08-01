@@ -169,6 +169,38 @@ export async function notifySlotsSaturated(
 }
 
 /**
+ * Tell the owner gate evaluation failed closed for a PR — the gate config
+ * was missing or unparseable, so nothing was armed. Sent once per failure
+ * (the autonomy sweep tracks the announcement; this just delivers). No-op
+ * when no fleet channel is configured: the sweep already logged it.
+ */
+export async function notifyGateConfigError(
+  channelId: string | null,
+  payload: { issueRef: string; prNumber: number; reason: string }
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await botClient.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Gate config error — nothing armed`)
+      .setDescription(
+        `${payload.issueRef} (PR #${payload.prNumber}) finished its implement pass, ` +
+          `but the review-gate config could not be read: ${payload.reason}\n\n` +
+          `The PR stays disarmed until the config on the default branch is fixed.`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel as TextChannel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send gate-config-error notification:`, err);
+  }
+}
+
+/**
  * Post a blocked run's question — to the project's linked channel, or the
  * fleet channel when the project has none. Returns the Discord message ID so
  * it becomes the task's current interactive message: replying to it queues
