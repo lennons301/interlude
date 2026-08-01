@@ -15,6 +15,10 @@ export interface AppConfig {
   maxTurns: number;
   /** Max budget in USD per task (default: 5.00) */
   maxBudgetUsd: number;
+  /** Explicit agent slot count, overriding the boot-time derivation. Null = derive from the Docker daemon */
+  capacitySlots: number | null;
+  /** Per-agent memory allocation in MiB (container cap + slot divisor). Null = default */
+  agentMemoryMb: number | null;
   /** Domain for subdomain-based preview (e.g. "interludes.co.uk"). Null = path-based fallback */
   domain: string | null;
   /** GitHub App ID (from app settings page) */
@@ -72,6 +76,12 @@ export function getConfig(): AppConfig {
     keepContainers: process.env.KEEP_CONTAINERS === "true",
     maxTurns: parseInt(process.env.MAX_TURNS ?? "50", 10),
     maxBudgetUsd: parseFloat(process.env.MAX_BUDGET_USD ?? "5.00"),
+    capacitySlots: process.env.CAPACITY_SLOTS
+      ? parseInt(process.env.CAPACITY_SLOTS, 10)
+      : null,
+    agentMemoryMb: process.env.AGENT_MEMORY_MB
+      ? parseInt(process.env.AGENT_MEMORY_MB, 10)
+      : null,
     domain: process.env.DOMAIN ?? null,
     githubAppId: process.env.GITHUB_APP_ID ?? null,
     githubAppPrivateKey: process.env.GITHUB_APP_PRIVATE_KEY ?? null,

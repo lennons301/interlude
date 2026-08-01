@@ -3,6 +3,7 @@ import { getDocker } from "./client";
 import { getImageName, ensureImage } from "./image-builder";
 import { getConfig, PLATFORM_REPO_URL } from "../config";
 import { getInstallationToken } from "../github/client";
+import { getCapacity } from "../orchestrator/capacity";
 
 /**
  * Bash run at container setup: install an env-based git credential helper
@@ -89,6 +90,8 @@ export async function createWorkspaceContainer(
   // DNS-safe subdomain derived from task ID (last 8 chars of ULID, lowercased)
   const previewSubdomain = `task-${options.taskId.slice(-8).toLowerCase()}`;
 
+  const capacity = await getCapacity();
+
   const container = await docker.createContainer({
     Image: getImageName(),
     name: containerName,
@@ -98,6 +101,11 @@ export async function createWorkspaceContainer(
     HostConfig: {
       NetworkMode: "interlude",
       Binds: binds.length > 0 ? binds : undefined,
+      // Hard caps: a runaway agent fails its own task, never the platform.
+      // MemorySwap = Memory disables swap, so the cap bites immediately.
+      Memory: capacity.perAgentMemory,
+      MemorySwap: capacity.perAgentMemory,
+      NanoCpus: capacity.cpuQuota,
     },
     NetworkingConfig: {
       EndpointsConfig: {

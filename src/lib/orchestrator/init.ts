@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import { newId } from "../ulid";
 import { getDocker, isDockerAvailable } from "../docker/client";
 import { startQueue } from "./queue";
+import { getCapacity } from "./capacity";
 import { isGitHubConfigured } from "../github/client";
 import { isDiscordConfigured, startDiscordBot } from "../discord/client";
 
@@ -108,6 +109,13 @@ export async function initOrchestrator(): Promise<void> {
   const dockerAvailable = await isDockerAvailable();
   if (dockerAvailable) {
     console.log("[orchestrator] Docker available, starting task queue");
+
+    const capacity = await getCapacity();
+    console.log(
+      `[orchestrator] Capacity: ${capacity.slots} agent slot(s), ` +
+        `${Math.round(capacity.perAgentMemory / (1024 * 1024))} MiB + ` +
+        `${capacity.cpuQuota / 1e9} CPU per agent`
+    );
     if (isGitHubConfigured()) {
       console.log("[orchestrator] GitHub App configured -- webhooks and PR creation enabled");
     } else {
