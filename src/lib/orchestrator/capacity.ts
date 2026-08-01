@@ -28,6 +28,8 @@ export interface DaemonInfo {
 export interface CapacityOverrides {
   /** Explicit slot count for when the derivation is wrong for a workload */
   slots?: number;
+  /** Per-agent memory allocation in MiB — resizes the container cap and the slot divisor together */
+  perAgentMemoryMb?: number;
 }
 
 export interface DerivedCapacity {
@@ -43,7 +45,12 @@ export function deriveCapacity(
   daemon: DaemonInfo,
   overrides: CapacityOverrides = {}
 ): DerivedCapacity {
-  const perAgentMemory = DEFAULT_AGENT_MEMORY_MB * MiB;
+  const memoryOverride = overrides.perAgentMemoryMb;
+  const perAgentMb =
+    memoryOverride !== undefined && Number.isFinite(memoryOverride) && memoryOverride > 0
+      ? memoryOverride
+      : DEFAULT_AGENT_MEMORY_MB;
+  const perAgentMemory = perAgentMb * MiB;
   const available = daemon.memTotalBytes - DEFAULT_ORCHESTRATOR_RESERVE_MB * MiB;
   const byMemory = Math.floor(available / perAgentMemory);
   const capped = Math.min(byMemory, daemon.cpuCount);
@@ -82,16 +89,20 @@ let _capacity: DerivedCapacity | null = null;
 /**
  * Capacity as derived at boot from the daemon's reported CPU and memory
  * (first call queries `docker info`; a VPS resize is picked up on restart).
- * `CAPACITY_SLOTS` overrides the slot count when the derivation is wrong
- * for a workload.
+ * `CAPACITY_SLOTS` overrides the slot count and `AGENT_MEMORY_MB` the
+ * per-agent allocation when the derivation is wrong for a workload.
  */
 export async function getCapacity(): Promise<DerivedCapacity> {
   if (_capacity) return _capacity;
 
   const info = await getDocker().info();
+  const config = getConfig();
   _capacity = deriveCapacity(
     { memTotalBytes: info.MemTotal, cpuCount: info.NCPU },
-    { slots: getConfig().capacitySlots ?? undefined }
+    {
+      slots: config.capacitySlots ?? undefined,
+      perAgentMemoryMb: config.agentMemoryMb ?? undefined,
+    }
   );
   return _capacity;
 }

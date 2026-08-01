@@ -66,6 +66,27 @@ describe("deriveCapacity", () => {
     expect(capacity.perAgentMemory).toBe(1_258_291_200);
     expect(capacity.cpuQuota).toBe(1_000_000_000);
   });
+
+  it("a per-agent memory override resizes the container cap and the slot divisor together", () => {
+    const capacity = deriveCapacity(
+      { memTotalBytes: 4 * GiB, cpuCount: 2 },
+      { perAgentMemoryMb: 2000 }
+    );
+    expect(capacity.perAgentMemory).toBe(2000 * MiB);
+    expect(capacity.slots).toBe(1);
+  });
+
+  it.each([{ perAgentMemoryMb: 0 }, { perAgentMemoryMb: -500 }, { perAgentMemoryMb: NaN }])(
+    "an invalid per-agent memory override ($perAgentMemoryMb) is ignored",
+    (overrides) => {
+      const capacity = deriveCapacity(
+        { memTotalBytes: 4 * GiB, cpuCount: 2 },
+        overrides
+      );
+      expect(capacity.perAgentMemory).toBe(1_258_291_200);
+      expect(capacity.slots).toBe(2);
+    }
+  );
 });
 
 describe("capacity provider", () => {
