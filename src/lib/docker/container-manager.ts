@@ -24,6 +24,27 @@ export function buildSetupScript(platformRepoUrl: string): string {
   ].join(" && ");
 }
 
+/**
+ * Env for a Claude turn exec. Auth is exec-scoped, mirroring GIT_AUTH_TOKEN:
+ * the long-lived setup-token never lands in the container's persistent env.
+ * The CLI prefers CLAUDE_CODE_OAUTH_TOKEN over the mounted credentials file,
+ * which stays as a fallback until the token path is verified on the VPS (#48).
+ */
+export function buildTurnEnv(options: {
+  prompt: string;
+  gitAuthToken: string;
+  claudeCodeOauthToken: string | null;
+}): string[] {
+  const env = [
+    `CLAUDE_PROMPT=${options.prompt}`,
+    `GIT_AUTH_TOKEN=${options.gitAuthToken}`,
+  ];
+  if (options.claudeCodeOauthToken) {
+    env.push(`CLAUDE_CODE_OAUTH_TOKEN=${options.claudeCodeOauthToken}`);
+  }
+  return env;
+}
+
 /** Bash run after each turn: commit any changes and push the branch via origin. */
 export function buildPushScript(): string {
   return [
@@ -206,7 +227,11 @@ export async function execClaudeTurn(
   const token = await getInstallationToken();
   const exec = await options.container.exec({
     Cmd: ["bash", "-c", cmdParts.join(" ")],
-    Env: [`CLAUDE_PROMPT=${options.prompt}`, `GIT_AUTH_TOKEN=${token}`],
+    Env: buildTurnEnv({
+      prompt: options.prompt,
+      gitAuthToken: token,
+      claudeCodeOauthToken: config.claudeCodeOauthToken,
+    }),
     AttachStdout: true,
     AttachStderr: true,
   });
