@@ -59,7 +59,7 @@ pnpm lint         # Run ESLint
 Local dev runs the orchestrator via `doppler run -- pnpm dev` — orchestrator secrets live in the Doppler `interlude/dev` config, not a `.env`. Two things Compose provides on the VPS that you must set up by hand locally:
 
 - **Agent-container network:** run `docker network create interlude` once. Agent containers attach to the `interlude` network, which Compose creates on the VPS but `pnpm dev` does not — without it, task runs fail with "network interlude not found".
-- **Claude credentials mount:** set `CLAUDE_CREDENTIALS_PATH` (in `interlude/dev`) to your host `~/.claude/.credentials.json` so agent containers get Claude auth — otherwise the agent errors with "Not logged in".
+- **Claude auth for agent containers:** set `CLAUDE_CODE_OAUTH_TOKEN` (in `interlude/dev`) to a token minted with `claude setup-token` — otherwise the agent errors with "Not logged in". The legacy fallback still works while both mechanisms exist: set `CLAUDE_CREDENTIALS_PATH` to your host `~/.claude/.credentials.json` to mount credentials into agent containers instead (slated for removal once the token path is verified on the VPS — #48).
 
 ## Current Status: Phase 4 done and verified on VPS; Phase 5 next
 
