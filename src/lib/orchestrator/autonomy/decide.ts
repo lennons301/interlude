@@ -188,8 +188,13 @@ export type Action =
       issueTitle: string;
       issueBody: string;
       attempt: number;
-      mode: "autonomous";
+      /** A checkpoint: directive makes the run supervised — forced
+       * human-signoff at the gate decision, never auto-merge */
+      mode: "autonomous" | "supervised";
       budgetUsd: number;
+      /** The checkpoint's text — the decision waiting for the owner; null
+       * for an ordinary autonomous run */
+      checkpoint: string | null;
       /** Per-exec turn limit from a max-turns directive; null = the default */
       maxTurns: number | null;
       workflow: WorkflowSelection;
@@ -628,8 +633,9 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       issueTitle: candidate.title,
       issueBody: candidate.body,
       attempt: candidate.attemptsMade + 1,
-      mode: "autonomous",
+      mode: directives.checkpoint !== null ? "supervised" : "autonomous",
       budgetUsd: directives.budget ?? snapshot.attemptBudgetUsd,
+      checkpoint: directives.checkpoint,
       maxTurns: directives.maxTurns,
       workflow: selectWorkflow(candidate.body, candidate.labels),
     });

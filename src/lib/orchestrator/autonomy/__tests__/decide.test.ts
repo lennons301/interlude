@@ -143,6 +143,7 @@ describe("decideNext — claiming", () => {
         attempt: 1,
         mode: "autonomous",
         budgetUsd: 20,
+        checkpoint: null,
         maxTurns: null,
         workflow: { source: "default" },
       },
@@ -194,6 +195,27 @@ describe("decideNext — claiming", () => {
     const actions = decideNext(makeSnapshot());
 
     expect(claims(actions)[0]).toMatchObject({ budgetUsd: 20, maxTurns: null });
+  });
+
+  it("claims a checkpoint ticket as a supervised run, carrying the checkpoint text", () => {
+    const body = "Spec.\n\n## Workflow\n\ncheckpoint: confirm the schema change with me\n";
+    const actions = decideNext(
+      makeSnapshot({ candidates: [makeCandidate({ body })] })
+    );
+
+    expect(claims(actions)[0]).toMatchObject({
+      mode: "supervised",
+      checkpoint: "confirm the schema change with me",
+    });
+  });
+
+  it("claims an ordinary ticket as an autonomous run with no checkpoint", () => {
+    const actions = decideNext(makeSnapshot());
+
+    expect(claims(actions)[0]).toMatchObject({
+      mode: "autonomous",
+      checkpoint: null,
+    });
   });
 });
 
