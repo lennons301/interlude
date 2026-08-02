@@ -46,6 +46,8 @@ export const runs = sqliteTable("runs", {
     .notNull()
     .default("claimed"),
   budgetUsd: real("budget_usd").notNull(),
+  // Per-exec turn limit from a ticket's max-turns directive; null = default
+  maxTurns: int("max_turns"),
   totalCostUsd: real("total_cost_usd").notNull().default(0),
   pullRequestNumber: int("pull_request_number"),
   pullRequestUrl: text("pull_request_url"),
@@ -68,6 +70,9 @@ export const runs = sqliteTable("runs", {
   reviewCycleCount: int("review_cycle_count").notNull().default(0),
   interruptionCount: int("interruption_count").notNull().default(0),
   blockedQuestion: text("blocked_question"),
+  // Why a failed attempt failed (budget/turn exhaustion, container error,
+  // review cycles) — human-readable, surfaced in the exhaust summary
+  failureReason: text("failure_reason"),
   claimedAt: int("claimed_at", { mode: "timestamp_ms" }).notNull(),
   startedAt: int("started_at", { mode: "timestamp_ms" }),
   finishedAt: int("finished_at", { mode: "timestamp_ms" }),

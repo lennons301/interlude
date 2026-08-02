@@ -6,6 +6,7 @@
 import { MAX_ATTEMPT_BUDGET_USD, MAX_TURNS_CEILING } from "./budgets";
 
 export const ARMING_LABEL = "ready-for-agent";
+export const READY_FOR_HUMAN_LABEL = "ready-for-human";
 export const INTERACTIVE_TRIGGER_LABEL = "interlude";
 
 const WORKFLOW_LABEL_PREFIX = "workflow:";

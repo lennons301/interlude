@@ -19,3 +19,17 @@ export const MAX_TURNS_CEILING = 100;
 /** Budget for one review pass — its own allowance, separate from the
  * implement attempt's, so reviewing never eats into a fix-up's headroom. */
 export const DEFAULT_REVIEW_BUDGET_USD = 5;
+
+/** Attempts per ticket before it is routed back to a human
+ * (`ready-for-agent` swapped for `ready-for-human`). */
+export const MAX_ATTEMPTS = 3;
+
+/** Implement↔review cycles allowed within one attempt: the initial pass and
+ * its review, plus one fix-up bought by a request-changes verdict. A second
+ * request-changes fails the attempt instead of looping. */
+export const MAX_REVIEW_CYCLES_PER_ATTEMPT = 2;
+
+/** Estate-wide daily autonomous spend cap in USD. Reaching it pauses pickup
+ * until local midnight; interactive tasks (no run row) are exempt by
+ * construction. */
+export const DAILY_AUTONOMOUS_CAP_USD = 500;

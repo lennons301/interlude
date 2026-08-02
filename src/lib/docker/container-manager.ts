@@ -51,6 +51,8 @@ export interface TurnOptions {
   sessionId?: string; // If set, uses --resume
   /** Per-exec budget override (autonomous runs carry their attempt budget) */
   maxBudgetUsd?: number;
+  /** Per-exec turn-limit override (a ticket's max-turns directive) */
+  maxTurns?: number;
 }
 
 export interface RunningContainer {
@@ -207,7 +209,7 @@ export async function execClaudeTurn(
     "--verbose",
     "--dangerously-skip-permissions",
     "--max-turns",
-    String(config.maxTurns),
+    String(options.maxTurns ?? config.maxTurns),
     "--max-budget-usd",
     String(options.maxBudgetUsd ?? config.maxBudgetUsd),
   ];

@@ -13,7 +13,7 @@ import {
 } from "../docker/container-manager";
 import { createOutputHandler, type TurnResult } from "./output-parser";
 import { parseReviewVerdict } from "./autonomy/verdict";
-import { DEFAULT_REVIEW_BUDGET_USD } from "./autonomy/budgets";
+import { DEFAULT_REVIEW_BUDGET_USD, MAX_ATTEMPTS } from "./autonomy/budgets";
 import { scanPorts } from "./port-scanner";
 import { getConfig } from "../config";
 import { getDocker } from "../docker/client";
@@ -175,6 +175,7 @@ export async function startTask(taskId: string): Promise<void> {
     // pass's raw stream is kept: the verdict is parsed from it.
     const turnResult = await runTurn(taskId, running, prompt, undefined, {
       maxBudgetUsd: isReviewPass ? DEFAULT_REVIEW_BUDGET_USD : run?.budgetUsd,
+      maxTurns: isReviewPass ? undefined : (run?.maxTurns ?? undefined),
       captureRaw: isReviewPass,
     });
 
@@ -198,6 +199,14 @@ export async function startTask(taskId: string): Promise<void> {
     await runPostTurnCommitAndPush(taskId, running);
 
     if (isImplementPass) {
+      // Exhaustion first (issue #18): a pass that ran out of budget or turns
+      // failed its attempt — the branch is already pushed, so the work
+      // survives for the next attempt, but nothing proceeds toward review.
+      const exhaustion = run ? attemptExhaustion(run, turnResult.costUsd, turnResult.subtype) : null;
+      if (exhaustion) {
+        await failImplementAttempt(taskId, run!.id, exhaustion);
+        return;
+      }
       // The pass's turn is over: park it blocked if its final message leads
       // with the BLOCKED marker — container kept alive, question escalated
       // to the owner (issue #19). Otherwise the initial turn is the whole
@@ -229,7 +238,11 @@ export async function startTask(taskId: string): Promise<void> {
           .where(eq(runs.id, task.runId))
           .run();
       } else {
-        finishRun(task.runId, "failed");
+        finishRun(
+          task.runId,
+          "failed",
+          `container error: ${err instanceof Error ? err.message : String(err)}`
+        );
       }
     }
     insertSystemMessage(
@@ -273,7 +286,7 @@ async function runTurn(
   running: RunningContainer,
   prompt: string,
   sessionId?: string,
-  opts?: { maxBudgetUsd?: number; captureRaw?: boolean }
+  opts?: { maxBudgetUsd?: number; maxTurns?: number; captureRaw?: boolean }
 ): Promise<TurnResult & { raw?: string }> {
   const handler = createOutputHandler(taskId);
   const rawChunks: Buffer[] = [];
@@ -283,6 +296,7 @@ async function runTurn(
     prompt,
     sessionId,
     maxBudgetUsd: opts?.maxBudgetUsd,
+    maxTurns: opts?.maxTurns,
   });
 
   // Race: wait for the exec stream to close OR the "result" event from Claude.
@@ -319,14 +333,24 @@ export async function processQueuedMessages(
     if (!task || (task.status !== "running" && task.status !== "blocked")) break;
 
     // Check budget — a run-owned task answers to its attempt budget, an
-    // interactive task to the configured default. Known gap (issue #18's
-    // budget-exhausted seam): completing a run-owned task here can strand an
-    // undelivered fix-up message, leaving the run `implementing` forever.
+    // interactive task to the configured default. Budget exhaustion on a
+    // run-owned task is a run-level outcome (issue #18): the attempt fails
+    // through the ledger, because quietly completing the task here would
+    // strand an undelivered fix-up message and leak the run in
+    // `implementing` forever.
     const run = task.runId
       ? db.select().from(runs).where(eq(runs.id, task.runId)).get()
       : undefined;
     const budgetUsd = run?.budgetUsd ?? config.maxBudgetUsd;
     if (task.totalCostUsd && task.totalCostUsd >= budgetUsd) {
+      if (run) {
+        await failImplementAttempt(
+          taskId,
+          run.id,
+          `budget exhausted ($${task.totalCostUsd.toFixed(2)} of $${budgetUsd.toFixed(2)})`
+        );
+        break;
+      }
       insertSystemMessage(
         taskId,
         `Budget limit reached ($${task.totalCostUsd.toFixed(2)} / $${budgetUsd.toFixed(2)})`
@@ -393,7 +417,10 @@ export async function processQueuedMessages(
       running,
       promptText,
       task.sessionId ?? undefined,
-      { maxBudgetUsd: run ? run.budgetUsd - (task.totalCostUsd ?? 0) : undefined }
+      {
+        maxBudgetUsd: run ? run.budgetUsd - (task.totalCostUsd ?? 0) : undefined,
+        maxTurns: run?.maxTurns ?? undefined,
+      }
     );
 
     // Update cumulative cost and session
@@ -410,6 +437,16 @@ export async function processQueuedMessages(
     await runPostTurnCommitAndPush(taskId, running);
 
     if (task.kind === "implement") {
+      // Exhaustion first (issue #18): a fix-up or answer turn that spent the
+      // attempt's remaining budget or turns fails the attempt through the
+      // ledger — the branch is already pushed, the work survives.
+      const exhaustion = run
+        ? attemptExhaustion(run, currentCost + turnResult.costUsd, turnResult.subtype)
+        : null;
+      if (exhaustion) {
+        await failImplementAttempt(taskId, run!.id, exhaustion);
+        break;
+      }
       // Park-or-proceed again: the resumed pass may hit another unresolved
       // decision and re-park blocked, or end its turn healthy — which leaves
       // it parked awaiting review. A pass that blocked before its PR was
@@ -540,7 +577,13 @@ export async function completeTask(taskId: string): Promise<void> {
     }
 
     updateTask(taskId, { status: "failed", containerStatus: null });
-    if (task.runId) finishRun(task.runId, "failed");
+    if (task.runId) {
+      finishRun(
+        task.runId,
+        "failed",
+        `container error: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
   } finally {
     activeTasks.delete(taskId);
     if (running && !getConfig().keepContainers) {
@@ -592,6 +635,71 @@ async function finishImplementPass(taskId: string): Promise<void> {
       task.githubIssue,
       `Implement pass complete -- PR #${task.pullRequestNumber} ready for review ($${cost})`
     );
+  }
+}
+
+/**
+ * Why an implement pass's turn left its attempt unable to continue, or null
+ * for a healthy turn. Budget is judged from accumulated cost (robust to CLI
+ * versions), turn exhaustion from the result event's subtype.
+ */
+function attemptExhaustion(
+  run: { budgetUsd: number },
+  totalCostUsd: number,
+  turnSubtype: string | null
+): string | null {
+  if (totalCostUsd >= run.budgetUsd) {
+    return `budget exhausted ($${totalCostUsd.toFixed(2)} of $${run.budgetUsd.toFixed(2)})`;
+  }
+  if (turnSubtype === "error_max_turns") return "turn limit reached";
+  return null;
+}
+
+/**
+ * Fail an implement attempt through the run ledger (issue #18): the run
+ * records the strike and its reason, the task fails, the owner learns why on
+ * the issue, and the container goes away. The branch was pushed after the
+ * turn, so the work survives for the next attempt; three strikes and the
+ * sweep routes the ticket back to a human.
+ */
+async function failImplementAttempt(
+  taskId: string,
+  runId: string,
+  reason: string
+): Promise<void> {
+  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+  const run = db.select().from(runs).where(eq(runs.id, runId)).get();
+
+  insertSystemMessage(taskId, `Attempt failed: ${reason}`);
+  updateTask(taskId, { status: "failed", containerStatus: null });
+  syncRunCost(runId);
+  db.update(runs)
+    .set({
+      status: "failed",
+      failureReason: reason,
+      finishedAt: new Date(),
+      // Keep the PR on the ledger for the exhaust summary and dashboard
+      pullRequestNumber: task?.pullRequestNumber ?? run?.pullRequestNumber,
+      pullRequestUrl: task?.pullRequestUrl ?? run?.pullRequestUrl,
+      // A blocked run that dies exhausted is no longer waiting on anyone
+      blockedQuestion: null,
+    })
+    .where(eq(runs.id, runId))
+    .run();
+
+  if (task?.githubIssue) {
+    await commentOnIssue(
+      task.githubIssue,
+      `Run failed (attempt ${run?.attempt ?? "?"}/${MAX_ATTEMPTS}): ${reason}. ` +
+        `Work so far is pushed to \`${task.branch}\`.`
+    );
+  }
+
+  const entry = activeTasks.get(taskId);
+  activeTasks.delete(taskId);
+  if (entry && !getConfig().keepContainers) {
+    await removeContainer(entry.container);
+    updateTask(taskId, { containerId: null });
   }
 }
 
@@ -952,9 +1060,9 @@ function updateTask(
 }
 
 /** Terminalize a run: failed consumes an attempt, cancelled does not. */
-function finishRun(runId: string, status: "failed" | "cancelled"): void {
+function finishRun(runId: string, status: "failed" | "cancelled", reason?: string): void {
   db.update(runs)
-    .set({ status, finishedAt: new Date() })
+    .set({ status, finishedAt: new Date(), ...(reason ? { failureReason: reason } : {}) })
     .where(eq(runs.id, runId))
     .run();
 }
