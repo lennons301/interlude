@@ -4,13 +4,20 @@
  * in the snapshot, nothing inside reads a clock, a database, Docker, GitHub
  * or Discord. The webhook fast path and the reconciliation sweep both feed
  * this one function, so there is a single decision path, and the executors
- * — sweep.ts for pickup and gating, the turn manager for a finished pass's
- * park-or-proceed — are thin performers of the Actions returned here.
+ * — sweep.ts for pickup, gating and the review pipeline, the turn manager
+ * for a finished pass's park-or-proceed — are thin performers of the Actions
+ * returned here.
  */
 
 import { detectBlockedQuestion } from "./blocked";
 import { evaluateGates, type GateConfig } from "./gates";
 import { selectWorkflow, type WorkflowSelection } from "./ticket";
+import {
+  buildFeedbackTurn,
+  undeliverableFeedbackBody,
+  type ReviewVerdictKind,
+  type ReviewVerdictResult,
+} from "./verdict";
 
 export interface ProjectSnapshot {
   id: string;
@@ -59,6 +66,41 @@ export interface PendingGateEvaluation {
     | { ok: false; reason: string };
 }
 
+/**
+ * A run whose PR has had its gate decision (auto-merge armed, or gated with
+ * `human-signoff`) and which now awaits its review pass. `hasReviewTask`
+ * carries the "already queued or running" fact so re-deciding stays
+ * idempotent across sweeps.
+ */
+export interface AwaitingReview {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  prNumber: number;
+  /** Auto-merge armed (ungated) vs waiting on human sign-off (gated) */
+  armed: boolean;
+  hasReviewTask: boolean;
+}
+
+/**
+ * A finished review pass whose stored verdict awaits its consequences. The
+ * pass's output was parsed when its container finished; the reducer maps the
+ * result to actions and the executor performs them with the reviewer
+ * credential that no container ever holds.
+ */
+export interface PendingVerdict {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  prNumber: number;
+  /** Auto-merge armed (ungated) vs gated */
+  armed: boolean;
+  result: ReviewVerdictResult;
+  /** The implement task whose container can take a fix-up turn; null once
+   * that container is gone (restart, failure, teardown) */
+  implementTaskId: string | null;
+}
+
 /** An implement turn that just finished, up for a park-or-proceed decision. */
 export interface PassOutcome {
   runId: string;
@@ -67,6 +109,16 @@ export interface PassOutcome {
   issueRef: string;
   /** The turn's final agent text message; null when the turn produced none */
   finalMessage: string | null;
+}
+
+/** A reviewed PR that has since closed on GitHub — merged by auto-merge or
+ * a human, or closed without merging. The run's ledger row can settle. */
+export interface SettledPr {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  prNumber: number;
+  merged: boolean;
 }
 
 export interface AutonomySnapshot {
@@ -97,6 +149,16 @@ export interface AutonomySnapshot {
    * always passes []; the turn manager evaluates each outcome at the moment
    * the turn finishes. */
   completedPasses: PassOutcome[];
+  /** Review tasks sitting in the queue — each has a slot spoken for */
+  queuedReviewCount: number;
+  /** Runs past their gate decision that await a review pass */
+  awaitingReview: AwaitingReview[];
+  /** Finished review passes whose verdicts await their consequences */
+  pendingVerdicts: PendingVerdict[];
+  /** Reviewed PRs that have closed on GitHub — their runs can settle */
+  settledPrs: SettledPr[];
+  /** Run IDs whose verdict failure was already announced (once per failure) */
+  announcedVerdictErrors: string[];
 }
 
 export type PauseReason =
@@ -137,6 +199,35 @@ export type Action =
       event: "gate-config-error";
       payload: { runId: string; issueRef: string; prNumber: number; reason: string };
     }
+  | { type: "startReview"; runId: string; issueRef: string; prNumber: number; armed: boolean }
+  | {
+      type: "postVerdict";
+      runId: string;
+      issueRef: string;
+      prNumber: number;
+      verdict: ReviewVerdictKind;
+      body: string;
+      armed: boolean;
+    }
+  | { type: "deliverFeedback"; runId: string; taskId: string; issueRef: string; body: string }
+  | {
+      type: "notify";
+      event: "verdict-unparseable";
+      payload: {
+        runId: string;
+        issueRef: string;
+        prNumber: number;
+        reason: string;
+        armed: boolean;
+      };
+    }
+  | {
+      type: "finalizeRun";
+      runId: string;
+      issueRef: string;
+      prNumber: number;
+      outcome: "merged" | "closed";
+    }
   | {
       type: "escalate";
       reason: "blocked";
@@ -148,8 +239,8 @@ export type Action =
 
 /**
  * A snapshot for deciding one finished pass at the moment its turn ends,
- * outside a sweep: every pickup, gating and saturation input is inert, so
- * the only possible decision is about the pass itself.
+ * outside a sweep: every pickup, gating, review and saturation input is
+ * inert, so the only possible decision is about the pass itself.
  */
 export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnapshot {
   return {
@@ -168,6 +259,11 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     pendingGateEvaluations: [],
     announcedGateConfigErrors: [],
     completedPasses: [pass],
+    queuedReviewCount: 0,
+    awaitingReview: [],
+    pendingVerdicts: [],
+    settledPrs: [],
+    announcedVerdictErrors: [],
   };
 }
 
@@ -198,10 +294,16 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
 
   // A finished pass that leads with the blocked marker is parked and its
   // question escalated; a healthy pass gets no action here — the turn
-  // manager proceeds to completion.
+  // manager proceeds to completion. A run escalated as blocked is driven by
+  // exactly one thing — its question: the executors never gather a blocked
+  // run into the review pipeline (it leaves the reviewing/gated set), but
+  // the combination is representable in a snapshot, so the reducer refuses
+  // to double-drive it rather than trusting the callers.
+  const blockedRunIds = new Set<string>();
   for (const pass of snapshot.completedPasses) {
     const question = detectBlockedQuestion(pass.finalMessage);
     if (question) {
+      blockedRunIds.add(pass.runId);
       actions.push({
         type: "escalate",
         reason: "blocked",
@@ -211,6 +313,112 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
         question,
       });
     }
+  }
+
+  // Settled PRs first: pure ledger bookkeeping for work that already landed
+  // (or was closed by a human) — nothing downstream depends on it this sweep.
+  for (const settled of snapshot.settledPrs) {
+    if (blockedRunIds.has(settled.runId)) continue;
+    actions.push({
+      type: "finalizeRun",
+      runId: settled.runId,
+      issueRef: settled.issueRef,
+      prNumber: settled.prNumber,
+      outcome: settled.merged ? "merged" : "closed",
+    });
+  }
+
+  // Verdicts next — in-flight work outranks everything else, and a fix-up
+  // turn resumes a parked container, so it takes a free slot ahead of any
+  // reservation below. A request-changes with no slot free is held whole
+  // (review post and fix-up together) for a later sweep: posting the review
+  // without delivering the feedback would strand the run mid-cycle.
+  let slotsLeft = Math.max(0, snapshot.slots.total - snapshot.slots.occupied);
+  for (const pending of snapshot.pendingVerdicts) {
+    if (blockedRunIds.has(pending.runId)) continue;
+    const { result } = pending;
+
+    if (result.kind === "unparseable") {
+      // The fail-closed case: no review is posted, nothing is armed, the
+      // owner is told (once). The executor disarms and adds human oversight.
+      if (!snapshot.announcedVerdictErrors.includes(pending.runId)) {
+        actions.push({
+          type: "notify",
+          event: "verdict-unparseable",
+          payload: {
+            runId: pending.runId,
+            issueRef: pending.issueRef,
+            prNumber: pending.prNumber,
+            reason: result.reason,
+            armed: pending.armed,
+          },
+        });
+      }
+      continue;
+    }
+
+    if (result.kind === "request-changes") {
+      if (pending.implementTaskId === null) {
+        // The container that could apply the feedback is gone; the findings
+        // escalate to a human rather than burning a fresh attempt here.
+        actions.push({
+          type: "postVerdict",
+          runId: pending.runId,
+          issueRef: pending.issueRef,
+          prNumber: pending.prNumber,
+          verdict: "escalate",
+          body: undeliverableFeedbackBody(result.body),
+          armed: pending.armed,
+        });
+        continue;
+      }
+      if (slotsLeft === 0) continue;
+      slotsLeft--;
+      actions.push({
+        type: "postVerdict",
+        runId: pending.runId,
+        issueRef: pending.issueRef,
+        prNumber: pending.prNumber,
+        verdict: "request-changes",
+        body: result.body,
+        armed: pending.armed,
+      });
+      actions.push({
+        type: "deliverFeedback",
+        runId: pending.runId,
+        taskId: pending.implementTaskId,
+        issueRef: pending.issueRef,
+        body: buildFeedbackTurn(pending.prNumber, result.body),
+      });
+      continue;
+    }
+
+    actions.push({
+      type: "postVerdict",
+      runId: pending.runId,
+      issueRef: pending.issueRef,
+      prNumber: pending.prNumber,
+      verdict: result.kind,
+      body: result.body,
+      armed: pending.armed,
+    });
+  }
+
+  // Review passes are queued before gate decisions and claims: they finish
+  // work already in flight. The queue starts them under the ordinary
+  // capacity check, so emitting one here only reserves intent, not a slot.
+  let reviewsQueuedThisSweep = 0;
+  for (const awaiting of snapshot.awaitingReview) {
+    if (blockedRunIds.has(awaiting.runId)) continue;
+    if (awaiting.hasReviewTask) continue;
+    reviewsQueuedThisSweep++;
+    actions.push({
+      type: "startReview",
+      runId: awaiting.runId,
+      issueRef: awaiting.issueRef,
+      prNumber: awaiting.prNumber,
+      armed: awaiting.armed,
+    });
   }
 
   // Gate decisions come before new claims: finish in-flight work first.
@@ -310,13 +518,17 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   if (eligible.length === 0) return actions;
 
   // Priority order: in-flight work already holds its slot (it is counted in
-  // `occupied`), a queued interactive task reserves the next free slot, an
-  // already-claimed implement task reserves the slot it is waiting for, and
-  // only what remains may go to new autonomous claims.
-  const freeSlots = Math.max(0, snapshot.slots.total - snapshot.slots.occupied);
+  // `occupied`, and a fix-up turn delivered above decremented `slotsLeft`),
+  // a queued interactive task reserves the next free slot, an
+  // already-claimed implement task or a queued review pass reserves the slot
+  // it is waiting for, and only what remains may go to new autonomous claims.
   const claimableSlots = Math.max(
     0,
-    freeSlots - snapshot.queuedInteractiveCount - snapshot.queuedImplementCount
+    slotsLeft -
+      snapshot.queuedInteractiveCount -
+      snapshot.queuedImplementCount -
+      snapshot.queuedReviewCount -
+      reviewsQueuedThisSweep
   );
 
   if (claimableSlots === 0) {

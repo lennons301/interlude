@@ -188,10 +188,17 @@ export function buildFleetView(rows: FleetRows): FleetView {
   const runById = new Map(rows.runs.map((r) => [r.id, r]));
   const projectName = (id: string) => projectById.get(id)?.name ?? id;
 
-  // A slot is a live container. Tasks are the container unit for every kind
-  // of work, so occupancy — and what saturation is attributable to — reads
-  // straight off tasks with a container status.
-  const occupants = rows.tasks.filter((t) => t.containerStatus !== null);
+  // A slot is a live container running (or setting up) an agent process.
+  // Tasks are the container unit for every kind of work, so occupancy — and
+  // what saturation is attributable to — reads straight off tasks with a
+  // container status. A parked autonomous container (an implement pass
+  // idling while its PR is reviewed, issue #17) stays alive but runs no
+  // agent and holds no slot; an idle interactive session does hold its slot.
+  const occupants = rows.tasks.filter(
+    (t) =>
+      t.containerStatus !== null &&
+      !(t.kind !== "interactive" && t.containerStatus === "idle")
+  );
   const segments: SlotSegment[] = occupants.map((t) => {
     const run = t.runId ? runById.get(t.runId) : undefined;
     return {

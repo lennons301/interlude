@@ -2,7 +2,7 @@ import { db } from "@/db";
 import { tasks, messages } from "@/db/schema";
 import { eq, and, isNull, asc, sql } from "drizzle-orm";
 import { startTask } from "./turn-manager";
-import { getActiveTasks, processQueuedMessages, scanForDevServer } from "./turn-manager";
+import { getActiveTasks, isParked, processQueuedMessages, scanForDevServer } from "./turn-manager";
 import {
   createLocalCapacityProvider,
   getCapacity,
@@ -22,10 +22,15 @@ let saturationLogged = false;
  * Slots in use: live containers plus pickups still provisioning theirs
  * (a task sits in processingTasks before it registers in activeTasks —
  * without counting those, back-to-back polls could overfill the box).
+ * Parked autonomous containers (an implement pass idling while its PR is
+ * reviewed) run no agent process and hold no slot — see isParked.
  */
 export function occupiedSlots(): number {
   const active = getActiveTasks();
-  let count = active.size;
+  let count = 0;
+  for (const entry of active.values()) {
+    if (!isParked(entry)) count++;
+  }
   for (const taskId of processingTasks) {
     if (!active.has(taskId)) count++;
   }
@@ -44,13 +49,15 @@ export function startQueue(): void {
       // 1. Pick up new queued tasks — through the capacity provider seam,
       // never a direct Docker query at the call site. Interactive tasks the
       // owner dispatched outrank queued autonomous passes for the next slot
-      // (issue #15); within a kind, oldest first.
+      // (issue #15); review passes outrank queued implements because they
+      // finish in-flight work rather than starting more (issue #17); within
+      // a kind, oldest first.
       const next = db
         .select()
         .from(tasks)
         .where(eq(tasks.status, "queued"))
         .orderBy(
-          sql`case when ${tasks.kind} = 'interactive' then 0 else 1 end`,
+          sql`case ${tasks.kind} when 'interactive' then 0 when 'review' then 1 else 2 end`,
           asc(tasks.createdAt)
         )
         .get();

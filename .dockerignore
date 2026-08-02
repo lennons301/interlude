@@ -7,3 +7,4 @@ node_modules
 .env*
 docs
 !docs/agents/workflows
+!docs/agents/review-pass.md

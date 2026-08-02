@@ -113,6 +113,25 @@ describe("buildFleetView — slots", () => {
     expect(view.slots.segments[1]).toEqual({ occupant: "free" });
   });
 
+  it("does not attribute a slot to a parked implement container awaiting review", () => {
+    // Issue #17: an implement pass idling while its PR is reviewed keeps its
+    // container (for the fix-up turn) but runs no agent and holds no slot.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "interlude" })],
+        tasks: [
+          makeTask({ projectId: "p1", kind: "implement", containerStatus: "idle" }),
+        ],
+      })
+    );
+
+    expect(view.slots.used).toBe(0);
+    expect(view.slots.segments).toEqual([
+      { occupant: "free" },
+      { occupant: "free" },
+    ]);
+  });
+
   it("attributes a slot to an autonomous run via its live task", () => {
     const view = buildFleetView(
       baseRows({
