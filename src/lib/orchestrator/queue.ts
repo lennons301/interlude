@@ -49,15 +49,16 @@ export function startQueue(): void {
       // 1. Pick up new queued tasks — through the capacity provider seam,
       // never a direct Docker query at the call site. Interactive tasks the
       // owner dispatched outrank queued autonomous passes for the next slot
-      // (issue #15); review passes outrank queued implements because they
-      // finish in-flight work rather than starting more (issue #17); within
-      // a kind, oldest first.
+      // (issue #15); review passes outrank the rest because they finish
+      // in-flight work rather than starting more (issue #17); triage passes
+      // outrank implements because shaping the backlog is cheap and new
+      // issues get met on arrival (issue #23); within a kind, oldest first.
       const next = db
         .select()
         .from(tasks)
         .where(eq(tasks.status, "queued"))
         .orderBy(
-          sql`case ${tasks.kind} when 'interactive' then 0 when 'review' then 1 else 2 end`,
+          sql`case ${tasks.kind} when 'interactive' then 0 when 'review' then 1 when 'triage' then 2 else 3 end`,
           asc(tasks.createdAt)
         )
         .get();

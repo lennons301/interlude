@@ -376,6 +376,54 @@ export async function notifyTaskIdle(
 }
 
 /**
+ * Post a triage recommendation: the pass judged a new issue well specified,
+ * and arming is one explicit yes away. Returns the Discord message ID so it
+ * becomes the triage task's interactive message — a reply of "yes" is the
+ * confirmation the orchestrator arms on. Anything else, including silence,
+ * leaves the issue un-armed.
+ */
+export async function notifyTriageRecommendation(
+  channelId: string,
+  rec: {
+    taskId: string;
+    issueRef: string;
+    issueTitle: string;
+    assessment: string;
+    projectName: string | null;
+  }
+): Promise<string | null> {
+  const botClient = getBotClient();
+  if (!botClient) return null;
+
+  try {
+    const channel = await botClient.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) return null;
+
+    const domain = process.env.DOMAIN ?? "interludes.co.uk";
+    const lines = [rec.assessment.trim().slice(0, 800), ""];
+    if (rec.projectName) lines.push(`Project: ${rec.projectName}`);
+    lines.push(`Ticket: ${rec.issueRef}`);
+    lines.push(
+      "",
+      "Reply **yes** to arm it (applies `ready-for-agent`), or apply the " +
+        "label on GitHub yourself. Anything else leaves it un-armed."
+    );
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Triage recommends arming: ${rec.issueTitle}`)
+      .setDescription(lines.join("\n"))
+      .setURL(`https://${domain}/tasks/${rec.taskId}`)
+      .setColor(0xf59e0b);
+
+    const msg = await sendWithRetry(channel as TextChannel, embed);
+    return msg.id;
+  } catch (err) {
+    console.error(`[discord] Failed to send triage recommendation:`, err);
+    return null;
+  }
+}
+
+/**
  * Tell the owner a ticket burnt its last attempt and went back to a human —
  * `ready-for-agent` swapped for `ready-for-human`. Sent to the project's
  * linked channel, or the fleet channel when the project has none. No-op when

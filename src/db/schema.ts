@@ -108,6 +108,15 @@ export const tasks = sqliteTable("tasks", {
     enum: ["setup", "running", "idle", "completing"],
   }),
   totalCostUsd: real("total_cost_usd").notNull().default(0),
+  // A finished triage pass's parsed exit, held until the sweep has applied
+  // it (comment, advisory labels, recommendation). Stored on the task —
+  // triage owns no run — so an exit survives an orchestrator restart
+  // without re-running the pass. The issue's needs-triage label is the
+  // "acted on" latch: once removed, the result is no longer gathered.
+  triageResult: text("triage_result", { mode: "json" }).$type<
+    | { kind: "recommend" | "needs-info" | "ready-for-human"; body: string }
+    | { kind: "unparseable"; reason: string }
+  >(),
   devPort: int("dev_port"),
   containerName: text("container_name"),
   previewSubdomain: text("preview_subdomain"),

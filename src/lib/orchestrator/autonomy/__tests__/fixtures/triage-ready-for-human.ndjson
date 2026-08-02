@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/workspace/repo","session_id":"tri-human-001","tools":["Bash","Read","Grep","Glob"]}
+{"type":"assistant","message":{"content":[{"type":"text","text":"This asks for a storage-engine swap — a decision, not a ticket."}]},"session_id":"tri-human-001"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":51000,"num_turns":6,"result":"TRIAGE: ready-for-human\n\nSuggested grilling agenda:\n1. What breaks with SQLite today — is this a real limit or a preference?\n2. Migration story for the existing WAL database and backups.\n3. Who operates the new server, and what does it cost?","stop_reason":"end_turn","session_id":"tri-human-001","total_cost_usd":0.29}

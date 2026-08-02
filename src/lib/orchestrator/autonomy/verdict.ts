@@ -11,6 +11,8 @@
  * rest of the message is the review body posted verbatim to GitHub.
  */
 
+import { finalPassMessage } from "./pass-output";
+
 export type ReviewVerdictKind = "approve" | "request-changes" | "escalate";
 
 export type ReviewVerdictResult =
@@ -54,38 +56,12 @@ export function undeliverableFeedbackBody(findings: string): string {
  * cleanly is unparseable by construction.
  */
 export function parseReviewVerdict(ndjson: string): ReviewVerdictResult {
-  let result: Record<string, unknown> | null = null;
-
-  for (const line of ndjson.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const event = JSON.parse(trimmed) as Record<string, unknown>;
-      if (event.type === "result") result = event;
-    } catch {
-      // Interleaved non-JSON output (stderr noise) is not the verdict's problem
-    }
+  const final = finalPassMessage(ndjson);
+  if (!final.ok) {
+    return { kind: "unparseable", reason: `review ${final.reason}` };
   }
 
-  if (!result) {
-    return { kind: "unparseable", reason: "review output has no result event" };
-  }
-
-  // A turn that errored out (budget, max turns, execution failure) is not a
-  // verdict, whatever its last words were — the pass did not finish reviewing.
-  if (result.is_error === true || result.subtype !== "success") {
-    return {
-      kind: "unparseable",
-      reason: `review pass did not complete cleanly (${result.subtype ?? "unknown error"})`,
-    };
-  }
-
-  const finalMessage = result.result;
-  if (typeof finalMessage !== "string" || !finalMessage.trim()) {
-    return { kind: "unparseable", reason: "result event carries no final message" };
-  }
-
-  const lines = finalMessage.trim().split("\n");
+  const lines = final.message.trim().split("\n");
   const match = lines[0].trim().match(VERDICT_LINE);
   if (!match) {
     return {

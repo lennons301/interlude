@@ -85,6 +85,41 @@ describe("todayAutonomousSpendUsd", () => {
 
     expect(todayAutonomousSpendUsd(NOW)).toBeCloseTo(1.5);
   });
+
+  it("counts today's triage passes — autonomous spend without a run", () => {
+    testDb
+      .insert(schema.tasks)
+      .values({
+        id: "triage-task",
+        projectId: "test-project",
+        title: "Triage: add export",
+        kind: "triage",
+        totalCostUsd: 1.75,
+        createdAt: TODAY_9AM,
+        updatedAt: TODAY_9AM,
+      })
+      .run();
+    insertRun({ totalCostUsd: 1.5 });
+
+    expect(todayAutonomousSpendUsd(NOW)).toBeCloseTo(3.25);
+  });
+
+  it("excludes triage passes created before local midnight", () => {
+    testDb
+      .insert(schema.tasks)
+      .values({
+        id: "triage-task-old",
+        projectId: "test-project",
+        title: "Triage: add export",
+        kind: "triage",
+        totalCostUsd: 2,
+        createdAt: YESTERDAY_11PM,
+        updatedAt: YESTERDAY_11PM,
+      })
+      .run();
+
+    expect(todayAutonomousSpendUsd(NOW)).toBe(0);
+  });
 });
 
 describe("startOfLocalDay", () => {

@@ -5,6 +5,7 @@ import { projects, tasks, messages } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { newId } from "../ulid";
 import { getConfig } from "../config";
+import { isArmingConfirmation } from "../orchestrator/autonomy/triage";
 import { setBotClient, notifyTaskQueued } from "./notifications";
 
 let client: Client | null = null;
@@ -190,6 +191,15 @@ async function handleReply(message: Message): Promise<void> {
 
   if (!task) return; // Reply to something that isn't a task notification
 
+  // A reply to a triage recommendation is an arming decision, not a task
+  // follow-up: an explicit yes applies ready-for-agent through the
+  // orchestrator — a human's confirmation is the one thing arming may trace
+  // to. Anything else is conversation, and silence is never consent.
+  if (task.kind === "triage") {
+    await handleArmingConfirmation(message, task);
+    return;
+  }
+
   // Handle "cancel" command
   if (message.content.trim().toLowerCase() === "cancel") {
     if (["completed", "failed", "cancelled"].includes(task.status)) {
@@ -224,6 +234,22 @@ async function handleReply(message: Message): Promise<void> {
 
   await message.react("👍");
   console.log(`[discord] Follow-up message for task ${task.id} from Discord`);
+}
+
+async function handleArmingConfirmation(
+  message: Message,
+  task: { id: string; githubIssue: string | null }
+): Promise<void> {
+  if (!task.githubIssue) return;
+  if (!isArmingConfirmation(message.content)) return;
+
+  // Dynamic import to avoid circular dependency with the orchestrator
+  const { armIssueFromDiscord } = await import("../orchestrator/autonomy/sweep");
+  const armed = await armIssueFromDiscord(task.githubIssue, message.author.tag);
+  await message.react(armed ? "✅" : "❌");
+  if (armed) {
+    console.log(`[discord] ${task.githubIssue} armed via reply by ${message.author.tag}`);
+  }
 }
 
 async function handleReactionAdd(

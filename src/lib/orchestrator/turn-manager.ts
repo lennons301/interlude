@@ -13,7 +13,13 @@ import {
 } from "../docker/container-manager";
 import { createOutputHandler, type TurnResult } from "./output-parser";
 import { parseReviewVerdict } from "./autonomy/verdict";
-import { DEFAULT_REVIEW_BUDGET_USD, MAX_ATTEMPTS } from "./autonomy/budgets";
+import { parseTriageExit } from "./autonomy/triage";
+import {
+  DEFAULT_REVIEW_BUDGET_USD,
+  DEFAULT_TRIAGE_BUDGET_USD,
+  MAX_ATTEMPTS,
+  TRIAGE_MAX_TURNS,
+} from "./autonomy/budgets";
 import { scanPorts } from "./port-scanner";
 import { getConfig } from "../config";
 import { getDocker } from "../docker/client";
@@ -71,13 +77,15 @@ export async function startTask(taskId: string): Promise<void> {
   if (!proj) throw new Error(`Project ${task.projectId} not found`);
   if (!proj.gitUrl) throw new Error(`Project ${proj.name} has no git URL`);
 
-  // Autonomous passes (implement and review) run on the ticket-loop contract
-  // branch and their description is the fully framed pass prompt, baked when
-  // the sweep created the task. A review pass checks out the PR's existing
-  // branch rather than creating one.
+  // Autonomous passes (implement, review, triage) run with their description
+  // as the fully framed pass prompt, baked when the sweep created the task.
+  // A review pass checks out the PR's existing branch rather than creating
+  // one; a triage pass reads the default branch through a throwaway local
+  // branch it never pushes.
   const isImplementPass = task.kind === "implement";
   const isReviewPass = task.kind === "review";
-  const isAutonomousPass = isImplementPass || isReviewPass;
+  const isTriagePass = task.kind === "triage";
+  const isAutonomousPass = isImplementPass || isReviewPass || isTriagePass;
   const issueNumber = task.githubIssue ? parseIssueRef(task.githubIssue)?.number : undefined;
   if (isImplementPass && !issueNumber) {
     throw new Error(`Implement task ${taskId} has no parsable GitHub issue ref`);
@@ -132,14 +140,15 @@ export async function startTask(taskId: string): Promise<void> {
   let running: RunningContainer | null = null;
 
   try {
-    // Create container. A review pass receives no credential beyond the App
-    // token its setup uses for cloning — not even the project's Doppler
-    // secrets: it reads code and runs tests, it doesn't run the app.
+    // Create container. Review and triage passes receive no credential
+    // beyond the App token their setup uses for cloning — not even the
+    // project's Doppler secrets: they read code, they don't run the app.
     running = await createWorkspaceContainer({
       taskId,
       gitUrl: proj.gitUrl,
       branch,
-      dopplerToken: isReviewPass ? undefined : (proj.dopplerToken ?? undefined),
+      dopplerToken:
+        isReviewPass || isTriagePass ? undefined : (proj.dopplerToken ?? undefined),
       checkoutExisting: isReviewPass,
     });
     activeTasks.set(taskId, { container: running, state: "setup", kind: task.kind });
@@ -171,12 +180,17 @@ export async function startTask(taskId: string): Promise<void> {
 
     // Run initial turn. An autonomous pass is one whole turn — an implement
     // pass carries the run's per-attempt budget, a review pass its own
-    // smaller allowance, never the interactive per-task default. The review
-    // pass's raw stream is kept: the verdict is parsed from it.
+    // smaller allowance, a triage pass the smallest of all plus a hard turn
+    // cap, never the interactive per-task default. Review and triage keep
+    // their raw stream: the structured exit is parsed from it.
     const turnResult = await runTurn(taskId, running, prompt, undefined, {
-      maxBudgetUsd: isReviewPass ? DEFAULT_REVIEW_BUDGET_USD : run?.budgetUsd,
-      maxTurns: isReviewPass ? undefined : (run?.maxTurns ?? undefined),
-      captureRaw: isReviewPass,
+      maxBudgetUsd: isReviewPass
+        ? DEFAULT_REVIEW_BUDGET_USD
+        : isTriagePass
+          ? DEFAULT_TRIAGE_BUDGET_USD
+          : run?.budgetUsd,
+      maxTurns: isTriagePass ? TRIAGE_MAX_TURNS : isReviewPass ? undefined : (run?.maxTurns ?? undefined),
+      captureRaw: isReviewPass || isTriagePass,
     });
 
     // Store session ID and cost
@@ -192,6 +206,13 @@ export async function startTask(taskId: string): Promise<void> {
       // Reviews never write: no commit, no push, no PR. Parse the verdict,
       // store it on the run for the sweep to act on, and tear down.
       await finishReviewPass(taskId, running, run?.id ?? null, turnResult.raw ?? "");
+      return;
+    }
+
+    if (isTriagePass) {
+      // Triage never writes either: parse the exit, store it on the task
+      // for the sweep to apply, and tear down.
+      await finishTriagePass(taskId, running, turnResult.raw ?? "");
       return;
     }
 
@@ -222,7 +243,27 @@ export async function startTask(taskId: string): Promise<void> {
     await scanForDevServer(taskId, running);
     await postIdleNotification(taskId);
   } catch (err) {
-    updateTask(taskId, { status: "failed", containerStatus: null });
+    // A triage pass that died delivered no exit. Store the failure as an
+    // unparseable result so the fail-closed path (nothing applied, the
+    // owner told once, needs-triage kept) runs instead of a silent retry.
+    // But never clobber an exit finishTriagePass already stored — a teardown
+    // failure after the store must not turn a good exit into an unparseable
+    // one (the sweep applies stored exits regardless of task status).
+    const storedExit = isTriagePass
+      ? db.select().from(tasks).where(eq(tasks.id, taskId)).get()?.triageResult
+      : null;
+    updateTask(taskId, {
+      status: "failed",
+      containerStatus: null,
+      ...(isTriagePass && storedExit == null
+        ? {
+            triageResult: {
+              kind: "unparseable" as const,
+              reason: `triage pass failed: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          }
+        : {}),
+    });
     if (task.runId) {
       if (isReviewPass) {
         // A review pass that died is not a failed attempt — the implement
@@ -732,6 +773,31 @@ async function finishReviewPass(
 }
 
 /**
+ * End of a triage pass: parse the exit from the raw stream, store it on the
+ * task for the sweep's next decision, and tear the container down. A triage
+ * pass never pushes, labels, comments or posts anything itself.
+ */
+async function finishTriagePass(
+  taskId: string,
+  running: RunningContainer,
+  rawStream: string
+): Promise<void> {
+  const exit = parseTriageExit(rawStream);
+
+  updateTask(taskId, { triageResult: exit });
+
+  insertSystemMessage(
+    taskId,
+    exit.kind === "unparseable"
+      ? `Triage pass finished without a parseable exit: ${exit.reason}`
+      : `Triage pass exit: ${exit.kind}`
+  );
+  console.log(`[orchestrator] Triage task ${taskId} exit: ${exit.kind}`);
+
+  await teardownTaskContainer(taskId, running);
+}
+
+/**
  * Release a parked implement container once its verdict needs no further
  * turns (approve, escalate, or the PR settled). The branch was pushed after
  * every turn, so there is nothing left to save — just record completion and
@@ -1051,6 +1117,7 @@ function updateTask(
     pullRequestNumber: number | null;
     pullRequestUrl: string | null;
     discordMessageId: string | null;
+    triageResult: (typeof tasks.$inferSelect)["triageResult"];
   }>
 ): void {
   db.update(tasks)
