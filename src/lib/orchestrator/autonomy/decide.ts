@@ -61,6 +61,9 @@ export interface PendingGateEvaluation {
   prNumber: number;
   /** Paths the PR changes, from the GitHub API */
   changedPaths: string[];
+  /** The run's checkpoint text, stored at claim time; non-null means the run
+   * is supervised and must gate regardless of what the globs match */
+  checkpoint: string | null;
   gateConfig:
     | { ok: true; estate: GateConfig; extension: GateConfig }
     | { ok: false; reason: string };
@@ -188,8 +191,13 @@ export type Action =
       issueTitle: string;
       issueBody: string;
       attempt: number;
-      mode: "autonomous";
+      /** A checkpoint: directive makes the run supervised — forced
+       * human-signoff at the gate decision, never auto-merge */
+      mode: "autonomous" | "supervised";
       budgetUsd: number;
+      /** The checkpoint's text — the decision waiting for the owner; null
+       * for an ordinary autonomous run */
+      checkpoint: string | null;
       /** Per-exec turn limit from a max-turns directive; null = the default */
       maxTurns: number | null;
       workflow: WorkflowSelection;
@@ -211,6 +219,9 @@ export type Action =
       issueRef: string;
       prNumber: number;
       categories: string[];
+      /** The supervised run's checkpoint text, carried so the notification
+       * names the decision that is waiting; null for a glob-matched gate */
+      checkpoint: string | null;
     }
   | { type: "armAutoMerge"; runId: string; issueRef: string; prNumber: number }
   | {
@@ -499,13 +510,18 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       pending.gateConfig.extension,
       pending.changedPaths
     );
-    if (categories.length > 0) {
+    // The supervised branch (issue #20): a checkpoint: directive forces
+    // human-signoff whatever the globs said — the matched categories are
+    // still recorded, but auto-merge is never armed. Supervised is a mode,
+    // not a status: the outcome is the ordinary gated path.
+    if (categories.length > 0 || pending.checkpoint !== null) {
       actions.push({
         type: "gatePr",
         runId: pending.runId,
         issueRef: pending.issueRef,
         prNumber: pending.prNumber,
         categories,
+        checkpoint: pending.checkpoint,
       });
     } else {
       actions.push({
@@ -628,8 +644,9 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       issueTitle: candidate.title,
       issueBody: candidate.body,
       attempt: candidate.attemptsMade + 1,
-      mode: "autonomous",
+      mode: directives.checkpoint !== null ? "supervised" : "autonomous",
       budgetUsd: directives.budget ?? snapshot.attemptBudgetUsd,
+      checkpoint: directives.checkpoint,
       maxTurns: directives.maxTurns,
       workflow: selectWorkflow(candidate.body, candidate.labels),
     });

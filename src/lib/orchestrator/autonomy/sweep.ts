@@ -538,6 +538,7 @@ async function gatherPendingGateEvaluations(
       issueRef: run.githubIssue,
       prNumber: run.pullRequestNumber!,
       changedPaths,
+      checkpoint: run.checkpoint,
       gateConfig,
     });
   }
@@ -676,7 +677,9 @@ async function executeActions(actions: Action[]): Promise<void> {
  * matched categories on the run, and say so on the issue. The label goes on
  * first — if it fails, the run stays pending and the next sweep retries.
  * Moving to `gated` clears any previous cycle's verdict: the review pass
- * that follows judges the PR as it now stands.
+ * that follows judges the PR as it now stands. A supervised run's comment
+ * leads with the checkpoint — the decision the owner is being waited on —
+ * rather than the (possibly empty) gate categories.
  */
 async function executeGatePr(action: Extract<Action, { type: "gatePr" }>): Promise<void> {
   const ref = parseIssueRef(action.issueRef);
@@ -695,9 +698,30 @@ async function executeGatePr(action: Extract<Action, { type: "gatePr" }>): Promi
     .where(eq(runs.id, action.runId))
     .run();
 
+  const gatedBy = [
+    ...(action.checkpoint !== null ? ["checkpoint"] : []),
+    ...action.categories,
+  ];
   console.log(
-    `[autonomy] Gated ${action.issueRef} PR #${action.prNumber}: ${action.categories.join(", ")}`
+    `[autonomy] Gated ${action.issueRef} PR #${action.prNumber}: ${gatedBy.join(", ")}`
   );
+
+  if (action.checkpoint !== null) {
+    const lines = [
+      `Checkpoint: this ticket runs supervised — PR #${action.prNumber} is labelled ` +
+        `\`${HUMAN_SIGNOFF_LABEL}\` with auto-merge left disarmed, regardless of gate ` +
+        `matches. A human approves and merges this one.`,
+    ];
+    if (action.checkpoint.trim()) {
+      lines.push(`The decision waiting:\n\n> ${action.checkpoint.trim()}`);
+    }
+    if (action.categories.length > 0) {
+      lines.push(`It also touches **${action.categories.join(", ")}**.`);
+    }
+    await commentOnIssue(action.issueRef, lines.join("\n\n"));
+    return;
+  }
+
   await commentOnIssue(
     action.issueRef,
     `Review gates: PR #${action.prNumber} touches **${action.categories.join(", ")}** — ` +
@@ -1207,6 +1231,7 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
         mode: action.mode,
         status: failure ? "failed" : "claimed",
         budgetUsd: action.budgetUsd,
+        checkpoint: action.checkpoint,
         maxTurns: action.maxTurns,
         claimedAt: now,
         finishedAt: failure ? now : null,

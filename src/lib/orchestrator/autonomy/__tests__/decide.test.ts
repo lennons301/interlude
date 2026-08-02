@@ -115,6 +115,7 @@ function makePending(
     issueRef: "acme/widgets#7",
     prNumber: 41,
     changedPaths: ["src/lib/util.ts"],
+    checkpoint: null,
     gateConfig: {
       ok: true,
       estate: { "visual-ui": ["**/components/**"] },
@@ -143,6 +144,7 @@ describe("decideNext — claiming", () => {
         attempt: 1,
         mode: "autonomous",
         budgetUsd: 20,
+        checkpoint: null,
         maxTurns: null,
         workflow: { source: "default" },
       },
@@ -194,6 +196,27 @@ describe("decideNext — claiming", () => {
     const actions = decideNext(makeSnapshot());
 
     expect(claims(actions)[0]).toMatchObject({ budgetUsd: 20, maxTurns: null });
+  });
+
+  it("claims a checkpoint ticket as a supervised run, carrying the checkpoint text", () => {
+    const body = "Spec.\n\n## Workflow\n\ncheckpoint: confirm the schema change with me\n";
+    const actions = decideNext(
+      makeSnapshot({ candidates: [makeCandidate({ body })] })
+    );
+
+    expect(claims(actions)[0]).toMatchObject({
+      mode: "supervised",
+      checkpoint: "confirm the schema change with me",
+    });
+  });
+
+  it("claims an ordinary ticket as an autonomous run with no checkpoint", () => {
+    const actions = decideNext(makeSnapshot());
+
+    expect(claims(actions)[0]).toMatchObject({
+      mode: "autonomous",
+      checkpoint: null,
+    });
   });
 });
 
@@ -718,6 +741,7 @@ describe("decideNext — gate evaluation of a finished implement pass", () => {
         issueRef: "acme/widgets#7",
         prNumber: 41,
         categories: ["infrastructure", "visual-ui"],
+        checkpoint: null,
       },
     ]);
   });
@@ -786,6 +810,7 @@ describe("decideNext — gate evaluation of a finished implement pass", () => {
         issueRef: "acme/widgets#9",
         prNumber: 44,
         categories: ["visual-ui"],
+        checkpoint: null,
       },
     ]);
   });
@@ -797,6 +822,84 @@ describe("decideNext — gate evaluation of a finished implement pass", () => {
     );
 
     expect(actions.map((a) => a.type)).toEqual(["armAutoMerge", "claimIssue"]);
+  });
+
+  it("gates a supervised PR even when no glob matched, carrying the checkpoint", () => {
+    // makePending's changed paths match no gate — an autonomous run would arm
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingGateEvaluations: [
+          makePending({ checkpoint: "confirm the schema change with me" }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "gatePr",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        categories: [],
+        checkpoint: "confirm the schema change with me",
+      },
+    ]);
+  });
+
+  it("records matched categories on a supervised gate alongside the checkpoint", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingGateEvaluations: [
+          makePending({
+            checkpoint: "confirm the schema change with me",
+            changedPaths: ["src/components/Button.tsx"],
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "gatePr",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        categories: ["visual-ui"],
+        checkpoint: "confirm the schema change with me",
+      },
+    ]);
+  });
+
+  it("supervises on a bare checkpoint directive — empty text is still a checkpoint", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingGateEvaluations: [makePending({ checkpoint: "" })],
+      })
+    );
+
+    expect(actions.map((a) => a.type)).toEqual(["gatePr"]);
+  });
+
+  it("fails closed on broken config even for a supervised run — config errors outrank the checkpoint", () => {
+    // The checkpoint's outcome (gated) does not depend on config, but the
+    // config failure is real and the owner must still hear about it; the run
+    // gates on the sweep after the config is fixed.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingGateEvaluations: [
+          makePending({
+            checkpoint: "confirm the schema change with me",
+            gateConfig: { ok: false, reason: "invalid YAML" },
+          }),
+        ],
+      })
+    );
+
+    expect(actions.map((a) => a.type)).toEqual(["notify"]);
   });
 
   it("gate decisions do not consume claimable slots", () => {

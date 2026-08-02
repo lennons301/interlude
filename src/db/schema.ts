@@ -70,6 +70,10 @@ export const runs = sqliteTable("runs", {
   reviewCycleCount: int("review_cycle_count").notNull().default(0),
   interruptionCount: int("interruption_count").notNull().default(0),
   blockedQuestion: text("blocked_question"),
+  // A checkpoint: directive's text, stored at claim time. Non-null makes the
+  // run supervised: its gate decision is forced to human-signoff regardless
+  // of glob matches, and the text names the decision waiting for the owner.
+  checkpoint: text("checkpoint"),
   // Why a failed attempt failed (budget/turn exhaustion, container error,
   // review cycles) — human-readable, surfaced in the exhaust summary
   failureReason: text("failure_reason"),
