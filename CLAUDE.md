@@ -26,6 +26,7 @@ Interlude is a self-hosted, agent-first development platform. You dispatch tasks
 - GitHub App provides webhook-driven issue→task creation (label `interlude` triggers task)
 - Draft PRs auto-created on first branch push, marked ready for review on completion
 - GitHub App is REQUIRED for git auth — agent containers clone/push using short-lived App installation tokens (no PAT). Issue sync + PR features still degrade gracefully if webhook/installation are partially configured.
+- Reviewer identity: the review pass returns a structured verdict and the **orchestrator** posts the PR review using `REVIEWER_GH_TOKEN`; the PAT never enters an agent container (issue #17). Its canonical home is Doppler `platform/prd`, and it is **mirrored** into `interlude/prd` because the orchestrator's service token is scoped to one config — **rotation must update both places**.
 - Git credential helper in agent containers reads a per-exec `GIT_AUTH_TOKEN` (minted fresh from the App); no token is persisted in `.git/config`.
 - Webhook endpoint: `POST /api/webhooks/github`
 - GitHub library: `src/lib/github/` (client, webhooks, issues, pull-requests)
@@ -38,7 +39,8 @@ Interlude is a self-hosted, agent-first development platform. You dispatch tasks
 
 Schema at `src/db/schema.ts`. Four tables: `projects`, `tasks`, `messages`, `runs`.
 
-- `runs` is the Phase 5 autonomy ledger — one row per attempt at one ticket; a run owns one or more tasks. Interactive tasks have no run, which exempts them from the daily autonomous spend cap by construction (`src/lib/orchestrator/spend.ts`)
+- `runs` is the Phase 5 autonomy ledger — one row per attempt at one ticket; a run owns one or more tasks (its implement pass plus any review passes). Interactive tasks have no run, which exempts them from the daily autonomous spend cap by construction (`src/lib/orchestrator/spend.ts`)
+- `runs.reviewResult` holds a finished review pass's parsed verdict until the orchestrator has acted on it; `runs.reviewVerdict` is the last verdict actually posted to GitHub
 - `tasks.kind` distinguishes interactive (default) / implement / review / triage; `tasks.runId` links a task to its run
 - `projects` carries `autonomyEnabled` (default off) plus cached `preflightStatus`/`preflightReason`
 

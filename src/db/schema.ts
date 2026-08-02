@@ -54,9 +54,17 @@ export const runs = sqliteTable("runs", {
     .$type<string[]>()
     .notNull()
     .default([]),
+  // The last verdict the orchestrator POSTED to GitHub for this run
   reviewVerdict: text("review_verdict", {
     enum: ["approve", "request-changes", "escalate"],
   }),
+  // A finished review pass's parsed output, held until the orchestrator has
+  // acted on it (posted the review / escalated / notified), then cleared.
+  // Stored on the run so a verdict survives an orchestrator restart.
+  reviewResult: text("review_result", { mode: "json" }).$type<
+    | { kind: "approve" | "request-changes" | "escalate"; body: string }
+    | { kind: "unparseable"; reason: string }
+  >(),
   reviewCycleCount: int("review_cycle_count").notNull().default(0),
   interruptionCount: int("interruption_count").notNull().default(0),
   blockedQuestion: text("blocked_question"),

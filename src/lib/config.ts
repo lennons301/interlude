@@ -35,6 +35,14 @@ export interface AppConfig {
   discordApplicationId: string | null;
   /** Discord guild (server) ID — used to deep-link into project channels */
   discordGuildId: string | null;
+  /**
+   * PAT of the reviewer machine account, used by the orchestrator (and only
+   * the orchestrator — it never enters an agent container) to post PR
+   * reviews. Canonical home is Doppler `platform/prd`; it is MIRRORED into
+   * `interlude/prd` because the orchestrator's service token is scoped to
+   * one config. Rotation must update both places.
+   */
+  reviewerGithubToken: string | null;
   /** Global autonomy kill switch — autonomous pickup runs only when true */
   autonomyEnabled: boolean;
   /** Extra GitHub logins allowed to author claimable issues (repo owners always are) */
@@ -98,6 +106,7 @@ export function getConfig(): AppConfig {
     discordBotToken: process.env.DISCORD_BOT_TOKEN ?? null,
     discordApplicationId: process.env.DISCORD_APPLICATION_ID ?? null,
     discordGuildId: process.env.DISCORD_GUILD_ID ?? null,
+    reviewerGithubToken: process.env.REVIEWER_GH_TOKEN ?? null,
     autonomyEnabled: process.env.AUTONOMY_ENABLED === "true",
     autonomyAllowedAuthors: (process.env.AUTONOMY_ALLOWED_AUTHORS ?? "")
       .split(",")

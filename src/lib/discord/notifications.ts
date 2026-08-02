@@ -244,6 +244,38 @@ export async function notifyRunBlocked(
 }
 
 /**
+ * Tell the owner a review verdict could not be acted on — the pass's output
+ * was unparseable, or the review could not be posted. Nothing merges until a
+ * human looks. Sent once per failure (the autonomy sweep tracks the
+ * announcement; this just delivers). No-op when no fleet channel is
+ * configured: the sweep already logged it.
+ */
+export async function notifyReviewBlocked(
+  channelId: string | null,
+  payload: { issueRef: string; prNumber: number; reason: string }
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await botClient.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Review blocked — nothing merged`)
+      .setDescription(
+        `${payload.issueRef} (PR #${payload.prNumber}): ${payload.reason}\n\n` +
+          `The PR stays disarmed until you look.`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel as TextChannel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send review-blocked notification:`, err);
+  }
+}
+
+/**
  * Post an "agent finished a turn — your move" idle notification.
  * Returns the Discord message ID so it can become the task's current
  * interactive message (for ✅-to-complete and reply-to-continue).

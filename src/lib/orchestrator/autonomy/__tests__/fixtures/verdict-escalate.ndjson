@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"/workspace/repo","session_id":"rev-esc-001","tools":["Bash","Read","Grep","Glob"]}
+{"type":"assistant","message":{"content":[{"type":"text","text":"The change is sound but alters the deploy pipeline's restart behaviour — a human should see this."}]},"session_id":"rev-esc-001"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"VERDICT: escalate\n\nThe work is complete, but it changes when the orchestrator restarts during deploys — consequential enough that the owner should look before it lands."}]},"session_id":"rev-esc-001"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":98000,"num_turns":5,"result":"VERDICT: escalate\n\nThe work is complete, but it changes when the orchestrator restarts during deploys — consequential enough that the owner should look before it lands.","stop_reason":"end_turn","session_id":"rev-esc-001","total_cost_usd":1.47}

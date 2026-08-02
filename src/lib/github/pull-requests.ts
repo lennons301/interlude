@@ -1,4 +1,6 @@
+import { Octokit } from "octokit";
 import { getOctokit, isGitHubConfigured } from "./client";
+import { getConfig } from "../config";
 
 interface CreatePrOptions {
   owner: string;
@@ -50,14 +52,15 @@ export async function createDraftPr(options: CreatePrOptions): Promise<PrResult 
 }
 
 /**
- * The slice of PR state gate evaluation depends on. Null on any API failure
- * — the caller skips the PR this sweep and retries on the next.
+ * The slice of PR state gate evaluation and run settlement depend on. Null
+ * on any API failure — the caller skips the PR this sweep and retries on
+ * the next.
  */
 export async function getPrState(
   owner: string,
   repo: string,
   prNumber: number
-): Promise<{ open: boolean; autoMergeArmed: boolean } | null> {
+): Promise<{ open: boolean; merged: boolean; autoMergeArmed: boolean } | null> {
   if (!isGitHubConfigured()) return null;
 
   try {
@@ -67,7 +70,11 @@ export async function getPrState(
       repo,
       pull_number: prNumber,
     });
-    return { open: pr.state === "open", autoMergeArmed: pr.auto_merge != null };
+    return {
+      open: pr.state === "open",
+      merged: pr.merged === true,
+      autoMergeArmed: pr.auto_merge != null,
+    };
   } catch (err) {
     console.error(`[github] Failed to read PR #${prNumber} state:`, err);
     return null;
@@ -165,6 +172,83 @@ export async function armAutoMergeSquash(
     return true;
   } catch (err) {
     console.error(`[github] Failed to arm auto-merge on PR #${prNumber}:`, err);
+    return false;
+  }
+}
+
+/**
+ * Disarm auto-merge on a PR. Only ever moves toward more human oversight:
+ * a request-changes or escalate verdict (and an unparseable one) disarms
+ * before anything else happens, so nothing can land mid-decision.
+ */
+export async function disarmAutoMerge(
+  owner: string,
+  repo: string,
+  prNumber: number
+): Promise<boolean> {
+  if (!isGitHubConfigured()) return false;
+
+  try {
+    const octokit = await getOctokit();
+    const { data: pr } = await octokit.rest.pulls.get({
+      owner,
+      repo,
+      pull_number: prNumber,
+    });
+
+    // Already disarmed (or landed by someone else's hand) — nothing to do.
+    if (pr.auto_merge == null) return true;
+
+    await octokit.graphql(
+      `
+      mutation($id: ID!) {
+        disablePullRequestAutoMerge(input: { pullRequestId: $id }) {
+          pullRequest { id }
+        }
+      }
+    `,
+      { id: pr.node_id }
+    );
+    return true;
+  } catch (err) {
+    console.error(`[github] Failed to disarm auto-merge on PR #${prNumber}:`, err);
+    return false;
+  }
+}
+
+/**
+ * Post a PR review as the reviewer machine account. This is the one place
+ * the reviewer identity is exercised, and it runs in the orchestrator with
+ * a token read from config at call time — the PAT never enters a container,
+ * so no agent process ever holds the identity that can approve agent work.
+ */
+export async function postReviewAsReviewer(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+  body: string
+): Promise<boolean> {
+  const token = getConfig().reviewerGithubToken;
+  if (!token) {
+    console.error(
+      `[github] REVIEWER_GH_TOKEN not configured — cannot post ${event} review on PR #${prNumber}`
+    );
+    return false;
+  }
+
+  try {
+    const reviewer = new Octokit({ auth: token });
+    await reviewer.rest.pulls.createReview({
+      owner,
+      repo,
+      pull_number: prNumber,
+      event,
+      body,
+    });
+    return true;
+  } catch (err) {
+    console.error(`[github] Failed to post ${event} review on PR #${prNumber}:`, err);
     return false;
   }
 }

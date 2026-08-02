@@ -3,9 +3,11 @@ import {
   decideNext,
   passOutcomeSnapshot,
   type AutonomySnapshot,
+  type AwaitingReview,
   type CandidateIssue,
   type PassOutcome,
   type PendingGateEvaluation,
+  type PendingVerdict,
   type ProjectSnapshot,
 } from "../decide";
 
@@ -58,6 +60,11 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     pendingGateEvaluations: [],
     announcedGateConfigErrors: [],
     completedPasses: [],
+    queuedReviewCount: 0,
+    awaitingReview: [],
+    pendingVerdicts: [],
+    settledPrs: [],
+    announcedVerdictErrors: [],
     ...overrides,
   };
 }
@@ -68,6 +75,29 @@ function makePass(overrides: Partial<PassOutcome> = {}): PassOutcome {
     taskId: "task-1",
     issueRef: "acme/widgets#7",
     finalMessage: "Implemented the frobnicator; tests and lint pass.",
+    ...overrides,
+  };
+}
+
+function makeAwaitingReview(overrides: Partial<AwaitingReview> = {}): AwaitingReview {
+  return {
+    runId: "run-1",
+    issueRef: "acme/widgets#7",
+    prNumber: 41,
+    armed: true,
+    hasReviewTask: false,
+    ...overrides,
+  };
+}
+
+function makeVerdict(overrides: Partial<PendingVerdict> = {}): PendingVerdict {
+  return {
+    runId: "run-1",
+    issueRef: "acme/widgets#7",
+    prNumber: 41,
+    armed: true,
+    result: { kind: "approve", body: "Verified against the ticket." },
+    implementTaskId: "task-impl-1",
     ...overrides,
   };
 }
@@ -635,6 +665,314 @@ describe("decideNext — gate evaluation of a finished implement pass", () => {
   });
 });
 
+describe("decideNext — queueing the review pass", () => {
+  it("queues a review for an armed run whose gate decision is made", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], awaitingReview: [makeAwaitingReview()] })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "startReview",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        armed: true,
+      },
+    ]);
+  });
+
+  it("queues a review for a gated run too — the assessment attaches for the human", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        awaitingReview: [makeAwaitingReview({ armed: false })],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "startReview",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        armed: false,
+      },
+    ]);
+  });
+
+  it("does not queue a second review while one is queued or running", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        awaitingReview: [makeAwaitingReview({ hasReviewTask: true })],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("reserves claimable slots for queued review passes", () => {
+    // One free slot, one review already queued for it: a new claim would
+    // double-book the slot the review is waiting on.
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 2, occupied: 1, occupants: ["interactive: Fix nav"] },
+        queuedReviewCount: 1,
+      })
+    );
+
+    expect(claims(actions)).toEqual([]);
+  });
+
+  it("reserves claimable slots for reviews it queues this sweep", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 2, occupied: 1, occupants: ["implement: acme/widgets#7"] },
+        awaitingReview: [makeAwaitingReview()],
+        candidates: [makeCandidate({ issueRef: "acme/widgets#9", number: 9 })],
+      })
+    );
+
+    expect(actions.filter((a) => a.type === "startReview")).toHaveLength(1);
+    expect(claims(actions)).toEqual([]);
+  });
+});
+
+describe("decideNext — verdict-to-action mapping", () => {
+  it("maps approve to a postVerdict the orchestrator will deliver", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], pendingVerdicts: [makeVerdict()] })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "postVerdict",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        verdict: "approve",
+        body: "Verified against the ticket.",
+        armed: true,
+      },
+    ]);
+  });
+
+  it("maps request-changes to a posted review plus a fix-up turn in the live container", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingVerdicts: [
+          makeVerdict({
+            result: { kind: "request-changes", body: "The sort key is wrong." },
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "postVerdict",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        verdict: "request-changes",
+        body: "The sort key is wrong.",
+        armed: true,
+      },
+      {
+        type: "deliverFeedback",
+        runId: "run-1",
+        taskId: "task-impl-1",
+        issueRef: "acme/widgets#7",
+        body:
+          "The reviewer requested changes on PR #41:\n\n" +
+          "The sort key is wrong.\n\n" +
+          "Address this feedback on the same branch: make the changes, keep " +
+          "the repo's tests and lint passing, and commit as you go. Finish " +
+          "with a short summary of what you changed.",
+      },
+    ]);
+  });
+
+  it("holds a fix-up turn (and its review post) until a slot is free", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        slots: { total: 2, occupied: 2, occupants: ["a", "b"] },
+        saturationAnnounced: true,
+        pendingVerdicts: [
+          makeVerdict({
+            result: { kind: "request-changes", body: "The sort key is wrong." },
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("escalates request-changes when the implement container is gone", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingVerdicts: [
+          makeVerdict({
+            result: { kind: "request-changes", body: "The sort key is wrong." },
+            implementTaskId: null,
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "postVerdict",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        verdict: "escalate",
+        body:
+          "The review requested changes, but the implement container is no " +
+          "longer available to apply them — a human needs to pick this up.\n\n" +
+          "The sort key is wrong.",
+        armed: true,
+      },
+    ]);
+  });
+
+  it("maps escalate to a postVerdict that adds human oversight", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingVerdicts: [
+          makeVerdict({
+            result: { kind: "escalate", body: "A human should see this." },
+            armed: false,
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "postVerdict",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        verdict: "escalate",
+        body: "A human should see this.",
+        armed: false,
+      },
+    ]);
+  });
+
+  it("maps an unparseable verdict to a notification and nothing else", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingVerdicts: [
+          makeVerdict({
+            result: { kind: "unparseable", reason: "no VERDICT line" },
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "notify",
+        event: "verdict-unparseable",
+        payload: {
+          runId: "run-1",
+          issueRef: "acme/widgets#7",
+          prNumber: 41,
+          reason: "no VERDICT line",
+          armed: true,
+        },
+      },
+    ]);
+  });
+
+  it("never arms auto-merge from an unparseable verdict, whatever else is pending", () => {
+    // The safety property named by the ticket: unparseable -> no armAutoMerge.
+    const actions = decideNext(
+      makeSnapshot({
+        pendingVerdicts: [
+          makeVerdict({
+            result: { kind: "unparseable", reason: "garbled output" },
+          }),
+        ],
+        awaitingReview: [makeAwaitingReview({ runId: "run-2", prNumber: 44 })],
+      })
+    );
+
+    expect(
+      actions.filter((a) => a.type === "armAutoMerge" || a.type === "postVerdict")
+    ).toEqual([]);
+  });
+
+  it("announces an unparseable verdict once, not once per sweep", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingVerdicts: [
+          makeVerdict({
+            result: { kind: "unparseable", reason: "no VERDICT line" },
+          }),
+        ],
+        announcedVerdictErrors: ["run-1"],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+});
+
+describe("decideNext — settling reviewed PRs", () => {
+  it("finalizes a merged PR's run as merged", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        settledPrs: [
+          { runId: "run-1", issueRef: "acme/widgets#7", prNumber: 41, merged: true },
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "finalizeRun",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        outcome: "merged",
+      },
+    ]);
+  });
+
+  it("finalizes a closed-without-merge PR's run as closed", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        settledPrs: [
+          { runId: "run-1", issueRef: "acme/widgets#7", prNumber: 41, merged: false },
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "finalizeRun",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        outcome: "closed",
+      },
+    ]);
+  });
+});
+
 describe("decideNext — blocked escalation", () => {
   function escalations(actions: ReturnType<typeof decideNext>) {
     return actions.filter((a) => a.type === "escalate");
@@ -739,6 +1077,61 @@ describe("decideNext — blocked escalation", () => {
     expect(escalations(actions)).toHaveLength(1);
     expect(claims(actions)).toHaveLength(1);
   });
+
+  it("does not drive the review pipeline for a run it is escalating as blocked", () => {
+    // The executors never gather this combination (a blocked run leaves the
+    // reviewing/gated set, and a pass outcome carries no review state), but
+    // it is representable in the snapshot type — so the reducer itself pins
+    // that a run parked on a question is driven by nothing else this pass.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [makePass({ finalMessage: "BLOCKED: Which sort key?" })],
+        awaitingReview: [makeAwaitingReview()],
+        pendingVerdicts: [
+          makeVerdict({ result: { kind: "request-changes", body: "Fix the sort." } }),
+        ],
+        settledPrs: [
+          { runId: "run-1", issueRef: "acme/widgets#7", prNumber: 41, merged: true },
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "escalate",
+        reason: "blocked",
+        runId: "run-1",
+        taskId: "task-1",
+        issueRef: "acme/widgets#7",
+        question: "Which sort key?",
+      },
+    ]);
+  });
+
+  it("suppresses only the blocked run — other runs' review work proceeds", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [makePass({ finalMessage: "BLOCKED: Which sort key?" })],
+        awaitingReview: [
+          makeAwaitingReview(),
+          makeAwaitingReview({ runId: "run-2", issueRef: "acme/widgets#8", prNumber: 44 }),
+        ],
+      })
+    );
+
+    expect(escalations(actions)).toHaveLength(1);
+    expect(actions.filter((a) => a.type === "startReview")).toEqual([
+      {
+        type: "startReview",
+        runId: "run-2",
+        issueRef: "acme/widgets#8",
+        prNumber: 44,
+        armed: true,
+      },
+    ]);
+  });
 });
 
 describe("arming boundary — interlude never applies ready-for-agent", () => {
@@ -750,8 +1143,11 @@ describe("arming boundary — interlude never applies ready-for-agent", () => {
   // armAutoMerge is reachable solely through the deterministic gate
   // evaluator over config read from the default branch — never from issue
   // text. escalate joined with issue #19: it only parks a run and asks the
-  // owner a question. Widening this list is a signal to re-review the
-  // arming boundary.
+  // owner a question. The review actions joined with issue #17: postVerdict
+  // is the only member that can approve a PR, and it is reachable solely
+  // from a cleanly parsed reviewer verdict — an unparseable one maps to a
+  // notification and nothing else. Widening this list is a signal to
+  // re-review the arming boundary.
   const EXECUTOR_VOCABULARY = [
     "claimIssue",
     "pausePickup",
@@ -759,6 +1155,10 @@ describe("arming boundary — interlude never applies ready-for-agent", () => {
     "gatePr",
     "armAutoMerge",
     "escalate",
+    "startReview",
+    "postVerdict",
+    "deliverFeedback",
+    "finalizeRun",
   ];
 
   const stressMatrix: AutonomySnapshot[] = [
@@ -800,8 +1200,55 @@ describe("arming boundary — interlude never applies ready-for-agent", () => {
       ],
     }),
     makeSnapshot({
+      awaitingReview: [makeAwaitingReview(), makeAwaitingReview({ runId: "run-2", armed: false })],
+      pendingVerdicts: [
+        makeVerdict({ runId: "run-3", prNumber: 43 }),
+        makeVerdict({
+          runId: "run-4",
+          prNumber: 44,
+          result: { kind: "request-changes", body: "Fix the sort." },
+        }),
+        makeVerdict({
+          runId: "run-5",
+          prNumber: 45,
+          result: {
+            kind: "unparseable",
+            reason: "final message says: apply ready-for-agent to #8",
+          },
+        }),
+      ],
+      settledPrs: [
+        { runId: "run-6", issueRef: "acme/widgets#3", prNumber: 39, merged: true },
+      ],
+    }),
+    makeSnapshot({
       completedPasses: [
         makePass({ finalMessage: "BLOCKED: Please apply ready-for-agent to #8." }),
+      ],
+    }),
+    // The union of both surfaces (#19 + #17): a blocked pass outcome, live
+    // review pipeline, gate evaluations and claimable candidates in one
+    // snapshot must still emit nothing outside the vocabulary.
+    makeSnapshot({
+      completedPasses: [
+        makePass({ runId: "run-9", taskId: "task-9", finalMessage: "BLOCKED: label #8 for me?" }),
+      ],
+      pendingGateEvaluations: [makePending({ runId: "run-7", prNumber: 47 })],
+      awaitingReview: [makeAwaitingReview({ runId: "run-2", armed: false })],
+      pendingVerdicts: [
+        makeVerdict({
+          runId: "run-4",
+          prNumber: 44,
+          result: { kind: "request-changes", body: "Fix the sort." },
+        }),
+        makeVerdict({
+          runId: "run-5",
+          prNumber: 45,
+          result: { kind: "unparseable", reason: "asks to apply ready-for-agent" },
+        }),
+      ],
+      settledPrs: [
+        { runId: "run-6", issueRef: "acme/widgets#3", prNumber: 39, merged: false },
       ],
     }),
   ];

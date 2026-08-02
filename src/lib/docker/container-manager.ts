@@ -10,8 +10,11 @@ import { getCapacity } from "../orchestrator/capacity";
  * (token supplied at exec time via GIT_AUTH_TOKEN), clone the repo with a
  * secret-free URL, clone the platform repo (best-effort), check out the task
  * branch, and pull Doppler secrets if a token is present.
+ *
+ * `checkoutExisting` checks out a branch that already exists on the remote
+ * (a review pass inspecting the PR branch) instead of creating a fresh one.
  */
-export function buildSetupScript(platformRepoUrl: string): string {
+export function buildSetupScript(platformRepoUrl: string, checkoutExisting = false): string {
   return [
     'git config --global user.name "$GIT_USER_NAME"',
     'git config --global user.email "$GIT_USER_EMAIL"',
@@ -19,7 +22,7 @@ export function buildSetupScript(platformRepoUrl: string): string {
     'git clone "$GIT_URL" /workspace/repo',
     `git clone --depth 1 ${platformRepoUrl} /workspace/platform 2>/dev/null || echo "WARN: platform repo clone failed, continuing without platform context"`,
     "cd /workspace/repo",
-    'git checkout -b "$GIT_BRANCH"',
+    checkoutExisting ? 'git checkout "$GIT_BRANCH"' : 'git checkout -b "$GIT_BRANCH"',
     'if [ -n "$DOPPLER_TOKEN" ]; then curl -sf --request GET "https://api.doppler.com/v3/configs/config/secrets/download?format=env" --header "Authorization: Bearer $DOPPLER_TOKEN" > .env.local && echo "Doppler: wrote .env.local ($(wc -l < .env.local) vars)" || echo "Doppler: API request failed"; fi',
   ].join(" && ");
 }
@@ -38,6 +41,8 @@ export interface WorkspaceOptions {
   gitUrl: string;
   branch: string;
   dopplerToken?: string;
+  /** Check out an existing remote branch instead of creating a new one */
+  checkoutExisting?: boolean;
 }
 
 export interface TurnOptions {
@@ -53,6 +58,8 @@ export interface RunningContainer {
   id: string;
   name: string;
   previewSubdomain: string;
+  /** Setup checks out an existing remote branch instead of creating one */
+  checkoutExisting?: boolean;
 }
 
 export async function createWorkspaceContainer(
@@ -118,7 +125,13 @@ export async function createWorkspaceContainer(
     },
   });
 
-  return { container, id: container.id, name: containerName, previewSubdomain };
+  return {
+    container,
+    id: container.id,
+    name: containerName,
+    previewSubdomain,
+    checkoutExisting: options.checkoutExisting,
+  };
 }
 
 export async function execSetup(
@@ -126,7 +139,7 @@ export async function execSetup(
 ): Promise<void> {
   const token = await getInstallationToken();
   const exec = await running.container.exec({
-    Cmd: ["bash", "-c", buildSetupScript(PLATFORM_REPO_URL)],
+    Cmd: ["bash", "-c", buildSetupScript(PLATFORM_REPO_URL, running.checkoutExisting ?? false)],
     Env: [`GIT_AUTH_TOKEN=${token}`],
     AttachStdout: true,
     AttachStderr: true,

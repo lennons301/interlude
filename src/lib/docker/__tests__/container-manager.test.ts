@@ -24,6 +24,15 @@ describe("buildSetupScript", () => {
   it("still writes Doppler secrets when DOPPLER_TOKEN is set", () => {
     expect(script).toContain('if [ -n "$DOPPLER_TOKEN" ]');
   });
+
+  it("checks out the existing remote branch for a review pass", () => {
+    const reviewScript = buildSetupScript(
+      "https://github.com/lennons301/platform.git",
+      true
+    );
+    expect(reviewScript).toContain('git checkout "$GIT_BRANCH"');
+    expect(reviewScript).not.toContain('git checkout -b');
+  });
 });
 
 describe("buildPushScript", () => {

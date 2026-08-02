@@ -43,6 +43,8 @@ COPY --from=build /app/Dockerfile.agent ./Dockerfile.agent
 COPY --from=build /app/custom-server.js ./custom-server.js
 # Vendored workflow skills, injected into autonomous pass prompts (issue #15)
 COPY --from=build /app/docs/agents/workflows ./docs/agents/workflows
+# Vendored reviewer definition, injected into review pass prompts (issue #17)
+COPY --from=build /app/docs/agents/review-pass.md ./docs/agents/review-pass.md
 
 # Install the Doppler CLI so the app boots via `doppler run`, pulling orchestrator
 # secrets from the Doppler `interlude/prd` config at runtime. DOPPLER_TOKEN (a prd
