@@ -6,3 +6,4 @@ node_modules
 *.db-shm
 .env*
 docs
+!docs/agents/workflows
