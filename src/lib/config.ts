@@ -5,6 +5,8 @@ import { DEFAULT_ATTEMPT_BUDGET_USD } from "./orchestrator/autonomy/budgets";
 export interface AppConfig {
   /** Anthropic API key (optional if using OAuth credentials) */
   anthropicApiKey: string | null;
+  /** Long-lived OAuth token from `claude setup-token`, injected into agent containers at exec (preferred over the mounted credentials file) */
+  claudeCodeOauthToken: string | null;
   /** Path to Claude OAuth credentials file inside this container */
   claudeCredentialsPath: string | null;
   /** Host path for mounting credentials into agent containers */
@@ -66,6 +68,7 @@ export function getConfig(): AppConfig {
   if (_config) return _config;
 
   const anthropicApiKey = process.env.ANTHROPIC_API_KEY ?? null;
+  const claudeCodeOauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null;
 
   // Find Claude credentials file — check the container mount path first,
   // then fall back to CLAUDE_CREDENTIALS_PATH or $HOME default
@@ -80,10 +83,15 @@ export function getConfig(): AppConfig {
   const claudeCredentialsPath =
     fs.existsSync(credentialsPath) ? credentialsPath : null;
 
-  if (!anthropicApiKey && !claudeCredentialsPath && !process.env.CLAUDE_CREDENTIALS_PATH) {
+  if (
+    !anthropicApiKey &&
+    !claudeCodeOauthToken &&
+    !claudeCredentialsPath &&
+    !process.env.CLAUDE_CREDENTIALS_PATH
+  ) {
     console.warn(
-      "Warning: No auth configured. Set ANTHROPIC_API_KEY, CLAUDE_CREDENTIALS_PATH, " +
-        "or ensure ~/.claude/.credentials.json exists."
+      "Warning: No auth configured. Set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`), " +
+        "ANTHROPIC_API_KEY, CLAUDE_CREDENTIALS_PATH, or ensure ~/.claude/.credentials.json exists."
     );
   }
 
@@ -94,6 +102,7 @@ export function getConfig(): AppConfig {
 
   _config = {
     anthropicApiKey,
+    claudeCodeOauthToken,
     claudeCredentialsPath,
     claudeCredentialsHostPath,
     gitUserName: process.env.GIT_USER_NAME ?? "Interlude Agent",
