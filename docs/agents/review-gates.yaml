@@ -47,8 +47,11 @@ human_signoff:
   # Phase 5 autonomy control surface: what may be claimed, gated, armed or
   # merged without a human. Never auto-merge a change to the thing that decides
   # what auto-merges. Paths confirmed by issue #15 (the reducer lives at
-  # src/lib/orchestrator/autonomy/); docs/agents/workflows/ is gated because
-  # its content is injected verbatim into autonomous pass prompts.
+  # src/lib/orchestrator/autonomy/); docs/agents/workflows/ and
+  # docs/agents/review-pass.md are gated because their content is injected
+  # verbatim into autonomous pass prompts — the reviewer definition is the
+  # thing that decides what auto-merges.
   autonomy-control:
     - "src/lib/orchestrator/autonomy/**"
     - "docs/agents/workflows/**"
+    - "docs/agents/review-pass.md"
