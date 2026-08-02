@@ -198,11 +198,13 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     // The needs-triage listing is the triage queue: new issues are marked by
     // the issues.opened webhook, strays by whoever labelled them. One issue
     // is at most one thing here — in flight (a pass queued or running),
-    // pending (a stored exit awaiting application), or a candidate. A failed
-    // pass (unparseable exit already announced and cleared, or death before
-    // an exit was stored) leaves the issue a candidate again, bounded by the
-    // lifetime pass count: past it the issue sits visibly labelled for a
-    // human, never in a spend loop.
+    // pending (a stored exit awaiting application), or a candidate. Stored
+    // exits are consumed when acted on — applied or announced-unparseable —
+    // so an issue that carries the label again (a retry, or a human
+    // re-queueing after questions were answered) becomes a candidate for a
+    // fresh pass, never a replay of a stale exit, bounded by the lifetime
+    // pass count: past it the issue sits visibly labelled for a human,
+    // never in a spend loop.
     try {
       const { data: strays } = await octokit.rest.issues.listForRepo({
         owner,
@@ -1018,6 +1020,9 @@ async function executeStartTriage(
  * carrying the assessment/questions/agenda, and the removal of needs-triage
  * — the latch that takes the issue out of the pending set, ordered last so
  * any earlier failure leaves the whole step retryable on the next sweep.
+ * A completed apply also consumes the stored exit (like the unparseable
+ * path does): re-adding needs-triage later — say, after the reporter
+ * answers the questions — must queue a fresh pass, not replay this one.
  * Returns false when the apply did not complete, so the caller suppresses
  * the paired recommendation ping.
  */
@@ -1041,6 +1046,11 @@ async function executeApplyTriage(
   }
   if (!(await commentOnIssue(action.issueRef, action.comment))) return false;
   if (!(await removeLabelFromIssue(action.issueRef, NEEDS_TRIAGE_LABEL))) return false;
+
+  db.update(tasks)
+    .set({ triageResult: null, updatedAt: new Date() })
+    .where(eq(tasks.id, action.taskId))
+    .run();
 
   console.log(
     `[autonomy] Triage ${action.exit} applied to ${action.issueRef}` +
