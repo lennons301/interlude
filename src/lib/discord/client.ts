@@ -69,6 +69,14 @@ async function handleMessage(message: Message): Promise<void> {
     return;
   }
 
+  // A reply routes to its task from any channel the bot can read — a blocked
+  // run's question may live in the fleet channel, which is linked to no
+  // project. Replies to non-task messages are ignored as before.
+  if (message.reference?.messageId) {
+    await handleReply(message);
+    return;
+  }
+
   // Check if this channel is linked to a project
   const project = db
     .select()
@@ -77,12 +85,6 @@ async function handleMessage(message: Message): Promise<void> {
     .get();
 
   if (!project) return; // Not a linked channel, ignore
-
-  // Check if this is a reply to a task notification
-  if (message.reference?.messageId) {
-    await handleReply(message, project);
-    return;
-  }
 
   // New message in linked channel — create a task
   await handleNewTask(message, project);
@@ -176,10 +178,7 @@ async function handleNewTask(
   console.log(`[discord] Message in #${message.channel} -> task ${taskId} (queued)`);
 }
 
-async function handleReply(
-  message: Message,
-  project: { id: string; name: string }
-): Promise<void> {
+async function handleReply(message: Message): Promise<void> {
   const repliedToId = message.reference!.messageId!;
 
   // Find the task this reply is for

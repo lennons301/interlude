@@ -201,6 +201,49 @@ export async function notifyGateConfigError(
 }
 
 /**
+ * Post a blocked run's question — to the project's linked channel, or the
+ * fleet channel when the project has none. Returns the Discord message ID so
+ * it becomes the task's current interactive message: replying to it queues
+ * the answer as the agent's next turn.
+ */
+export async function notifyRunBlocked(
+  channelId: string,
+  task: {
+    id: string;
+    title: string;
+    question: string;
+    issueRef: string | null;
+    projectName: string | null;
+  }
+): Promise<string | null> {
+  const botClient = getBotClient();
+  if (!botClient) return null;
+
+  try {
+    const channel = await botClient.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) return null;
+
+    const domain = process.env.DOMAIN ?? "interludes.co.uk";
+    const lines = [task.question.trim().slice(0, 1000), ""];
+    if (task.projectName) lines.push(`Project: ${task.projectName}`);
+    if (task.issueRef) lines.push(`Ticket: ${task.issueRef}`);
+    lines.push("", "Reply to answer — your reply becomes the agent's next turn.");
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Agent blocked: ${task.title}`)
+      .setDescription(lines.join("\n"))
+      .setURL(`https://${domain}/tasks/${task.id}`)
+      .setColor(0xf59e0b);
+
+    const msg = await sendWithRetry(channel as TextChannel, embed);
+    return msg.id;
+  } catch (err) {
+    console.error(`[discord] Failed to send blocked notification:`, err);
+    return null;
+  }
+}
+
+/**
  * Post an "agent finished a turn — your move" idle notification.
  * Returns the Discord message ID so it can become the task's current
  * interactive message (for ✅-to-complete and reply-to-continue).

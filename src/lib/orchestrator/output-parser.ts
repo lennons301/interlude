@@ -17,6 +17,9 @@ import { newId } from "../ulid";
 export interface TurnResult {
   sessionId: string | null;
   costUsd: number;
+  /** The turn's last assistant text message — what the blocked-marker
+   * detector reads. Null when the turn produced no text at all. */
+  finalMessage: string | null;
 }
 
 interface ContentBlock {
@@ -34,6 +37,7 @@ export function createOutputHandler(taskId: string) {
   let buffer = "";
   let sessionId: string | null = null;
   let costUsd = 0;
+  let finalMessage: string | null = null;
   let lastToolUseMessageId: string | null = null;
   let _onDone: (() => void) | null = null;
 
@@ -58,7 +62,7 @@ export function createOutputHandler(taskId: string) {
         this.parseLine(buffer.trim());
         buffer = "";
       }
-      return { sessionId, costUsd };
+      return { sessionId, costUsd, finalMessage };
     },
 
     parseLine(line: string): void {
@@ -94,6 +98,7 @@ export function createOutputHandler(taskId: string) {
 
         for (const block of contentBlocks) {
           if (block.type === "text" && block.text) {
+            finalMessage = block.text;
             db.insert(messages)
               .values({
                 id: newId(),

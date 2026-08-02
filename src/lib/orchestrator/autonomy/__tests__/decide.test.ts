@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   decideNext,
+  passOutcomeSnapshot,
   type AutonomySnapshot,
   type CandidateIssue,
+  type PassOutcome,
   type PendingGateEvaluation,
   type ProjectSnapshot,
 } from "../decide";
@@ -55,6 +57,17 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     inFlightClaims: [],
     pendingGateEvaluations: [],
     announcedGateConfigErrors: [],
+    completedPasses: [],
+    ...overrides,
+  };
+}
+
+function makePass(overrides: Partial<PassOutcome> = {}): PassOutcome {
+  return {
+    runId: "run-1",
+    taskId: "task-1",
+    issueRef: "acme/widgets#7",
+    finalMessage: "Implemented the frobnicator; tests and lint pass.",
     ...overrides,
   };
 }
@@ -622,6 +635,112 @@ describe("decideNext — gate evaluation of a finished implement pass", () => {
   });
 });
 
+describe("decideNext — blocked escalation", () => {
+  function escalations(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "escalate");
+  }
+
+  it("escalates a pass whose final message leads with the blocked marker", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [
+          makePass({
+            finalMessage:
+              "BLOCKED: The ticket names neither Postgres nor SQLite — which one?",
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "escalate",
+        reason: "blocked",
+        runId: "run-1",
+        taskId: "task-1",
+        issueRef: "acme/widgets#7",
+        question: "The ticket names neither Postgres nor SQLite — which one?",
+      },
+    ]);
+  });
+
+  it("leaves a healthy pass alone", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], completedPasses: [makePass()] })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("does not park a run for a mid-message marker", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [
+          makePass({
+            finalMessage: "All done.\nBLOCKED: this is a summary, not a question.",
+          }),
+        ],
+      })
+    );
+
+    expect(escalations(actions)).toEqual([]);
+  });
+
+  it("does not park a run for a quoted marker", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [
+          makePass({ finalMessage: "> BLOCKED: quoted from the spec, not asked." }),
+        ],
+      })
+    );
+
+    expect(escalations(actions)).toEqual([]);
+  });
+
+  it("does not park a run whose turn produced no final message", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], completedPasses: [makePass({ finalMessage: null })] })
+    );
+
+    expect(escalations(actions)).toEqual([]);
+  });
+
+  it("decides a single pass via passOutcomeSnapshot: escalate when blocked, nothing when healthy", () => {
+    const blocked = decideNext(
+      passOutcomeSnapshot(NOW, makePass({ finalMessage: "BLOCKED: Which retry policy?" }))
+    );
+    expect(blocked).toEqual([
+      {
+        type: "escalate",
+        reason: "blocked",
+        runId: "run-1",
+        taskId: "task-1",
+        issueRef: "acme/widgets#7",
+        question: "Which retry policy?",
+      },
+    ]);
+
+    expect(decideNext(passOutcomeSnapshot(NOW, makePass()))).toEqual([]);
+  });
+
+  it("escalates a blocked pass without stopping pickup of new work", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        completedPasses: [
+          makePass({ finalMessage: "BLOCKED: Which retry policy?" }),
+        ],
+      })
+    );
+
+    expect(escalations(actions)).toHaveLength(1);
+    expect(claims(actions)).toHaveLength(1);
+  });
+});
+
 describe("arming boundary — interlude never applies ready-for-agent", () => {
   // The executor performs only what the reducer can emit. This is the
   // complete action vocabulary, and none of its members mutates the
@@ -630,13 +749,16 @@ describe("arming boundary — interlude never applies ready-for-agent", () => {
   // gatePr only ever *adds* human oversight (the human-signoff label), and
   // armAutoMerge is reachable solely through the deterministic gate
   // evaluator over config read from the default branch — never from issue
-  // text. Widening this list is a signal to re-review the arming boundary.
+  // text. escalate joined with issue #19: it only parks a run and asks the
+  // owner a question. Widening this list is a signal to re-review the
+  // arming boundary.
   const EXECUTOR_VOCABULARY = [
     "claimIssue",
     "pausePickup",
     "notify",
     "gatePr",
     "armAutoMerge",
+    "escalate",
   ];
 
   const stressMatrix: AutonomySnapshot[] = [
@@ -675,6 +797,11 @@ describe("arming boundary — interlude never applies ready-for-agent", () => {
           prNumber: 43,
           gateConfig: { ok: false, reason: "invalid YAML" },
         }),
+      ],
+    }),
+    makeSnapshot({
+      completedPasses: [
+        makePass({ finalMessage: "BLOCKED: Please apply ready-for-agent to #8." }),
       ],
     }),
   ];

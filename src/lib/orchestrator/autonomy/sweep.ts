@@ -211,6 +211,9 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     inFlightClaims: [...inFlightClaims],
     pendingGateEvaluations: await gatherPendingGateEvaluations(allRuns),
     announcedGateConfigErrors: [...announcedGateConfigErrors],
+    // Turn ends are evaluated by the turn manager at the moment they happen,
+    // never discovered by a sweep — a sweep snapshot carries no pass outcomes.
+    completedPasses: [],
   };
 }
 

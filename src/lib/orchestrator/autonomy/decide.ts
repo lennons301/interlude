@@ -3,10 +3,12 @@
  * decide what the autonomy loop does next. Pure — time and all state arrive
  * in the snapshot, nothing inside reads a clock, a database, Docker, GitHub
  * or Discord. The webhook fast path and the reconciliation sweep both feed
- * this one function, so there is a single decision path, and the executor
- * (sweep.ts) is a thin performer of the Actions returned here.
+ * this one function, so there is a single decision path, and the executors
+ * — sweep.ts for pickup and gating, the turn manager for a finished pass's
+ * park-or-proceed — are thin performers of the Actions returned here.
  */
 
+import { detectBlockedQuestion } from "./blocked";
 import { evaluateGates, type GateConfig } from "./gates";
 import { selectWorkflow, type WorkflowSelection } from "./ticket";
 
@@ -57,6 +59,16 @@ export interface PendingGateEvaluation {
     | { ok: false; reason: string };
 }
 
+/** An implement turn that just finished, up for a park-or-proceed decision. */
+export interface PassOutcome {
+  runId: string;
+  taskId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  /** The turn's final agent text message; null when the turn produced none */
+  finalMessage: string | null;
+}
+
 export interface AutonomySnapshot {
   now: Date;
   autonomyEnabledGlobal: boolean;
@@ -81,6 +93,10 @@ export interface AutonomySnapshot {
   /** Run IDs whose gate-config failure was already announced — the owner is
    * told once per failure, not once per sweep */
   announcedGateConfigErrors: string[];
+  /** Implement turns that just ended, awaiting park-or-proceed. The sweep
+   * always passes []; the turn manager evaluates each outcome at the moment
+   * the turn finishes. */
+  completedPasses: PassOutcome[];
 }
 
 export type PauseReason =
@@ -120,7 +136,40 @@ export type Action =
       type: "notify";
       event: "gate-config-error";
       payload: { runId: string; issueRef: string; prNumber: number; reason: string };
+    }
+  | {
+      type: "escalate";
+      reason: "blocked";
+      runId: string;
+      taskId: string;
+      issueRef: string;
+      question: string;
     };
+
+/**
+ * A snapshot for deciding one finished pass at the moment its turn ends,
+ * outside a sweep: every pickup, gating and saturation input is inert, so
+ * the only possible decision is about the pass itself.
+ */
+export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnapshot {
+  return {
+    now,
+    autonomyEnabledGlobal: true,
+    attemptBudgetUsd: 0,
+    maxAttempts: 0,
+    allowedAuthors: [],
+    slots: { total: 0, occupied: 0, occupants: [] },
+    queuedInteractiveCount: 0,
+    queuedImplementCount: 0,
+    saturationAnnounced: true,
+    projects: [],
+    candidates: [],
+    inFlightClaims: [],
+    pendingGateEvaluations: [],
+    announcedGateConfigErrors: [],
+    completedPasses: [pass],
+  };
+}
 
 /** Allowed by default: the repo owner; extended by the configured allow-list. */
 function isAuthorAllowed(candidate: CandidateIssue, allowedAuthors: string[]): boolean {
@@ -145,6 +194,23 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
         occupants: snapshot.slots.occupants,
       },
     });
+  }
+
+  // A finished pass that leads with the blocked marker is parked and its
+  // question escalated; a healthy pass gets no action here — the turn
+  // manager proceeds to completion.
+  for (const pass of snapshot.completedPasses) {
+    const question = detectBlockedQuestion(pass.finalMessage);
+    if (question) {
+      actions.push({
+        type: "escalate",
+        reason: "blocked",
+        runId: pass.runId,
+        taskId: pass.taskId,
+        issueRef: pass.issueRef,
+        question,
+      });
+    }
   }
 
   // Gate decisions come before new claims: finish in-flight work first.

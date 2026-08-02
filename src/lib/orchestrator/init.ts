@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { tasks, messages } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { newId } from "../ulid";
 import { getDocker, isDockerAvailable } from "../docker/client";
 import { startQueue } from "./queue";
@@ -73,11 +73,13 @@ async function reapStaleContainers(): Promise<void> {
 
     if (containers.length === 0) return;
 
-    // Get all tasks that should have a live container
+    // Get all tasks that should have a live container. Blocked tasks are
+    // parked, not dead: their container is deliberately kept alive holding
+    // its context while the question waits (issue #19).
     const activeTasks = await db
       .select({ containerName: tasks.containerName })
       .from(tasks)
-      .where(eq(tasks.status, "running"));
+      .where(inArray(tasks.status, ["running", "blocked"]));
 
     const activeNames = new Set(activeTasks.map((t) => t.containerName).filter(Boolean));
 

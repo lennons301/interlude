@@ -76,8 +76,8 @@ function workflowBlock(ticket: ImplementTicket): string {
 export function buildImplementPrompt(ticket: ImplementTicket): string {
   return [
     `You are an autonomous implement pass working GitHub issue #${ticket.issueNumber} ` +
-      `of ${ticket.repo}. No human is watching this run and follow-up questions are ` +
-      `not possible.`,
+      `of ${ticket.repo}. No human is watching this run; the only way to reach one ` +
+      `is the BLOCKED marker described below.`,
     ``,
     `Operating rules:`,
     `- You are on the branch agent/issue-${ticket.issueNumber}, already checked out.`,
@@ -85,6 +85,11 @@ export function buildImplementPrompt(ticket: ImplementTicket): string {
       `it asks, all of it, and only it.`,
     `- Make small, atomic commits as you work. Run the repo's tests and lint before ` +
       `you finish, and do not finish with either failing.`,
+    `- If you hit a decision the ticket does not resolve, do not guess: stop and ` +
+      `end your turn with a final message whose first line is exactly ` +
+      "`BLOCKED: <your question>` — the marker must start the first line, with " +
+      `nothing before it, or it will not be seen. The question goes to the owner ` +
+      `and the answer arrives as your next turn, with your context intact.`,
     `- End with a short summary of what you built and anything a reviewer should know.`,
     ``,
     workflowBlock(ticket),

@@ -42,6 +42,14 @@ describe("buildImplementPrompt", () => {
     expect(prompt).toContain("agent/issue-7");
   });
 
+  it("carries the blocked-marker contract: stop and lead the final message with it", () => {
+    const prompt = buildImplementPrompt({ ...TICKET, workflow: { source: "default" } });
+
+    expect(prompt).toContain("BLOCKED: <your question>");
+    expect(prompt).toContain("first line");
+    expect(prompt).toMatch(/stop/i);
+  });
+
   it("embeds the selected skill's content for a label selection", () => {
     const prompt = buildImplementPrompt({
       ...TICKET,
