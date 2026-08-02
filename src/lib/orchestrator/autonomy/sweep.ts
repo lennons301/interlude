@@ -1002,19 +1002,23 @@ async function executeExhaust(action: Extract<Action, { type: "exhaust" }>): Pro
   if (!(await addLabelToIssue(action.issueRef, READY_FOR_HUMAN_LABEL))) return;
   if (!(await removeLabelFromIssue(action.issueRef, ARMING_LABEL))) return;
 
-  const failed = db
+  const allRuns = db
     .select()
     .from(runs)
-    .where(and(eq(runs.githubIssue, action.issueRef), eq(runs.status, "failed")))
+    .where(eq(runs.githubIssue, action.issueRef))
     .all()
     .sort((a, b) => a.claimedAt.getTime() - b.claimedAt.getTime());
+  const failed = allRuns.filter((r) => r.status === "failed");
 
   const last = failed[failed.length - 1];
   if (last) {
     db.update(runs).set({ status: "exhausted" }).where(eq(runs.id, last.id)).run();
   }
 
-  const totalSpendUsd = failed.reduce((sum, r) => sum + r.totalCostUsd, 0);
+  // The strikes are the failed runs, but the ticket's bill is every run it
+  // ever had — interrupted and cancelled ones, and a prior exhausted run
+  // from before a human re-arm, still spent real money.
+  const totalSpendUsd = allRuns.reduce((sum, r) => sum + r.totalCostUsd, 0);
   const attemptLines = failed.map(
     (r) =>
       `- attempt ${r.attempt}: $${r.totalCostUsd.toFixed(2)} — ${r.failureReason ?? "failed"}`

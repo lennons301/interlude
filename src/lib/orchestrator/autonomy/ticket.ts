@@ -86,7 +86,7 @@ function workflowSectionLines(body: string): string[] {
     }
     if (inFence) continue;
 
-    if (!inSection && /^#{2,3}\s+Workflow\s*$/i.test(line)) {
+    if (!inSection && WORKFLOW_SECTION.test(line)) {
       inSection = true;
       continue;
     }
