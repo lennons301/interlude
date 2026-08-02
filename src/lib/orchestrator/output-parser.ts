@@ -20,6 +20,9 @@ export interface TurnResult {
   /** The turn's last assistant text message — what the blocked-marker
    * detector reads. Null when the turn produced no text at all. */
   finalMessage: string | null;
+  /** The result event's subtype ("success", "error_max_turns", ...) — how
+   * turn exhaustion is detected. Null when no result event arrived. */
+  subtype: string | null;
 }
 
 interface ContentBlock {
@@ -38,6 +41,7 @@ export function createOutputHandler(taskId: string) {
   let sessionId: string | null = null;
   let costUsd = 0;
   let finalMessage: string | null = null;
+  let subtype: string | null = null;
   let lastToolUseMessageId: string | null = null;
   let _onDone: (() => void) | null = null;
 
@@ -62,7 +66,7 @@ export function createOutputHandler(taskId: string) {
         this.parseLine(buffer.trim());
         buffer = "";
       }
-      return { sessionId, costUsd, finalMessage };
+      return { sessionId, costUsd, finalMessage, subtype };
     },
 
     parseLine(line: string): void {
@@ -179,6 +183,7 @@ export function createOutputHandler(taskId: string) {
 
       if (type === "result") {
         sessionId = (event.session_id as string) ?? null;
+        subtype = (event.subtype as string) ?? null;
         costUsd =
           (event.total_cost_usd as number) ??
           (event.cost_usd as number) ??

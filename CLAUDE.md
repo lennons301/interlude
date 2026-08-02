@@ -40,6 +40,7 @@ Interlude is a self-hosted, agent-first development platform. You dispatch tasks
 Schema at `src/db/schema.ts`. Four tables: `projects`, `tasks`, `messages`, `runs`.
 
 - `runs` is the Phase 5 autonomy ledger — one row per attempt at one ticket; a run owns one or more tasks (its implement pass plus any review passes). Interactive tasks have no run, which exempts them from the daily autonomous spend cap by construction (`src/lib/orchestrator/spend.ts`)
+- Budgets (issue #18): `MAX_BUDGET_USD` is the **$20 per-attempt** default — it was $5 per *task* before Phase 5, and interactive tasks deliberately inherit the new, more generous default. A ticket's `budget:` directive (Workflow section) may raise one attempt to at most $75; review passes carry their own ~$5; the $500/day autonomous cap and all ceilings live in `src/lib/orchestrator/autonomy/budgets.ts`
 - `runs.reviewResult` holds a finished review pass's parsed verdict until the orchestrator has acted on it; `runs.reviewVerdict` is the last verdict actually posted to GitHub
 - `tasks.kind` distinguishes interactive (default) / implement / review / triage; `tasks.runId` links a task to its run
 - `projects` carries `autonomyEnabled` (default off) plus cached `preflightStatus`/`preflightReason`

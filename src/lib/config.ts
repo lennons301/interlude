@@ -1,5 +1,6 @@
 import path from "path";
 import fs from "fs";
+import { DEFAULT_ATTEMPT_BUDGET_USD } from "./orchestrator/autonomy/budgets";
 
 export interface AppConfig {
   /** Anthropic API key (optional if using OAuth credentials) */
@@ -13,9 +14,17 @@ export interface AppConfig {
   gitUserName: string;
   gitUserEmail: string;
   keepContainers: boolean;
-  /** Max agentic turns per task (default: 50) */
+  /** Max agentic turns per exec (default: 50; a ticket's max-turns directive
+   * may raise an autonomous attempt's to at most 100) */
   maxTurns: number;
-  /** Max budget in USD per task (default: 5.00) */
+  /**
+   * Max budget in USD (default: 20.00). Phase 5 (issue #18) changed the
+   * meaning: this is the default budget per autonomous *attempt* — one claim,
+   * fresh container — raisable per ticket via a `budget:` directive up to a
+   * hard $75 ceiling. Interactive tasks deliberately inherit the same, more
+   * generous, per-task default (it was $5 per task before Phase 5). Review
+   * passes carry their own ~$5 allowance instead.
+   */
   maxBudgetUsd: number;
   /** Explicit agent slot count, overriding the boot-time derivation. Null = derive from the Docker daemon */
   capacitySlots: number | null;
@@ -100,7 +109,9 @@ export function getConfig(): AppConfig {
     gitUserEmail: process.env.GIT_USER_EMAIL ?? "agent@interlude.dev",
     keepContainers: process.env.KEEP_CONTAINERS === "true",
     maxTurns: parseInt(process.env.MAX_TURNS ?? "50", 10),
-    maxBudgetUsd: parseFloat(process.env.MAX_BUDGET_USD ?? "5.00"),
+    maxBudgetUsd: parseFloat(
+      process.env.MAX_BUDGET_USD ?? String(DEFAULT_ATTEMPT_BUDGET_USD)
+    ),
     capacitySlots: process.env.CAPACITY_SLOTS
       ? parseInt(process.env.CAPACITY_SLOTS, 10)
       : null,

@@ -12,7 +12,12 @@ import { newId } from "../../ulid";
 import { getConfig, PLATFORM_REPO_URL } from "../../config";
 import { getOctokit, isGitHubConfigured } from "../../github/client";
 import { fetchFileFromDefaultBranch } from "../../github/contents";
-import { commentOnIssue, parseIssueRef } from "../../github/issues";
+import {
+  addLabelToIssue,
+  commentOnIssue,
+  parseIssueRef,
+  removeLabelFromIssue,
+} from "../../github/issues";
 import {
   armAutoMergeSquash,
   disarmAutoMerge,
@@ -23,12 +28,15 @@ import {
 } from "../../github/pull-requests";
 import { parseRepoFromGitUrl } from "../../github/repo";
 import {
+  notifyAttemptsExhausted,
+  notifyDailyCapReached,
   notifyGateConfigError,
   notifyReviewBlocked,
   notifySlotsSaturated,
 } from "../../discord/notifications";
 import { getCapacity } from "../capacity";
 import { occupiedSlots } from "../queue";
+import { startOfLocalDay, todayAutonomousSpendUsd } from "../spend";
 import { getActiveTasks, isParked, releaseParkedImplementTask } from "../turn-manager";
 import {
   decideNext,
@@ -47,12 +55,13 @@ import {
   parseGateConfig,
   type GateConfig,
 } from "./gates";
-import { ARMING_LABEL, labelNames, parseBlockedByRefs } from "./ticket";
+import { ARMING_LABEL, READY_FOR_HUMAN_LABEL, labelNames, parseBlockedByRefs } from "./ticket";
 import { buildImplementPrompt, buildReviewPrompt } from "./workflow";
-import { DEFAULT_ATTEMPT_BUDGET_USD } from "./budgets";
-
-/** Attempts per ticket before the reducer refuses further claims. */
-export const MAX_ATTEMPTS = 3;
+import {
+  DAILY_AUTONOMOUS_CAP_USD,
+  MAX_ATTEMPTS,
+  MAX_REVIEW_CYCLES_PER_ATTEMPT,
+} from "./budgets";
 
 const SWEEP_INTERVAL_MS = 30_000;
 
@@ -68,6 +77,9 @@ const ACTIVE_RUN_STATUSES = new Set([
 let sweepInterval: ReturnType<typeof setInterval> | null = null;
 let sweeping = false;
 let saturationAnnounced = false;
+// The local day (startOfLocalDay ms) whose cap pause was announced — keyed by
+// day rather than a boolean so the announcement re-arms itself at midnight.
+let dailyCapAnnouncedDay: number | null = null;
 const inFlightClaims = new Set<string>();
 // Run IDs whose gate-config failure the owner has already been told about —
 // once per failure, not once per sweep. Pruned as runs leave the pending set.
@@ -206,8 +218,14 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
   return {
     now,
     autonomyEnabledGlobal: config.autonomyEnabled,
-    attemptBudgetUsd: DEFAULT_ATTEMPT_BUDGET_USD,
+    // MAX_BUDGET_USD is the per-attempt default since Phase 5 (a ticket's
+    // budget: directive may raise a single attempt to the $75 ceiling)
+    attemptBudgetUsd: config.maxBudgetUsd,
     maxAttempts: MAX_ATTEMPTS,
+    maxReviewCycles: MAX_REVIEW_CYCLES_PER_ATTEMPT,
+    todayAutonomousSpendUsd: todayAutonomousSpendUsd(now),
+    dailyCapUsd: DAILY_AUTONOMOUS_CAP_USD,
+    dailyCapAnnounced: dailyCapAnnouncedDay === startOfLocalDay(now).getTime(),
     allowedAuthors: config.autonomyAllowedAuthors,
     slots: { total: capacity.slots, occupied: occupiedSlots(), occupants },
     queuedInteractiveCount: queuedTasks.filter((t) => t.kind === "interactive").length,
@@ -292,6 +310,7 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
         armed,
         result: run.reviewResult,
         implementTaskId: liveImplementTaskId(run.id),
+        reviewCycleCount: run.reviewCycleCount,
       });
       continue;
     }
@@ -610,6 +629,12 @@ async function executeActions(actions: Action[]): Promise<void> {
       case "finalizeRun":
         await executeFinalizeRun(action);
         break;
+      case "exhaust":
+        await executeExhaust(action);
+        break;
+      case "failAttempt":
+        await executeFailAttempt(action);
+        break;
       case "pausePickup":
         console.log(
           `[autonomy] Pickup paused (${action.reason})${action.detail ? `: ${action.detail}` : ""}`
@@ -621,6 +646,13 @@ async function executeActions(actions: Action[]): Promise<void> {
             `[autonomy] All ${action.payload.total} slot(s) busy: ${action.payload.occupants.join(", ")}`
           );
           await notifySlotsSaturated(getConfig().discordFleetChannelId, action.payload);
+        } else if (action.event === "daily-cap-reached") {
+          console.log(
+            `[autonomy] Daily cap reached ($${action.payload.spentUsd.toFixed(2)} / ` +
+              `$${action.payload.capUsd.toFixed(2)}) — pickup paused until local midnight`
+          );
+          dailyCapAnnouncedDay = startOfLocalDay(new Date()).getTime();
+          await notifyDailyCapReached(getConfig().discordFleetChannelId, action.payload);
         } else if (action.event === "gate-config-error") {
           await executeGateConfigError(action.payload);
         } else if (action.event === "verdict-unparseable") {
@@ -958,6 +990,120 @@ async function executeFinalizeRun(
 }
 
 /**
+ * Three failed attempts: the ticket goes back to a human. Labels first —
+ * `ready-for-human` added before `ready-for-agent` is removed, so the issue
+ * is never in neither queue, and the removal (which takes the issue out of
+ * the candidate set) is what makes this fire once. The last failed run
+ * becomes `exhausted`: the dashboard's needs-you bucket reads it, and a
+ * deliberate re-arm then finds two failed runs, granting exactly one fresh
+ * attempt instead of insta-exhausting.
+ */
+async function executeExhaust(action: Extract<Action, { type: "exhaust" }>): Promise<void> {
+  if (!(await addLabelToIssue(action.issueRef, READY_FOR_HUMAN_LABEL))) return;
+  if (!(await removeLabelFromIssue(action.issueRef, ARMING_LABEL))) return;
+
+  const allRuns = db
+    .select()
+    .from(runs)
+    .where(eq(runs.githubIssue, action.issueRef))
+    .all()
+    .sort((a, b) => a.claimedAt.getTime() - b.claimedAt.getTime());
+  const failed = allRuns.filter((r) => r.status === "failed");
+
+  const last = failed[failed.length - 1];
+  if (last) {
+    db.update(runs).set({ status: "exhausted" }).where(eq(runs.id, last.id)).run();
+  }
+
+  // The strikes are the failed runs, but the ticket's bill is every run it
+  // ever had — interrupted and cancelled ones, and a prior exhausted run
+  // from before a human re-arm, still spent real money.
+  const totalSpendUsd = allRuns.reduce((sum, r) => sum + r.totalCostUsd, 0);
+  const attemptLines = failed.map(
+    (r) =>
+      `- attempt ${r.attempt}: $${r.totalCostUsd.toFixed(2)} — ${r.failureReason ?? "failed"}`
+  );
+
+  console.log(
+    `[autonomy] ${action.issueRef} exhausted after ${action.attemptsMade} attempts — ready-for-human`
+  );
+  await commentOnIssue(
+    action.issueRef,
+    `All ${action.attemptsMade} autonomous attempts failed — swapping ` +
+      `\`${ARMING_LABEL}\` for \`${READY_FOR_HUMAN_LABEL}\`.\n\n` +
+      `${attemptLines.join("\n")}\n\n` +
+      `Total autonomous spend on this ticket: $${totalSpendUsd.toFixed(2)}.`
+  );
+
+  const project = last
+    ? db.select().from(projects).where(eq(projects.id, last.projectId)).get()
+    : undefined;
+  await notifyAttemptsExhausted(
+    project?.discordChannelId ?? getConfig().discordFleetChannelId,
+    { issueRef: action.issueRef, attempts: action.attemptsMade, totalSpendUsd }
+  );
+}
+
+/**
+ * An attempt that exhausted its review cycles: the final request-changes
+ * findings still land on the PR as the record, but no fix-up turn runs — the
+ * run fails, counting a strike toward exhaustion. Ordering fails safe:
+ * disarm before anything else (abort and retry next sweep if it fails), and
+ * the review post is best-effort — with auto-merge off and no approval
+ * posted, nothing can merge either way.
+ */
+async function executeFailAttempt(
+  action: Extract<Action, { type: "failAttempt" }>
+): Promise<void> {
+  const ref = parseIssueRef(action.issueRef);
+  if (!ref) return;
+
+  if (action.armed) {
+    const disarmed = await disarmAutoMerge(ref.owner, ref.repo, action.prNumber);
+    if (!disarmed) return;
+  }
+
+  const posted = await postReviewAsReviewer(
+    ref.owner,
+    ref.repo,
+    action.prNumber,
+    "REQUEST_CHANGES",
+    action.reviewBody
+  );
+
+  const run = db.select().from(runs).where(eq(runs.id, action.runId)).get();
+  db.update(runs)
+    .set({
+      status: "failed",
+      failureReason: "review cycles exhausted",
+      reviewResult: null,
+      ...(posted ? { reviewVerdict: "request-changes" as const } : {}),
+      finishedAt: new Date(),
+    })
+    .where(eq(runs.id, action.runId))
+    .run();
+
+  await releaseImplementContainer(
+    action.runId,
+    "Review cycles exhausted — attempt failed, releasing container."
+  );
+
+  console.log(
+    `[autonomy] Run ${action.runId} failed: review cycles exhausted (${action.issueRef})`
+  );
+  await commentOnIssue(
+    action.issueRef,
+    `Run failed (attempt ${run?.attempt ?? "?"}/${MAX_ATTEMPTS}): review cycles ` +
+      `exhausted — ${MAX_REVIEW_CYCLES_PER_ATTEMPT} implement↔review cycles without ` +
+      `an approval. ` +
+      (posted
+        ? `The reviewer's final findings are on PR #${action.prNumber}.`
+        : `Posting the review to PR #${action.prNumber} failed; the reviewer's ` +
+          `final findings were:\n\n${action.reviewBody}`)
+  );
+}
+
+/**
  * An unparseable verdict fails closed: disarm, add human oversight, tell the
  * owner (once), and leave the stored result in place as the record. No
  * review is posted and nothing can merge until a human looks.
@@ -1053,8 +1199,10 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
         mode: action.mode,
         status: failure ? "failed" : "claimed",
         budgetUsd: action.budgetUsd,
+        maxTurns: action.maxTurns,
         claimedAt: now,
         finishedAt: failure ? now : null,
+        failureReason: failure ? `failed before start: ${failure}` : null,
       })
       .run();
 

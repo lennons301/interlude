@@ -9,15 +9,12 @@ import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, eq, gte, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { getConfig } from "../config";
 import { getCapacity } from "../orchestrator/capacity";
+import { DAILY_AUTONOMOUS_CAP_USD } from "../orchestrator/autonomy/budgets";
 import {
   buildFleetView,
   type FleetRows,
   type FleetView,
 } from "./fleet-view";
-
-/** Estate-wide daily autonomous spend cap (Phase 5 spec §Budgets). Moves to
- * config when the budgets ticket lands; the read model only needs a number. */
-export const DAILY_AUTONOMOUS_CAP_USD = 500;
 
 const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 

@@ -49,6 +49,10 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     autonomyEnabledGlobal: true,
     attemptBudgetUsd: 20,
     maxAttempts: 3,
+    maxReviewCycles: 2,
+    todayAutonomousSpendUsd: 0,
+    dailyCapUsd: 500,
+    dailyCapAnnounced: false,
     allowedAuthors: [],
     slots: { total: 2, occupied: 0, occupants: [] },
     queuedInteractiveCount: 0,
@@ -98,6 +102,7 @@ function makeVerdict(overrides: Partial<PendingVerdict> = {}): PendingVerdict {
     armed: true,
     result: { kind: "approve", body: "Verified against the ticket." },
     implementTaskId: "task-impl-1",
+    reviewCycleCount: 0,
     ...overrides,
   };
 }
@@ -138,6 +143,7 @@ describe("decideNext — claiming", () => {
         attempt: 1,
         mode: "autonomous",
         budgetUsd: 20,
+        maxTurns: null,
         workflow: { source: "default" },
       },
     ]);
@@ -164,6 +170,73 @@ describe("decideNext — claiming", () => {
 
     expect(claims(actions)).toHaveLength(1);
     expect(claims(actions)[0]).toMatchObject({ attempt: 2 });
+  });
+
+  it("resolves budget and max-turns from the ticket's directives", () => {
+    const body = "Spec.\n\n## Workflow\n\nbudget: $40\nmax-turns: 80\n";
+    const actions = decideNext(
+      makeSnapshot({ candidates: [makeCandidate({ body })] })
+    );
+
+    expect(claims(actions)[0]).toMatchObject({ budgetUsd: 40, maxTurns: 80 });
+  });
+
+  it("clamps an over-ceiling budget directive at claim time", () => {
+    const body = "## Workflow\n\nbudget: $10000\n";
+    const actions = decideNext(
+      makeSnapshot({ candidates: [makeCandidate({ body })] })
+    );
+
+    expect(claims(actions)[0]).toMatchObject({ budgetUsd: 75 });
+  });
+
+  it("falls back to the snapshot's default budget and no turn override", () => {
+    const actions = decideNext(makeSnapshot());
+
+    expect(claims(actions)[0]).toMatchObject({ budgetUsd: 20, maxTurns: null });
+  });
+});
+
+describe("decideNext — attempt accounting", () => {
+  it("exhausts a ticket whose third attempt has failed instead of claiming it", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [makeCandidate({ attemptsMade: 3 })] })
+    );
+
+    expect(actions).toEqual([
+      { type: "exhaust", issueRef: "acme/widgets#7", attemptsMade: 3 },
+    ]);
+  });
+
+  it("still claims while attempts remain", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [makeCandidate({ attemptsMade: 2 })] })
+    );
+
+    expect(actions.filter((a) => a.type === "exhaust")).toEqual([]);
+    expect(claims(actions)[0]).toMatchObject({ attempt: 3 });
+  });
+
+  it("does not exhaust a ticket that somehow still has an active run", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [makeCandidate({ attemptsMade: 3, hasActiveRun: true })],
+      })
+    );
+
+    expect(actions.filter((a) => a.type === "exhaust")).toEqual([]);
+  });
+
+  it("exhausts even when a blocker is open — routing to a human is not blocked", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [makeCandidate({ attemptsMade: 3, hasOpenBlocker: true })],
+      })
+    );
+
+    expect(actions).toEqual([
+      { type: "exhaust", issueRef: "acme/widgets#7", attemptsMade: 3 },
+    ]);
   });
 });
 
@@ -473,6 +546,81 @@ describe("decideNext — pause reasons", () => {
 
   it("emits no pause when everything is claimable", () => {
     expect(pauses(decideNext(makeSnapshot()))).toEqual([]);
+  });
+
+  it("pauses with 'daily-cap' and announces it once when today's spend meets the cap", () => {
+    const actions = decideNext(
+      makeSnapshot({ todayAutonomousSpendUsd: 500, dailyCapUsd: 500 })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "notify",
+        event: "daily-cap-reached",
+        payload: { spentUsd: 500, capUsd: 500 },
+      },
+      { type: "pausePickup", reason: "daily-cap" },
+    ]);
+  });
+
+  it("does not re-announce a cap pause that was already announced", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        todayAutonomousSpendUsd: 512.4,
+        dailyCapUsd: 500,
+        dailyCapAnnounced: true,
+      })
+    );
+
+    expect(actions).toEqual([{ type: "pausePickup", reason: "daily-cap" }]);
+  });
+
+  it("claims normally while today's spend is under the cap", () => {
+    const actions = decideNext(
+      makeSnapshot({ todayAutonomousSpendUsd: 499.99, dailyCapUsd: 500 })
+    );
+
+    expect(claims(actions)).toHaveLength(1);
+    expect(pauses(actions)).toEqual([]);
+  });
+
+  it("does not pause with 'daily-cap' when there is nothing eligible to claim", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        todayAutonomousSpendUsd: 500,
+        dailyCapUsd: 500,
+        candidates: [],
+      })
+    );
+
+    expect(pauses(actions)).toEqual([]);
+  });
+
+  it("keeps driving in-flight work while the cap pauses pickup", () => {
+    // The cap pauses pickup only: a stored verdict still posts, and a burnt
+    // ticket is still routed back to a human.
+    const actions = decideNext(
+      makeSnapshot({
+        todayAutonomousSpendUsd: 500,
+        dailyCapUsd: 500,
+        dailyCapAnnounced: true,
+        pendingVerdicts: [makeVerdict()],
+        candidates: [
+          makeCandidate(),
+          makeCandidate({
+            issueRef: "acme/widgets#9",
+            number: 9,
+            attemptsMade: 3,
+          }),
+        ],
+      })
+    );
+
+    expect(actions.map((a) => a.type)).toEqual([
+      "postVerdict",
+      "exhaust",
+      "pausePickup",
+    ]);
   });
 });
 
@@ -926,6 +1074,70 @@ describe("decideNext — verdict-to-action mapping", () => {
     );
 
     expect(actions).toEqual([]);
+  });
+
+  it("fails the attempt when a second request-changes would exceed the cycle bound", () => {
+    // Cycle 1 was implement+review; the first request-changes bought cycle 2.
+    // A second request-changes has no cycle left to spend, so the attempt
+    // fails instead of delivering another fix-up turn.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingVerdicts: [
+          makeVerdict({
+            result: { kind: "request-changes", body: "Still wrong." },
+            reviewCycleCount: 1,
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "failAttempt",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        armed: true,
+        reason: "review-cycles-exhausted",
+        reviewBody: "Still wrong.",
+      },
+    ]);
+  });
+
+  it("fails on exhausted cycles even when the container is gone", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingVerdicts: [
+          makeVerdict({
+            result: { kind: "request-changes", body: "Still wrong." },
+            reviewCycleCount: 1,
+            implementTaskId: null,
+          }),
+        ],
+      })
+    );
+
+    expect(actions.map((a) => a.type)).toEqual(["failAttempt"]);
+  });
+
+  it("does not hold a cycle-exhausted failure for a free slot — it releases one", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        slots: { total: 2, occupied: 2, occupants: ["a", "b"] },
+        saturationAnnounced: true,
+        pendingVerdicts: [
+          makeVerdict({
+            result: { kind: "request-changes", body: "Still wrong." },
+            reviewCycleCount: 1,
+          }),
+        ],
+      })
+    );
+
+    expect(actions.map((a) => a.type)).toEqual(["failAttempt"]);
   });
 });
 
