@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/workspace/repo","session_id":"tri-errored-001","tools":["Bash","Read","Grep","Glob"]}
+{"type":"assistant","message":{"content":[{"type":"text","text":"TRIAGE: recommend\n\nLooks ready to arm."}]},"session_id":"tri-errored-001"}
+{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":95000,"num_turns":15,"result":"TRIAGE: recommend\n\nLooks ready to arm.","stop_reason":"max_turns","session_id":"tri-errored-001","total_cost_usd":1.92}
