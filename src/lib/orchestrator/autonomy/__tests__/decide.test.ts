@@ -847,6 +847,61 @@ describe("decideNext — gate evaluation of a finished implement pass", () => {
     ]);
   });
 
+  it("records matched categories on a supervised gate alongside the checkpoint", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingGateEvaluations: [
+          makePending({
+            checkpoint: "confirm the schema change with me",
+            changedPaths: ["src/components/Button.tsx"],
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "gatePr",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        categories: ["visual-ui"],
+        checkpoint: "confirm the schema change with me",
+      },
+    ]);
+  });
+
+  it("supervises on a bare checkpoint directive — empty text is still a checkpoint", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingGateEvaluations: [makePending({ checkpoint: "" })],
+      })
+    );
+
+    expect(actions.map((a) => a.type)).toEqual(["gatePr"]);
+  });
+
+  it("fails closed on broken config even for a supervised run — config errors outrank the checkpoint", () => {
+    // The checkpoint's outcome (gated) does not depend on config, but the
+    // config failure is real and the owner must still hear about it; the run
+    // gates on the sweep after the config is fixed.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingGateEvaluations: [
+          makePending({
+            checkpoint: "confirm the schema change with me",
+            gateConfig: { ok: false, reason: "invalid YAML" },
+          }),
+        ],
+      })
+    );
+
+    expect(actions.map((a) => a.type)).toEqual(["notify"]);
+  });
+
   it("gate decisions do not consume claimable slots", () => {
     // Gate evaluation is orchestrator work, not container work — a pending
     // decision must not block the last free slot from a new claim.
