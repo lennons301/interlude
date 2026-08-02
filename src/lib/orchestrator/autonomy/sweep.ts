@@ -530,6 +530,7 @@ async function gatherPendingGateEvaluations(
       issueRef: run.githubIssue,
       prNumber: run.pullRequestNumber!,
       changedPaths,
+      checkpoint: run.checkpoint,
       gateConfig,
     });
   }
@@ -1199,6 +1200,7 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
         mode: action.mode,
         status: failure ? "failed" : "claimed",
         budgetUsd: action.budgetUsd,
+        checkpoint: action.checkpoint,
         maxTurns: action.maxTurns,
         claimedAt: now,
         finishedAt: failure ? now : null,

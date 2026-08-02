@@ -61,6 +61,9 @@ export interface PendingGateEvaluation {
   prNumber: number;
   /** Paths the PR changes, from the GitHub API */
   changedPaths: string[];
+  /** The run's checkpoint text, stored at claim time; non-null means the run
+   * is supervised and must gate regardless of what the globs match */
+  checkpoint: string | null;
   gateConfig:
     | { ok: true; estate: GateConfig; extension: GateConfig }
     | { ok: false; reason: string };
@@ -216,6 +219,9 @@ export type Action =
       issueRef: string;
       prNumber: number;
       categories: string[];
+      /** The supervised run's checkpoint text, carried so the notification
+       * names the decision that is waiting; null for a glob-matched gate */
+      checkpoint: string | null;
     }
   | { type: "armAutoMerge"; runId: string; issueRef: string; prNumber: number }
   | {
@@ -504,13 +510,18 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       pending.gateConfig.extension,
       pending.changedPaths
     );
-    if (categories.length > 0) {
+    // The supervised branch (issue #20): a checkpoint: directive forces
+    // human-signoff whatever the globs said — the matched categories are
+    // still recorded, but auto-merge is never armed. Supervised is a mode,
+    // not a status: the outcome is the ordinary gated path.
+    if (categories.length > 0 || pending.checkpoint !== null) {
       actions.push({
         type: "gatePr",
         runId: pending.runId,
         issueRef: pending.issueRef,
         prNumber: pending.prNumber,
         categories,
+        checkpoint: pending.checkpoint,
       });
     } else {
       actions.push({

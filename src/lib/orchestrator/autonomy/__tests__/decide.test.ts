@@ -115,6 +115,7 @@ function makePending(
     issueRef: "acme/widgets#7",
     prNumber: 41,
     changedPaths: ["src/lib/util.ts"],
+    checkpoint: null,
     gateConfig: {
       ok: true,
       estate: { "visual-ui": ["**/components/**"] },
@@ -740,6 +741,7 @@ describe("decideNext — gate evaluation of a finished implement pass", () => {
         issueRef: "acme/widgets#7",
         prNumber: 41,
         categories: ["infrastructure", "visual-ui"],
+        checkpoint: null,
       },
     ]);
   });
@@ -808,6 +810,7 @@ describe("decideNext — gate evaluation of a finished implement pass", () => {
         issueRef: "acme/widgets#9",
         prNumber: 44,
         categories: ["visual-ui"],
+        checkpoint: null,
       },
     ]);
   });
@@ -819,6 +822,29 @@ describe("decideNext — gate evaluation of a finished implement pass", () => {
     );
 
     expect(actions.map((a) => a.type)).toEqual(["armAutoMerge", "claimIssue"]);
+  });
+
+  it("gates a supervised PR even when no glob matched, carrying the checkpoint", () => {
+    // makePending's changed paths match no gate — an autonomous run would arm
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingGateEvaluations: [
+          makePending({ checkpoint: "confirm the schema change with me" }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "gatePr",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        categories: [],
+        checkpoint: "confirm the schema change with me",
+      },
+    ]);
   });
 
   it("gate decisions do not consume claimable slots", () => {
