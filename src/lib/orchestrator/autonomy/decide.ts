@@ -399,10 +399,10 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
 }
 
 /** Allowed by default: the repo owner; extended by the configured allow-list. */
-function isAuthorAllowed(candidate: CandidateIssue, allowedAuthors: string[]): boolean {
-  const author = candidate.author.toLowerCase();
-  const repoOwner = candidate.repo.split("/")[0].toLowerCase();
-  return author === repoOwner || allowedAuthors.some((a) => a.toLowerCase() === author);
+function isAuthorAllowed(repo: string, author: string, allowedAuthors: string[]): boolean {
+  const login = author.toLowerCase();
+  const repoOwner = repo.split("/")[0].toLowerCase();
+  return login === repoOwner || allowedAuthors.some((a) => a.toLowerCase() === login);
 }
 
 export function decideNext(snapshot: AutonomySnapshot): Action[] {
@@ -692,6 +692,36 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     }
   }
 
+  // Triage pickup: a stray needs-triage issue gets its short, cheap pass.
+  // Emitted before new claims — shaping the backlog outranks starting more
+  // implement work — but after everything in flight; the queue starts the
+  // task under the ordinary capacity check, so emitting here reserves
+  // intent, not a slot. Skipped wholesale once the daily cap is reached:
+  // triage spend is autonomous spend. Registered is the only project gate —
+  // triage writes no code and pushes nothing, so pickup preflight does not
+  // apply — and the author allow-list bounds whose issues can spend triage
+  // money.
+  let triagesQueuedThisSweep = 0;
+  if (snapshot.todayAutonomousSpendUsd < snapshot.dailyCapUsd) {
+    for (const candidate of snapshot.triageCandidates) {
+      if (candidate.hasTriageTask) continue;
+      const project = snapshot.projects.find((p) => p.repo === candidate.repo);
+      if (!project) continue;
+      if (!isAuthorAllowed(candidate.repo, candidate.author, snapshot.allowedAuthors)) {
+        continue;
+      }
+      triagesQueuedThisSweep++;
+      actions.push({
+        type: "startTriage",
+        issueRef: candidate.issueRef,
+        projectId: project.id,
+        issueNumber: candidate.number,
+        issueTitle: candidate.title,
+        issueBody: candidate.body,
+      });
+    }
+  }
+
   if (snapshot.candidates.length === 0) return actions;
 
   if (!snapshot.autonomyEnabledGlobal) {
@@ -737,7 +767,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       });
       continue;
     }
-    if (!isAuthorAllowed(candidate, snapshot.allowedAuthors)) continue;
+    if (!isAuthorAllowed(candidate.repo, candidate.author, snapshot.allowedAuthors)) continue;
     if (candidate.hasOpenBlocker) continue;
     if (snapshot.inFlightClaims.includes(candidate.issueRef)) continue;
     eligible.push({ candidate, project });
@@ -783,7 +813,9 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       snapshot.queuedInteractiveCount -
       snapshot.queuedImplementCount -
       snapshot.queuedReviewCount -
-      reviewsQueuedThisSweep
+      reviewsQueuedThisSweep -
+      snapshot.queuedTriageCount -
+      triagesQueuedThisSweep
   );
 
   if (claimableSlots === 0) {
