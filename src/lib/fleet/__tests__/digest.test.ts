@@ -364,6 +364,12 @@ describe("renderDailyDigest — spend", () => {
           status: "merged",
           finishedAt: jul(31, 12),
         }),
+        makeRun({
+          id: "r-this-morning",
+          totalCostUsd: 60,
+          claimedAt: aug(2, 2), // claimed before send but after the window
+          startedAt: aug(2, 2),
+        }),
       ],
       projects: [makeProject({ id: "proj-1" })],
     });

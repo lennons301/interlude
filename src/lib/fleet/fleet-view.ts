@@ -217,10 +217,16 @@ export function buildFleetView(rows: FleetRows): FleetView {
 
   // Today's autonomous spend mirrors todayAutonomousSpendUsd: a sum over
   // runs claimed since local midnight. Interactive tasks have no run, which
-  // exempts them by construction rather than by a filter.
+  // exempts them by construction rather than by a filter. The upper bound
+  // matters only to the digest, which evaluates the view at the end of a
+  // past day over live rows — the view must know nothing after `now`.
   const dayStart = startOfLocalDay(rows.now).getTime();
   const todayUsd = rows.runs
-    .filter((r) => r.claimedAt.getTime() >= dayStart)
+    .filter(
+      (r) =>
+        r.claimedAt.getTime() >= dayStart &&
+        r.claimedAt.getTime() <= rows.now.getTime()
+    )
     .reduce((sum, r) => sum + r.totalCostUsd, 0);
   const capPaused = todayUsd >= rows.dailyCapUsd;
 

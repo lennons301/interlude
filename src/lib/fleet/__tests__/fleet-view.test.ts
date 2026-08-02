@@ -240,6 +240,27 @@ describe("buildFleetView — spend", () => {
     expect(view.spend.capPaused).toBe(false);
   });
 
+  it("excludes runs claimed after `now` from today's spend", () => {
+    // The digest evaluates the view at the end of a past day over live rows;
+    // a run claimed after that instant belongs to the next day's ledger.
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          makeRun({ id: "r1", totalCostUsd: 3 }),
+          makeRun({
+            id: "r-future",
+            totalCostUsd: 480,
+            claimedAt: new Date(2026, 7, 1, 13, 0, 0), // an hour past NOW
+            startedAt: new Date(2026, 7, 1, 13, 0, 0),
+          }),
+        ],
+      })
+    );
+
+    expect(view.spend.todayUsd).toBeCloseTo(3);
+    expect(view.spend.capPaused).toBe(false);
+  });
+
   it("excludes runs claimed before local midnight from today's spend", () => {
     const view = buildFleetView(
       baseRows({

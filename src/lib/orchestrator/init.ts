@@ -6,7 +6,7 @@ import { getDocker, isDockerAvailable } from "../docker/client";
 import { startQueue } from "./queue";
 import { getCapacity } from "./capacity";
 import { startAutonomySweeps } from "./autonomy/sweep";
-import { startDailyDigest } from "./digest";
+import { startDailyDigest } from "./digest-schedule";
 import { getConfig } from "../config";
 import { isGitHubConfigured } from "../github/client";
 import { isDiscordConfigured, startDiscordBot } from "../discord/client";

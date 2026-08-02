@@ -93,14 +93,12 @@ export async function hasDigestPostedSince(
   channelId: string,
   since: Date
 ): Promise<boolean> {
-  const botClient = getBotClient();
-  if (!botClient) throw new Error("Discord bot not connected");
   const channel = await fetchTextChannel(channelId);
 
   const recent = await channel.messages.fetch({ limit: 100 });
   return recent.some(
     (msg) =>
-      msg.author.id === botClient.user?.id &&
+      msg.author.id === channel.client.user?.id &&
       msg.createdTimestamp >= since.getTime() &&
       msg.embeds.some((e) => e.title?.startsWith(DIGEST_TITLE_PREFIX))
   );
