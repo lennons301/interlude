@@ -3,6 +3,8 @@
  * Nothing here performs I/O; the sweep gathers, these functions interpret.
  */
 
+import { MAX_ATTEMPT_BUDGET_USD, MAX_TURNS_CEILING } from "./budgets";
+
 export const ARMING_LABEL = "ready-for-agent";
 export const INTERACTIVE_TRIGGER_LABEL = "interlude";
 
@@ -10,6 +12,80 @@ const WORKFLOW_LABEL_PREFIX = "workflow:";
 
 /** A `## Workflow` (or `### Workflow`) section heading in a ticket body. */
 const WORKFLOW_SECTION = /^#{2,3}\s+Workflow\s*$/im;
+
+/**
+ * The bounded directive set a ticket may carry in its Workflow section.
+ * Null means "not specified — use the default". Directives can only move
+ * bounded numbers or add human oversight; there is deliberately no key that
+ * touches gates, the reviewer, auto-merge or the daily cap, and unknown keys
+ * are ignored rather than interpreted.
+ */
+export interface TicketDirectives {
+  /** Per-attempt budget in USD, clamped to MAX_ATTEMPT_BUDGET_USD */
+  budget: number | null;
+  /** Per-exec turn limit, clamped to MAX_TURNS_CEILING */
+  maxTurns: number | null;
+  /** Checkpoint text — forces supervised mode (issue #20 wires this) */
+  checkpoint: string | null;
+  /** Named workflow — informational in v1 (selectWorkflow drives the pass) */
+  workflow: string | null;
+}
+
+/**
+ * Parse the bounded directive set from a ticket body. Only whole lines inside
+ * the ticket's Workflow section count — directive-shaped text in prose or
+ * inside code fences is data, not instructions, and issue bodies are
+ * semi-trusted input that must never widen its own authority.
+ */
+export function parseTicketDirectives(body: string): TicketDirectives {
+  const directives: TicketDirectives = {
+    budget: null,
+    maxTurns: null,
+    checkpoint: null,
+    workflow: null,
+  };
+
+  for (const line of workflowSectionLines(body)) {
+    const match = line.match(/^\s*(?:[-*]\s+)?([a-z-]+)\s*:\s*(.*)$/i);
+    if (!match) continue;
+    const key = match[1].toLowerCase();
+    const value = match[2].trim();
+
+    if (key === "budget" && directives.budget === null) {
+      const amount = value.match(/^\$?(\d+(?:\.\d+)?)$/);
+      const parsed = amount ? parseFloat(amount[1]) : NaN;
+      if (parsed > 0) directives.budget = Math.min(parsed, MAX_ATTEMPT_BUDGET_USD);
+    } else if (key === "max-turns" && directives.maxTurns === null) {
+      const parsed = /^\d+$/.test(value) ? parseInt(value, 10) : NaN;
+      if (parsed > 0) directives.maxTurns = Math.min(parsed, MAX_TURNS_CEILING);
+    } else if (key === "checkpoint" && directives.checkpoint === null) {
+      directives.checkpoint = value;
+    } else if (key === "workflow" && directives.workflow === null) {
+      directives.workflow = value;
+    }
+  }
+
+  return directives;
+}
+
+/** The lines of the ticket's Workflow section, if it has one. */
+function workflowSectionLines(body: string): string[] {
+  const lines = body.split("\n");
+  const sectionLines: string[] = [];
+  let inSection = false;
+
+  for (const line of lines) {
+    const heading = line.match(/^(#{2,3})\s+Workflow\s*$/i);
+    if (heading) {
+      inSection = true;
+      continue;
+    }
+    if (inSection && /^#{1,3}\s/.test(line)) break;
+    if (inSection) sectionLines.push(line);
+  }
+
+  return sectionLines;
+}
 
 /** How the implement pass's workflow was selected for a ticket. */
 export type WorkflowSelection =

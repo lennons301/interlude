@@ -1,9 +1,100 @@
 import { describe, it, expect } from "vitest";
 import {
   parseBlockedByRefs,
+  parseTicketDirectives,
   selectWorkflow,
   shouldCreateInteractiveTask,
 } from "../ticket";
+
+describe("parseTicketDirectives", () => {
+  it("returns all-null for a body with no Workflow section", () => {
+    expect(parseTicketDirectives("Just prose.\n\nbudget: $40\n")).toEqual({
+      budget: null,
+      maxTurns: null,
+      checkpoint: null,
+      workflow: null,
+    });
+  });
+
+  it("parses a budget directive from the Workflow section", () => {
+    const body = "Intro.\n\n## Workflow\n\nbudget: $40\n";
+    expect(parseTicketDirectives(body).budget).toBe(40);
+  });
+
+  it("clamps an over-ceiling budget to $75 — issue text cannot exceed the ceiling", () => {
+    const body = "## Workflow\n\nbudget: $10000\n";
+    expect(parseTicketDirectives(body).budget).toBe(75);
+  });
+
+  it("accepts a plain number and decimals", () => {
+    expect(parseTicketDirectives("## Workflow\nbudget: 42.50").budget).toBe(42.5);
+  });
+
+  it("ignores budget values that are not positive amounts", () => {
+    expect(parseTicketDirectives("## Workflow\nbudget: lots").budget).toBeNull();
+    expect(parseTicketDirectives("## Workflow\nbudget: -5").budget).toBeNull();
+    expect(parseTicketDirectives("## Workflow\nbudget: 0").budget).toBeNull();
+    expect(parseTicketDirectives("## Workflow\nbudget: $40 per day").budget).toBeNull();
+  });
+
+  it("parses and clamps max-turns", () => {
+    expect(parseTicketDirectives("## Workflow\nmax-turns: 80").maxTurns).toBe(80);
+    expect(parseTicketDirectives("## Workflow\nmax-turns: 4000").maxTurns).toBe(100);
+    expect(parseTicketDirectives("## Workflow\nmax-turns: 0").maxTurns).toBeNull();
+    expect(parseTicketDirectives("## Workflow\nmax-turns: many").maxTurns).toBeNull();
+  });
+
+  it("parses checkpoint with its question text, and a bare checkpoint as empty", () => {
+    const body = "## Workflow\n\ncheckpoint: confirm the schema change with me\n";
+    expect(parseTicketDirectives(body).checkpoint).toBe("confirm the schema change with me");
+    expect(parseTicketDirectives("## Workflow\ncheckpoint:").checkpoint).toBe("");
+  });
+
+  it("parses the informational workflow directive", () => {
+    expect(parseTicketDirectives("## Workflow\nworkflow: tdd").workflow).toBe("tdd");
+  });
+
+  it("parses all four directives together, bulleted and case-insensitive", () => {
+    const body = [
+      "## Workflow",
+      "",
+      "- Budget: $30",
+      "- MAX-TURNS: 60",
+      "- checkpoint: pause before deploy",
+      "- workflow: tdd",
+    ].join("\n");
+    expect(parseTicketDirectives(body)).toEqual({
+      budget: 30,
+      maxTurns: 60,
+      checkpoint: "pause before deploy",
+      workflow: "tdd",
+    });
+  });
+
+  it("takes the first occurrence when a key repeats", () => {
+    const body = "## Workflow\nbudget: $30\nbudget: $75\n";
+    expect(parseTicketDirectives(body).budget).toBe(30);
+  });
+
+  it("ignores unknown keys — there is no directive that widens authority", () => {
+    const body = [
+      "## Workflow",
+      "daily-cap: 99999",
+      "reviewer: mallory",
+      "gates: off",
+      "auto-merge: on",
+      "human-signoff: off",
+      "attempts: 100",
+      "budget: $30",
+    ].join("\n");
+    expect(parseTicketDirectives(body)).toEqual({
+      budget: 30,
+      maxTurns: null,
+      checkpoint: null,
+      workflow: null,
+    });
+  });
+});
 
 describe("selectWorkflow", () => {
   it("selects the skill named by a workflow:<skill> label", () => {
