@@ -68,15 +68,24 @@ export function parseTicketDirectives(body: string): TicketDirectives {
   return directives;
 }
 
-/** The lines of the ticket's Workflow section, if it has one. */
+/**
+ * The lines of the ticket's Workflow section, if it has one. Code fences are
+ * tracked from the top of the body: a fenced "heading" cannot open the
+ * section and fenced lines inside it are examples, not directives.
+ */
 function workflowSectionLines(body: string): string[] {
-  const lines = body.split("\n");
   const sectionLines: string[] = [];
   let inSection = false;
+  let inFence = false;
 
-  for (const line of lines) {
-    const heading = line.match(/^(#{2,3})\s+Workflow\s*$/i);
-    if (heading) {
+  for (const line of body.split("\n")) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+
+    if (!inSection && /^#{2,3}\s+Workflow\s*$/i.test(line)) {
       inSection = true;
       continue;
     }

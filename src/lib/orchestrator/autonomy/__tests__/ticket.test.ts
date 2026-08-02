@@ -76,6 +76,65 @@ describe("parseTicketDirectives", () => {
     expect(parseTicketDirectives(body).budget).toBe(30);
   });
 
+  it("ignores directive-shaped lines inside a code fence in the Workflow section", () => {
+    const body = [
+      "## Workflow",
+      "",
+      "Run the loop like this:",
+      "```",
+      "budget: $10000",
+      "max-turns: 4000",
+      "checkpoint: fake",
+      "```",
+      "budget: $30",
+    ].join("\n");
+    expect(parseTicketDirectives(body)).toEqual({
+      budget: 30,
+      maxTurns: null,
+      checkpoint: null,
+      workflow: null,
+    });
+  });
+
+  it("ignores a Workflow heading that is itself inside a code fence", () => {
+    const body = ["```", "## Workflow", "budget: $75", "```"].join("\n");
+    expect(parseTicketDirectives(body).budget).toBeNull();
+  });
+
+  it("ignores directive-alike prose — a mid-line mention is not a directive", () => {
+    const body = "## Workflow\n\nKeep the budget: $60 conversation for later.\n";
+    expect(parseTicketDirectives(body).budget).toBeNull();
+  });
+
+  it("stops at the next heading — directives outside the section are inert", () => {
+    const body = [
+      "## Workflow",
+      "budget: $30",
+      "",
+      "## Notes",
+      "max-turns: 90",
+    ].join("\n");
+    expect(parseTicketDirectives(body)).toEqual({
+      budget: 30,
+      maxTurns: null,
+      checkpoint: null,
+      workflow: null,
+    });
+  });
+
+  it("keeps a deeper sub-heading inside the section", () => {
+    const body = [
+      "## Workflow",
+      "#### Limits",
+      "budget: $30",
+    ].join("\n");
+    expect(parseTicketDirectives(body).budget).toBe(30);
+  });
+
+  it("reads a ### Workflow heading too", () => {
+    expect(parseTicketDirectives("### Workflow\nbudget: $25").budget).toBe(25);
+  });
+
   it("ignores unknown keys — there is no directive that widens authority", () => {
     const body = [
       "## Workflow",
