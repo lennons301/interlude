@@ -11,7 +11,14 @@
 
 import { detectBlockedQuestion } from "./blocked";
 import { evaluateGates, type GateConfig } from "./gates";
-import { parseTicketDirectives, selectWorkflow, type WorkflowSelection } from "./ticket";
+import {
+  NEEDS_INFO_LABEL,
+  READY_FOR_HUMAN_LABEL,
+  parseTicketDirectives,
+  selectWorkflow,
+  type WorkflowSelection,
+} from "./ticket";
+import type { TriageExitKind, TriageResult } from "./triage";
 import {
   buildFeedbackTurn,
   undeliverableFeedbackBody,
@@ -116,6 +123,36 @@ export interface PassOutcome {
   finalMessage: string | null;
 }
 
+/** An open issue awaiting triage (`needs-triage`), as gathered by the sweep. */
+export interface TriageCandidate {
+  /** "owner/repo#n" */
+  issueRef: string;
+  /** "owner/repo" */
+  repo: string;
+  number: number;
+  title: string;
+  body: string;
+  /** GitHub login of the issue author */
+  author: string;
+  /** A triage task already queued or running for this issue (idempotency) */
+  hasTriageTask: boolean;
+}
+
+/**
+ * A finished triage pass whose stored exit awaits application. The pass's
+ * output was parsed when its container finished and stored on the task; the
+ * reducer maps the exit to actions and the executor performs them — the pass
+ * itself never labels, comments, edits or closes anything.
+ */
+export interface PendingTriage {
+  taskId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  issueTitle: string;
+  projectId: string;
+  result: TriageResult;
+}
+
 /** A reviewed PR that has since closed on GitHub — merged by auto-merge or
  * a human, or closed without merging. The run's ledger row can settle. */
 export interface SettledPr {
@@ -173,6 +210,14 @@ export interface AutonomySnapshot {
   settledPrs: SettledPr[];
   /** Run IDs whose verdict failure was already announced (once per failure) */
   announcedVerdictErrors: string[];
+  /** Open issues labelled `needs-triage` with no triage pass yet */
+  triageCandidates: TriageCandidate[];
+  /** Finished triage passes whose stored exits await application */
+  pendingTriageResults: PendingTriage[];
+  /** Triage tasks sitting in the queue — each has a slot spoken for */
+  queuedTriageCount: number;
+  /** Task IDs whose unparseable triage exit was already announced */
+  announcedTriageErrors: string[];
 }
 
 export type PauseReason =
@@ -266,6 +311,43 @@ export type Action =
       issueRef: string;
       question: string;
     }
+  | {
+      type: "startTriage";
+      issueRef: string;
+      projectId: string;
+      issueNumber: number;
+      issueTitle: string;
+      issueBody: string;
+    }
+  | {
+      type: "applyTriage";
+      taskId: string;
+      issueRef: string;
+      exit: TriageExitKind;
+      /** Advisory labels only — fixed per exit kind, drawn from
+       * ADVISORY_TRIAGE_LABELS and never from pass output. No exit maps to
+       * `ready-for-agent`; the executor refuses anything outside the set. */
+      addLabels: string[];
+      /** The comment the orchestrator posts on the issue — the assessment,
+       * the questions, or the grilling agenda, framed */
+      comment: string;
+    }
+  | {
+      type: "notify";
+      event: "triage-recommendation";
+      payload: {
+        taskId: string;
+        issueRef: string;
+        issueTitle: string;
+        projectId: string;
+        assessment: string;
+      };
+    }
+  | {
+      type: "notify";
+      event: "triage-unparseable";
+      payload: { taskId: string; issueRef: string; reason: string };
+    }
   | { type: "exhaust"; issueRef: string; attemptsMade: number }
   | {
       type: "failAttempt";
@@ -309,6 +391,10 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     pendingVerdicts: [],
     settledPrs: [],
     announcedVerdictErrors: [],
+    triageCandidates: [],
+    pendingTriageResults: [],
+    queuedTriageCount: 0,
+    announcedTriageErrors: [],
   };
 }
 
@@ -371,6 +457,79 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       prNumber: settled.prNumber,
       outcome: settled.merged ? "merged" : "closed",
     });
+  }
+
+  // Triage exits next: comment-and-advisory-label bookkeeping for passes
+  // that already ran, needing no slot. The label set is derived from the
+  // exit kind alone — recommend applies nothing (arming stays with a human),
+  // needs-info and ready-for-human apply exactly their own label. No mapping
+  // to ready-for-agent exists, so no pass output can reach it. An
+  // unparseable exit fails closed: announced once, nothing applied, and the
+  // issue keeps `needs-triage` so a human sees it in the tracker.
+  for (const pending of snapshot.pendingTriageResults) {
+    const { result } = pending;
+
+    if (result.kind === "unparseable") {
+      if (!snapshot.announcedTriageErrors.includes(pending.taskId)) {
+        actions.push({
+          type: "notify",
+          event: "triage-unparseable",
+          payload: {
+            taskId: pending.taskId,
+            issueRef: pending.issueRef,
+            reason: result.reason,
+          },
+        });
+      }
+      continue;
+    }
+
+    if (result.kind === "recommend") {
+      actions.push({
+        type: "applyTriage",
+        taskId: pending.taskId,
+        issueRef: pending.issueRef,
+        exit: "recommend",
+        addLabels: [],
+        comment:
+          `Triage assessment — recommended for arming:\n\n${result.body}\n\n` +
+          `Arming stays with a human: apply \`ready-for-agent\` to launch, ` +
+          `or confirm the Discord recommendation with a reply of "yes".`,
+      });
+      actions.push({
+        type: "notify",
+        event: "triage-recommendation",
+        payload: {
+          taskId: pending.taskId,
+          issueRef: pending.issueRef,
+          issueTitle: pending.issueTitle,
+          projectId: pending.projectId,
+          assessment: result.body,
+        },
+      });
+    } else if (result.kind === "needs-info") {
+      actions.push({
+        type: "applyTriage",
+        taskId: pending.taskId,
+        issueRef: pending.issueRef,
+        exit: "needs-info",
+        addLabels: [NEEDS_INFO_LABEL],
+        comment:
+          `Triage: this needs more information before it can be armed — ` +
+          `labelled \`${NEEDS_INFO_LABEL}\`.\n\n${result.body}`,
+      });
+    } else {
+      actions.push({
+        type: "applyTriage",
+        taskId: pending.taskId,
+        issueRef: pending.issueRef,
+        exit: "ready-for-human",
+        addLabels: [READY_FOR_HUMAN_LABEL],
+        comment:
+          `Triage: this needs a grilling session before anyone writes code — ` +
+          `labelled \`${READY_FOR_HUMAN_LABEL}\`.\n\n${result.body}`,
+      });
+    }
   }
 
   // Verdicts next — in-flight work outranks everything else, and a fix-up

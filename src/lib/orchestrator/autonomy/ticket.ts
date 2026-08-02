@@ -7,7 +7,28 @@ import { MAX_ATTEMPT_BUDGET_USD, MAX_TURNS_CEILING } from "./budgets";
 
 export const ARMING_LABEL = "ready-for-agent";
 export const READY_FOR_HUMAN_LABEL = "ready-for-human";
+export const NEEDS_TRIAGE_LABEL = "needs-triage";
+export const NEEDS_INFO_LABEL = "needs-info";
+export const WONTFIX_LABEL = "wontfix";
 export const INTERACTIVE_TRIGGER_LABEL = "interlude";
+
+/** The five canonical triage-role labels (docs/agents/triage-labels.md). An
+ * issue carrying any of these has already been routed — a new issue arriving
+ * with one is not re-marked for triage. */
+export const TRIAGE_ROLE_LABELS = [
+  NEEDS_TRIAGE_LABEL,
+  NEEDS_INFO_LABEL,
+  ARMING_LABEL,
+  READY_FOR_HUMAN_LABEL,
+  WONTFIX_LABEL,
+];
+
+/** The only labels a triage exit may apply — advisory routing, never arming.
+ * The reducer's exit mapping draws from this set alone, and the executor
+ * refuses an applyTriage action carrying anything else. `ready-for-agent`
+ * is excluded by construction: triage reads semi-trusted input, so its
+ * ceiling is enforced in trusted code, not requested in a prompt. */
+export const ADVISORY_TRIAGE_LABELS = [NEEDS_INFO_LABEL, READY_FOR_HUMAN_LABEL];
 
 const WORKFLOW_LABEL_PREFIX = "workflow:";
 

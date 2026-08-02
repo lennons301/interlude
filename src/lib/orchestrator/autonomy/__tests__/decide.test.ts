@@ -7,8 +7,10 @@ import {
   type CandidateIssue,
   type PassOutcome,
   type PendingGateEvaluation,
+  type PendingTriage,
   type PendingVerdict,
   type ProjectSnapshot,
+  type TriageCandidate,
 } from "../decide";
 
 // Fixed clock — time arrives in the snapshot, never read inside the reducer
@@ -69,6 +71,37 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     pendingVerdicts: [],
     settledPrs: [],
     announcedVerdictErrors: [],
+    triageCandidates: [],
+    pendingTriageResults: [],
+    queuedTriageCount: 0,
+    announcedTriageErrors: [],
+    ...overrides,
+  };
+}
+
+function makeTriageCandidate(overrides: Partial<TriageCandidate> = {}): TriageCandidate {
+  return {
+    issueRef: "acme/widgets#9",
+    repo: "acme/widgets",
+    number: 9,
+    title: "Add CSV export",
+    body: "Export the task list as CSV from the task list page.",
+    author: "acme",
+    hasTriageTask: false,
+    ...overrides,
+  };
+}
+
+function makePendingTriage(overrides: Partial<PendingTriage> = {}): PendingTriage {
+  return {
+    taskId: "task-tri-1",
+    issueRef: "acme/widgets#9",
+    issueTitle: "Add CSV export",
+    projectId: "proj-1",
+    result: {
+      kind: "recommend",
+      body: "Well specified: names the page, the format and the done-signal.",
+    },
     ...overrides,
   };
 }
@@ -1446,6 +1479,131 @@ describe("decideNext — blocked escalation", () => {
         armed: true,
       },
     ]);
+  });
+});
+
+describe("decideNext — triage-exit mapping", () => {
+  // The seam under test (issue #23): a finished triage pass's parsed exit
+  // maps to applyTriage actions whose label set is fixed per exit — derived
+  // from the exit kind alone, never from anything the pass wrote.
+  it("maps recommend to a label-free assessment plus the owner recommendation", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], pendingTriageResults: [makePendingTriage()] })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "applyTriage",
+        taskId: "task-tri-1",
+        issueRef: "acme/widgets#9",
+        exit: "recommend",
+        addLabels: [],
+        comment: expect.stringContaining(
+          "Well specified: names the page, the format and the done-signal."
+        ),
+      },
+      {
+        type: "notify",
+        event: "triage-recommendation",
+        payload: {
+          taskId: "task-tri-1",
+          issueRef: "acme/widgets#9",
+          issueTitle: "Add CSV export",
+          projectId: "proj-1",
+          assessment:
+            "Well specified: names the page, the format and the done-signal.",
+        },
+      },
+    ]);
+  });
+
+  it("maps needs-info to the needs-info label with the questions, and no Discord ping", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingTriageResults: [
+          makePendingTriage({
+            result: { kind: "needs-info", body: "- Which page?\n- CSV or JSON?" },
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "applyTriage",
+        taskId: "task-tri-1",
+        issueRef: "acme/widgets#9",
+        exit: "needs-info",
+        addLabels: ["needs-info"],
+        comment: expect.stringContaining("- Which page?\n- CSV or JSON?"),
+      },
+    ]);
+  });
+
+  it("maps ready-for-human to the ready-for-human label with the grilling agenda", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingTriageResults: [
+          makePendingTriage({
+            result: { kind: "ready-for-human", body: "1. Real limit or preference?" },
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "applyTriage",
+        taskId: "task-tri-1",
+        issueRef: "acme/widgets#9",
+        exit: "ready-for-human",
+        addLabels: ["ready-for-human"],
+        comment: expect.stringContaining("1. Real limit or preference?"),
+      },
+    ]);
+  });
+
+  it("maps an unparseable exit to a notification and nothing else — fail closed", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingTriageResults: [
+          makePendingTriage({
+            result: { kind: "unparseable", reason: "no TRIAGE: line" },
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "notify",
+        event: "triage-unparseable",
+        payload: {
+          taskId: "task-tri-1",
+          issueRef: "acme/widgets#9",
+          reason: "no TRIAGE: line",
+        },
+      },
+    ]);
+  });
+
+  it("announces an unparseable exit once, not once per sweep", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingTriageResults: [
+          makePendingTriage({
+            result: { kind: "unparseable", reason: "no TRIAGE: line" },
+          }),
+        ],
+        announcedTriageErrors: ["task-tri-1"],
+      })
+    );
+
+    expect(actions).toEqual([]);
   });
 });
 
