@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { buildSetupScript, buildPushScript } from "../container-manager";
+import {
+  buildSetupScript,
+  buildPushScript,
+  buildTurnEnv,
+} from "../container-manager";
 
 describe("buildSetupScript", () => {
   const script = buildSetupScript("https://github.com/lennons301/platform.git");
@@ -32,6 +36,36 @@ describe("buildSetupScript", () => {
     );
     expect(reviewScript).toContain('git checkout "$GIT_BRANCH"');
     expect(reviewScript).not.toContain('git checkout -b');
+  });
+});
+
+describe("buildTurnEnv", () => {
+  it("always carries the prompt and git auth token", () => {
+    const env = buildTurnEnv({
+      prompt: "do the thing",
+      gitAuthToken: "ghs_abc",
+      claudeCodeOauthToken: null,
+    });
+    expect(env).toContain("CLAUDE_PROMPT=do the thing");
+    expect(env).toContain("GIT_AUTH_TOKEN=ghs_abc");
+  });
+
+  it("injects CLAUDE_CODE_OAUTH_TOKEN when configured", () => {
+    const env = buildTurnEnv({
+      prompt: "p",
+      gitAuthToken: "t",
+      claudeCodeOauthToken: "sk-ant-oat01-xyz",
+    });
+    expect(env).toContain("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-xyz");
+  });
+
+  it("omits CLAUDE_CODE_OAUTH_TOKEN when not configured", () => {
+    const env = buildTurnEnv({
+      prompt: "p",
+      gitAuthToken: "t",
+      claudeCodeOauthToken: null,
+    });
+    expect(env.some((e) => e.startsWith("CLAUDE_CODE_OAUTH_TOKEN"))).toBe(false);
   });
 });
 
