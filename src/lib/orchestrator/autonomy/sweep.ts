@@ -72,6 +72,7 @@ import {
   DAILY_AUTONOMOUS_CAP_USD,
   MAX_ATTEMPTS,
   MAX_REVIEW_CYCLES_PER_ATTEMPT,
+  MAX_TRIAGE_PASSES_PER_ISSUE,
 } from "./budgets";
 
 const SWEEP_INTERVAL_MS = 30_000;
@@ -197,9 +198,11 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     // The needs-triage listing is the triage queue: new issues are marked by
     // the issues.opened webhook, strays by whoever labelled them. One issue
     // is at most one thing here — in flight (a pass queued or running),
-    // pending (a stored exit awaiting application), or a candidate. A pass
-    // that died before storing an exit leaves the issue a candidate again,
-    // bounded by each retry requiring another crash in the store window.
+    // pending (a stored exit awaiting application), or a candidate. A failed
+    // pass (unparseable exit already announced and cleared, or death before
+    // an exit was stored) leaves the issue a candidate again, bounded by the
+    // lifetime pass count: past it the issue sits visibly labelled for a
+    // human, never in a spend loop.
     try {
       const { data: strays } = await octokit.rest.issues.listForRepo({
         owner,
@@ -234,7 +237,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
             projectId: project.id,
             result: stored.triageResult!,
           });
-        } else {
+        } else if (inFlight || triageTasks.length < MAX_TRIAGE_PASSES_PER_ISSUE) {
           triageCandidates.push({
             issueRef,
             repo: repoFullName,
@@ -1093,7 +1096,11 @@ async function executeTriageRecommendation(payload: {
  * An unparseable triage exit fails closed: nothing applied, needs-triage
  * kept so the issue stays visible in the tracker, and the owner told on the
  * issue — once. The announcement is marked only after the comment lands, so
- * a failed comment retries next sweep.
+ * a failed comment retries next sweep. Landing it also clears the stored
+ * result: the failure is consumed, and the issue becomes a candidate again
+ * for the one retry the lifetime pass bound allows — a transient failure
+ * (budget blown mid-pass, container death) gets a second look, a persistent
+ * one ends parked on the label, never in a spend loop.
  */
 async function executeTriageUnparseable(payload: {
   taskId: string;
@@ -1106,9 +1113,15 @@ async function executeTriageUnparseable(payload: {
   const commented = await commentOnIssue(
     payload.issueRef,
     `The triage pass did not return a parseable exit (${payload.reason}). ` +
-      `Failing closed — nothing applied; \`${NEEDS_TRIAGE_LABEL}\` stays for a human to route.`
+      `Failing closed — nothing applied; \`${NEEDS_TRIAGE_LABEL}\` stays. Triage ` +
+      `retries a failed pass once; if this message reappears, route the issue by hand.`
   );
-  if (commented) announcedTriageErrors.add(payload.taskId);
+  if (!commented) return;
+  announcedTriageErrors.add(payload.taskId);
+  db.update(tasks)
+    .set({ triageResult: null, updatedAt: new Date() })
+    .where(eq(tasks.id, payload.taskId))
+    .run();
 }
 
 /**

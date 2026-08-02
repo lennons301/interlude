@@ -243,18 +243,21 @@ export async function startTask(taskId: string): Promise<void> {
     await scanForDevServer(taskId, running);
     await postIdleNotification(taskId);
   } catch (err) {
-    updateTask(taskId, { status: "failed", containerStatus: null });
-    if (isTriagePass) {
-      // A triage pass that died delivered no exit. Store the failure as an
-      // unparseable result so the fail-closed path (nothing applied, the
-      // owner told once, needs-triage kept) runs instead of a silent retry.
-      updateTask(taskId, {
-        triageResult: {
-          kind: "unparseable",
-          reason: `triage pass failed: ${err instanceof Error ? err.message : String(err)}`,
-        },
-      });
-    }
+    // A triage pass that died delivered no exit. Store the failure as an
+    // unparseable result so the fail-closed path (nothing applied, the
+    // owner told once, needs-triage kept) runs instead of a silent retry.
+    updateTask(taskId, {
+      status: "failed",
+      containerStatus: null,
+      ...(isTriagePass
+        ? {
+            triageResult: {
+              kind: "unparseable" as const,
+              reason: `triage pass failed: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          }
+        : {}),
+    });
     if (task.runId) {
       if (isReviewPass) {
         // A review pass that died is not a failed attempt — the implement

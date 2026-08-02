@@ -5,6 +5,7 @@ import { projects, tasks, messages } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { newId } from "../ulid";
 import { getConfig } from "../config";
+import { isArmingConfirmation } from "../orchestrator/autonomy/triage";
 import { setBotClient, notifyTaskQueued } from "./notifications";
 
 let client: Client | null = null;
@@ -240,8 +241,6 @@ async function handleArmingConfirmation(
   task: { id: string; githubIssue: string | null }
 ): Promise<void> {
   if (!task.githubIssue) return;
-
-  const { isArmingConfirmation } = await import("../orchestrator/autonomy/triage");
   if (!isArmingConfirmation(message.content)) return;
 
   // Dynamic import to avoid circular dependency with the orchestrator

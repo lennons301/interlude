@@ -1,6 +1,7 @@
 /**
- * Triage-exit parsing for the triage pass (issue #23) — pure interpretation
- * of a triage container's stream-json output. Triage reads semi-trusted
+ * Pure interpretation on the triage pass's boundaries (issue #23): parsing
+ * a triage container's stream-json output into an exit, and recognising the
+ * owner's explicit arming confirmation in Discord. Triage reads semi-trusted
  * input, so its ceiling is enforced here and in the reducer, not requested
  * in a prompt: the parser can only ever return one of three exits (or
  * unparseable), and `decideNext` maps each exit to a fixed advisory label
@@ -27,20 +28,6 @@ const TRIAGE_LINE = /^TRIAGE:[ \t]*(recommend|needs-info|ready-for-human)[ \t]*$
  * non-empty body — an assessment, questions or an agenda are the pass's
  * whole output; a bare marker drives nothing.
  */
-/**
- * Whether a Discord reply to a triage recommendation is an explicit arming
- * confirmation. Deliberately strict — exactly "yes", "arm" or "arm it",
- * case-insensitive with trailing punctuation ignored. Prose that merely
- * contains a yes, hedges, and silence are never consent.
- */
-export function isArmingConfirmation(reply: string): boolean {
-  const normalized = reply
-    .trim()
-    .toLowerCase()
-    .replace(/[.!\s]+$/, "");
-  return normalized === "yes" || normalized === "arm" || normalized === "arm it";
-}
-
 export function parseTriageExit(ndjson: string): TriageResult {
   const final = finalPassMessage(ndjson);
   if (!final.ok) {
@@ -64,4 +51,19 @@ export function parseTriageExit(ndjson: string): TriageResult {
   }
 
   return { kind, body };
+}
+
+/**
+ * Whether a Discord reply to a triage recommendation is an explicit arming
+ * confirmation — the other pure interpretation on triage's arming boundary.
+ * Deliberately strict: exactly "yes" (case-insensitive, trailing punctuation
+ * ignored), the word the recommendation asks for. Prose that merely contains
+ * a yes, hedges, and silence are never consent.
+ */
+export function isArmingConfirmation(reply: string): boolean {
+  const normalized = reply
+    .trim()
+    .toLowerCase()
+    .replace(/[.!\s]+$/, "");
+  return normalized === "yes";
 }

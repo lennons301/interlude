@@ -79,7 +79,7 @@ describe("isArmingConfirmation", () => {
   // Silence is never consent, and neither is anything short of an explicit
   // yes: this matcher is what stands between a Discord reply and the
   // orchestrator applying ready-for-agent on the owner's behalf.
-  it.each(["yes", "Yes", "YES.", "yes!", "  yes  ", "arm", "Arm it", "arm it!"])(
+  it.each(["yes", "Yes", "YES.", "yes!", "  yes  "])(
     "accepts the explicit confirmation %j",
     (reply) => {
       expect(isArmingConfirmation(reply)).toBe(true);
@@ -96,7 +96,7 @@ describe("isArmingConfirmation", () => {
     "y",
     "ok",
     "👍",
-    "arm it later",
+    "arm it",
     "don't arm it",
   ])("rejects %j — not an explicit confirmation", (reply) => {
     expect(isArmingConfirmation(reply)).toBe(false);

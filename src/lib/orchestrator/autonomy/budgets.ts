@@ -29,6 +29,12 @@ export const DEFAULT_TRIAGE_BUDGET_USD = 2;
  * has no directive surface. */
 export const TRIAGE_MAX_TURNS = 15;
 
+/** Triage passes allowed per issue, ever: the first, plus one retry after a
+ * failure (an unparseable exit whose announcement landed, or a pass that
+ * died before storing one). Beyond that the issue sits visibly labelled
+ * needs-triage for a human to route — never an unbounded spend loop. */
+export const MAX_TRIAGE_PASSES_PER_ISSUE = 2;
+
 /** Attempts per ticket before it is routed back to a human
  * (`ready-for-agent` swapped for `ready-for-human`). */
 export const MAX_ATTEMPTS = 3;
