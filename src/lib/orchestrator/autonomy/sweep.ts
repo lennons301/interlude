@@ -33,6 +33,7 @@ import {
   notifyGateConfigError,
   notifyReviewBlocked,
   notifySlotsSaturated,
+  notifyTriageRecommendation,
 } from "../../discord/notifications";
 import { recordBacklog } from "../../fleet/backlog";
 import { getCapacity } from "../capacity";
@@ -46,8 +47,10 @@ import {
   type AwaitingReview,
   type CandidateIssue,
   type PendingGateEvaluation,
+  type PendingTriage,
   type PendingVerdict,
   type SettledPr,
+  type TriageCandidate,
 } from "./decide";
 import {
   ESTATE_GATES_PATH,
@@ -56,8 +59,15 @@ import {
   parseGateConfig,
   type GateConfig,
 } from "./gates";
-import { ARMING_LABEL, READY_FOR_HUMAN_LABEL, labelNames, parseBlockedByRefs } from "./ticket";
-import { buildImplementPrompt, buildReviewPrompt } from "./workflow";
+import {
+  ADVISORY_TRIAGE_LABELS,
+  ARMING_LABEL,
+  NEEDS_TRIAGE_LABEL,
+  READY_FOR_HUMAN_LABEL,
+  labelNames,
+  parseBlockedByRefs,
+} from "./ticket";
+import { buildImplementPrompt, buildReviewPrompt, buildTriagePrompt } from "./workflow";
 import {
   DAILY_AUTONOMOUS_CAP_USD,
   MAX_ATTEMPTS,
@@ -90,6 +100,10 @@ const announcedGateConfigErrors = new Set<string>();
 // not post (executor-level, e.g. REVIEWER_GH_TOKEN missing).
 const announcedVerdictErrors = new Set<string>();
 const announcedReviewPostFailures = new Set<string>();
+// Triage-task IDs whose unparseable exit the owner has already been told
+// about — once per failure, not once per sweep. Pruned as issues leave the
+// needs-triage set.
+const announcedTriageErrors = new Set<string>();
 // Consecutive sweeps each config source has failed to read for reasons that
 // looked transient (keyed "owner/repo:path"). A network blip retries
 // silently, but a persistent failure — a permissions problem reads the same
@@ -171,12 +185,70 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
   }
 
   const candidates: CandidateIssue[] = [];
+  const triageCandidates: TriageCandidate[] = [];
+  const pendingTriageResults: PendingTriage[] = [];
   const octokit = await getOctokit();
 
   for (const project of registered) {
     const repoFullName = project.githubRepo!;
     const [owner, repo] = repoFullName.split("/");
     if (!owner || !repo) continue;
+
+    // The needs-triage listing is the triage queue: new issues are marked by
+    // the issues.opened webhook, strays by whoever labelled them. One issue
+    // is at most one thing here — in flight (a pass queued or running),
+    // pending (a stored exit awaiting application), or a candidate. A pass
+    // that died before storing an exit leaves the issue a candidate again,
+    // bounded by each retry requiring another crash in the store window.
+    try {
+      const { data: strays } = await octokit.rest.issues.listForRepo({
+        owner,
+        repo,
+        labels: NEEDS_TRIAGE_LABEL,
+        state: "open",
+        per_page: 100,
+      });
+
+      for (const issue of strays) {
+        if (issue.pull_request) continue;
+        const issueRef = `${repoFullName}#${issue.number}`;
+
+        const triageTasks = db
+          .select()
+          .from(tasks)
+          .where(and(eq(tasks.githubIssue, issueRef), eq(tasks.kind, "triage")))
+          .all();
+        const inFlight = triageTasks.some(
+          (t) => t.status === "queued" || t.status === "running"
+        );
+        const stored = triageTasks
+          .filter((t) => t.triageResult != null)
+          .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+          .pop();
+
+        if (!inFlight && stored) {
+          pendingTriageResults.push({
+            taskId: stored.id,
+            issueRef,
+            issueTitle: issue.title,
+            projectId: project.id,
+            result: stored.triageResult!,
+          });
+        } else {
+          triageCandidates.push({
+            issueRef,
+            repo: repoFullName,
+            number: issue.number,
+            title: issue.title,
+            body: issue.body ?? "",
+            author: issue.user?.login ?? "",
+            hasTriageTask: inFlight,
+          });
+        }
+      }
+    } catch (err) {
+      console.error(`[autonomy] Failed to list needs-triage issues for ${repoFullName}:`, err);
+    }
 
     try {
       const { data: issues } = await octokit.rest.issues.listForRepo({
@@ -223,6 +295,15 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
 
   const reviewState = await gatherReviewState(allRuns);
 
+  // The owner is re-told about an unparseable triage exit only if its issue
+  // left the needs-triage set and somehow returned; otherwise one
+  // announcement stands.
+  for (const taskId of [...announcedTriageErrors]) {
+    if (!pendingTriageResults.some((p) => p.taskId === taskId)) {
+      announcedTriageErrors.delete(taskId);
+    }
+  }
+
   return {
     now,
     autonomyEnabledGlobal: config.autonomyEnabled,
@@ -258,6 +339,10 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     pendingVerdicts: reviewState.pendingVerdicts,
     settledPrs: reviewState.settledPrs,
     announcedVerdictErrors: [...announcedVerdictErrors],
+    triageCandidates,
+    pendingTriageResults,
+    queuedTriageCount: queuedTasks.filter((t) => t.kind === "triage").length,
+    announcedTriageErrors: [...announcedTriageErrors],
   };
 }
 
@@ -610,12 +695,23 @@ async function executeActions(actions: Action[]): Promise<void> {
   // Runs whose postVerdict failed this pass — their deliverFeedback must not
   // run, or a re-posted verdict next sweep would deliver the fix-up twice.
   const failedVerdictPosts = new Set<string>();
+  // Same pattern for triage: a recommendation is only pinged to Discord once
+  // its applyTriage landed, or a retried apply would ping the owner twice.
+  const failedTriageApplies = new Set<string>();
 
   for (const action of actions) {
     switch (action.type) {
       case "claimIssue":
         await executeClaim(action);
         break;
+      case "startTriage":
+        await executeStartTriage(action);
+        break;
+      case "applyTriage": {
+        const applied = await executeApplyTriage(action);
+        if (!applied) failedTriageApplies.add(action.taskId);
+        break;
+      }
       case "gatePr":
         await executeGatePr(action);
         break;
@@ -666,6 +762,12 @@ async function executeActions(actions: Action[]): Promise<void> {
           await executeGateConfigError(action.payload);
         } else if (action.event === "verdict-unparseable") {
           await executeVerdictUnparseable(action.payload);
+        } else if (action.event === "triage-recommendation") {
+          if (!failedTriageApplies.has(action.payload.taskId)) {
+            await executeTriageRecommendation(action.payload);
+          }
+        } else if (action.event === "triage-unparseable") {
+          await executeTriageUnparseable(action.payload);
         }
         break;
     }
@@ -859,6 +961,198 @@ async function executeStartReview(
     // Missing reviewer definition or a GitHub read failure: the run stays
     // awaiting review and the next sweep retries.
     console.error(`[autonomy] Failed to queue review for ${action.issueRef}:`, err);
+  }
+}
+
+/**
+ * Queue a triage pass: a short, cheap, read-only unit of work drawing a slot
+ * like any other pass, in its own container with the repo as reading
+ * material. The prompt is built here from the vendored pass definition and
+ * the live issue — never from anything a container wrote. The pass receives
+ * no credential beyond the App token its setup uses for cloning, and not
+ * the project's Doppler secrets.
+ */
+async function executeStartTriage(
+  action: Extract<Action, { type: "startTriage" }>
+): Promise<void> {
+  const ref = parseIssueRef(action.issueRef);
+  if (!ref) return;
+
+  try {
+    const prompt = buildTriagePrompt({
+      repo: `${ref.owner}/${ref.repo}`,
+      issueNumber: action.issueNumber,
+      issueTitle: action.issueTitle,
+      issueBody: action.issueBody,
+    });
+
+    const now = new Date();
+    const taskId = newId();
+    db.insert(tasks)
+      .values({
+        id: taskId,
+        projectId: action.projectId,
+        title: `Triage: ${action.issueTitle}`,
+        description: prompt,
+        status: "queued",
+        kind: "triage",
+        githubIssue: action.issueRef,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .run();
+
+    console.log(`[autonomy] Queued triage of ${action.issueRef} -> task ${taskId}`);
+  } catch (err) {
+    // Missing pass definition: the issue stays needs-triage and the next
+    // sweep retries.
+    console.error(`[autonomy] Failed to queue triage for ${action.issueRef}:`, err);
+  }
+}
+
+/**
+ * Apply a triage exit's fixed consequences: advisory labels, the comment
+ * carrying the assessment/questions/agenda, and the removal of needs-triage
+ * — the latch that takes the issue out of the pending set, ordered last so
+ * any earlier failure leaves the whole step retryable on the next sweep.
+ * Returns false when the apply did not complete, so the caller suppresses
+ * the paired recommendation ping.
+ */
+async function executeApplyTriage(
+  action: Extract<Action, { type: "applyTriage" }>
+): Promise<boolean> {
+  // Defence in depth behind the reducer's fixed exit mapping: an applyTriage
+  // action may only ever carry advisory labels. Anything else — however it
+  // got here — is refused whole. Triage can never arm execution.
+  const rogue = action.addLabels.filter((l) => !ADVISORY_TRIAGE_LABELS.includes(l));
+  if (rogue.length > 0) {
+    console.error(
+      `[autonomy] Refusing applyTriage for ${action.issueRef} — ` +
+        `non-advisory label(s): ${rogue.join(", ")}`
+    );
+    return false;
+  }
+
+  for (const label of action.addLabels) {
+    if (!(await addLabelToIssue(action.issueRef, label))) return false;
+  }
+  if (!(await commentOnIssue(action.issueRef, action.comment))) return false;
+  if (!(await removeLabelFromIssue(action.issueRef, NEEDS_TRIAGE_LABEL))) return false;
+
+  console.log(
+    `[autonomy] Triage ${action.exit} applied to ${action.issueRef}` +
+      (action.addLabels.length ? ` (${action.addLabels.join(", ")})` : "")
+  );
+  return true;
+}
+
+/**
+ * Ping the owner that triage recommends arming — to the project's linked
+ * channel, or the fleet channel when the project has none. The message id is
+ * stored on the triage task so a reply of "yes" routes back as the explicit
+ * confirmation the arming route requires. No channel configured is fine: the
+ * assessment is on the issue and a label click arms it just the same.
+ */
+async function executeTriageRecommendation(payload: {
+  taskId: string;
+  issueRef: string;
+  issueTitle: string;
+  projectId: string;
+  assessment: string;
+}): Promise<void> {
+  const project = db
+    .select()
+    .from(projects)
+    .where(eq(projects.id, payload.projectId))
+    .get();
+  const channelId = project?.discordChannelId ?? getConfig().discordFleetChannelId;
+  if (!channelId) {
+    console.log(
+      `[autonomy] Triage recommends arming ${payload.issueRef} — no Discord ` +
+        `channel configured, the assessment is on the issue`
+    );
+    return;
+  }
+
+  const msgId = await notifyTriageRecommendation(channelId, {
+    taskId: payload.taskId,
+    issueRef: payload.issueRef,
+    issueTitle: payload.issueTitle,
+    assessment: payload.assessment,
+    projectName: project?.name ?? null,
+  });
+  if (msgId) {
+    db.update(tasks)
+      .set({ discordMessageId: msgId, updatedAt: new Date() })
+      .where(eq(tasks.id, payload.taskId))
+      .run();
+  }
+}
+
+/**
+ * An unparseable triage exit fails closed: nothing applied, needs-triage
+ * kept so the issue stays visible in the tracker, and the owner told on the
+ * issue — once. The announcement is marked only after the comment lands, so
+ * a failed comment retries next sweep.
+ */
+async function executeTriageUnparseable(payload: {
+  taskId: string;
+  issueRef: string;
+  reason: string;
+}): Promise<void> {
+  console.error(
+    `[autonomy] Triage pass for ${payload.issueRef} returned no usable exit: ${payload.reason}`
+  );
+  const commented = await commentOnIssue(
+    payload.issueRef,
+    `The triage pass did not return a parseable exit (${payload.reason}). ` +
+      `Failing closed — nothing applied; \`${NEEDS_TRIAGE_LABEL}\` stays for a human to route.`
+  );
+  if (commented) announcedTriageErrors.add(payload.taskId);
+}
+
+/**
+ * Arm an issue on the owner's explicit Discord confirmation of a triage
+ * recommendation. This is deliberately NOT reachable from decideNext or any
+ * pass output — the reducer's action vocabulary cannot express it. It runs
+ * only from the Discord reply handler, carrying a human's yes, which is the
+ * one thing the security model lets arming trace to. The route is recorded
+ * on the issue before the label lands: a record without arming retries; an
+ * arming without a record would be an audit gap.
+ */
+export async function armIssueFromDiscord(
+  issueRef: string,
+  confirmedBy: string
+): Promise<boolean> {
+  const ref = parseIssueRef(issueRef);
+  if (!ref) return false;
+
+  try {
+    const octokit = await getOctokit();
+    const { data: issue } = await octokit.rest.issues.get({
+      owner: ref.owner,
+      repo: ref.repo,
+      issue_number: ref.number,
+    });
+    if (issue.state !== "open") return false;
+    if (labelNames(issue.labels).includes(ARMING_LABEL)) return true; // already armed
+
+    const recorded = await commentOnIssue(
+      issueRef,
+      `Armed via Discord: ${confirmedBy} confirmed the triage recommendation — ` +
+        `applying \`${ARMING_LABEL}\`.`
+    );
+    if (!recorded) return false;
+    if (!(await addLabelToIssue(issueRef, ARMING_LABEL))) return false;
+
+    console.log(`[autonomy] ${issueRef} armed via Discord confirmation by ${confirmedBy}`);
+    runAutonomySweep().catch((err) =>
+      console.error("[autonomy] Post-arming sweep failed:", err)
+    );
+    return true;
+  } catch (err) {
+    console.error(`[autonomy] Discord arming of ${issueRef} failed:`, err);
+    return false;
   }
 }
 

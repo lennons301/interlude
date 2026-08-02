@@ -20,6 +20,15 @@ export const MAX_TURNS_CEILING = 100;
  * implement attempt's, so reviewing never eats into a fix-up's headroom. */
 export const DEFAULT_REVIEW_BUDGET_USD = 5;
 
+/** Budget for one triage pass — shaping the backlog must cost a fraction of
+ * implementing a ticket. */
+export const DEFAULT_TRIAGE_BUDGET_USD = 2;
+
+/** Per-exec turn cap for a triage pass: read the issue against the repo's
+ * context, judge, exit. Not raisable — triage reads semi-trusted input and
+ * has no directive surface. */
+export const TRIAGE_MAX_TURNS = 15;
+
 /** Attempts per ticket before it is routed back to a human
  * (`ready-for-agent` swapped for `ready-for-human`). */
 export const MAX_ATTEMPTS = 3;

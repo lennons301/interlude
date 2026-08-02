@@ -11,15 +11,17 @@ export function parseIssueRef(ref: string): { owner: string; repo: string; numbe
 
 /**
  * Post a comment on a GitHub issue. No-op if GitHub is not configured.
+ * Returns false when the comment did not land, for callers whose ordering
+ * depends on it; most callers fire and forget.
  */
 export async function commentOnIssue(
   issueRef: string,
   body: string
-): Promise<void> {
-  if (!isGitHubConfigured()) return;
+): Promise<boolean> {
+  if (!isGitHubConfigured()) return false;
 
   const parsed = parseIssueRef(issueRef);
-  if (!parsed) return;
+  if (!parsed) return false;
 
   try {
     const octokit = await getOctokit();
@@ -29,8 +31,10 @@ export async function commentOnIssue(
       issue_number: parsed.number,
       body,
     });
+    return true;
   } catch (err) {
     console.error(`[github] Failed to comment on ${issueRef}:`, err);
+    return false;
   }
 }
 

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
-import { parseTriageExit } from "../triage";
+import { isArmingConfirmation, parseTriageExit } from "../triage";
 
 // Fixtures follow the shape of __tests__/stream-fixture.ndjson: the raw
 // stream-json a triage pass emits, ending in a `result` event whose `result`
@@ -72,5 +72,33 @@ describe("parseTriageExit", () => {
     it("rejects empty input", () => {
       expect(parseTriageExit("")).toMatchObject({ kind: "unparseable" });
     });
+  });
+});
+
+describe("isArmingConfirmation", () => {
+  // Silence is never consent, and neither is anything short of an explicit
+  // yes: this matcher is what stands between a Discord reply and the
+  // orchestrator applying ready-for-agent on the owner's behalf.
+  it.each(["yes", "Yes", "YES.", "yes!", "  yes  ", "arm", "Arm it", "arm it!"])(
+    "accepts the explicit confirmation %j",
+    (reply) => {
+      expect(isArmingConfirmation(reply)).toBe(true);
+    }
+  );
+
+  it.each([
+    "",
+    "   ",
+    "no",
+    "yesterday's build broke",
+    "yes but let me look first",
+    "yes please",
+    "y",
+    "ok",
+    "👍",
+    "arm it later",
+    "don't arm it",
+  ])("rejects %j — not an explicit confirmation", (reply) => {
+    expect(isArmingConfirmation(reply)).toBe(false);
   });
 });

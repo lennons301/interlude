@@ -4,12 +4,14 @@ import { tasks, projects } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { newId } from "@/lib/ulid";
 import { verifyWebhookSignature } from "@/lib/github/webhooks";
-import { commentOnIssue } from "@/lib/github/issues";
+import { addLabelToIssue, commentOnIssue } from "@/lib/github/issues";
 import { isGitHubConfigured } from "@/lib/github/client";
 import { runAutonomySweep } from "@/lib/orchestrator/autonomy/sweep";
 import {
   ARMING_LABEL,
   INTERACTIVE_TRIGGER_LABEL,
+  NEEDS_TRIAGE_LABEL,
+  TRIAGE_ROLE_LABELS,
   labelNames,
   shouldCreateInteractiveTask,
 } from "@/lib/orchestrator/autonomy/ticket";
@@ -30,6 +32,43 @@ export async function POST(request: Request) {
 
   const event = request.headers.get("x-github-event");
   const payload = JSON.parse(body);
+
+  // A new issue on a registered project gets met on arrival (issue #23):
+  // mark it needs-triage — the label is the triage queue — and kick the
+  // sweep. The webhook is just latency; the reconciliation sweep picks up
+  // strays the same way. An issue arriving already routed (any triage-role
+  // label, or the interactive trigger) is left alone.
+  if (event === "issues" && payload.action === "opened") {
+    const issue = payload.issue;
+    const repoFullName = payload.repository?.full_name;
+    if (!issue || !repoFullName || issue.pull_request) {
+      return NextResponse.json({ ok: true, skipped: "not a plain issue" });
+    }
+
+    const project = db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(eq(projects.githubRepo, repoFullName))
+      .get();
+    if (!project) {
+      return NextResponse.json({ ok: true, skipped: "no project" });
+    }
+
+    const labels = labelNames(issue.labels);
+    if (
+      labels.some(
+        (l) => TRIAGE_ROLE_LABELS.includes(l) || l === INTERACTIVE_TRIGGER_LABEL
+      )
+    ) {
+      return NextResponse.json({ ok: true, skipped: "already routed" });
+    }
+
+    await addLabelToIssue(`${repoFullName}#${issue.number}`, NEEDS_TRIAGE_LABEL);
+    runAutonomySweep().catch((err) =>
+      console.error("[autonomy] Webhook-triggered sweep failed:", err)
+    );
+    return NextResponse.json({ ok: true, triggered: "triage" });
+  }
 
   if (event === "issues" && payload.action === "labeled") {
     const label = payload.label?.name;

@@ -27,6 +27,20 @@ const TRIAGE_LINE = /^TRIAGE:[ \t]*(recommend|needs-info|ready-for-human)[ \t]*$
  * non-empty body — an assessment, questions or an agenda are the pass's
  * whole output; a bare marker drives nothing.
  */
+/**
+ * Whether a Discord reply to a triage recommendation is an explicit arming
+ * confirmation. Deliberately strict — exactly "yes", "arm" or "arm it",
+ * case-insensitive with trailing punctuation ignored. Prose that merely
+ * contains a yes, hedges, and silence are never consent.
+ */
+export function isArmingConfirmation(reply: string): boolean {
+  const normalized = reply
+    .trim()
+    .toLowerCase()
+    .replace(/[.!\s]+$/, "");
+  return normalized === "yes" || normalized === "arm" || normalized === "arm it";
+}
+
 export function parseTriageExit(ndjson: string): TriageResult {
   const final = finalPassMessage(ndjson);
   if (!final.ok) {

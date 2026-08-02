@@ -32,6 +32,7 @@ Interlude is a self-hosted, agent-first development platform. You dispatch tasks
 - GitHub library: `src/lib/github/` (client, webhooks, issues, pull-requests)
 - Discord bot (optional; degrades gracefully when unconfigured) maps each project to one channel via `!link <project>` / `!unlink`; new channel messages create tasks, replies deliver follow-ups
 - Discord lifecycle embeds: queued / completed / failed, plus an idle "agent finished a turn" notification (react ✅ to complete the task, reply to continue)
+- Triage (issue #23): `issues.opened` on a registered project marks the issue `needs-triage` (the label is the queue); a short read-only pass (`kind: triage`, no run, ~$2 + hard turn cap) returns `TRIAGE: recommend | needs-info | ready-for-human` and the orchestrator applies fixed consequences. Triage can never apply `ready-for-agent`, edit bodies, or close issues — arming needs a human label click or an explicit Discord "yes" (reply to the recommendation embed), and the route is recorded on the issue
 - Draft PR is auto-created on first branch push for **any** task origin (issue, Discord, or UI) — not only issue-linked tasks — and marked ready for review on completion
 - Discord library: `src/lib/discord/` (client = gateway + message/reaction routing, notifications = embeds)
 
@@ -42,7 +43,7 @@ Schema at `src/db/schema.ts`. Four tables: `projects`, `tasks`, `messages`, `run
 - `runs` is the Phase 5 autonomy ledger — one row per attempt at one ticket; a run owns one or more tasks (its implement pass plus any review passes). Interactive tasks have no run, which exempts them from the daily autonomous spend cap by construction (`src/lib/orchestrator/spend.ts`)
 - Budgets (issue #18): `MAX_BUDGET_USD` is the **$20 per-attempt** default — it was $5 per *task* before Phase 5, and interactive tasks deliberately inherit the new, more generous default. A ticket's `budget:` directive (Workflow section) may raise one attempt to at most $75; review passes carry their own ~$5; the $500/day autonomous cap and all ceilings live in `src/lib/orchestrator/autonomy/budgets.ts`
 - `runs.reviewResult` holds a finished review pass's parsed verdict until the orchestrator has acted on it; `runs.reviewVerdict` is the last verdict actually posted to GitHub
-- `tasks.kind` distinguishes interactive (default) / implement / review / triage; `tasks.runId` links a task to its run
+- `tasks.kind` distinguishes interactive (default) / implement / review / triage; `tasks.runId` links a task to its run; `tasks.triageResult` holds a finished triage pass's parsed exit until the sweep applies it (triage owns no run, so its spend is counted into the daily cap by kind in `spend.ts`)
 - `projects` carries `autonomyEnabled` (default off) plus cached `preflightStatus`/`preflightReason`
 
 - Run migrations: `npx drizzle-kit push`
