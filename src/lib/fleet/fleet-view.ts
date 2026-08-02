@@ -19,8 +19,9 @@ export interface FleetRows {
   projects: FleetProjectRow[];
   runs: FleetRunRow[];
   tasks: FleetTaskRow[];
-  /** Tickets armed `ready-for-agent` and not yet claimed; null = unknown */
-  readyForAgentCount: number | null;
+  /** Tickets armed `ready-for-agent` and not yet claimed, keyed by project
+   * id — the sweep's last tracker observation; null = never observed */
+  backlogByProject: Record<string, number> | null;
 }
 
 export interface FleetProjectRow {
@@ -155,7 +156,11 @@ export interface FleetView {
   needsYou: NeedsYouItem[];
   running: RunningCard[];
   recent: { windowDays: number; totalUsd: number; items: RecentItem[] };
-  queue: { readyForAgent: number | null };
+  queue: {
+    readyForAgent: number | null;
+    /** Backlog depth per project, deepest first; null = never observed */
+    byProject: { projectName: string; count: number }[] | null;
+  };
   /** True when any project has autonomy enabled */
   autonomyOn: boolean;
 }
@@ -214,10 +219,16 @@ export function buildFleetView(rows: FleetRows): FleetView {
 
   // Today's autonomous spend mirrors todayAutonomousSpendUsd: a sum over
   // runs claimed since local midnight. Interactive tasks have no run, which
-  // exempts them by construction rather than by a filter.
+  // exempts them by construction rather than by a filter. The upper bound
+  // matters only to the digest, which evaluates the view at the end of a
+  // past day over live rows — the view must know nothing after `now`.
   const dayStart = startOfLocalDay(rows.now).getTime();
   const todayUsd = rows.runs
-    .filter((r) => r.claimedAt.getTime() >= dayStart)
+    .filter(
+      (r) =>
+        r.claimedAt.getTime() >= dayStart &&
+        r.claimedAt.getTime() <= rows.now.getTime()
+    )
     .reduce((sum, r) => sum + r.totalCostUsd, 0);
   const capPaused = todayUsd >= rows.dailyCapUsd;
 
@@ -433,6 +444,21 @@ export function buildFleetView(rows: FleetRows): FleetView {
   recentItems.sort((a, b) => b.finishedAt.localeCompare(a.finishedAt));
   const recentTotalUsd = recentItems.reduce((sum, i) => sum + i.costUsd, 0);
 
+  // Backlog entries answer to the projects table — an observation for a
+  // since-deleted project counts nowhere.
+  const backlog = rows.backlogByProject
+    ? Object.entries(rows.backlogByProject)
+        .filter(([projectId]) => projectById.has(projectId))
+        .map(([projectId, count]) => ({
+          projectName: projectName(projectId),
+          count,
+        }))
+        .sort(
+          (a, b) =>
+            b.count - a.count || a.projectName.localeCompare(b.projectName)
+        )
+    : null;
+
   return {
     generatedAt: rows.now.toISOString(),
     slots: {
@@ -449,7 +475,12 @@ export function buildFleetView(rows: FleetRows): FleetView {
       totalUsd: recentTotalUsd,
       items: recentItems,
     },
-    queue: { readyForAgent: rows.readyForAgentCount },
+    queue: {
+      readyForAgent: backlog
+        ? backlog.reduce((sum, b) => sum + b.count, 0)
+        : null,
+      byProject: backlog,
+    },
     autonomyOn: rows.projects.some((p) => p.autonomyEnabled),
   };
 }

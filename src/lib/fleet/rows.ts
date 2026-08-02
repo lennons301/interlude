@@ -9,6 +9,7 @@ import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, eq, gte, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { getConfig } from "../config";
 import { getCapacity } from "../orchestrator/capacity";
+import { getBacklogByProject } from "./backlog";
 import { DAILY_AUTONOMOUS_CAP_USD } from "../orchestrator/autonomy/budgets";
 import {
   buildFleetView,
@@ -108,9 +109,9 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
       createdAt: t.createdAt,
       updatedAt: t.updatedAt,
     })),
-    // Queue depth needs the tracker; the pickup/reconciliation ticket will
-    // feed it. Null renders as "queue unknown" rather than a wrong zero.
-    readyForAgentCount: null,
+    // The sweep's last tracker observation; null (never observed) renders
+    // as "queue unknown" rather than a wrong zero.
+    backlogByProject: getBacklogByProject(),
   };
 }
 

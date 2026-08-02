@@ -6,6 +6,7 @@ import { getDocker, isDockerAvailable } from "../docker/client";
 import { startQueue } from "./queue";
 import { getCapacity } from "./capacity";
 import { startAutonomySweeps } from "./autonomy/sweep";
+import { startDailyDigest } from "./digest-schedule";
 import { getConfig } from "../config";
 import { isGitHubConfigured } from "../github/client";
 import { isDiscordConfigured, startDiscordBot } from "../discord/client";
@@ -127,7 +128,12 @@ export async function initOrchestrator(): Promise<void> {
     }
     if (isDiscordConfigured()) {
       startDiscordBot()
-        .then(() => console.log("[orchestrator] Discord bot started"))
+        .then(() => {
+          console.log("[orchestrator] Discord bot started");
+          // The daily fleet digest posts through the bot, so it only makes
+          // sense once the bot is connected
+          startDailyDigest();
+        })
         .catch((err) => console.error("[orchestrator] Discord bot failed to start:", err));
     } else {
       console.log("[orchestrator] Discord bot not configured -- running without Discord integration");
