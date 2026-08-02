@@ -374,3 +374,66 @@ export async function notifyTaskIdle(
     return null;
   }
 }
+
+/**
+ * Tell the owner a ticket burnt its last attempt and went back to a human —
+ * `ready-for-agent` swapped for `ready-for-human`. Sent to the project's
+ * linked channel, or the fleet channel when the project has none. No-op when
+ * neither is configured: the sweep already logged and commented on the issue.
+ */
+export async function notifyAttemptsExhausted(
+  channelId: string | null,
+  payload: { issueRef: string; attempts: number; totalSpendUsd: number }
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await botClient.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Attempts exhausted — ${payload.issueRef} needs you`)
+      .setDescription(
+        `All ${payload.attempts} attempts failed ` +
+          `($${payload.totalSpendUsd.toFixed(2)} autonomous spend). ` +
+          `The ticket is now \`ready-for-human\`; the per-attempt story is on the issue.`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel as TextChannel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send attempts-exhausted notification:`, err);
+  }
+}
+
+/**
+ * Announce (once per day — the sweep tracks the flag) that the daily
+ * autonomous spend cap paused pickup. Interactive work is unaffected and the
+ * pause lifts at local midnight. No-op when no fleet channel is configured.
+ */
+export async function notifyDailyCapReached(
+  channelId: string | null,
+  payload: { spentUsd: number; capUsd: number }
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await botClient.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Daily autonomous spend cap reached`)
+      .setDescription(
+        `$${payload.spentUsd.toFixed(2)} of the $${payload.capUsd.toFixed(2)} daily cap ` +
+          `is spent — autonomous pickup is paused until local midnight. ` +
+          `Interactive tasks are unaffected.`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel as TextChannel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send daily-cap notification:`, err);
+  }
+}

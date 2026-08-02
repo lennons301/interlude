@@ -5,6 +5,8 @@
  * never disagree about the state of the fleet.
  */
 
+import { MAX_ATTEMPTS } from "../orchestrator/autonomy/budgets";
+
 export interface FleetRows {
   /** Current time — passed in, never read inside */
   now: Date;
@@ -76,8 +78,8 @@ export interface FleetTaskRow {
   updatedAt: Date;
 }
 
-/** One attempt is allowed 3 strikes before the ticket goes ready-for-human */
-export const MAX_ATTEMPTS = 3;
+/** Re-exported from the budgets leaf so the view and the loop can't drift */
+export { MAX_ATTEMPTS };
 
 export type NeedsYouCause =
   | "blocked"
