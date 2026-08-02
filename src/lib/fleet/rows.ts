@@ -113,7 +113,7 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     })),
     // Queue depth needs the tracker; the pickup/reconciliation ticket will
     // feed it. Null renders as "queue unknown" rather than a wrong zero.
-    readyForAgentCount: null,
+    backlogByProject: null,
   };
 }
 

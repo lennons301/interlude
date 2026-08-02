@@ -20,7 +20,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     projects: [],
     runs: [],
     tasks: [],
-    readyForAgentCount: null,
+    backlogByProject: null,
     ...overrides,
   };
 }
@@ -812,25 +812,51 @@ describe("buildFleetView — recent completions", () => {
 });
 
 describe("buildFleetView — queue and autonomy", () => {
-  it("carries queue depth and whether any project has autonomy on", () => {
+  it("derives total and per-project backlog from the tracker observation", () => {
     const view = buildFleetView(
       baseRows({
-        readyForAgentCount: 3,
+        // "ghost" was observed but its project has since been deleted —
+        // it must not haunt the total or the breakdown
+        backlogByProject: { p1: 2, p2: 0, ghost: 4 },
         projects: [
-          makeProject({ id: "p1", autonomyEnabled: false }),
-          makeProject({ id: "p2", autonomyEnabled: true }),
+          makeProject({ id: "p1", name: "interlude", autonomyEnabled: false }),
+          makeProject({ id: "p2", name: "lemons", autonomyEnabled: true }),
         ],
       })
     );
 
-    expect(view.queue.readyForAgent).toBe(3);
+    expect(view.queue.readyForAgent).toBe(2);
+    expect(view.queue.byProject).toEqual([
+      { projectName: "interlude", count: 2 },
+      { projectName: "lemons", count: 0 },
+    ]);
     expect(view.autonomyOn).toBe(true);
+  });
+
+  it("orders the backlog breakdown deepest first, then by name", () => {
+    const view = buildFleetView(
+      baseRows({
+        backlogByProject: { p1: 1, p2: 3, p3: 3 },
+        projects: [
+          makeProject({ id: "p1", name: "aardvark" }),
+          makeProject({ id: "p2", name: "zebra" }),
+          makeProject({ id: "p3", name: "lemons" }),
+        ],
+      })
+    );
+
+    expect(view.queue.byProject?.map((b) => b.projectName)).toEqual([
+      "lemons",
+      "zebra",
+      "aardvark",
+    ]);
   });
 
   it("reports unknown queue depth as null and autonomy off", () => {
     const view = buildFleetView(baseRows());
 
     expect(view.queue.readyForAgent).toBeNull();
+    expect(view.queue.byProject).toBeNull();
     expect(view.autonomyOn).toBe(false);
   });
 });
