@@ -246,10 +246,16 @@ export async function startTask(taskId: string): Promise<void> {
     // A triage pass that died delivered no exit. Store the failure as an
     // unparseable result so the fail-closed path (nothing applied, the
     // owner told once, needs-triage kept) runs instead of a silent retry.
+    // But never clobber an exit finishTriagePass already stored — a teardown
+    // failure after the store must not turn a good exit into an unparseable
+    // one (the sweep applies stored exits regardless of task status).
+    const storedExit = isTriagePass
+      ? db.select().from(tasks).where(eq(tasks.id, taskId)).get()?.triageResult
+      : null;
     updateTask(taskId, {
       status: "failed",
       containerStatus: null,
-      ...(isTriagePass
+      ...(isTriagePass && storedExit == null
         ? {
             triageResult: {
               kind: "unparseable" as const,
