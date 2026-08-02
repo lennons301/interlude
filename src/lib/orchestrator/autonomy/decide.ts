@@ -11,7 +11,7 @@
 
 import { detectBlockedQuestion } from "./blocked";
 import { evaluateGates, type GateConfig } from "./gates";
-import { selectWorkflow, type WorkflowSelection } from "./ticket";
+import { parseTicketDirectives, selectWorkflow, type WorkflowSelection } from "./ticket";
 import {
   buildFeedbackTurn,
   undeliverableFeedbackBody,
@@ -99,6 +99,8 @@ export interface PendingVerdict {
   /** The implement task whose container can take a fix-up turn; null once
    * that container is gone (restart, failure, teardown) */
   implementTaskId: string | null;
+  /** Fix-up turns already bought by request-changes verdicts this attempt */
+  reviewCycleCount: number;
 }
 
 /** An implement turn that just finished, up for a park-or-proceed decision. */
@@ -126,6 +128,15 @@ export interface AutonomySnapshot {
   autonomyEnabledGlobal: boolean;
   attemptBudgetUsd: number;
   maxAttempts: number;
+  /** Implement↔review cycles allowed within one attempt */
+  maxReviewCycles: number;
+  /** Autonomous spend since local midnight — a sum over the runs ledger, so
+   * interactive tasks (which have no run) are exempt by construction */
+  todayAutonomousSpendUsd: number;
+  /** Estate-wide daily autonomous spend cap in USD */
+  dailyCapUsd: number;
+  /** Whether today's cap pause was already announced */
+  dailyCapAnnounced: boolean;
   /** Extra allow-listed authors beyond each repo's owner (lowercase) */
   allowedAuthors: string[];
   slots: { total: number; occupied: number; occupants: string[] };
@@ -165,7 +176,8 @@ export type PauseReason =
   | "autonomy-off-global"
   | "autonomy-off-project"
   | "preflight-failing"
-  | "no-slots";
+  | "no-slots"
+  | "daily-cap";
 
 export type Action =
   | {
@@ -178,6 +190,8 @@ export type Action =
       attempt: number;
       mode: "autonomous";
       budgetUsd: number;
+      /** Per-exec turn limit from a max-turns directive; null = the default */
+      maxTurns: number | null;
       workflow: WorkflowSelection;
     }
   | { type: "pausePickup"; reason: PauseReason; detail?: string }
@@ -185,6 +199,11 @@ export type Action =
       type: "notify";
       event: "slots-saturated";
       payload: { occupied: number; total: number; occupants: string[] };
+    }
+  | {
+      type: "notify";
+      event: "daily-cap-reached";
+      payload: { spentUsd: number; capUsd: number };
     }
   | {
       type: "gatePr";
@@ -235,6 +254,17 @@ export type Action =
       taskId: string;
       issueRef: string;
       question: string;
+    }
+  | { type: "exhaust"; issueRef: string; attemptsMade: number }
+  | {
+      type: "failAttempt";
+      runId: string;
+      issueRef: string;
+      prNumber: number;
+      armed: boolean;
+      reason: "review-cycles-exhausted";
+      /** The final review's findings — posted to the PR as the record */
+      reviewBody: string;
     };
 
 /**
@@ -248,6 +278,10 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     autonomyEnabledGlobal: true,
     attemptBudgetUsd: 0,
     maxAttempts: 0,
+    maxReviewCycles: 0,
+    todayAutonomousSpendUsd: 0,
+    dailyCapUsd: 0,
+    dailyCapAnnounced: true,
     allowedAuthors: [],
     slots: { total: 0, occupied: 0, occupants: [] },
     queuedInteractiveCount: 0,
@@ -358,6 +392,23 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     }
 
     if (result.kind === "request-changes") {
+      // Cycle 1 is the initial implement+review; each request-changes buys
+      // one more. A verdict that would need a cycle past the bound fails the
+      // attempt — the findings still land on the PR, but no fix-up runs, and
+      // the failed run counts a strike. Checked before the container-gone
+      // escalation: the bound binds whether or not a fix-up is deliverable.
+      if (pending.reviewCycleCount + 1 >= snapshot.maxReviewCycles) {
+        actions.push({
+          type: "failAttempt",
+          runId: pending.runId,
+          issueRef: pending.issueRef,
+          prNumber: pending.prNumber,
+          armed: pending.armed,
+          reason: "review-cycles-exhausted",
+          reviewBody: result.body,
+        });
+        continue;
+      }
       if (pending.implementTaskId === null) {
         // The container that could apply the feedback is gone; the findings
         // escalate to a human rather than burning a fresh attempt here.
@@ -497,12 +548,22 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       );
       continue;
     }
+    if (candidate.hasActiveRun) continue;
+    // Three strikes: the ticket goes back to a human instead of looping. The
+    // executor's label swap (ready-for-agent -> ready-for-human) removes the
+    // issue from the candidate set, which is what makes this once. Emitted
+    // ahead of the author and blocker checks — routing a burnt ticket back
+    // to a human is bookkeeping, not pickup.
+    if (candidate.attemptsMade >= snapshot.maxAttempts) {
+      actions.push({
+        type: "exhaust",
+        issueRef: candidate.issueRef,
+        attemptsMade: candidate.attemptsMade,
+      });
+      continue;
+    }
     if (!isAuthorAllowed(candidate, snapshot.allowedAuthors)) continue;
     if (candidate.hasOpenBlocker) continue;
-    if (candidate.hasActiveRun) continue;
-    // Refuse a claim past the attempt budget even before #18's exhaust flow
-    // lands — an unattended claim-fail loop must be bounded from day one.
-    if (candidate.attemptsMade >= snapshot.maxAttempts) continue;
     if (snapshot.inFlightClaims.includes(candidate.issueRef)) continue;
     eligible.push({ candidate, project });
   }
@@ -516,6 +577,25 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   );
 
   if (eligible.length === 0) return actions;
+
+  // The daily cap pauses pickup and nothing else: in-flight work above still
+  // ran, exhaust bookkeeping still routed, interactive tasks never counted.
+  // Spend is attributed to the day a run was claimed and the sum starts at
+  // local midnight, so the pause lifts with the new day. Announced once.
+  if (snapshot.todayAutonomousSpendUsd >= snapshot.dailyCapUsd) {
+    if (!snapshot.dailyCapAnnounced) {
+      actions.push({
+        type: "notify",
+        event: "daily-cap-reached",
+        payload: {
+          spentUsd: snapshot.todayAutonomousSpendUsd,
+          capUsd: snapshot.dailyCapUsd,
+        },
+      });
+    }
+    actions.push({ type: "pausePickup", reason: "daily-cap" });
+    return actions;
+  }
 
   // Priority order: in-flight work already holds its slot (it is counted in
   // `occupied`, and a fix-up turn delivered above decremented `slotsLeft`),
@@ -537,6 +617,9 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   }
 
   for (const { candidate, project } of eligible.slice(0, claimableSlots)) {
+    // Directives are the ticket adjusting its own bounded numbers — parsed
+    // from the Workflow section only, already clamped to the ceilings.
+    const directives = parseTicketDirectives(candidate.body);
     actions.push({
       type: "claimIssue",
       issueRef: candidate.issueRef,
@@ -546,7 +629,8 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       issueBody: candidate.body,
       attempt: candidate.attemptsMade + 1,
       mode: "autonomous",
-      budgetUsd: snapshot.attemptBudgetUsd,
+      budgetUsd: directives.budget ?? snapshot.attemptBudgetUsd,
+      maxTurns: directives.maxTurns,
       workflow: selectWorkflow(candidate.body, candidate.labels),
     });
   }
