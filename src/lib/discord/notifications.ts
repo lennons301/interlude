@@ -1,4 +1,5 @@
 import { Client, EmbedBuilder, TextChannel, type Message } from "discord.js";
+import { DIGEST_TITLE_PREFIX, type DigestContent } from "../fleet/digest";
 
 // The bot client is set once, in the instrumentation/orchestrator context where
 // the Discord bot connects (client.ts -> setBotClient). But notification helpers
@@ -39,6 +40,70 @@ async function sendWithRetry(
     }
   }
   throw lastErr;
+}
+
+/** Resolve a channel or throw — for callers that retry, unlike the
+ * fire-and-forget notify* helpers below which swallow their failures. */
+async function fetchTextChannel(channelId: string): Promise<TextChannel> {
+  const botClient = getBotClient();
+  if (!botClient) throw new Error("Discord bot not connected");
+  const channel = await botClient.channels.fetch(channelId);
+  if (!channel || !channel.isTextBased()) {
+    throw new Error(`Channel ${channelId} is not a text channel`);
+  }
+  return channel as TextChannel;
+}
+
+/**
+ * Post the daily digest to the fleet channel. Throws on failure — the
+ * digest scheduler owns the retry, because a silently dropped digest would
+ * defeat "one message each morning".
+ */
+export async function postDailyDigest(
+  channelId: string,
+  content: DigestContent
+): Promise<void> {
+  const channel = await fetchTextChannel(channelId);
+
+  const embed = new EmbedBuilder()
+    .setTitle(content.title)
+    .setColor(0x7b61ff)
+    .addFields(
+      content.sections.map((section) => {
+        const value = section.lines.join("\n");
+        return {
+          name: section.heading,
+          // Backstop for Discord's 1024-char field limit — the renderer's
+          // per-section line cap should keep us well under it
+          value: value.length <= 1024 ? value : `${value.slice(0, 1023)}…`,
+        };
+      })
+    );
+
+  await sendWithRetry(channel, embed);
+}
+
+/**
+ * Has this bot already posted a digest to the channel since `since`?
+ * Keys on the digest's stable title prefix, so a tick after a redeploy is
+ * idempotent. Throws when Discord can't be asked — the scheduler retries
+ * rather than guessing.
+ */
+export async function hasDigestPostedSince(
+  channelId: string,
+  since: Date
+): Promise<boolean> {
+  const botClient = getBotClient();
+  if (!botClient) throw new Error("Discord bot not connected");
+  const channel = await fetchTextChannel(channelId);
+
+  const recent = await channel.messages.fetch({ limit: 100 });
+  return recent.some(
+    (msg) =>
+      msg.author.id === botClient.user?.id &&
+      msg.createdTimestamp >= since.getTime() &&
+      msg.embeds.some((e) => e.title?.startsWith(DIGEST_TITLE_PREFIX))
+  );
 }
 
 /**

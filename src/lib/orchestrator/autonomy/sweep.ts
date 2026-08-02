@@ -27,6 +27,7 @@ import {
   notifyReviewBlocked,
   notifySlotsSaturated,
 } from "../../discord/notifications";
+import { recordBacklog } from "../../fleet/backlog";
 import { getCapacity } from "../capacity";
 import { occupiedSlots } from "../queue";
 import { getActiveTasks, isParked, releaseParkedImplementTask } from "../turn-manager";
@@ -174,12 +175,15 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
         per_page: 100,
       });
 
+      let unclaimed = 0;
       for (const issue of issues) {
         if (issue.pull_request) continue; // PRs are issues to the API, not to us
 
         const issueRef = `${repoFullName}#${issue.number}`;
         const body = issue.body ?? "";
         const issueRuns = allRuns.filter((r) => r.githubIssue === issueRef);
+        const hasActiveRun = issueRuns.some((r) => ACTIVE_RUN_STATUSES.has(r.status));
+        if (!hasActiveRun) unclaimed++;
 
         candidates.push({
           issueRef,
@@ -192,9 +196,13 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
           armedAt: await resolveArmedAt(octokit, owner, repo, issue.number, new Date(issue.created_at)),
           hasOpenBlocker: await hasOpenBlocker(octokit, owner, repo, issue, body),
           attemptsMade: issueRuns.filter((r) => r.status === "failed").length,
-          hasActiveRun: issueRuns.some((r) => ACTIVE_RUN_STATUSES.has(r.status)),
+          hasActiveRun,
         });
       }
+      // Feed the read model's backlog depth (dashboard + daily digest) from
+      // this listing — recorded only on success, so a failed repo keeps its
+      // last good observation rather than reading as an empty queue.
+      recordBacklog(project.id, unclaimed);
     } catch (err) {
       // One repo's API failure must not stall the whole fleet's sweep
       console.error(`[autonomy] Failed to list candidates for ${repoFullName}:`, err);
