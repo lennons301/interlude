@@ -4,11 +4,11 @@
  * A `workflow:<skill>` label is honoured by injecting the skill's actual
  * content into the pass prompt — not by merely naming it. The content is
  * vendored in this repo under docs/agents/workflows/ and read by the
- * orchestrator, never from anything an agent container can write to: the
- * host `~/.claude` mount is rw inside every agent container, so sourcing
- * executable instructions from there would let one run poison the next.
- * A selection that cannot be resolved throws — the run fails loudly rather
- * than silently falling back to the agent's judgement.
+ * orchestrator, never from an agent container's filesystem: that filesystem
+ * is ephemeral and per-run, so sourcing executable instructions from it
+ * would let one run poison the next. A selection that cannot be resolved
+ * throws — the run fails loudly rather than silently falling back to the
+ * agent's judgement.
  */
 
 import path from "path";

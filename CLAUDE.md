@@ -28,6 +28,7 @@ Interlude is a self-hosted, agent-first development platform. You dispatch tasks
 - GitHub App is REQUIRED for git auth — agent containers clone/push using short-lived App installation tokens (no PAT). Issue sync + PR features still degrade gracefully if webhook/installation are partially configured.
 - Reviewer identity: the review pass returns a structured verdict and the **orchestrator** posts the PR review using `REVIEWER_GH_TOKEN`; the PAT never enters an agent container (issue #17). Its canonical home is Doppler `platform/prd`, and it is **mirrored** into `interlude/prd` because the orchestrator's service token is scoped to one config — **rotation must update both places**.
 - Git credential helper in agent containers reads a per-exec `GIT_AUTH_TOKEN` (minted fresh from the App); no token is persisted in `.git/config`.
+- Agent containers get **no host bind mount** (issue #28): everything they need is granted deliberately and exec-scoped — the `interlude` Docker network, a fresh `GIT_AUTH_TOKEN`, and Claude auth via `CLAUDE_CODE_OAUTH_TOKEN`. There is no host `~/.claude` mount, so a container cannot read or write the host user's Claude config/history/credentials, and the image's own `/home/node/.claude` (plugins, etc.) survives unshadowed. The rationale lives at the mount site in `src/lib/docker/container-manager.ts` — read it before adding any `Bind`.
 - Webhook endpoint: `POST /api/webhooks/github`
 - GitHub library: `src/lib/github/` (client, webhooks, issues, pull-requests)
 - Discord bot (optional; degrades gracefully when unconfigured) maps each project to one channel via `!link <project>` / `!unlink`; new channel messages create tasks, replies deliver follow-ups
@@ -64,7 +65,7 @@ pnpm lint         # Run ESLint
 Local dev runs the orchestrator via `doppler run -- pnpm dev` — orchestrator secrets live in the Doppler `interlude/dev` config, not a `.env`. Two things Compose provides on the VPS that you must set up by hand locally:
 
 - **Agent-container network:** run `docker network create interlude` once. Agent containers attach to the `interlude` network, which Compose creates on the VPS but `pnpm dev` does not — without it, task runs fail with "network interlude not found".
-- **Claude auth for agent containers:** set `CLAUDE_CODE_OAUTH_TOKEN` (in `interlude/dev`) to a token minted with `claude setup-token` — otherwise the agent errors with "Not logged in". The legacy fallback still works while both mechanisms exist: set `CLAUDE_CREDENTIALS_PATH` to your host `~/.claude/.credentials.json` to mount credentials into agent containers instead (slated for removal once the token path is verified on the VPS — #48).
+- **Claude auth for agent containers:** set `CLAUDE_CODE_OAUTH_TOKEN` (in `interlude/dev`) to a token minted with `claude setup-token` — otherwise the agent errors with "Not logged in". This env token (or `ANTHROPIC_API_KEY`) is the only way Claude auth reaches an agent container; the legacy `CLAUDE_CREDENTIALS_PATH` credentials-file mount was removed in issue #28 (see the "no host mount" convention below).
 
 ## Current Status: Phase 4 done and verified on VPS; Phase 5 next
 
