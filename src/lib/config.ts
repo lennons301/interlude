@@ -1,16 +1,10 @@
-import path from "path";
-import fs from "fs";
 import { DEFAULT_ATTEMPT_BUDGET_USD } from "./orchestrator/autonomy/budgets";
 
 export interface AppConfig {
-  /** Anthropic API key (optional if using OAuth credentials) */
+  /** Anthropic API key (optional if using CLAUDE_CODE_OAUTH_TOKEN) */
   anthropicApiKey: string | null;
-  /** Long-lived OAuth token from `claude setup-token`, injected into agent containers at exec (preferred over the mounted credentials file) */
+  /** Long-lived OAuth token from `claude setup-token`, injected into agent containers at exec — the sole subscription-auth path (#28) */
   claudeCodeOauthToken: string | null;
-  /** Path to Claude OAuth credentials file inside this container */
-  claudeCredentialsPath: string | null;
-  /** Host path for mounting credentials into agent containers */
-  claudeCredentialsHostPath: string | null;
   gitUserName: string;
   gitUserEmail: string;
   keepContainers: boolean;
@@ -70,41 +64,20 @@ export function getConfig(): AppConfig {
   const anthropicApiKey = process.env.ANTHROPIC_API_KEY ?? null;
   const claudeCodeOauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null;
 
-  // Find Claude credentials file — check the container mount path first,
-  // then fall back to CLAUDE_CREDENTIALS_PATH or $HOME default
-  const candidatePaths = [
-    "/home/node/.claude/.credentials.json",
-    process.env.CLAUDE_CREDENTIALS_PATH,
-    path.join(process.env.HOME ?? "/root", ".claude", ".credentials.json"),
-  ].filter(Boolean) as string[];
-
-  const credentialsPath = candidatePaths.find((p) => fs.existsSync(p)) ?? candidatePaths[0];
-
-  const claudeCredentialsPath =
-    fs.existsSync(credentialsPath) ? credentialsPath : null;
-
-  if (
-    !anthropicApiKey &&
-    !claudeCodeOauthToken &&
-    !claudeCredentialsPath &&
-    !process.env.CLAUDE_CREDENTIALS_PATH
-  ) {
+  // Agent-container Claude auth is exec-scoped: CLAUDE_CODE_OAUTH_TOKEN (from
+  // `claude setup-token`), with ANTHROPIC_API_KEY as an alternative. The old
+  // mounted-credentials-file path was retired with the host `~/.claude` mount
+  // (#28), so there is nothing to detect on disk here.
+  if (!anthropicApiKey && !claudeCodeOauthToken) {
     console.warn(
-      "Warning: No auth configured. Set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`), " +
-        "ANTHROPIC_API_KEY, CLAUDE_CREDENTIALS_PATH, or ensure ~/.claude/.credentials.json exists."
+      "Warning: No agent Claude auth configured. Set CLAUDE_CODE_OAUTH_TOKEN " +
+        "(from `claude setup-token`) or ANTHROPIC_API_KEY."
     );
   }
-
-  // The host path is used to mount credentials into agent containers.
-  // It comes directly from the env var — the app container itself may not
-  // be able to see the file (it's a host path, not a container path).
-  const claudeCredentialsHostPath = process.env.CLAUDE_CREDENTIALS_PATH ?? null;
 
   _config = {
     anthropicApiKey,
     claudeCodeOauthToken,
-    claudeCredentialsPath,
-    claudeCredentialsHostPath,
     gitUserName: process.env.GIT_USER_NAME ?? "Interlude Agent",
     gitUserEmail: process.env.GIT_USER_EMAIL ?? "agent@interlude.dev",
     keepContainers: process.env.KEEP_CONTAINERS === "true",
