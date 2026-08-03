@@ -78,14 +78,16 @@ import {
 
 const SWEEP_INTERVAL_MS = 30_000;
 
-/** Run statuses that mean "this issue is being worked" — not re-claimable. */
-const ACTIVE_RUN_STATUSES = new Set([
+/** Run statuses that mean "this issue is being worked" — not re-claimable,
+ * and (issue #24) its containers are off-limits to the reaper. */
+export const LIVE_RUN_STATUSES = [
   "claimed",
   "implementing",
   "reviewing",
   "gated",
   "blocked",
-]);
+] as const;
+const ACTIVE_RUN_STATUSES = new Set<string>(LIVE_RUN_STATUSES);
 
 let sweepInterval: ReturnType<typeof setInterval> | null = null;
 let sweeping = false;

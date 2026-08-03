@@ -1,11 +1,11 @@
 import { db } from "@/db";
-import { tasks, messages } from "@/db/schema";
-import { eq, inArray } from "drizzle-orm";
+import { tasks, messages, runs } from "@/db/schema";
+import { and, eq, inArray, or } from "drizzle-orm";
 import { newId } from "../ulid";
 import { getDocker, isDockerAvailable } from "../docker/client";
 import { startQueue } from "./queue";
 import { getCapacity } from "./capacity";
-import { startAutonomySweeps } from "./autonomy/sweep";
+import { LIVE_RUN_STATUSES, startAutonomySweeps } from "./autonomy/sweep";
 import { startDailyDigest } from "./digest-schedule";
 import { getConfig } from "../config";
 import { isGitHubConfigured } from "../github/client";
@@ -13,9 +13,65 @@ import { isDiscordConfigured, startDiscordBot } from "../discord/client";
 
 let initialized = false;
 
+/**
+ * Restart recovery for the runs ledger (issue #24): a run that was being
+ * actively worked when the process died lost its containers' exec streams
+ * with it. Mark it `interrupted` — a separate ledger outcome from `failed`,
+ * so the sweep re-claims the ticket without consuming an attempt: the
+ * platform's downtime is never charged to the ticket, work already pushed
+ * to the branch survives, and only the in-flight turn is lost. The re-claim
+ * is bounded by decideNext's interruption accounting.
+ *
+ * A `reviewing` run whose parsed verdict is already stored is left alone —
+ * acting on the verdict after a restart is exactly why it is stored on the
+ * run — and `gated`/`blocked` runs are waiting on a human, not on a lost
+ * turn, so re-running their implement pass would buy nothing.
+ *
+ * Must run before recoverOrphanedTasks, which rewrites the `running` task
+ * statuses this reads.
+ */
+async function markInterruptedRuns(): Promise<void> {
+  const activeRuns = await db
+    .select()
+    .from(runs)
+    .where(inArray(runs.status, ["claimed", "implementing", "reviewing"]));
+
+  const now = new Date();
+  for (const run of activeRuns) {
+    if (run.reviewResult != null) continue;
+
+    const owned = await db
+      .select({ status: tasks.status })
+      .from(tasks)
+      .where(eq(tasks.runId, run.id));
+    if (!owned.some((t) => t.status === "running")) continue;
+
+    await db
+      .update(runs)
+      .set({
+        status: "interrupted",
+        interruptionCount: run.interruptionCount + 1,
+        finishedAt: now,
+      })
+      .where(eq(runs.id, run.id));
+
+    // A queued task of an interrupted run (say, its review pass) must not
+    // start against an abandoned attempt — the re-claim queues its own.
+    await db
+      .update(tasks)
+      .set({ status: "cancelled", updatedAt: now })
+      .where(and(eq(tasks.runId, run.id), eq(tasks.status, "queued")));
+
+    console.log(
+      `[orchestrator] Run ${run.id} (${run.githubIssue}) interrupted by restart — ` +
+        `the sweep will re-claim without consuming an attempt`
+    );
+  }
+}
+
 async function recoverOrphanedTasks(): Promise<void> {
   const orphaned = await db
-    .select({ id: tasks.id, containerName: tasks.containerName })
+    .select({ id: tasks.id, containerName: tasks.containerName, runId: tasks.runId })
     .from(tasks)
     .where(eq(tasks.status, "running"));
 
@@ -49,7 +105,9 @@ async function recoverOrphanedTasks(): Promise<void> {
       id: newId(),
       taskId: task.id,
       role: "system",
-      content: "Server restarted — task interrupted. You can re-queue this task.",
+      content: task.runId
+        ? "Orchestrator restarted — this pass's container was lost. Recovery is handled at the run level."
+        : "Server restarted — task interrupted. You can re-queue this task.",
       type: "system",
       createdAt: now,
     });
@@ -76,11 +134,20 @@ async function reapStaleContainers(): Promise<void> {
 
     // Get all tasks that should have a live container. Blocked tasks are
     // parked, not dead: their container is deliberately kept alive holding
-    // its context while the question waits (issue #19).
+    // its context while the question waits (issue #19). Any task owned by a
+    // live run is likewise protected whatever its own status (issue #24) —
+    // between a claim and the task row catching up, recovery must never be
+    // fighting cleanup.
     const activeTasks = await db
       .select({ containerName: tasks.containerName })
       .from(tasks)
-      .where(inArray(tasks.status, ["running", "blocked"]));
+      .leftJoin(runs, eq(tasks.runId, runs.id))
+      .where(
+        or(
+          inArray(tasks.status, ["running", "blocked"]),
+          inArray(runs.status, [...LIVE_RUN_STATUSES])
+        )
+      );
 
     const activeNames = new Set(activeTasks.map((t) => t.containerName).filter(Boolean));
 
@@ -138,6 +205,7 @@ export async function initOrchestrator(): Promise<void> {
     } else {
       console.log("[orchestrator] Discord bot not configured -- running without Discord integration");
     }
+    await markInterruptedRuns();
     await recoverOrphanedTasks();
     await reapStaleContainers();
     startQueue();
