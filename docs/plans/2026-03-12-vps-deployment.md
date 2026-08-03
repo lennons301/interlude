@@ -324,6 +324,8 @@ Notes on the design:
 - Docker socket mounted for agent container management via dockerode
 - `HOSTNAME=0.0.0.0` ensures Next.js listens on all interfaces inside the container
 
+> **Superseded by #28 (2026-08-03).** The `CLAUDE_CREDENTIALS_PATH` mount described in this section no longer exists. Agent-container Claude auth is now the exec-scoped `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) — see `src/lib/docker/container-manager.ts` and CLAUDE.md's "no host bind mount" convention. The rest of this section is kept as a point-in-time record.
+
 **Critical: `CLAUDE_CREDENTIALS_PATH` must be set to the host path in `.env` on the VPS.** Here's why:
 1. Compose mounts the host file into the app container at `/home/node/.claude/.credentials.json`
 2. `config.ts` reads `CLAUDE_CREDENTIALS_PATH` from env — this value becomes `config.claudeCredentialsPath`

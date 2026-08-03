@@ -10,11 +10,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN corepack enable && corepack prepare pnpm@latest --activate
 RUN npm install -g @anthropic-ai/claude-code
 
-# Use the existing node user (uid 1000) which matches the deploy user on the host,
-# so mounted credential files retain correct ownership after token refresh
+# Run as the existing node user (uid 1000), which also matches the deploy
+# user on the host — kept aligned so any future host bind mount stays
+# uid-consistent (issue #28 removed the last one: the host ~/.claude mount).
 RUN mkdir -p /workspace && chown node:node /workspace
 
-# Pre-accept permissions bypass for headless operation
+# Image-owned Claude directory. Nothing is mounted over it now (#28), so
+# anything installed here (e.g. plugins) survives at runtime. Pre-accept the
+# permissions bypass for headless operation.
 RUN mkdir -p /home/node/.claude && chown -R node:node /home/node/.claude
 RUN echo '{"bypassPermissionsModeAccepted": true}' > /home/node/.claude.json && chown node:node /home/node/.claude.json
 

@@ -30,8 +30,9 @@ export function buildSetupScript(platformRepoUrl: string, checkoutExisting = fal
 /**
  * Env for a Claude turn exec. Auth is exec-scoped, mirroring GIT_AUTH_TOKEN:
  * the long-lived setup-token never lands in the container's persistent env.
- * The CLI prefers CLAUDE_CODE_OAUTH_TOKEN over the mounted credentials file,
- * which stays as a fallback until the token path is verified on the VPS (#48).
+ * CLAUDE_CODE_OAUTH_TOKEN is the sole subscription-auth path — the mounted
+ * host credentials file it once fell back to was removed with the host
+ * `~/.claude` mount (#28); ANTHROPIC_API_KEY remains an alternative.
  */
 export function buildTurnEnv(options: {
   prompt: string;
@@ -109,15 +110,17 @@ export async function createWorkspaceContainer(
     env.push(`DOPPLER_TOKEN=${options.dopplerToken}`);
   }
 
-  const binds: string[] = [];
-  if (config.claudeCredentialsHostPath) {
-    const hostClaudeDir = config.claudeCredentialsHostPath.replace(
-      /\/.credentials\.json$/,
-      ""
-    );
-    binds.push(`${hostClaudeDir}:/home/node/.claude:rw`);
-  }
-
+  // What an agent container is granted from the host — deliberately, and
+  // nothing else (issue #28):
+  //   - the `interlude` Docker network (for preview routing), and
+  //   - a fresh, short-lived GitHub App token per exec (GIT_AUTH_TOKEN).
+  // Claude auth arrives the same exec-scoped way, as CLAUDE_CODE_OAUTH_TOKEN
+  // in buildTurnEnv — it is the VPS-verified live path (#48). There is NO
+  // bind mount: the container never sees the host's `~/.claude`, so it cannot
+  // read or write the host user's Claude config, history, project state or
+  // credentials, and whatever the image installs under /home/node/.claude
+  // (e.g. plugins) is no longer shadowed at runtime. Before adding any Bind
+  // here, weigh it against that: a mount is host reach that outlives the run.
   const containerName = `interlude-task-${options.taskId}-${Date.now()}`;
   // DNS-safe subdomain derived from task ID (last 8 chars of ULID, lowercased)
   const previewSubdomain = `task-${options.taskId.slice(-8).toLowerCase()}`;
@@ -132,7 +135,6 @@ export async function createWorkspaceContainer(
     WorkingDir: "/workspace",
     HostConfig: {
       NetworkMode: "interlude",
-      Binds: binds.length > 0 ? binds : undefined,
       // Hard caps: a runaway agent fails its own task, never the platform.
       // MemorySwap = Memory disables swap, so the cap bites immediately.
       Memory: capacity.perAgentMemory,
