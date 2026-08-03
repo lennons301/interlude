@@ -45,8 +45,17 @@ export async function PATCH(
   if (githubRepo !== undefined) updates.githubRepo = githubRepo;
   if (dopplerToken !== undefined) updates.dopplerToken = dopplerToken;
   // Enabling autonomy is the deliberate per-project switch (default off). It is
-  // never flipped on implicitly — only when the caller sends the flag.
-  if (autonomyEnabled !== undefined) updates.autonomyEnabled = autonomyEnabled;
+  // never flipped on implicitly — only when the caller sends an explicit
+  // boolean, so a stray truthy string can't arm a project.
+  if (autonomyEnabled !== undefined) {
+    if (typeof autonomyEnabled !== "boolean") {
+      return NextResponse.json(
+        { error: "autonomyEnabled must be a boolean" },
+        { status: 400 }
+      );
+    }
+    updates.autonomyEnabled = autonomyEnabled;
+  }
 
   if (Object.keys(updates).length > 0) {
     db.update(projects).set(updates).where(eq(projects.id, id)).run();

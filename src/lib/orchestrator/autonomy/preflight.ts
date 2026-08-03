@@ -75,6 +75,24 @@ function isNotFound(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { status?: number }).status === 404;
 }
 
+/**
+ * Run one boolean check against the GitHub API: a 404 means the thing genuinely
+ * isn't there (check false); any other error is a real failure worth logging,
+ * and still resolves false so preflight fails closed rather than passing on a
+ * transient blip.
+ */
+async function apiCheck(label: string, fn: () => Promise<unknown>): Promise<boolean> {
+  try {
+    await fn();
+    return true;
+  } catch (err) {
+    if (!isNotFound(err)) {
+      console.error(`[preflight] ${label} failed:`, err);
+    }
+    return false;
+  }
+}
+
 /** Resolve the reviewer machine account's login from REVIEWER_GH_TOKEN. */
 async function reviewerLogin(): Promise<string | null> {
   const token = getConfig().reviewerGithubToken;
@@ -87,6 +105,19 @@ async function reviewerLogin(): Promise<string | null> {
     console.error("[preflight] Could not resolve reviewer login from REVIEWER_GH_TOKEN:", err);
     return null;
   }
+}
+
+/** Is the reviewer machine account a collaborator on the repo? */
+async function isReviewerCollaborator(
+  octokit: Awaited<ReturnType<typeof getOctokit>>,
+  owner: string,
+  repo: string
+): Promise<boolean> {
+  const login = await reviewerLogin();
+  if (!login) return false;
+  return apiCheck(`checkCollaborator ${owner}/${repo}`, () =>
+    octokit.rest.repos.checkCollaborator({ owner, repo, username: login })
+  );
 }
 
 /**
@@ -136,27 +167,13 @@ export async function computePreflight(project: ProjectRow): Promise<PreflightRe
   }
 
   const [branchProtected, reviewerIsCollaborator, signoffLabelExists] = await Promise.all([
-    octokit.rest.repos
-      .getBranchProtection({ owner, repo, branch: defaultBranch })
-      .then(() => true)
-      .catch((err) => {
-        if (!isNotFound(err)) {
-          console.error(`[preflight] getBranchProtection failed for ${owner}/${repo}:`, err);
-        }
-        return false;
-      }),
-    reviewerLogin().then((login) =>
-      login
-        ? octokit.rest.repos
-            .checkCollaborator({ owner, repo, username: login })
-            .then(() => true)
-            .catch(() => false)
-        : false
+    apiCheck(`getBranchProtection ${owner}/${repo}`, () =>
+      octokit.rest.repos.getBranchProtection({ owner, repo, branch: defaultBranch })
     ),
-    octokit.rest.issues
-      .getLabel({ owner, repo, name: HUMAN_SIGNOFF_LABEL })
-      .then(() => true)
-      .catch(() => false),
+    isReviewerCollaborator(octokit, owner, repo),
+    apiCheck(`getLabel ${owner}/${repo}`, () =>
+      octokit.rest.issues.getLabel({ owner, repo, name: HUMAN_SIGNOFF_LABEL })
+    ),
   ]);
 
   return evaluatePreflight({
