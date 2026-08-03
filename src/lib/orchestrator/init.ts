@@ -58,9 +58,11 @@ async function markInterruptedRuns(): Promise<void> {
 
     // A queued task of an interrupted run (say, its review pass) must not
     // start against an abandoned attempt — the re-claim queues its own.
+    // Clear container_status alongside the terminal status so the row can
+    // never later read as a live session (issue #46).
     await db
       .update(tasks)
-      .set({ status: "cancelled", updatedAt: now })
+      .set({ status: "cancelled", containerStatus: null, updatedAt: now })
       .where(and(eq(tasks.runId, run.id), eq(tasks.status, "queued")));
 
     console.log(
