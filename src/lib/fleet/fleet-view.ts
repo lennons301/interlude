@@ -247,13 +247,18 @@ export function buildFleetView(rows: FleetRows): FleetView {
   const capPaused = todayUsd >= rows.dailyCapUsd;
 
   // A run's face in the UI is its latest task — the live container if one
-  // exists, otherwise the most recently created pass.
+  // exists, otherwise the most recently created pass. A finished pass with a
+  // stale container_status is not "live" (issue #46), so the same terminal
+  // guard applies here as in the occupants filter.
   const tasksOfRun = (runId: string) =>
     rows.tasks.filter((t) => t.runId === runId);
   const currentTaskOf = (runId: string) => {
     const owned = tasksOfRun(runId);
     return (
-      owned.find((t) => t.containerStatus !== null) ??
+      owned.find(
+        (t) =>
+          t.containerStatus !== null && !TERMINAL_TASK_STATUSES.has(t.status)
+      ) ??
       owned.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] ??
       null
     );

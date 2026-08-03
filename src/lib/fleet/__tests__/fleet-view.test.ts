@@ -710,6 +710,44 @@ describe("buildFleetView — running", () => {
     ]);
   });
 
+  it("picks a run's live pass as its face, ignoring a finished pass with a stale container_status", () => {
+    // Issue #46, sibling path: currentTaskOf must not surface a terminal task
+    // as a run's current face just because it still carries container_status.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", status: "reviewing" })],
+        tasks: [
+          // Ordered first, so a naive `.find` would return it.
+          makeTask({
+            id: "t-stale",
+            projectId: "p1",
+            runId: "r1",
+            kind: "implement",
+            title: "Old finished pass",
+            status: "completed",
+            containerStatus: "idle",
+            createdAt: new Date(2026, 7, 1, 8, 0, 0),
+          }),
+          makeTask({
+            id: "t-live",
+            projectId: "p1",
+            runId: "r1",
+            kind: "review",
+            title: "Live review pass",
+            status: "running",
+            containerStatus: "running",
+            createdAt: TODAY_9AM,
+          }),
+        ],
+      })
+    );
+
+    expect(view.running).toHaveLength(1);
+    expect(view.running[0].taskId).toBe("t-live");
+    expect(view.running[0].title).toBe("Live review pass");
+  });
+
   it("excludes finished runs and containerless interactive tasks from running", () => {
     const view = buildFleetView(
       baseRows({
