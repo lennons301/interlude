@@ -45,6 +45,7 @@ Schema at `src/db/schema.ts`. Four tables: `projects`, `tasks`, `messages`, `run
 - `runs.reviewResult` holds a finished review pass's parsed verdict until the orchestrator has acted on it; `runs.reviewVerdict` is the last verdict actually posted to GitHub
 - `tasks.kind` distinguishes interactive (default) / implement / review / triage; `tasks.runId` links a task to its run; `tasks.triageResult` holds a finished triage pass's parsed exit until the sweep applies it (triage owns no run, so its spend is counted into the daily cap by kind in `spend.ts`)
 - `projects` carries `autonomyEnabled` (default off) plus cached `preflightStatus`/`preflightReason`
+- Restart recovery (issue #24): boot marks claimed/implementing/reviewing runs that own a `running` task as `interrupted` (a run holding a stored review verdict is left for the verdict path instead; gated/blocked runs wait on a human, not a lost turn). The sweep then re-claims the ticket **without** consuming an attempt — interruptions are counted separately (`runs.interruptionCount`, `interrupted` rows) and bounded by `MAX_INTERRUPTIONS_PER_TICKET` (5, in `budgets.ts`); past the bound the ticket is routed `ready-for-human` like exhaustion. The reaper never removes a container whose task belongs to a live run
 
 - Run migrations: `npx drizzle-kit push`
 - Generate migrations: `npx drizzle-kit generate`
