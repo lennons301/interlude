@@ -39,6 +39,16 @@ export const MAX_TRIAGE_PASSES_PER_ISSUE = 2;
  * (`ready-for-agent` swapped for `ready-for-human`). */
 export const MAX_ATTEMPTS = 3;
 
+/** Interruptions (runs lost to orchestrator restarts) tolerated per ticket
+ * before it is routed back to a human like an exhausted one. Counted
+ * separately from attempts — a restart is the platform's downtime, never
+ * charged to the ticket — and deliberately more generous than MAX_ATTEMPTS,
+ * because merging any interlude PR restarts the orchestrator and routine
+ * deploys must not burn unrelated tickets. The bound exists for the other
+ * case: a ticket whose run crashes the orchestrator itself would otherwise
+ * re-claim forever on the no-attempt-consumed exemption. */
+export const MAX_INTERRUPTIONS_PER_TICKET = 5;
+
 /** Implement↔review cycles allowed within one attempt: the initial pass and
  * its review, plus one fix-up bought by a request-changes verdict. A second
  * request-changes fails the attempt instead of looping. */

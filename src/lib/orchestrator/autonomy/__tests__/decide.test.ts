@@ -44,6 +44,7 @@ function makeCandidate(overrides: Partial<CandidateIssue> = {}): CandidateIssue 
     armedAt: ARMED_EARLY,
     hasOpenBlocker: false,
     attemptsMade: 0,
+    interruptionsMade: 0,
     hasActiveRun: false,
     ...overrides,
   };
@@ -55,6 +56,7 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     autonomyEnabledGlobal: true,
     attemptBudgetUsd: 20,
     maxAttempts: 3,
+    maxInterruptions: 5,
     maxReviewCycles: 2,
     todayAutonomousSpendUsd: 0,
     dailyCapUsd: 500,
@@ -264,7 +266,13 @@ describe("decideNext — attempt accounting", () => {
     );
 
     expect(actions).toEqual([
-      { type: "exhaust", issueRef: "acme/widgets#7", attemptsMade: 3 },
+      {
+        type: "exhaust",
+        issueRef: "acme/widgets#7",
+        attemptsMade: 3,
+        interruptionsMade: 0,
+        reason: "attempts",
+      },
     ]);
   });
 
@@ -295,8 +303,118 @@ describe("decideNext — attempt accounting", () => {
     );
 
     expect(actions).toEqual([
-      { type: "exhaust", issueRef: "acme/widgets#7", attemptsMade: 3 },
+      {
+        type: "exhaust",
+        issueRef: "acme/widgets#7",
+        attemptsMade: 3,
+        interruptionsMade: 0,
+        reason: "attempts",
+      },
     ]);
+  });
+});
+
+describe("decideNext — interruption accounting", () => {
+  it("routes a ticket at the interruption bound back to a human instead of re-claiming", () => {
+    // A ticket that crashes the orchestrator on every claim would otherwise
+    // loop forever: each restart marks the run interrupted (not failed), so
+    // attempt accounting alone never exhausts it.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [makeCandidate({ attemptsMade: 1, interruptionsMade: 5 })],
+      })
+    );
+
+    expect(claims(actions)).toEqual([]);
+    expect(actions).toEqual([
+      {
+        type: "exhaust",
+        issueRef: "acme/widgets#7",
+        attemptsMade: 1,
+        interruptionsMade: 5,
+        reason: "interruptions",
+      },
+    ]);
+  });
+
+  it("re-claims an interrupted ticket without consuming an attempt", () => {
+    // One failed attempt plus two interruptions: the next claim is attempt 2
+    // — the interruptions bought no strikes, only the failure did.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [makeCandidate({ attemptsMade: 1, interruptionsMade: 2 })],
+      })
+    );
+
+    expect(actions.filter((a) => a.type === "exhaust")).toEqual([]);
+    expect(claims(actions)).toHaveLength(1);
+    expect(claims(actions)[0]).toMatchObject({ attempt: 2 });
+  });
+
+  it("counts interruptions separately from attempts — neither bound borrows from the other", () => {
+    // 2 failed + 4 interrupted = 6 runs, yet the ticket still claims: each
+    // counter sits one below its own bound.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [makeCandidate({ attemptsMade: 2, interruptionsMade: 4 })],
+      })
+    );
+
+    expect(actions.filter((a) => a.type === "exhaust")).toEqual([]);
+    expect(claims(actions)[0]).toMatchObject({ attempt: 3 });
+  });
+
+  it("emits exactly one exhaust when both bounds are hit, attributed to attempts", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [makeCandidate({ attemptsMade: 3, interruptionsMade: 5 })],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "exhaust",
+        issueRef: "acme/widgets#7",
+        attemptsMade: 3,
+        interruptionsMade: 5,
+        reason: "attempts",
+      },
+    ]);
+  });
+
+  it("routes to a human on the interruption bound even when a blocker is open", () => {
+    // Mirrors the attempts rule: routing a burnt ticket back is bookkeeping,
+    // not pickup, so the blocker and author checks don't apply.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [
+          makeCandidate({ interruptionsMade: 5, hasOpenBlocker: true }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "exhaust",
+        issueRef: "acme/widgets#7",
+        attemptsMade: 0,
+        interruptionsMade: 5,
+        reason: "interruptions",
+      },
+    ]);
+  });
+
+  it("does not route on interruptions while a run is still active", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [
+          makeCandidate({ interruptionsMade: 5, hasActiveRun: true }),
+        ],
+      })
+    );
+
+    expect(actions.filter((a) => a.type === "exhaust")).toEqual([]);
+    expect(claims(actions)).toEqual([]);
   });
 });
 
