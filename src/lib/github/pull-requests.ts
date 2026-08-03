@@ -52,15 +52,28 @@ export async function createDraftPr(options: CreatePrOptions): Promise<PrResult 
 }
 
 /**
- * The slice of PR state gate evaluation and run settlement depend on. Null
- * on any API failure — the caller skips the PR this sweep and retries on
- * the next.
+ * Whether a PR can merge into its base cleanly. GitHub computes mergeability
+ * lazily, so the first read after a push returns `unknown` (REST `mergeable:
+ * null`) until the background check settles — callers re-poll rather than
+ * treat `unknown` as a verdict (issue #54). `conflicting` is a settled "no".
+ */
+export type MergeableState = "mergeable" | "conflicting" | "unknown";
+
+/**
+ * The slice of PR state gate evaluation, run settlement and integration
+ * (issue #54) depend on. Null on any API failure — the caller skips the PR
+ * this sweep and retries on the next.
  */
 export async function getPrState(
   owner: string,
   repo: string,
   prNumber: number
-): Promise<{ open: boolean; merged: boolean; autoMergeArmed: boolean } | null> {
+): Promise<{
+  open: boolean;
+  merged: boolean;
+  autoMergeArmed: boolean;
+  mergeable: MergeableState;
+} | null> {
   if (!isGitHubConfigured()) return null;
 
   try {
@@ -70,10 +83,20 @@ export async function getPrState(
       repo,
       pull_number: prNumber,
     });
+    // REST `mergeable`: true = clean, false = conflicts, null = not yet
+    // computed. Map null to `unknown` so a still-computing check is re-polled
+    // rather than mistaken for a clean merge.
+    const mergeable: MergeableState =
+      pr.mergeable === true
+        ? "mergeable"
+        : pr.mergeable === false
+          ? "conflicting"
+          : "unknown";
     return {
       open: pr.state === "open",
       merged: pr.merged === true,
       autoMergeArmed: pr.auto_merge != null,
+      mergeable,
     };
   } catch (err) {
     console.error(`[github] Failed to read PR #${prNumber} state:`, err);

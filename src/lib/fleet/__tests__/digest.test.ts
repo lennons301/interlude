@@ -63,6 +63,7 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     pullRequestNumber: null,
     pullRequestUrl: null,
     blockedQuestion: null,
+    integrationCount: 0,
     claimedAt: aug(1, 9),
     startedAt: aug(1, 9),
     finishedAt: null,

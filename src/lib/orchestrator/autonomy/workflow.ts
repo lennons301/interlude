@@ -187,6 +187,50 @@ export function buildTriagePrompt(ticket: TriageTicket): string {
   ].join("\n");
 }
 
+export interface RepairTicket {
+  /** "owner/repo" */
+  repo: string;
+  issueNumber: number;
+  prNumber: number;
+  /** The PR's base — the default branch to merge in */
+  baseBranch: string;
+}
+
+/**
+ * The full prompt for an integration repair pass (issue #54). The default
+ * branch moved under a parked PR and it now conflicts; this pass merges the
+ * base branch into the PR branch — merge only, never rebase or force-push, so
+ * the PR's own review history stays intact — resolves any conflicts, and ends.
+ * It does no feature work: its single job is to make the PR mergeable again,
+ * after which the normal gate + review machinery re-runs on the push.
+ */
+export function buildRepairPrompt(ticket: RepairTicket): string {
+  return [
+    `You are an autonomous integration-repair pass for PR #${ticket.prNumber} ` +
+      `of ${ticket.repo}, which implements GitHub issue #${ticket.issueNumber}. ` +
+      `No human is watching this run and follow-up questions are not possible.`,
+    ``,
+    `The default branch has moved and the PR now conflicts with it. Your only ` +
+      `job is to make the PR mergeable again — do no feature work.`,
+    ``,
+    `Operating rules:`,
+    `- You are on the PR branch agent/issue-${ticket.issueNumber}, already ` +
+      `checked out at /workspace/repo with its existing commits.`,
+    `- Bring in the default branch by MERGING it — run ` +
+      "`git fetch origin && git merge origin/" + ticket.baseBranch + "`. " +
+      `Never rebase and never force-push: the PR's commits and its review ` +
+      `history must be preserved.`,
+    `- Resolve every merge conflict, keeping both sides' intent. When in doubt ` +
+      `prefer the PR branch's feature changes over the incoming default-branch ` +
+      `edits, but never leave conflict markers.`,
+    `- Run the repo's tests and lint after resolving, and do not finish with ` +
+      `either failing. Commit the merge with a descriptive message.`,
+    `- Do not change anything the conflict did not require. Add no new features, ` +
+      `open no new files unrelated to the resolution.`,
+    `- End with a short summary of what conflicted and how you resolved it.`,
+  ].join("\n");
+}
+
 /**
  * The full prompt for an autonomous implement pass. The ticket body is
  * supplied as the spec, framed as data between markers — it can describe the

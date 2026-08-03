@@ -68,6 +68,11 @@ export const runs = sqliteTable("runs", {
     | { kind: "unparseable"; reason: string }
   >(),
   reviewCycleCount: int("review_cycle_count").notNull().default(0),
+  // Repair passes run to resolve a CONFLICTING PR (issue #54). Counted per
+  // conflict episode — reset to 0 once the PR is observed mergeable again, so
+  // a fresh conflict earns fresh repairs; past MAX_INTEGRATION_ATTEMPTS a
+  // still-conflicting PR escalates to a human. Never consumes an attempt.
+  integrationCount: int("integration_count").notNull().default(0),
   interruptionCount: int("interruption_count").notNull().default(0),
   blockedQuestion: text("blocked_question"),
   // A checkpoint: directive's text, stored at claim time. Non-null makes the
@@ -96,7 +101,7 @@ export const tasks = sqliteTable("tasks", {
     .default("queued"),
   githubIssue: text("github_issue"),
   kind: text("kind", {
-    enum: ["interactive", "implement", "review", "triage"],
+    enum: ["interactive", "implement", "review", "triage", "repair"],
   })
     .notNull()
     .default("interactive"),

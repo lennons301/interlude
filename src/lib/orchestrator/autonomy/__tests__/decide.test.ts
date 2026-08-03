@@ -9,6 +9,7 @@ import {
   type AutonomySnapshot,
   type AwaitingReview,
   type CandidateIssue,
+  type ConflictingPr,
   type PassOutcome,
   type PendingGateEvaluation,
   type PendingTriage,
@@ -58,6 +59,7 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     maxAttempts: 3,
     maxInterruptions: 5,
     maxReviewCycles: 2,
+    maxIntegrationAttempts: 1,
     todayAutonomousSpendUsd: 0,
     dailyCapUsd: 500,
     dailyCapAnnounced: false,
@@ -77,10 +79,28 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     pendingVerdicts: [],
     settledPrs: [],
     announcedVerdictErrors: [],
+    conflictingPrs: [],
+    resolvedConflicts: [],
+    queuedRepairCount: 0,
+    announcedIntegrationEscalations: [],
     triageCandidates: [],
     pendingTriageResults: [],
     queuedTriageCount: 0,
     announcedTriageErrors: [],
+    ...overrides,
+  };
+}
+
+function makeConflictingPr(
+  overrides: Partial<ConflictingPr> = {}
+): ConflictingPr {
+  return {
+    runId: "run-1",
+    issueRef: "acme/widgets#7",
+    prNumber: 41,
+    armed: false,
+    integrationsMade: 0,
+    hasRepairTask: false,
     ...overrides,
   };
 }
@@ -1440,6 +1460,122 @@ describe("decideNext — settling reviewed PRs", () => {
         outcome: "closed",
       },
     ]);
+  });
+});
+
+describe("decideNext — CONFLICTING parked PRs (issue #54)", () => {
+  it("repairs a conflicting PR with repairs still available", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        conflictingPrs: [makeConflictingPr({ integrationsMade: 0 })],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "repairPr",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        integration: 1,
+      },
+    ]);
+  });
+
+  it("does not queue a second repair while one is in flight", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        conflictingPrs: [
+          makeConflictingPr({ integrationsMade: 0, hasRepairTask: true }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("escalates once repairs are spent and the PR still conflicts", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxIntegrationAttempts: 1,
+        conflictingPrs: [
+          makeConflictingPr({ armed: true, integrationsMade: 1 }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "escalateConflict",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        armed: true,
+        integrationsMade: 1,
+      },
+    ]);
+  });
+
+  it("announces the escalation only once", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxIntegrationAttempts: 1,
+        conflictingPrs: [makeConflictingPr({ integrationsMade: 1 })],
+        announcedIntegrationEscalations: ["run-1"],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("resets the counter when a repaired PR is mergeable again", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        resolvedConflicts: [{ runId: "run-1", issueRef: "acme/widgets#7" }],
+      })
+    );
+
+    expect(actions).toEqual([
+      { type: "clearIntegration", runId: "run-1", issueRef: "acme/widgets#7" },
+    ]);
+  });
+
+  it("never repairs or escalates a run that just blocked on a question", () => {
+    // A run driven by its BLOCKED question is not also dragged into
+    // integration — the pass outcome owns it.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [
+          makePass({ finalMessage: "BLOCKED: which database?" }),
+        ],
+        conflictingPrs: [makeConflictingPr({ integrationsMade: 1 })],
+        maxIntegrationAttempts: 1,
+      })
+    );
+
+    expect(actions.some((a) => a.type === "repairPr")).toBe(false);
+    expect(actions.some((a) => a.type === "escalateConflict")).toBe(false);
+    expect(actions.some((a) => a.type === "escalate")).toBe(true);
+  });
+
+  it("a queued repair reserves a slot away from new claims", () => {
+    // One slot, one repair already queued: no room to claim a fresh ticket.
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 1, occupied: 0, occupants: [] },
+        queuedRepairCount: 1,
+        candidates: [makeCandidate()],
+      })
+    );
+
+    expect(actions.some((a) => a.type === "claimIssue")).toBe(false);
+    expect(actions).toContainEqual({ type: "pausePickup", reason: "no-slots" });
   });
 });
 

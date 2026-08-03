@@ -50,6 +50,7 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     pullRequestNumber: null,
     pullRequestUrl: null,
     blockedQuestion: null,
+    integrationCount: 0,
     claimedAt: TODAY_9AM,
     startedAt: TODAY_9AM,
     finishedAt: null,
@@ -422,6 +423,61 @@ describe("buildFleetView — needs you", () => {
         },
       },
     ]);
+  });
+
+  it("raises a gated PR stalled on a merge conflict as a distinct red state (issue #54)", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "gated",
+            // Integration repairs spent (MAX_INTEGRATION_ATTEMPTS = 1) and
+            // still conflicting: not a plain sign-off.
+            integrationCount: 1,
+            pullRequestNumber: 55,
+            pullRequestUrl: "https://github.com/lennons301/lemons/pull/55",
+          }),
+        ],
+      })
+    );
+
+    expect(view.needsYou).toEqual([
+      {
+        cause: "conflict",
+        severity: "red",
+        context: "lemons #34 · attempt 1/3",
+        body: "PR #55 still conflicts with the default branch — resolve and merge",
+        action: {
+          label: "Resolve PR #55",
+          href: "https://github.com/lennons301/lemons/pull/55",
+        },
+      },
+    ]);
+  });
+
+  it("keeps a repaired-and-mergeable gated PR as an ordinary sign-off", () => {
+    // A successful repair resets integrationCount to 0, so the run reads as a
+    // clean sign-off wait, not a conflict.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "gated",
+            integrationCount: 0,
+            pullRequestNumber: 55,
+            pullRequestUrl: "https://github.com/lennons301/lemons/pull/55",
+          }),
+        ],
+      })
+    );
+
+    expect(view.needsYou.map((i) => i.cause)).toEqual(["signoff"]);
   });
 
   it("raises an exhausted ticket with a link to its issue", () => {

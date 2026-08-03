@@ -15,6 +15,7 @@ import { createOutputHandler, type TurnResult } from "./output-parser";
 import { parseReviewVerdict } from "./autonomy/verdict";
 import { parseTriageExit } from "./autonomy/triage";
 import {
+  DEFAULT_REPAIR_BUDGET_USD,
   DEFAULT_REVIEW_BUDGET_USD,
   DEFAULT_TRIAGE_BUDGET_USD,
   MAX_ATTEMPTS,
@@ -35,7 +36,7 @@ const activeTasks = new Map<
   {
     container: RunningContainer;
     state: "setup" | "running" | "idle" | "completing";
-    kind: "interactive" | "implement" | "review" | "triage";
+    kind: "interactive" | "implement" | "review" | "triage" | "repair";
   }
 >();
 
@@ -85,15 +86,21 @@ export async function startTask(taskId: string): Promise<void> {
   const isImplementPass = task.kind === "implement";
   const isReviewPass = task.kind === "review";
   const isTriagePass = task.kind === "triage";
-  const isAutonomousPass = isImplementPass || isReviewPass || isTriagePass;
+  // An integration-repair pass (issue #54) is an implement-shaped pass on an
+  // existing PR branch: it checks the branch out, merges the default branch
+  // in, pushes, and parks awaiting review exactly like an implement pass —
+  // but it is never an attempt, so it skips attempt-exhaustion accounting.
+  const isRepairPass = task.kind === "repair";
+  const isImplementShaped = isImplementPass || isRepairPass;
+  const isAutonomousPass = isImplementShaped || isReviewPass || isTriagePass;
   const issueNumber = task.githubIssue ? parseIssueRef(task.githubIssue)?.number : undefined;
-  if (isImplementPass && !issueNumber) {
-    throw new Error(`Implement task ${taskId} has no parsable GitHub issue ref`);
+  if (isImplementShaped && !issueNumber) {
+    throw new Error(`${task.kind} task ${taskId} has no parsable GitHub issue ref`);
   }
   if (isReviewPass && !task.branch) {
     throw new Error(`Review task ${taskId} has no branch to check out`);
   }
-  const branch = isImplementPass
+  const branch = isImplementShaped
     ? `agent/issue-${issueNumber}`
     : isReviewPass
       ? task.branch!
@@ -114,11 +121,13 @@ export async function startTask(taskId: string): Promise<void> {
   updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
   insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
 
-  // Only the implement pass moves the run to `implementing` — a review pass
-  // starting must not drag a `reviewing`/`gated` run backwards.
-  if (run && isImplementPass) {
+  // Only an implement-shaped pass moves the run to `implementing` — a review
+  // pass starting must not drag a `reviewing`/`gated` run backwards. A repair
+  // pass keeps the run's original startedAt so the dashboard's elapsed time
+  // does not jump when a conflict is repaired mid-life.
+  if (run && isImplementShaped) {
     db.update(runs)
-      .set({ status: "implementing", startedAt: new Date() })
+      .set({ status: "implementing", startedAt: run.startedAt ?? new Date() })
       .where(eq(runs.id, run.id))
       .run();
   }
@@ -148,8 +157,10 @@ export async function startTask(taskId: string): Promise<void> {
       gitUrl: proj.gitUrl,
       branch,
       dopplerToken:
-        isReviewPass || isTriagePass ? undefined : (proj.dopplerToken ?? undefined),
-      checkoutExisting: isReviewPass,
+        isReviewPass || isTriagePass || isRepairPass
+          ? undefined
+          : (proj.dopplerToken ?? undefined),
+      checkoutExisting: isReviewPass || isRepairPass,
     });
     activeTasks.set(taskId, { container: running, state: "setup", kind: task.kind });
 
@@ -188,8 +199,14 @@ export async function startTask(taskId: string): Promise<void> {
         ? DEFAULT_REVIEW_BUDGET_USD
         : isTriagePass
           ? DEFAULT_TRIAGE_BUDGET_USD
-          : run?.budgetUsd,
-      maxTurns: isTriagePass ? TRIAGE_MAX_TURNS : isReviewPass ? undefined : (run?.maxTurns ?? undefined),
+          : isRepairPass
+            ? DEFAULT_REPAIR_BUDGET_USD
+            : run?.budgetUsd,
+      maxTurns: isTriagePass
+        ? TRIAGE_MAX_TURNS
+        : isReviewPass || isRepairPass
+          ? undefined
+          : (run?.maxTurns ?? undefined),
       captureRaw: isReviewPass || isTriagePass,
     });
 
@@ -219,14 +236,18 @@ export async function startTask(taskId: string): Promise<void> {
     // Commit and push after turn completes
     await runPostTurnCommitAndPush(taskId, running);
 
-    if (isImplementPass) {
-      // Exhaustion first (issue #18): a pass that ran out of budget or turns
-      // failed its attempt — the branch is already pushed, so the work
-      // survives for the next attempt, but nothing proceeds toward review.
-      const exhaustion = run ? attemptExhaustion(run, turnResult.costUsd, turnResult.subtype) : null;
-      if (exhaustion) {
-        await failImplementAttempt(taskId, run!.id, exhaustion);
-        return;
+    if (isImplementShaped) {
+      // Exhaustion first (issue #18) — but only for a real implement attempt.
+      // A repair pass (issue #54) is never an attempt, so a repair that spent
+      // its budget without clearing the conflict still parks: the sweep's
+      // conflict check then escalates the still-CONFLICTING PR to a human,
+      // rather than the repair burning a strike.
+      if (isImplementPass) {
+        const exhaustion = run ? attemptExhaustion(run, turnResult.costUsd, turnResult.subtype) : null;
+        if (exhaustion) {
+          await failImplementAttempt(taskId, run!.id, exhaustion);
+          return;
+        }
       }
       // The pass's turn is over: park it blocked if its final message leads
       // with the BLOCKED marker — container kept alive, question escalated
@@ -477,7 +498,10 @@ export async function processQueuedMessages(
     // Commit and push after each turn
     await runPostTurnCommitAndPush(taskId, running);
 
-    if (task.kind === "implement") {
+    if (task.kind === "implement" || task.kind === "repair") {
+      // A repair container that later receives a fix-up turn (issue #54) is
+      // continuing the attempt's review cycle, so from here it behaves exactly
+      // like an implement pass — exhaustion included.
       // Exhaustion first (issue #18): a fix-up or answer turn that spent the
       // attempt's remaining budget or turns fails the attempt through the
       // ledger — the branch is already pushed, the work survives.

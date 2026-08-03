@@ -24,6 +24,19 @@ export const DEFAULT_REVIEW_BUDGET_USD = 5;
  * implementing a ticket. */
 export const DEFAULT_TRIAGE_BUDGET_USD = 2;
 
+/** Budget for one repair pass (issue #54): merging the default branch into a
+ * conflicting PR branch is a small mechanical turn, so it carries its own
+ * modest allowance rather than the implement attempt's full budget. */
+export const DEFAULT_REPAIR_BUDGET_USD = 5;
+
+/** Repair passes run to integrate a CONFLICTING parked PR before it escalates
+ * to a human (issue #54). One automated merge of the default branch either
+ * clears the conflict or it is a genuine content clash needing human
+ * judgement, which a second identical attempt would not resolve — so the
+ * bound is one. Counted per conflict episode (reset once the PR is mergeable
+ * again) and, unlike an attempt, never charged against MAX_ATTEMPTS. */
+export const MAX_INTEGRATION_ATTEMPTS = 1;
+
 /** Per-exec turn cap for a triage pass: read the issue against the repo's
  * context, judge, exit. Not raisable — triage reads semi-trusted input and
  * has no directive surface. */
