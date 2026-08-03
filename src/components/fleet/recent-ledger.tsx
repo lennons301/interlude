@@ -21,7 +21,7 @@ export function RecentLedger({ view, now }: { view: FleetView; now: Date }) {
           <tbody>
             {items.map((item, i) => (
               <tr key={i} className="border-t border-fl-line first:border-t-0">
-                <td className="w-12 py-2 pr-2 align-top font-plex-mono text-[12px]">
+                <td className="w-14 py-2 pr-2 align-top font-plex-mono text-[12px]">
                   {item.prUrl ? (
                     <a
                       href={item.prUrl}
