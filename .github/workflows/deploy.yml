@@ -5,6 +5,15 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Serialise deploys: each push to main triggers its own run, and two concurrent
+# `docker compose down → build → up` sequences on the 2 vCPU / 4 GB VPS starve
+# the box (incident 2026-08-01, issue #40 — prod and even sshd stopped
+# answering). Queue rather than cancel: killing a mid-flight deploy could
+# strand the stack half-torn-down between `down` and `up`.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
