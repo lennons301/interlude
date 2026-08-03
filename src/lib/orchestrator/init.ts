@@ -6,6 +6,7 @@ import { getDocker, isDockerAvailable } from "../docker/client";
 import { startQueue } from "./queue";
 import { getCapacity } from "./capacity";
 import { ACTIVE_RUN_STATUSES, startAutonomySweeps } from "./autonomy/sweep";
+import { startPreflightRefresh } from "./autonomy/preflight";
 import { startDailyDigest } from "./digest-schedule";
 import { getConfig } from "../config";
 import { isGitHubConfigured } from "../github/client";
@@ -219,6 +220,13 @@ export async function initOrchestrator(): Promise<void> {
         "[autonomy] Autonomous pickup disabled" +
           (getConfig().autonomyEnabled ? " (GitHub App not configured)" : " (AUTONOMY_ENABLED != true)")
       );
+    }
+
+    // Keep preflight fresh for autonomy-enabled projects independently of the
+    // global kill switch, so the dashboard names what's missing while pilots
+    // are being set up (and catches drift like branch protection being removed).
+    if (isGitHubConfigured()) {
+      startPreflightRefresh();
     }
 
     // Run the reaper every 5 minutes to catch any leaked containers

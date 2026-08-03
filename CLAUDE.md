@@ -225,6 +225,7 @@ Phase 5's loop. Phase 5 itself ships only the fleet dashboard.
 - Phase 2a plan: `docs/plans/2026-03-11-phase2a-agent-orchestrator.md`
 - VPS deployment spec: `docs/specs/2026-03-12-vps-deployment-design.md`
 - Phase 5 spec: `docs/specs/2026-07-30-phase5-autonomous-ticket-loop-design.md`
+- Operator runbook (Phase 5 autonomy): `docs/runbook.md`
 - Overall design: see `docs/plans/2026-03-10-remote-agent-dev-environment-design.md` (external)
 
 ## Platform Context

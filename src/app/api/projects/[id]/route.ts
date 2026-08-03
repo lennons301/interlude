@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { projects } from "@/db/schema";
 import { eq } from "drizzle-orm";
+import { refreshProjectPreflight } from "@/lib/orchestrator/autonomy/preflight";
 
 export async function GET(
   _request: Request,
@@ -25,11 +26,12 @@ export async function PATCH(
 ) {
   const { id } = await params;
   const body = await request.json();
-  const { name, gitUrl, githubRepo, dopplerToken } = body as {
+  const { name, gitUrl, githubRepo, dopplerToken, autonomyEnabled } = body as {
     name?: string;
     gitUrl?: string;
     githubRepo?: string | null;
     dopplerToken?: string | null;
+    autonomyEnabled?: boolean;
   };
 
   const project = db.select().from(projects).where(eq(projects.id, id)).get();
@@ -42,9 +44,32 @@ export async function PATCH(
   if (gitUrl !== undefined) updates.gitUrl = gitUrl;
   if (githubRepo !== undefined) updates.githubRepo = githubRepo;
   if (dopplerToken !== undefined) updates.dopplerToken = dopplerToken;
+  // Enabling autonomy is the deliberate per-project switch (default off). It is
+  // never flipped on implicitly — only when the caller sends an explicit
+  // boolean, so a stray truthy string can't arm a project.
+  if (autonomyEnabled !== undefined) {
+    if (typeof autonomyEnabled !== "boolean") {
+      return NextResponse.json(
+        { error: "autonomyEnabled must be a boolean" },
+        { status: 400 }
+      );
+    }
+    updates.autonomyEnabled = autonomyEnabled;
+  }
 
   if (Object.keys(updates).length > 0) {
     db.update(projects).set(updates).where(eq(projects.id, id)).run();
+  }
+
+  // Enabling autonomy runs preflight now, so the owner immediately sees whether
+  // the repo is ready (and, if not, what is missing) rather than waiting for
+  // the next periodic refresh. Fail-closed: nothing gets claimed until it passes.
+  if (autonomyEnabled === true) {
+    try {
+      await refreshProjectPreflight(id);
+    } catch (err) {
+      console.error(`[projects] Preflight refresh failed for ${id}:`, err);
+    }
   }
 
   const updated = db.select().from(projects).where(eq(projects.id, id)).get();
