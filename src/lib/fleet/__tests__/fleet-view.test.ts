@@ -172,6 +172,29 @@ describe("buildFleetView — slots", () => {
     expect(view.slots.used).toBe(0);
   });
 
+  it("never counts a terminal-status task as a slot occupant, even with a stale container_status", () => {
+    // Issue #46: a task cancelled months ago still carried
+    // container_status='idle' and rendered as a running interactive session.
+    // Terminal status wins over a stale container column.
+    for (const status of ["cancelled", "completed", "failed"] as const) {
+      const view = buildFleetView(
+        baseRows({
+          projects: [makeProject({ id: "p1", name: "interlude" })],
+          tasks: [
+            makeTask({ projectId: "p1", status, containerStatus: "idle" }),
+          ],
+        })
+      );
+
+      expect(view.slots.used).toBe(0);
+      expect(view.slots.segments).toEqual([
+        { occupant: "free" },
+        { occupant: "free" },
+      ]);
+      expect(view.running).toEqual([]);
+    }
+  });
+
   it("reports saturation with what it is attributable to", () => {
     const view = buildFleetView(
       baseRows({
