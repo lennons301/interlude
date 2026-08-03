@@ -17,7 +17,7 @@ export function RecentLedger({ view, now }: { view: FleetView; now: Date }) {
           nothing completed this week
         </p>
       ) : (
-        <table className="w-full border-collapse text-sm">
+        <table className="w-full table-fixed border-collapse text-sm">
           <tbody>
             {items.map((item, i) => (
               <tr key={i} className="border-t border-fl-line first:border-t-0">
@@ -45,11 +45,11 @@ export function RecentLedger({ view, now }: { view: FleetView; now: Date }) {
                   >
                     {item.title}
                   </span>
-                  <span className="font-plex-mono text-[11px] text-fl-ink-3">
+                  <span className="block truncate font-plex-mono text-[11px] text-fl-ink-3">
                     {item.projectName}
                   </span>
                 </td>
-                <td className="py-2 pr-2 text-right align-top font-plex-mono text-[12px] tabular-nums text-fl-ink-2">
+                <td className="w-16 py-2 pr-2 text-right align-top font-plex-mono text-[12px] tabular-nums text-fl-ink-2">
                   <Money usd={item.costUsd} />
                 </td>
                 <td className="w-10 py-2 text-right align-top font-plex-mono text-[11px] text-fl-ink-3">
