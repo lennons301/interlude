@@ -71,6 +71,7 @@ import { buildImplementPrompt, buildReviewPrompt, buildTriagePrompt } from "./wo
 import {
   DAILY_AUTONOMOUS_CAP_USD,
   MAX_ATTEMPTS,
+  MAX_INTERRUPTIONS_PER_TICKET,
   MAX_REVIEW_CYCLES_PER_ATTEMPT,
   MAX_TRIAGE_PASSES_PER_ISSUE,
 } from "./budgets";
@@ -285,6 +286,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
           armedAt: await resolveArmedAt(octokit, owner, repo, issue.number, new Date(issue.created_at)),
           hasOpenBlocker: await hasOpenBlocker(octokit, owner, repo, issue, body),
           attemptsMade: issueRuns.filter((r) => r.status === "failed").length,
+          interruptionsMade: issueRuns.filter((r) => r.status === "interrupted").length,
           hasActiveRun,
         });
       }
@@ -316,6 +318,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     // budget: directive may raise a single attempt to the $75 ceiling)
     attemptBudgetUsd: config.maxBudgetUsd,
     maxAttempts: MAX_ATTEMPTS,
+    maxInterruptions: MAX_INTERRUPTIONS_PER_TICKET,
     maxReviewCycles: MAX_REVIEW_CYCLES_PER_ATTEMPT,
     todayAutonomousSpendUsd: todayAutonomousSpendUsd(now),
     dailyCapUsd: DAILY_AUTONOMOUS_CAP_USD,
@@ -1339,13 +1342,16 @@ async function executeFinalizeRun(
 }
 
 /**
- * Three failed attempts: the ticket goes back to a human. Labels first —
+ * A burnt ticket goes back to a human: three failed attempts, or the
+ * interruption bound (a ticket whose runs keep dying to restarts must not
+ * re-claim forever on the no-attempt-consumed exemption). Labels first —
  * `ready-for-human` added before `ready-for-agent` is removed, so the issue
  * is never in neither queue, and the removal (which takes the issue out of
- * the candidate set) is what makes this fire once. The last failed run
+ * the candidate set) is what makes this fire once. The last strike's run
  * becomes `exhausted`: the dashboard's needs-you bucket reads it, and a
- * deliberate re-arm then finds two failed runs, granting exactly one fresh
- * attempt instead of insta-exhausting.
+ * deliberate re-arm then finds one fewer strike — two failed runs, or four
+ * interruptions — granting exactly one fresh claim instead of
+ * insta-exhausting.
  */
 async function executeExhaust(action: Extract<Action, { type: "exhaust" }>): Promise<void> {
   if (!(await addLabelToIssue(action.issueRef, READY_FOR_HUMAN_LABEL))) return;
@@ -1358,38 +1364,61 @@ async function executeExhaust(action: Extract<Action, { type: "exhaust" }>): Pro
     .all()
     .sort((a, b) => a.claimedAt.getTime() - b.claimedAt.getTime());
   const failed = allRuns.filter((r) => r.status === "failed");
+  const interrupted = allRuns.filter((r) => r.status === "interrupted");
 
-  const last = failed[failed.length - 1];
+  const strikes = action.reason === "interruptions" ? interrupted : failed;
+  const last = strikes[strikes.length - 1];
   if (last) {
     db.update(runs).set({ status: "exhausted" }).where(eq(runs.id, last.id)).run();
   }
 
-  // The strikes are the failed runs, but the ticket's bill is every run it
-  // ever had — interrupted and cancelled ones, and a prior exhausted run
-  // from before a human re-arm, still spent real money.
+  // The strikes are the failed (or interrupted) runs, but the ticket's bill
+  // is every run it ever had — interrupted and cancelled ones, and a prior
+  // exhausted run from before a human re-arm, still spent real money.
   const totalSpendUsd = allRuns.reduce((sum, r) => sum + r.totalCostUsd, 0);
   const attemptLines = failed.map(
     (r) =>
       `- attempt ${r.attempt}: $${r.totalCostUsd.toFixed(2)} — ${r.failureReason ?? "failed"}`
   );
 
-  console.log(
-    `[autonomy] ${action.issueRef} exhausted after ${action.attemptsMade} attempts — ready-for-human`
-  );
-  await commentOnIssue(
-    action.issueRef,
-    `All ${action.attemptsMade} autonomous attempts failed — swapping ` +
-      `\`${ARMING_LABEL}\` for \`${READY_FOR_HUMAN_LABEL}\`.\n\n` +
-      `${attemptLines.join("\n")}\n\n` +
-      `Total autonomous spend on this ticket: $${totalSpendUsd.toFixed(2)}.`
-  );
+  if (action.reason === "interruptions") {
+    console.log(
+      `[autonomy] ${action.issueRef} hit the interruption bound ` +
+        `(${action.interruptionsMade}) — ready-for-human`
+    );
+    await commentOnIssue(
+      action.issueRef,
+      `${action.interruptionsMade} runs on this ticket were lost to orchestrator ` +
+        `restarts. Interruptions never consume attempts, but re-claims are bounded — ` +
+        `swapping \`${ARMING_LABEL}\` for \`${READY_FOR_HUMAN_LABEL}\`.\n\n` +
+        (attemptLines.length > 0 ? `Failed attempts so far:\n${attemptLines.join("\n")}\n\n` : "") +
+        `Total autonomous spend on this ticket: $${totalSpendUsd.toFixed(2)}.`
+    );
+  } else {
+    console.log(
+      `[autonomy] ${action.issueRef} exhausted after ${action.attemptsMade} attempts — ready-for-human`
+    );
+    await commentOnIssue(
+      action.issueRef,
+      `All ${action.attemptsMade} autonomous attempts failed — swapping ` +
+        `\`${ARMING_LABEL}\` for \`${READY_FOR_HUMAN_LABEL}\`.\n\n` +
+        `${attemptLines.join("\n")}\n\n` +
+        `Total autonomous spend on this ticket: $${totalSpendUsd.toFixed(2)}.`
+    );
+  }
 
   const project = last
     ? db.select().from(projects).where(eq(projects.id, last.projectId)).get()
     : undefined;
   await notifyAttemptsExhausted(
     project?.discordChannelId ?? getConfig().discordFleetChannelId,
-    { issueRef: action.issueRef, attempts: action.attemptsMade, totalSpendUsd }
+    {
+      issueRef: action.issueRef,
+      attempts: action.attemptsMade,
+      interruptions: action.interruptionsMade,
+      reason: action.reason,
+      totalSpendUsd,
+    }
   );
 }
 

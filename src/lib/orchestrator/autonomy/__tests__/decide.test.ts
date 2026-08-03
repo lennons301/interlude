@@ -44,6 +44,7 @@ function makeCandidate(overrides: Partial<CandidateIssue> = {}): CandidateIssue 
     armedAt: ARMED_EARLY,
     hasOpenBlocker: false,
     attemptsMade: 0,
+    interruptionsMade: 0,
     hasActiveRun: false,
     ...overrides,
   };
@@ -55,6 +56,7 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     autonomyEnabledGlobal: true,
     attemptBudgetUsd: 20,
     maxAttempts: 3,
+    maxInterruptions: 5,
     maxReviewCycles: 2,
     todayAutonomousSpendUsd: 0,
     dailyCapUsd: 500,
@@ -264,7 +266,13 @@ describe("decideNext — attempt accounting", () => {
     );
 
     expect(actions).toEqual([
-      { type: "exhaust", issueRef: "acme/widgets#7", attemptsMade: 3 },
+      {
+        type: "exhaust",
+        issueRef: "acme/widgets#7",
+        attemptsMade: 3,
+        interruptionsMade: 0,
+        reason: "attempts",
+      },
     ]);
   });
 
@@ -295,7 +303,37 @@ describe("decideNext — attempt accounting", () => {
     );
 
     expect(actions).toEqual([
-      { type: "exhaust", issueRef: "acme/widgets#7", attemptsMade: 3 },
+      {
+        type: "exhaust",
+        issueRef: "acme/widgets#7",
+        attemptsMade: 3,
+        interruptionsMade: 0,
+        reason: "attempts",
+      },
+    ]);
+  });
+});
+
+describe("decideNext — interruption accounting", () => {
+  it("routes a ticket at the interruption bound back to a human instead of re-claiming", () => {
+    // A ticket that crashes the orchestrator on every claim would otherwise
+    // loop forever: each restart marks the run interrupted (not failed), so
+    // attempt accounting alone never exhausts it.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [makeCandidate({ attemptsMade: 1, interruptionsMade: 5 })],
+      })
+    );
+
+    expect(claims(actions)).toEqual([]);
+    expect(actions).toEqual([
+      {
+        type: "exhaust",
+        issueRef: "acme/widgets#7",
+        attemptsMade: 1,
+        interruptionsMade: 5,
+        reason: "interruptions",
+      },
     ]);
   });
 });
