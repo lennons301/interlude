@@ -431,7 +431,13 @@ export async function notifyTriageRecommendation(
  */
 export async function notifyAttemptsExhausted(
   channelId: string | null,
-  payload: { issueRef: string; attempts: number; totalSpendUsd: number }
+  payload: {
+    issueRef: string;
+    attempts: number;
+    interruptions: number;
+    reason: "attempts" | "interruptions";
+    totalSpendUsd: number;
+  }
 ): Promise<void> {
   const botClient = getBotClient();
   if (!botClient || !channelId) return;
@@ -440,14 +446,24 @@ export async function notifyAttemptsExhausted(
     const channel = await botClient.channels.fetch(channelId);
     if (!channel || !channel.isTextBased()) return;
 
-    const embed = new EmbedBuilder()
-      .setTitle(`Attempts exhausted — ${payload.issueRef} needs you`)
-      .setDescription(
-        `All ${payload.attempts} attempts failed ` +
-          `($${payload.totalSpendUsd.toFixed(2)} autonomous spend). ` +
-          `The ticket is now \`ready-for-human\`; the per-attempt story is on the issue.`
-      )
-      .setColor(0xef4444);
+    const embed =
+      payload.reason === "interruptions"
+        ? new EmbedBuilder()
+            .setTitle(`Interruption bound hit — ${payload.issueRef} needs you`)
+            .setDescription(
+              `${payload.interruptions} runs lost to orchestrator restarts ` +
+                `($${payload.totalSpendUsd.toFixed(2)} autonomous spend). Re-claims are ` +
+                `bounded, so the ticket is now \`ready-for-human\`; the story is on the issue.`
+            )
+            .setColor(0xef4444)
+        : new EmbedBuilder()
+            .setTitle(`Attempts exhausted — ${payload.issueRef} needs you`)
+            .setDescription(
+              `All ${payload.attempts} attempts failed ` +
+                `($${payload.totalSpendUsd.toFixed(2)} autonomous spend). ` +
+                `The ticket is now \`ready-for-human\`; the per-attempt story is on the issue.`
+            )
+            .setColor(0xef4444);
 
     await sendWithRetry(channel as TextChannel, embed);
   } catch (err) {

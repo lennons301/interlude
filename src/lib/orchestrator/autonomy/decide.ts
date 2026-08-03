@@ -52,6 +52,10 @@ export interface CandidateIssue {
   hasOpenBlocker: boolean;
   /** Attempts already consumed (failed runs) for this issue */
   attemptsMade: number;
+  /** Runs lost to orchestrator restarts (interrupted runs) for this issue —
+   * counted separately from attempts: the platform's downtime is never
+   * charged to the ticket, but the re-claim is bounded */
+  interruptionsMade: number;
   hasActiveRun: boolean;
 }
 
@@ -168,6 +172,9 @@ export interface AutonomySnapshot {
   autonomyEnabledGlobal: boolean;
   attemptBudgetUsd: number;
   maxAttempts: number;
+  /** Interruptions (orchestrator restarts) tolerated per ticket before it is
+   * routed back to a human instead of re-claimed */
+  maxInterruptions: number;
   /** Implement↔review cycles allowed within one attempt */
   maxReviewCycles: number;
   /** Autonomous spend since local midnight — a sum over the runs ledger, so
@@ -348,7 +355,16 @@ export type Action =
       event: "triage-unparseable";
       payload: { taskId: string; issueRef: string; reason: string };
     }
-  | { type: "exhaust"; issueRef: string; attemptsMade: number }
+  | {
+      type: "exhaust";
+      issueRef: string;
+      attemptsMade: number;
+      interruptionsMade: number;
+      /** What burnt the ticket: three failed attempts, or the interruption
+       * bound — restarts are counted separately and never consume attempts,
+       * but past the bound the ticket goes to a human instead of looping */
+      reason: "attempts" | "interruptions";
+    }
   | {
       type: "failAttempt";
       runId: string;
@@ -371,6 +387,7 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     autonomyEnabledGlobal: true,
     attemptBudgetUsd: 0,
     maxAttempts: 0,
+    maxInterruptions: 0,
     maxReviewCycles: 0,
     todayAutonomousSpendUsd: 0,
     dailyCapUsd: 0,
@@ -764,6 +781,23 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
         type: "exhaust",
         issueRef: candidate.issueRef,
         attemptsMade: candidate.attemptsMade,
+        interruptionsMade: candidate.interruptionsMade,
+        reason: "attempts",
+      });
+      continue;
+    }
+    // The interruption bound, checked after (and independently of) attempts:
+    // a run lost to an orchestrator restart is re-claimed without consuming
+    // an attempt — the platform's downtime is not the ticket's fault — but a
+    // ticket that crashes the orchestrator on every claim would loop
+    // forever on that exemption, so re-claims are bounded separately.
+    if (candidate.interruptionsMade >= snapshot.maxInterruptions) {
+      actions.push({
+        type: "exhaust",
+        issueRef: candidate.issueRef,
+        attemptsMade: candidate.attemptsMade,
+        interruptionsMade: candidate.interruptionsMade,
+        reason: "interruptions",
       });
       continue;
     }
