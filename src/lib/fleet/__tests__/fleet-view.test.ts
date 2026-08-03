@@ -172,6 +172,29 @@ describe("buildFleetView — slots", () => {
     expect(view.slots.used).toBe(0);
   });
 
+  it("never counts a terminal-status task as a slot occupant, even with a stale container_status", () => {
+    // Issue #46: a task cancelled months ago still carried
+    // container_status='idle' and rendered as a running interactive session.
+    // Terminal status wins over a stale container column.
+    for (const status of ["cancelled", "completed", "failed"] as const) {
+      const view = buildFleetView(
+        baseRows({
+          projects: [makeProject({ id: "p1", name: "interlude" })],
+          tasks: [
+            makeTask({ projectId: "p1", status, containerStatus: "idle" }),
+          ],
+        })
+      );
+
+      expect(view.slots.used).toBe(0);
+      expect(view.slots.segments).toEqual([
+        { occupant: "free" },
+        { occupant: "free" },
+      ]);
+      expect(view.running).toEqual([]);
+    }
+  });
+
   it("reports saturation with what it is attributable to", () => {
     const view = buildFleetView(
       baseRows({
@@ -685,6 +708,44 @@ describe("buildFleetView — running", () => {
         spend: { usd: 1.23, budgetUsd: null },
       },
     ]);
+  });
+
+  it("picks a run's live pass as its face, ignoring a finished pass with a stale container_status", () => {
+    // Issue #46, sibling path: currentTaskOf must not surface a terminal task
+    // as a run's current face just because it still carries container_status.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", status: "reviewing" })],
+        tasks: [
+          // Ordered first, so a naive `.find` would return it.
+          makeTask({
+            id: "t-stale",
+            projectId: "p1",
+            runId: "r1",
+            kind: "implement",
+            title: "Old finished pass",
+            status: "completed",
+            containerStatus: "idle",
+            createdAt: new Date(2026, 7, 1, 8, 0, 0),
+          }),
+          makeTask({
+            id: "t-live",
+            projectId: "p1",
+            runId: "r1",
+            kind: "review",
+            title: "Live review pass",
+            status: "running",
+            containerStatus: "running",
+            createdAt: TODAY_9AM,
+          }),
+        ],
+      })
+    );
+
+    expect(view.running).toHaveLength(1);
+    expect(view.running[0].taskId).toBe("t-live");
+    expect(view.running[0].title).toBe("Live review pass");
   });
 
   it("excludes finished runs and containerless interactive tasks from running", () => {

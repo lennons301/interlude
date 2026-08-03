@@ -190,6 +190,14 @@ function issueUrl(githubIssue: string): string | null {
 const RECENT_WINDOW_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** A task in one of these statuses is finished — it can hold no slot and
+ * renders as no active session, regardless of a stale container_status. */
+const TERMINAL_TASK_STATUSES = new Set<FleetTaskRow["status"]>([
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
 export function buildFleetView(rows: FleetRows): FleetView {
   const projectById = new Map(rows.projects.map((p) => [p.id, p]));
   const runById = new Map(rows.runs.map((r) => [r.id, r]));
@@ -201,8 +209,14 @@ export function buildFleetView(rows: FleetRows): FleetView {
   // container status. A parked autonomous container (an implement pass
   // idling while its PR is reviewed, issue #17) stays alive but runs no
   // agent and holds no slot; an idle interactive session does hold its slot.
+  //
+  // A task in a terminal status is never an active session, whatever
+  // container_status says: cancellation and completion should null the column,
+  // but a stale value (issue #46: a task cancelled months ago still carrying
+  // container_status='idle') must not resurrect it as a running session here.
   const occupants = rows.tasks.filter(
     (t) =>
+      !TERMINAL_TASK_STATUSES.has(t.status) &&
       t.containerStatus !== null &&
       !(t.kind !== "interactive" && t.containerStatus === "idle")
   );
@@ -233,13 +247,18 @@ export function buildFleetView(rows: FleetRows): FleetView {
   const capPaused = todayUsd >= rows.dailyCapUsd;
 
   // A run's face in the UI is its latest task — the live container if one
-  // exists, otherwise the most recently created pass.
+  // exists, otherwise the most recently created pass. A finished pass with a
+  // stale container_status is not "live" (issue #46), so the same terminal
+  // guard applies here as in the occupants filter.
   const tasksOfRun = (runId: string) =>
     rows.tasks.filter((t) => t.runId === runId);
   const currentTaskOf = (runId: string) => {
     const owned = tasksOfRun(runId);
     return (
-      owned.find((t) => t.containerStatus !== null) ??
+      owned.find(
+        (t) =>
+          t.containerStatus !== null && !TERMINAL_TASK_STATUSES.has(t.status)
+      ) ??
       owned.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] ??
       null
     );
