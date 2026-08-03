@@ -1,9 +1,43 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   buildSetupScript,
   buildPushScript,
   buildTurnEnv,
+  createWorkspaceContainer,
 } from "../container-manager";
+
+// Capture the options passed to docker.createContainer so we can assert on the
+// HostConfig the orchestrator asks Docker for.
+const { createContainerSpy } = vi.hoisted(() => ({
+  createContainerSpy: vi.fn(async () => ({ id: "container-under-test" })),
+}));
+
+vi.mock("@/lib/docker/client", () => ({
+  getDocker: () => ({ createContainer: createContainerSpy }),
+}));
+vi.mock("@/lib/docker/image-builder", () => ({
+  ensureImage: vi.fn(async () => {}),
+  getImageName: () => "interlude-agent:test",
+}));
+vi.mock("@/lib/orchestrator/capacity", () => ({
+  getCapacity: vi.fn(async () => ({
+    slots: 2,
+    perAgentMemory: 1200 * 1024 * 1024,
+    cpuQuota: 1_000_000_000,
+  })),
+}));
+vi.mock("@/lib/github/client", () => ({
+  getInstallationToken: vi.fn(async () => "ghs_installation"),
+}));
+vi.mock("@/lib/config", () => ({
+  PLATFORM_REPO_URL: "https://github.com/lennons301/platform.git",
+  getConfig: () => ({
+    anthropicApiKey: null,
+    claudeCodeOauthToken: "sk-ant-oat01-test",
+    gitUserName: "Interlude Agent",
+    gitUserEmail: "agent@interlude.dev",
+  }),
+}));
 
 describe("buildSetupScript", () => {
   const script = buildSetupScript("https://github.com/lennons301/platform.git");
@@ -80,5 +114,28 @@ describe("buildPushScript", () => {
   it("does not embed any token", () => {
     expect(script).not.toContain("GIT_TOKEN");
     expect(script).not.toContain("GIT_AUTH_TOKEN");
+  });
+});
+
+describe("createWorkspaceContainer", () => {
+  beforeEach(() => {
+    createContainerSpy.mockClear();
+  });
+
+  // Regression guard for issue #28: agent containers must not bind-mount
+  // anything from the host — the old rw `~/.claude` mount is gone and must
+  // stay gone. Auth reaches the container only via exec-scoped env tokens.
+  it("grants no host bind mount", async () => {
+    await createWorkspaceContainer({
+      taskId: "01J000000000000000000TASK",
+      gitUrl: "https://github.com/lennons301/interlude.git",
+      branch: "agent/issue-28",
+    });
+
+    expect(createContainerSpy).toHaveBeenCalledTimes(1);
+    const opts = createContainerSpy.mock.calls[0][0] as {
+      HostConfig?: { Binds?: unknown };
+    };
+    expect(opts.HostConfig?.Binds).toBeUndefined();
   });
 });
