@@ -149,17 +149,18 @@ export async function startTask(taskId: string): Promise<void> {
   let running: RunningContainer | null = null;
 
   try {
-    // Create container. Review and triage passes receive no credential
-    // beyond the App token their setup uses for cloning — not even the
-    // project's Doppler secrets: they read code, they don't run the app.
+    // Create container. Review and triage passes receive no credential beyond
+    // the App token their setup uses for cloning — not even the project's
+    // Doppler secrets: they read code, they don't run the app. A repair pass
+    // is implement-shaped — it merges, pushes, and runs the repo's tests and
+    // lint — so it gets the same Doppler secrets an implement pass does, or a
+    // test that needs them would behave differently than under implement.
     running = await createWorkspaceContainer({
       taskId,
       gitUrl: proj.gitUrl,
       branch,
       dopplerToken:
-        isReviewPass || isTriagePass || isRepairPass
-          ? undefined
-          : (proj.dopplerToken ?? undefined),
+        isReviewPass || isTriagePass ? undefined : (proj.dopplerToken ?? undefined),
       checkoutExisting: isReviewPass || isRepairPass,
     });
     activeTasks.set(taskId, { container: running, state: "setup", kind: task.kind });

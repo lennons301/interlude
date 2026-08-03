@@ -1468,18 +1468,13 @@ async function executeRepairPr(action: Extract<Action, { type: "repairPr" }>): P
   // on this run (a reviewing run's implement pass) so nothing double-books.
   await releaseImplementContainer(action.runId, "Repairing a merge conflict in a fresh container.");
 
+  // Queue the repair task first: it is the idempotency anchor (a queued/running
+  // repair task keeps the next sweep from double-queuing) and startTask flips
+  // the run to `implementing` when it begins, so even if the run update below
+  // never lands the repair still runs and recovers the state. The PR is carried
+  // on the task so the pass pushes to the existing PR (no second draft) and
+  // parks awaiting review rather than completing outright.
   const now = new Date();
-  db.update(runs)
-    .set({
-      status: "implementing",
-      integrationCount: run.integrationCount + 1,
-      reviewVerdict: null,
-      reviewResult: null,
-      gateCategories: [],
-    })
-    .where(eq(runs.id, action.runId))
-    .run();
-
   const taskId = newId();
   db.insert(tasks)
     .values({
@@ -1492,13 +1487,24 @@ async function executeRepairPr(action: Extract<Action, { type: "repairPr" }>): P
       runId: run.id,
       githubIssue: action.issueRef,
       branch: `agent/issue-${ref.number}`,
-      // Carry the PR so the pass pushes to the existing PR (no second draft)
-      // and parks awaiting review rather than completing outright.
       pullRequestNumber: run.pullRequestNumber,
       pullRequestUrl: run.pullRequestUrl,
       createdAt: now,
       updatedAt: now,
     })
+    .run();
+
+  // Move the run out of the reviewable set now so the review pipeline does not
+  // also act on it, and count the repair (never an attempt).
+  db.update(runs)
+    .set({
+      status: "implementing",
+      integrationCount: run.integrationCount + 1,
+      reviewVerdict: null,
+      reviewResult: null,
+      gateCategories: [],
+    })
+    .where(eq(runs.id, action.runId))
     .run();
 
   console.log(

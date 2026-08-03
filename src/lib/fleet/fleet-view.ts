@@ -318,32 +318,31 @@ export function buildFleetView(rows: FleetRows): FleetView {
   // repairs are spent (issue #54) is stalled on a merge conflict — a distinct,
   // red, "resolve it" state rather than silence or an ordinary sign-off.
   for (const run of rows.runs.filter((r) => r.status === "gated")) {
-    const stalledOnConflict = run.integrationCount >= MAX_INTEGRATION_ATTEMPTS;
     const pr = run.pullRequestNumber;
-    needsYou.push({
-      cause: stalledOnConflict ? "conflict" : "signoff",
-      severity: stalledOnConflict ? "red" : "amber",
-      context: runContext(run),
-      body: stalledOnConflict
-        ? pr
+    const link = (label: string): NeedsYouItem["action"] =>
+      run.pullRequestUrl ? { label, href: run.pullRequestUrl } : null;
+
+    if (run.integrationCount >= MAX_INTEGRATION_ATTEMPTS) {
+      needsYou.push({
+        cause: "conflict",
+        severity: "red",
+        context: runContext(run),
+        body: pr
           ? `PR #${pr} still conflicts with the default branch — resolve and merge`
-          : "PR still conflicts with the default branch — resolve and merge"
-        : pr
+          : "PR still conflicts with the default branch — resolve and merge",
+        action: link(pr ? `Resolve PR #${pr}` : "Resolve PR"),
+      });
+    } else {
+      needsYou.push({
+        cause: "signoff",
+        severity: "amber",
+        context: runContext(run),
+        body: pr
           ? `PR #${pr} waits for your sign-off`
           : "PR waits for your sign-off",
-      action: run.pullRequestUrl
-        ? {
-            label: stalledOnConflict
-              ? pr
-                ? `Resolve PR #${pr}`
-                : "Resolve PR"
-              : pr
-                ? `Review PR #${pr}`
-                : "Review PR",
-            href: run.pullRequestUrl,
-          }
-        : null,
-    });
+        action: link(pr ? `Review PR #${pr}` : "Review PR"),
+      });
+    }
   }
 
   // An exhausted ticket needs a human until either they re-arm it (a newer
