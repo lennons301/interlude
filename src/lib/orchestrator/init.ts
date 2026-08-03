@@ -5,7 +5,7 @@ import { newId } from "../ulid";
 import { getDocker, isDockerAvailable } from "../docker/client";
 import { startQueue } from "./queue";
 import { getCapacity } from "./capacity";
-import { LIVE_RUN_STATUSES, startAutonomySweeps } from "./autonomy/sweep";
+import { ACTIVE_RUN_STATUSES, startAutonomySweeps } from "./autonomy/sweep";
 import { startDailyDigest } from "./digest-schedule";
 import { getConfig } from "../config";
 import { isGitHubConfigured } from "../github/client";
@@ -135,9 +135,9 @@ async function reapStaleContainers(): Promise<void> {
     // Get all tasks that should have a live container. Blocked tasks are
     // parked, not dead: their container is deliberately kept alive holding
     // its context while the question waits (issue #19). Any task owned by a
-    // live run is likewise protected whatever its own status (issue #24) —
-    // between a claim and the task row catching up, recovery must never be
-    // fighting cleanup.
+    // live run is likewise protected whatever its own status (issue #24):
+    // recovery must never be fighting cleanup, so while the run is being
+    // worked, only the run's own lifecycle may take its containers.
     const activeTasks = await db
       .select({ containerName: tasks.containerName })
       .from(tasks)
@@ -145,7 +145,7 @@ async function reapStaleContainers(): Promise<void> {
       .where(
         or(
           inArray(tasks.status, ["running", "blocked"]),
-          inArray(runs.status, [...LIVE_RUN_STATUSES])
+          inArray(runs.status, [...ACTIVE_RUN_STATUSES])
         )
       );
 

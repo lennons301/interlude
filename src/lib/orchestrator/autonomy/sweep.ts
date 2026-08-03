@@ -80,14 +80,14 @@ const SWEEP_INTERVAL_MS = 30_000;
 
 /** Run statuses that mean "this issue is being worked" — not re-claimable,
  * and (issue #24) its containers are off-limits to the reaper. */
-export const LIVE_RUN_STATUSES = [
+export const ACTIVE_RUN_STATUSES = [
   "claimed",
   "implementing",
   "reviewing",
   "gated",
   "blocked",
 ] as const;
-const ACTIVE_RUN_STATUSES = new Set<string>(LIVE_RUN_STATUSES);
+const ACTIVE_RUN_STATUS_SET = new Set<string>(ACTIVE_RUN_STATUSES);
 
 let sweepInterval: ReturnType<typeof setInterval> | null = null;
 let sweeping = false;
@@ -274,7 +274,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
         const issueRef = `${repoFullName}#${issue.number}`;
         const body = issue.body ?? "";
         const issueRuns = allRuns.filter((r) => r.githubIssue === issueRef);
-        const hasActiveRun = issueRuns.some((r) => ACTIVE_RUN_STATUSES.has(r.status));
+        const hasActiveRun = issueRuns.some((r) => ACTIVE_RUN_STATUS_SET.has(r.status));
         if (!hasActiveRun) unclaimed++;
 
         candidates.push({
@@ -1349,11 +1349,11 @@ async function executeFinalizeRun(
  * re-claim forever on the no-attempt-consumed exemption). Labels first —
  * `ready-for-human` added before `ready-for-agent` is removed, so the issue
  * is never in neither queue, and the removal (which takes the issue out of
- * the candidate set) is what makes this fire once. The last strike's run
- * becomes `exhausted`: the dashboard's needs-you bucket reads it, and a
- * deliberate re-arm then finds one fewer strike — two failed runs, or four
- * interruptions — granting exactly one fresh claim instead of
- * insta-exhausting.
+ * the candidate set) is what makes this fire once. Each bound at its limit
+ * turns its last strike's run `exhausted`: the dashboard's needs-you bucket
+ * reads it, and a deliberate re-arm then finds one fewer strike on every
+ * counter — two failed runs, or four interruptions — granting exactly one
+ * fresh claim instead of insta-exhausting.
  */
 async function executeExhaust(action: Extract<Action, { type: "exhaust" }>): Promise<void> {
   if (!(await addLabelToIssue(action.issueRef, READY_FOR_HUMAN_LABEL))) return;
@@ -1368,10 +1368,20 @@ async function executeExhaust(action: Extract<Action, { type: "exhaust" }>): Pro
   const failed = allRuns.filter((r) => r.status === "failed");
   const interrupted = allRuns.filter((r) => r.status === "interrupted");
 
+  // Every bound at its limit surrenders one strike to the exhausted marker —
+  // usually just the one that fired, but a double-burnt ticket marks both, or
+  // a single re-arm would insta-exhaust on the other counter instead of
+  // getting its one fresh claim.
   const strikes = action.reason === "interruptions" ? interrupted : failed;
   const last = strikes[strikes.length - 1];
-  if (last) {
-    db.update(runs).set({ status: "exhausted" }).where(eq(runs.id, last.id)).run();
+  const markers = [
+    ...(action.attemptsMade >= MAX_ATTEMPTS ? [failed[failed.length - 1]] : []),
+    ...(action.interruptionsMade >= MAX_INTERRUPTIONS_PER_TICKET
+      ? [interrupted[interrupted.length - 1]]
+      : []),
+  ].filter((r) => r != null);
+  for (const marker of markers) {
+    db.update(runs).set({ status: "exhausted" }).where(eq(runs.id, marker.id)).run();
   }
 
   // The strikes are the failed (or interrupted) runs, but the ticket's bill
