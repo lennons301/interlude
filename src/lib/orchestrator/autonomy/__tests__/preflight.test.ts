@@ -12,7 +12,7 @@ import { HUMAN_SIGNOFF_LABEL } from "../gates";
 const ALL_PASS: PreflightChecks = {
   repoConfigured: true,
   repo: "owner/repo",
-  repoAccessible: true,
+  repoAccess: "accessible",
   branchProtection: "protected",
   reviewerIsCollaborator: true,
   signoffLabelExists: true,
@@ -29,7 +29,7 @@ describe("evaluatePreflight", () => {
     const result = evaluatePreflight({
       repoConfigured: false,
       repo: "",
-      repoAccessible: false,
+      repoAccess: "inaccessible",
       branchProtection: "unprotected",
       reviewerIsCollaborator: false,
       signoffLabelExists: false,
@@ -38,12 +38,12 @@ describe("evaluatePreflight", () => {
     expect(result.reason).toBe("no GitHub repo configured (needs gitUrl and githubRepo)");
   });
 
-  it("short-circuits to the access reason, naming the repo, when unreachable", () => {
+  it("short-circuits to the access reason, naming the repo, when inaccessible", () => {
     // Prerequisite failure hides the checks that couldn't be gathered anyway,
     // and names the repo so the owner knows which installation to fix.
     const result = evaluatePreflight({
       ...ALL_PASS,
-      repoAccessible: false,
+      repoAccess: "inaccessible",
       branchProtection: "unprotected",
       reviewerIsCollaborator: false,
       signoffLabelExists: false,
@@ -52,6 +52,20 @@ describe("evaluatePreflight", () => {
     expect(result.reason).toBe(
       "the GitHub App cannot access owner/repo — add it to the App installation"
     );
+  });
+
+  it("reports a transient reach failure as retryable, not as a config fix", () => {
+    // A network/500 blip must not tell the owner to touch an installation that
+    // isn't broken — it's a different reason from `inaccessible` (issue #70).
+    const result = evaluatePreflight({
+      ...ALL_PASS,
+      repoAccess: "unreachable",
+      branchProtection: "unprotected",
+      reviewerIsCollaborator: false,
+      signoffLabelExists: false,
+    });
+    expect(result.status).toBe("failing");
+    expect(result.reason).toBe("could not reach GitHub to check owner/repo — will retry");
   });
 
   it("names the missing App permission when branch protection is forbidden", () => {
@@ -87,7 +101,7 @@ describe("evaluatePreflight", () => {
     const result = evaluatePreflight({
       repoConfigured: true,
       repo: "owner/repo",
-      repoAccessible: true,
+      repoAccess: "accessible",
       branchProtection: "unprotected",
       reviewerIsCollaborator: false,
       signoffLabelExists: false,

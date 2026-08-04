@@ -36,14 +36,24 @@ import { HUMAN_SIGNOFF_LABEL } from "./gates";
  */
 export type BranchProtectionStatus = "protected" | "unprotected" | "forbidden";
 
+/**
+ * Outcome of the App-token repos.get. `inaccessible` (a 404/403) is the repo
+ * not being in the App installation — a specific owner fix — whereas
+ * `unreachable` is a transient/unknown GitHub error that no config change would
+ * fix. Keeping them distinct stops a network blip from telling the owner to
+ * "add the repo to the installation" when nothing is actually misconfigured
+ * (issue #70).
+ */
+export type RepoAccess = "accessible" | "inaccessible" | "unreachable";
+
 /** Every requirement autonomy depends on. */
 export interface PreflightChecks {
   /** Project has both a gitUrl and an owner/repo githubRepo */
   repoConfigured: boolean;
   /** owner/repo, named in the reasons that must point the owner at a repo */
   repo: string;
-  /** The App installation can reach the repo at all (repos.get succeeds) */
-  repoAccessible: boolean;
+  /** Whether the App installation can reach the repo at all (repos.get) */
+  repoAccess: RepoAccess;
   /** Branch-protection probe on the repo's real default branch */
   branchProtection: BranchProtectionStatus;
   /** The reviewer machine account is a collaborator on the repo */
@@ -63,8 +73,8 @@ const PREFLIGHT_REFRESH_INTERVAL_MS = 5 * 60_000;
 
 /**
  * Pure: map gathered checks to a stored status and a reason that names what is
- * missing. `repoConfigured` and `repoAccessible` are prerequisites — without
- * them the remaining checks cannot even be gathered, so a failure there
+ * missing. `repoConfigured` and `repoAccess` are prerequisites — without them
+ * the remaining checks cannot even be gathered, so a failure there
  * short-circuits to a single clear reason rather than a misleading list. The
  * rest are independent and accumulate, so the owner fixes everything in one
  * pass. A branch-protection `forbidden` names the missing App permission, not a
@@ -74,10 +84,16 @@ export function evaluatePreflight(checks: PreflightChecks): PreflightResult {
   if (!checks.repoConfigured) {
     return { status: "failing", reason: "no GitHub repo configured (needs gitUrl and githubRepo)" };
   }
-  if (!checks.repoAccessible) {
+  if (checks.repoAccess === "inaccessible") {
     return {
       status: "failing",
       reason: `the GitHub App cannot access ${checks.repo} — add it to the App installation`,
+    };
+  }
+  if (checks.repoAccess === "unreachable") {
+    return {
+      status: "failing",
+      reason: `could not reach GitHub to check ${checks.repo} — will retry`,
     };
   }
 
@@ -198,7 +214,7 @@ export async function computePreflight(project: ProjectRow): Promise<PreflightRe
     return evaluatePreflight({
       repoConfigured: false,
       repo: project.githubRepo ?? "",
-      repoAccessible: false,
+      repoAccess: "inaccessible",
       branchProtection: "unprotected",
       reviewerIsCollaborator: false,
       signoffLabelExists: false,
@@ -212,25 +228,31 @@ export async function computePreflight(project: ProjectRow): Promise<PreflightRe
   // repo and yields the *real* default branch. We never fall back to a guessed
   // "main": a wrong guess would 404 the protection probe on a non-default branch
   // and mis-report a configured repo as unprotected (issue #70).
-  let repoAccessible = false;
+  let repoAccess: RepoAccess = "unreachable";
   let defaultBranch: string | null = null;
   try {
     const { data } = await octokit.rest.repos.get({ owner, repo });
-    repoAccessible = true;
+    repoAccess = "accessible";
     defaultBranch = data.default_branch;
   } catch (err) {
-    // A 404/403 both mean the installation can't see this repo — a first-class,
-    // short-circuiting failure. Anything else is a real fault worth logging.
-    if (!isNotFound(err) && !isForbidden(err)) {
+    // A 404/403 both mean the installation can't see this repo — a specific,
+    // actionable owner fix. Anything else is a transient/unknown fault: fail
+    // closed as `unreachable` (not `inaccessible`) so we don't tell the owner to
+    // touch an installation that isn't broken, and log it (issue #70).
+    if (isNotFound(err) || isForbidden(err)) {
+      repoAccess = "inaccessible";
+    } else {
       console.error(`[preflight] repos.get failed for ${repoLabel}:`, err);
     }
   }
 
-  if (!repoAccessible || !defaultBranch) {
+  // A null default branch means repos.get did not succeed, so repoAccess already
+  // carries why (inaccessible or unreachable) and the dependent checks are skipped.
+  if (defaultBranch === null) {
     return evaluatePreflight({
       repoConfigured: true,
       repo: repoLabel,
-      repoAccessible: false,
+      repoAccess,
       branchProtection: "unprotected",
       reviewerIsCollaborator: false,
       signoffLabelExists: false,
@@ -248,7 +270,7 @@ export async function computePreflight(project: ProjectRow): Promise<PreflightRe
   return evaluatePreflight({
     repoConfigured: true,
     repo: repoLabel,
-    repoAccessible: true,
+    repoAccess: "accessible",
     branchProtection,
     reviewerIsCollaborator,
     signoffLabelExists,
