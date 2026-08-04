@@ -104,6 +104,10 @@ export interface ReviewTicket {
   prNumber: number;
   /** Auto-merge armed (an approval lands it) vs gated behind human-signoff */
   armed: boolean;
+  /** Set on a re-queue after the prior pass returned an unparseable verdict
+   * (issue #89): the parse failure, fed back so this pass restates its verdict
+   * in the required shape. Parser-generated text, never container-controlled. */
+  parseFailure?: string;
 }
 
 /**
@@ -124,6 +128,22 @@ export function buildReviewPrompt(ticket: ReviewTicket): string {
       `#${ticket.prNumber} on the default branch immediately.`
     : `Merge state: GATED — the PR carries \`human-signoff\` and auto-merge ` +
       `is off; your review informs the human who merges.`;
+
+  // On a re-queue after an unparseable verdict (issue #89), the prior pass's
+  // parse failure is fed back so this pass restates the verdict in shape. The
+  // reason is parser-generated, so it cannot smuggle instructions past the
+  // operating rules; it is guidance about format, not about the review.
+  const retryNote = ticket.parseFailure
+    ? [
+        ``,
+        `NOTE — this is a retry. A previous review pass reviewed this same PR ` +
+          `but its final message could not be parsed as a verdict ` +
+          `(${ticket.parseFailure}), so nothing was posted. Review the PR ` +
+          `again and this time make your final message begin with the ` +
+          `VERDICT: line in exactly the shape below. This is the last retry — ` +
+          `a second unparseable verdict falls to human oversight.`,
+      ]
+    : [];
 
   return [
     `You are an autonomous review pass for PR #${ticket.prNumber} of ` +
@@ -157,6 +177,7 @@ export function buildReviewPrompt(ticket: ReviewTicket): string {
       `non-empty body.`,
     ``,
     `A final message in any other shape blocks the merge and pages the owner.`,
+    ...retryNote,
   ].join("\n");
 }
 

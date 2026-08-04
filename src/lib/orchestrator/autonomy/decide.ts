@@ -115,6 +115,11 @@ export interface PendingVerdict {
   implementTaskId: string | null;
   /** Fix-up turns already bought by request-changes verdicts this attempt */
   reviewCycleCount: number;
+  /** Unparseable verdicts this attempt has already been re-queued for
+   * (runs.reviewUnparseableCount). Below `maxUnparseableRetries` an
+   * unparseable verdict buys one more review pass with the parse failure fed
+   * back; at or past it the verdict fails closed (issue #89). */
+  unparseableRetriesMade: number;
 }
 
 /** An implement turn that just finished, up for a park-or-proceed decision. */
@@ -210,6 +215,9 @@ export interface AutonomySnapshot {
   maxInterruptions: number;
   /** Implement↔review cycles allowed within one attempt */
   maxReviewCycles: number;
+  /** Unparseable review verdicts re-queued per attempt before one fails
+   * closed (issue #89) */
+  maxUnparseableRetries: number;
   /** Repair passes allowed per conflict episode before a still-CONFLICTING
    * parked PR escalates to a human */
   maxIntegrationAttempts: number;
@@ -333,6 +341,20 @@ export type Action =
       payload: { runId: string; issueRef: string; prNumber: number; reason: string };
     }
   | { type: "startReview"; runId: string; issueRef: string; prNumber: number; armed: boolean }
+  | {
+      // Re-queue a review pass whose prior verdict was unparseable (issue #89),
+      // feeding the parse failure back so it can restate the verdict in shape.
+      // The executor clears the stored result and counts the retry; a second
+      // unparseable verdict falls to the fail-closed `verdict-unparseable` path.
+      type: "retryReview";
+      runId: string;
+      issueRef: string;
+      prNumber: number;
+      armed: boolean;
+      /** Why the prior verdict could not be parsed — injected into the retry
+       * prompt verbatim (parser-generated, never container-controlled text) */
+      parseFailure: string;
+    }
   | {
       type: "postVerdict";
       runId: string;
@@ -459,6 +481,7 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     maxAttempts: 0,
     maxInterruptions: 0,
     maxReviewCycles: 0,
+    maxUnparseableRetries: 0,
     maxIntegrationAttempts: 0,
     todayAutonomousSpendUsd: 0,
     dailyCapUsd: 0,
@@ -677,13 +700,35 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // (review post and fix-up together) for a later sweep: posting the review
   // without delivering the feedback would strand the run mid-cycle.
   let slotsLeft = Math.max(0, snapshot.slots.total - snapshot.slots.occupied);
+  // A re-queued review reserves the slot it will draw exactly as a first
+  // review does, so it is counted with the fresh reviews below when new claims
+  // work out how many slots remain.
+  let reviewsQueuedThisSweep = 0;
   for (const pending of snapshot.pendingVerdicts) {
     if (blockedRunIds.has(pending.runId)) continue;
     const { result } = pending;
 
     if (result.kind === "unparseable") {
-      // The fail-closed case: no review is posted, nothing is armed, the
-      // owner is told (once). The executor disarms and adds human oversight.
+      // A pure format slip is the common cause — a substantively fine review
+      // whose final message just didn't lead with a VERDICT: line — so the
+      // pass earns one bounded re-queue with the parse failure fed back before
+      // anyone is paged (issue #89). Like a first review, this reserves intent,
+      // not a slot: the queue applies the capacity check when it starts.
+      if (pending.unparseableRetriesMade < snapshot.maxUnparseableRetries) {
+        reviewsQueuedThisSweep++;
+        actions.push({
+          type: "retryReview",
+          runId: pending.runId,
+          issueRef: pending.issueRef,
+          prNumber: pending.prNumber,
+          armed: pending.armed,
+          parseFailure: result.reason,
+        });
+        continue;
+      }
+      // Retries spent: the fail-closed case. No review is posted, nothing is
+      // armed, the owner is told (once). The executor disarms and adds human
+      // oversight, leaving the stored result in place as the record.
       if (!snapshot.announcedVerdictErrors.includes(pending.runId)) {
         actions.push({
           type: "notify",
@@ -767,7 +812,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // Review passes are queued before gate decisions and claims: they finish
   // work already in flight. The queue starts them under the ordinary
   // capacity check, so emitting one here only reserves intent, not a slot.
-  let reviewsQueuedThisSweep = 0;
+  // (reviewsQueuedThisSweep was seeded above by any unparseable re-queues.)
   for (const awaiting of snapshot.awaitingReview) {
     if (blockedRunIds.has(awaiting.runId)) continue;
     if (awaiting.hasReviewTask) continue;
