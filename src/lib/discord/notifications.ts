@@ -339,6 +339,41 @@ export async function notifyReviewBlocked(
 }
 
 /**
+ * A parked PR still conflicts with the default branch after its automated
+ * integration repairs are spent (issue #54): a human must resolve the conflict
+ * and merge. Pushed once per stall — the dashboard's conflict needs-you entry
+ * carries it after that.
+ */
+export async function notifyIntegrationEscalation(
+  channelId: string | null,
+  payload: { issueRef: string; prNumber: number; integrationsMade: number }
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await botClient.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) return;
+
+    const repairs = `${payload.integrationsMade} automated repair${
+      payload.integrationsMade === 1 ? "" : "s"
+    }`;
+    const embed = new EmbedBuilder()
+      .setTitle(`Merge conflict needs you — nothing merged`)
+      .setDescription(
+        `${payload.issueRef} (PR #${payload.prNumber}) still conflicts with the ` +
+          `default branch after ${repairs}.\n\n` +
+          `Auto-merge is disarmed — resolve the conflict and merge.`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel as TextChannel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send integration-escalation notification:`, err);
+  }
+}
+
+/**
  * Post an "agent finished a turn — your move" idle notification.
  * Returns the Discord message ID so it can become the task's current
  * interactive message (for ✅-to-complete and reply-to-continue).

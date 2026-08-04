@@ -167,6 +167,39 @@ export interface SettledPr {
   merged: boolean;
 }
 
+/**
+ * A parked run (reviewing/gated) whose open PR the tracker reports as
+ * CONFLICTING (issue #54): a human merge elsewhere moved the default branch
+ * under it. Left alone this is an invisible stall, so the reducer drives an
+ * integration repair or, once repairs are spent, escalates to a human. A PR
+ * whose mergeability is still `unknown` never lands here — it is re-polled,
+ * never treated as a verdict.
+ */
+export interface ConflictingPr {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  prNumber: number;
+  /** Auto-merge armed (reviewing) vs gated — the executor disarms on escalate */
+  armed: boolean;
+  /** Repair passes already run this conflict episode (runs.integrationCount) */
+  integrationsMade: number;
+  /** A repair task already queued or running for this run (idempotency) */
+  hasRepairTask: boolean;
+}
+
+/**
+ * A parked run whose PR the tracker now reports as mergeable again after a
+ * prior conflict (integrationCount > 0). The episode is over: its repair
+ * counter resets so a future, unrelated conflict earns its own repairs
+ * instead of escalating on a stale count.
+ */
+export interface ResolvedConflict {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+}
+
 export interface AutonomySnapshot {
   now: Date;
   autonomyEnabledGlobal: boolean;
@@ -177,6 +210,9 @@ export interface AutonomySnapshot {
   maxInterruptions: number;
   /** Implement↔review cycles allowed within one attempt */
   maxReviewCycles: number;
+  /** Repair passes allowed per conflict episode before a still-CONFLICTING
+   * parked PR escalates to a human */
+  maxIntegrationAttempts: number;
   /** Autonomous spend since local midnight — a sum over the runs ledger, so
    * interactive tasks (which have no run) are exempt by construction */
   todayAutonomousSpendUsd: number;
@@ -217,6 +253,14 @@ export interface AutonomySnapshot {
   settledPrs: SettledPr[];
   /** Run IDs whose verdict failure was already announced (once per failure) */
   announcedVerdictErrors: string[];
+  /** Parked runs whose open PR is CONFLICTING — repaired or escalated */
+  conflictingPrs: ConflictingPr[];
+  /** Parked runs whose PR is mergeable again after a conflict — counter reset */
+  resolvedConflicts: ResolvedConflict[];
+  /** Repair tasks sitting in the queue — each has a slot spoken for */
+  queuedRepairCount: number;
+  /** Run IDs whose conflict escalation was already announced (once per stall) */
+  announcedIntegrationEscalations: string[];
   /** Open issues labelled `needs-triage` with no triage pass yet */
   triageCandidates: TriageCandidate[];
   /** Finished triage passes whose stored exits await application */
@@ -311,6 +355,25 @@ export type Action =
       outcome: "merged" | "closed";
     }
   | {
+      type: "repairPr";
+      runId: string;
+      issueRef: string;
+      prNumber: number;
+      /** Which repair this is (integrationsMade + 1) — for the issue comment */
+      integration: number;
+    }
+  | {
+      type: "escalateConflict";
+      runId: string;
+      issueRef: string;
+      prNumber: number;
+      /** Auto-merge armed — disarm before handing to a human */
+      armed: boolean;
+      /** Repairs spent before giving up — named in the escalation */
+      integrationsMade: number;
+    }
+  | { type: "clearIntegration"; runId: string; issueRef: string }
+  | {
       type: "escalate";
       reason: "blocked";
       runId: string;
@@ -389,6 +452,7 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     maxAttempts: 0,
     maxInterruptions: 0,
     maxReviewCycles: 0,
+    maxIntegrationAttempts: 0,
     todayAutonomousSpendUsd: 0,
     dailyCapUsd: 0,
     dailyCapAnnounced: true,
@@ -408,6 +472,10 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     pendingVerdicts: [],
     settledPrs: [],
     announcedVerdictErrors: [],
+    conflictingPrs: [],
+    resolvedConflicts: [],
+    queuedRepairCount: 0,
+    announcedIntegrationEscalations: [],
     triageCandidates: [],
     pendingTriageResults: [],
     queuedTriageCount: 0,
@@ -473,6 +541,53 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       issueRef: settled.issueRef,
       prNumber: settled.prNumber,
       outcome: settled.merged ? "merged" : "closed",
+    });
+  }
+
+  // Parked PRs the tracker reports CONFLICTING (issue #54): a human merge
+  // elsewhere moved the default branch under a reviewing/gated run. Left
+  // unnoticed this is an invisible stall, so each conflict drives an
+  // integration repair — a fresh container that merges the default branch in
+  // (merge only) and lets the normal gate + review machinery re-run on push.
+  // A repair never consumes an attempt; once repairs are spent and the PR is
+  // still CONFLICTING the run escalates to a human, announced once. A PR whose
+  // mergeability is still `unknown` never reaches this list — it is re-polled.
+  let repairsQueuedThisSweep = 0;
+  for (const conflicting of snapshot.conflictingPrs) {
+    if (blockedRunIds.has(conflicting.runId)) continue;
+    if (conflicting.integrationsMade >= snapshot.maxIntegrationAttempts) {
+      if (!snapshot.announcedIntegrationEscalations.includes(conflicting.runId)) {
+        actions.push({
+          type: "escalateConflict",
+          runId: conflicting.runId,
+          issueRef: conflicting.issueRef,
+          prNumber: conflicting.prNumber,
+          armed: conflicting.armed,
+          integrationsMade: conflicting.integrationsMade,
+        });
+      }
+      continue;
+    }
+    if (conflicting.hasRepairTask) continue; // a repair is already in flight
+    repairsQueuedThisSweep++;
+    actions.push({
+      type: "repairPr",
+      runId: conflicting.runId,
+      issueRef: conflicting.issueRef,
+      prNumber: conflicting.prNumber,
+      integration: conflicting.integrationsMade + 1,
+    });
+  }
+
+  // A parked run whose PR is mergeable again after a conflict: end the episode
+  // so a later, unrelated conflict earns its own repairs rather than being
+  // judged against a stale count.
+  for (const resolved of snapshot.resolvedConflicts) {
+    if (blockedRunIds.has(resolved.runId)) continue;
+    actions.push({
+      type: "clearIntegration",
+      runId: resolved.runId,
+      issueRef: resolved.issueRef,
     });
   }
 
@@ -839,8 +954,9 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // Priority order: in-flight work already holds its slot (it is counted in
   // `occupied`, and a fix-up turn delivered above decremented `slotsLeft`),
   // a queued interactive task reserves the next free slot, an
-  // already-claimed implement task or a queued review pass reserves the slot
-  // it is waiting for, and only what remains may go to new autonomous claims.
+  // already-claimed implement task or a queued review, repair or triage pass
+  // reserves the slot it is waiting for, and only what remains may go to new
+  // autonomous claims.
   const claimableSlots = Math.max(
     0,
     slotsLeft -
@@ -848,6 +964,8 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       snapshot.queuedImplementCount -
       snapshot.queuedReviewCount -
       reviewsQueuedThisSweep -
+      snapshot.queuedRepairCount -
+      repairsQueuedThisSweep -
       snapshot.queuedTriageCount -
       triagesQueuedThisSweep
   );

@@ -7,7 +7,7 @@
 
 import { db } from "@/db";
 import { messages, projects, runs, tasks } from "@/db/schema";
-import { and, eq, inArray, isNotNull, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { newId } from "../../ulid";
 import { getConfig, PLATFORM_REPO_URL } from "../../config";
 import { getOctokit, isGitHubConfigured } from "../../github/client";
@@ -31,6 +31,7 @@ import {
   notifyAttemptsExhausted,
   notifyDailyCapReached,
   notifyGateConfigError,
+  notifyIntegrationEscalation,
   notifyReviewBlocked,
   notifySlotsSaturated,
   notifyTriageRecommendation,
@@ -46,9 +47,11 @@ import {
   type AutonomySnapshot,
   type AwaitingReview,
   type CandidateIssue,
+  type ConflictingPr,
   type PendingGateEvaluation,
   type PendingTriage,
   type PendingVerdict,
+  type ResolvedConflict,
   type SettledPr,
   type TriageCandidate,
 } from "./decide";
@@ -67,10 +70,16 @@ import {
   labelNames,
   parseBlockedByRefs,
 } from "./ticket";
-import { buildImplementPrompt, buildReviewPrompt, buildTriagePrompt } from "./workflow";
+import {
+  buildImplementPrompt,
+  buildRepairPrompt,
+  buildReviewPrompt,
+  buildTriagePrompt,
+} from "./workflow";
 import {
   DAILY_AUTONOMOUS_CAP_USD,
   MAX_ATTEMPTS,
+  MAX_INTEGRATION_ATTEMPTS,
   MAX_INTERRUPTIONS_PER_TICKET,
   MAX_REVIEW_CYCLES_PER_ATTEMPT,
   MAX_TRIAGE_PASSES_PER_ISSUE,
@@ -104,6 +113,10 @@ const announcedGateConfigErrors = new Set<string>();
 // not post (executor-level, e.g. REVIEWER_GH_TOKEN missing).
 const announcedVerdictErrors = new Set<string>();
 const announcedReviewPostFailures = new Set<string>();
+// Run IDs whose merge-conflict escalation (issue #54) the owner has already
+// been told about — once per stall, not once per sweep. Pruned as runs leave
+// the conflicting set (repaired, resolved by a human, or the PR closed).
+const announcedIntegrationEscalations = new Set<string>();
 // Triage-task IDs whose unparseable exit the owner has already been told
 // about — once per failure, not once per sweep. Pruned as issues leave the
 // needs-triage set.
@@ -322,6 +335,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     maxAttempts: MAX_ATTEMPTS,
     maxInterruptions: MAX_INTERRUPTIONS_PER_TICKET,
     maxReviewCycles: MAX_REVIEW_CYCLES_PER_ATTEMPT,
+    maxIntegrationAttempts: MAX_INTEGRATION_ATTEMPTS,
     todayAutonomousSpendUsd: todayAutonomousSpendUsd(now),
     dailyCapUsd: DAILY_AUTONOMOUS_CAP_USD,
     dailyCapAnnounced: dailyCapAnnouncedDay === startOfLocalDay(now).getTime(),
@@ -349,6 +363,10 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     pendingVerdicts: reviewState.pendingVerdicts,
     settledPrs: reviewState.settledPrs,
     announcedVerdictErrors: [...announcedVerdictErrors],
+    conflictingPrs: reviewState.conflictingPrs,
+    resolvedConflicts: reviewState.resolvedConflicts,
+    queuedRepairCount: queuedTasks.filter((t) => t.kind === "repair").length,
+    announcedIntegrationEscalations: [...announcedIntegrationEscalations],
     triageCandidates,
     pendingTriageResults,
     queuedTriageCount: queuedTasks.filter((t) => t.kind === "triage").length,
@@ -367,10 +385,14 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
   awaitingReview: AwaitingReview[];
   pendingVerdicts: PendingVerdict[];
   settledPrs: SettledPr[];
+  conflictingPrs: ConflictingPr[];
+  resolvedConflicts: ResolvedConflict[];
 }> {
   const awaitingReview: AwaitingReview[] = [];
   const pendingVerdicts: PendingVerdict[] = [];
   const settledPrs: SettledPr[] = [];
+  const conflictingPrs: ConflictingPr[] = [];
+  const resolvedConflicts: ResolvedConflict[] = [];
 
   const reviewable = allRuns.filter(
     (r) =>
@@ -384,6 +406,15 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
   }
   for (const runId of [...announcedReviewPostFailures]) {
     if (!reviewable.some((r) => r.id === runId)) announcedReviewPostFailures.delete(runId);
+  }
+  // The conflict escalation is likewise re-announced only if the run leaves
+  // the reviewing/gated set and returns — a run being repaired is
+  // `implementing`, so this prunes as soon as a repair or a human's fix moves
+  // the PR back to mergeable (or closes it).
+  for (const runId of [...announcedIntegrationEscalations]) {
+    if (!reviewable.some((r) => r.id === runId)) {
+      announcedIntegrationEscalations.delete(runId);
+    }
   }
 
   for (const run of reviewable) {
@@ -404,6 +435,40 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
     }
 
     const armed = run.status === "reviewing";
+
+    // Integration (issue #54): a parked PR the tracker reports CONFLICTING is
+    // repaired or escalated ahead of the review pipeline — reviewing a PR that
+    // cannot merge is wasted work, and the repair re-triggers review on its
+    // push. `unknown` mergeability is re-polled next sweep, never a verdict.
+    if (pr.mergeable === "conflicting") {
+      const hasRepairTask =
+        db
+          .select({ id: tasks.id })
+          .from(tasks)
+          .where(
+            and(
+              eq(tasks.runId, run.id),
+              eq(tasks.kind, "repair"),
+              inArray(tasks.status, ["queued", "running"])
+            )
+          )
+          .get() != null;
+      conflictingPrs.push({
+        runId: run.id,
+        issueRef: run.githubIssue,
+        prNumber: run.pullRequestNumber!,
+        armed,
+        integrationsMade: run.integrationCount,
+        hasRepairTask,
+      });
+      continue;
+    }
+    // A repaired PR that is mergeable again ends its conflict episode: the
+    // reset lets a later, unrelated conflict earn its own repairs. It still
+    // proceeds through the normal pipeline below.
+    if (pr.mergeable === "mergeable" && run.integrationCount > 0) {
+      resolvedConflicts.push({ runId: run.id, issueRef: run.githubIssue });
+    }
 
     if (run.reviewResult != null) {
       pendingVerdicts.push({
@@ -443,15 +508,23 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
     });
   }
 
-  return { awaitingReview, pendingVerdicts, settledPrs };
+  return { awaitingReview, pendingVerdicts, settledPrs, conflictingPrs, resolvedConflicts };
 }
 
-/** The implement task a run owns (a run has at most one implement pass). */
-function implementTaskOf(runId: string) {
+/**
+ * A run's current working pass: its implement pass, or the integration-repair
+ * pass (issue #54) that supersedes it once a conflict is being merged out. The
+ * most recently created of the two is the live one, so gate evaluation, fix-up
+ * delivery and container release all follow it rather than a stale earlier
+ * pass (a repaired run has both an old, completed implement task and a live
+ * repair task).
+ */
+function workingTaskOf(runId: string) {
   return db
     .select({ id: tasks.id, status: tasks.status, containerStatus: tasks.containerStatus })
     .from(tasks)
-    .where(and(eq(tasks.runId, runId), eq(tasks.kind, "implement")))
+    .where(and(eq(tasks.runId, runId), inArray(tasks.kind, ["implement", "repair"])))
+    .orderBy(desc(tasks.createdAt))
     .get();
 }
 
@@ -463,13 +536,13 @@ function implementTaskOf(runId: string) {
  * diff is still moving — evaluating gates now would arm a stale decision.
  */
 function implementPassSettled(runId: string): boolean {
-  const implementTask = implementTaskOf(runId);
-  if (!implementTask) return false;
+  const workingTask = workingTaskOf(runId);
+  if (!workingTask) return false;
 
   const settled =
-    implementTask.status === "running"
-      ? implementTask.containerStatus === "idle"
-      : implementTask.status === "completed" || implementTask.status === "failed";
+    workingTask.status === "running"
+      ? workingTask.containerStatus === "idle"
+      : workingTask.status === "completed" || workingTask.status === "failed";
   if (!settled) return false;
 
   const undelivered = db
@@ -477,7 +550,7 @@ function implementPassSettled(runId: string): boolean {
     .from(messages)
     .where(
       and(
-        eq(messages.taskId, implementTask.id),
+        eq(messages.taskId, workingTask.id),
         eq(messages.role, "user"),
         isNull(messages.deliveredAt)
       )
@@ -486,12 +559,12 @@ function implementPassSettled(runId: string): boolean {
   return undelivered == null;
 }
 
-/** The run's implement task, if its container is still alive to take a
- * fix-up turn. */
+/** The run's working task (implement or repair), if its container is still
+ * alive to take a fix-up turn. */
 function liveImplementTaskId(runId: string): string | null {
-  const implementTask = implementTaskOf(runId);
-  if (!implementTask || implementTask.status !== "running") return null;
-  return getActiveTasks().has(implementTask.id) ? implementTask.id : null;
+  const workingTask = workingTaskOf(runId);
+  if (!workingTask || workingTask.status !== "running") return null;
+  return getActiveTasks().has(workingTask.id) ? workingTask.id : null;
 }
 
 /** How one gate-config source read went: usable config, a real config
@@ -743,6 +816,15 @@ async function executeActions(actions: Action[]): Promise<void> {
         break;
       case "finalizeRun":
         await executeFinalizeRun(action);
+        break;
+      case "repairPr":
+        await executeRepairPr(action);
+        break;
+      case "escalateConflict":
+        await executeEscalateConflict(action);
+        break;
+      case "clearIntegration":
+        executeClearIntegration(action);
         break;
       case "exhaust":
         await executeExhaust(action);
@@ -1344,6 +1426,165 @@ async function executeFinalizeRun(
 }
 
 /**
+ * A CONFLICTING parked PR (issue #54): queue an integration-repair pass in a
+ * fresh container and move the run back to `implementing` so the normal gate
+ * evaluation and review pass re-run once the repair pushes. The repair counts
+ * against the integration bound, never an attempt. Idempotency is the run's
+ * status flip: once it is `implementing` it leaves the reviewable set, so no
+ * second repair is queued while this one runs.
+ */
+async function executeRepairPr(action: Extract<Action, { type: "repairPr" }>): Promise<void> {
+  const ref = parseIssueRef(action.issueRef);
+  if (!ref) return;
+
+  const run = db.select().from(runs).where(eq(runs.id, action.runId)).get();
+  // A stale action: only a parked run still awaiting its merge is repaired.
+  if (!run || (run.status !== "reviewing" && run.status !== "gated")) return;
+  if (run.pullRequestNumber == null) return;
+
+  // The default branch to merge in. A read failure skips this sweep with no
+  // mutation; the PR is still CONFLICTING next sweep and the repair retries.
+  let baseBranch: string;
+  let prompt: string;
+  try {
+    const octokit = await getOctokit();
+    const { data: repo } = await octokit.rest.repos.get({
+      owner: ref.owner,
+      repo: ref.repo,
+    });
+    baseBranch = repo.default_branch;
+    prompt = buildRepairPrompt({
+      repo: `${ref.owner}/${ref.repo}`,
+      issueNumber: ref.number,
+      prNumber: run.pullRequestNumber,
+      baseBranch,
+    });
+  } catch (err) {
+    console.error(`[autonomy] Could not prepare repair for ${action.issueRef}:`, err);
+    return;
+  }
+
+  // The repair runs in a fresh container; release any container still parked
+  // on this run (a reviewing run's implement pass) so nothing double-books.
+  await releaseImplementContainer(action.runId, "Repairing a merge conflict in a fresh container.");
+
+  // Queue the repair task first: it is the idempotency anchor (a queued/running
+  // repair task keeps the next sweep from double-queuing) and startTask flips
+  // the run to `implementing` when it begins, so even if the run update below
+  // never lands the repair still runs and recovers the state. The PR is carried
+  // on the task so the pass pushes to the existing PR (no second draft) and
+  // parks awaiting review rather than completing outright.
+  const now = new Date();
+  const taskId = newId();
+  db.insert(tasks)
+    .values({
+      id: taskId,
+      projectId: run.projectId,
+      title: `Integration repair — PR #${run.pullRequestNumber}`,
+      description: prompt,
+      status: "queued",
+      kind: "repair",
+      runId: run.id,
+      githubIssue: action.issueRef,
+      branch: `agent/issue-${ref.number}`,
+      pullRequestNumber: run.pullRequestNumber,
+      pullRequestUrl: run.pullRequestUrl,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .run();
+
+  // Move the run out of the reviewable set now so the review pipeline does not
+  // also act on it, and count the repair (never an attempt).
+  db.update(runs)
+    .set({
+      status: "implementing",
+      integrationCount: run.integrationCount + 1,
+      reviewVerdict: null,
+      reviewResult: null,
+      gateCategories: [],
+    })
+    .where(eq(runs.id, action.runId))
+    .run();
+
+  console.log(
+    `[autonomy] Repair ${action.integration} for ${action.issueRef} PR #${run.pullRequestNumber} -> task ${taskId}`
+  );
+  await commentOnIssue(
+    action.issueRef,
+    `PR #${run.pullRequestNumber} conflicts with the default branch — starting an ` +
+      `integration repair (merge \`${baseBranch}\` in, no rebase or force-push). ` +
+      `Gate evaluation and review re-run on the push.`
+  );
+}
+
+/**
+ * A PR still CONFLICTING after its repairs are spent (issue #54): hand it to a
+ * human. Disarm (if armed), label it `human-signoff`, land the run in `gated`
+ * and release its container. The run's spent integrationCount is what the
+ * dashboard reads as the distinct conflict needs-you entry — this is a visible
+ * stall, not silence. Mutations run before the announcement, so a failure
+ * leaves it un-announced and the next sweep retries the whole step.
+ */
+async function executeEscalateConflict(
+  action: Extract<Action, { type: "escalateConflict" }>
+): Promise<void> {
+  const ref = parseIssueRef(action.issueRef);
+  if (!ref) return;
+
+  if (action.armed) {
+    const disarmed = await disarmAutoMerge(ref.owner, ref.repo, action.prNumber);
+    if (!disarmed) return;
+  }
+  const labeled = await labelPr(ref.owner, ref.repo, action.prNumber, HUMAN_SIGNOFF_LABEL);
+  if (!labeled) return;
+
+  db.update(runs)
+    .set({ status: "gated", reviewResult: null })
+    .where(eq(runs.id, action.runId))
+    .run();
+  await releaseImplementContainer(
+    action.runId,
+    "Merge conflict needs a human — releasing container."
+  );
+
+  announcedIntegrationEscalations.add(action.runId);
+  const repairs = `${action.integrationsMade} automated repair${
+    action.integrationsMade === 1 ? "" : "s"
+  }`;
+  console.error(
+    `[autonomy] Integration repair exhausted for ${action.issueRef} PR #${action.prNumber} — needs a human`
+  );
+  await commentOnIssue(
+    action.issueRef,
+    `PR #${action.prNumber} still conflicts with the default branch after ${repairs}. ` +
+      `Auto-merge is disarmed and it is labelled \`${HUMAN_SIGNOFF_LABEL}\` — please resolve ` +
+      `the conflict and merge this one.`
+  );
+  await notifyIntegrationEscalation(getConfig().discordFleetChannelId, {
+    issueRef: action.issueRef,
+    prNumber: action.prNumber,
+    integrationsMade: action.integrationsMade,
+  });
+}
+
+/**
+ * A repaired PR that is mergeable again: close out the conflict episode by
+ * resetting the run's integration counter, so a later, unrelated conflict is
+ * judged on its own repairs rather than a stale count.
+ */
+function executeClearIntegration(
+  action: Extract<Action, { type: "clearIntegration" }>
+): void {
+  db.update(runs)
+    .set({ integrationCount: 0 })
+    .where(eq(runs.id, action.runId))
+    .run();
+  announcedIntegrationEscalations.delete(action.runId);
+  console.log(`[autonomy] ${action.issueRef} is mergeable again — integration counter reset`);
+}
+
+/**
  * A burnt ticket goes back to a human: three failed attempts, or the
  * interruption bound (a ticket whose runs keep dying to restarts must not
  * re-claim forever on the no-attempt-consumed exemption). Labels first —
@@ -1539,11 +1780,12 @@ async function executeVerdictUnparseable(payload: {
   });
 }
 
-/** Release a run's parked implement container once no further turn can use it. */
+/** Release a run's parked working container (implement or repair) once no
+ * further turn can use it. */
 async function releaseImplementContainer(runId: string, note: string): Promise<void> {
-  const implementTask = implementTaskOf(runId);
-  if (implementTask?.status === "running") {
-    await releaseParkedImplementTask(implementTask.id, note);
+  const workingTask = workingTaskOf(runId);
+  if (workingTask?.status === "running") {
+    await releaseParkedImplementTask(workingTask.id, note);
   }
 }
 

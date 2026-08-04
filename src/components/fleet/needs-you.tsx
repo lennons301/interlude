@@ -5,6 +5,7 @@ import { Chip, Eyebrow } from "./fleet-bits";
 const CAUSE_LABEL: Record<NeedsYouItem["cause"], string> = {
   blocked: "blocked question",
   signoff: "sign-off",
+  conflict: "merge conflict",
   exhausted: "exhausted",
   cap: "cap pause",
   preflight: "preflight",
@@ -13,6 +14,7 @@ const CAUSE_LABEL: Record<NeedsYouItem["cause"], string> = {
 const CAUSE_TONE: Record<NeedsYouItem["cause"], "amber" | "red"> = {
   blocked: "amber",
   signoff: "amber",
+  conflict: "red",
   exhausted: "red",
   cap: "red",
   preflight: "amber",

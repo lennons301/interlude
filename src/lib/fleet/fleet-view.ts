@@ -5,7 +5,10 @@
  * never disagree about the state of the fleet.
  */
 
-import { MAX_ATTEMPTS } from "../orchestrator/autonomy/budgets";
+import {
+  MAX_ATTEMPTS,
+  MAX_INTEGRATION_ATTEMPTS,
+} from "../orchestrator/autonomy/budgets";
 
 export interface FleetRows {
   /** Current time — passed in, never read inside */
@@ -55,6 +58,10 @@ export interface FleetRunRow {
   pullRequestNumber: number | null;
   pullRequestUrl: string | null;
   blockedQuestion: string | null;
+  /** Integration repairs spent this conflict episode (issue #54): a gated run
+   * at or past MAX_INTEGRATION_ATTEMPTS is a stalled merge conflict, not a
+   * plain sign-off */
+  integrationCount: number;
   claimedAt: Date;
   startedAt: Date | null;
   finishedAt: Date | null;
@@ -64,7 +71,7 @@ export interface FleetTaskRow {
   id: string;
   projectId: string;
   runId: string | null;
-  kind: "interactive" | "implement" | "review" | "triage";
+  kind: "interactive" | "implement" | "review" | "triage" | "repair";
   title: string;
   status: "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled";
   containerStatus: "setup" | "running" | "idle" | "completing" | null;
@@ -84,6 +91,7 @@ export { MAX_ATTEMPTS };
 export type NeedsYouCause =
   | "blocked"
   | "signoff"
+  | "conflict"
   | "exhausted"
   | "cap"
   | "preflight";
@@ -306,23 +314,35 @@ export function buildFleetView(rows: FleetRows): FleetView {
     });
   }
 
+  // A gated run is normally a clean sign-off wait, but one whose integration
+  // repairs are spent (issue #54) is stalled on a merge conflict — a distinct,
+  // red, "resolve it" state rather than silence or an ordinary sign-off.
   for (const run of rows.runs.filter((r) => r.status === "gated")) {
-    needsYou.push({
-      cause: "signoff",
-      severity: "amber",
-      context: runContext(run),
-      body: run.pullRequestNumber
-        ? `PR #${run.pullRequestNumber} waits for your sign-off`
-        : "PR waits for your sign-off",
-      action: run.pullRequestUrl
-        ? {
-            label: run.pullRequestNumber
-              ? `Review PR #${run.pullRequestNumber}`
-              : "Review PR",
-            href: run.pullRequestUrl,
-          }
-        : null,
-    });
+    const pr = run.pullRequestNumber;
+    const link = (label: string): NeedsYouItem["action"] =>
+      run.pullRequestUrl ? { label, href: run.pullRequestUrl } : null;
+
+    if (run.integrationCount >= MAX_INTEGRATION_ATTEMPTS) {
+      needsYou.push({
+        cause: "conflict",
+        severity: "red",
+        context: runContext(run),
+        body: pr
+          ? `PR #${pr} still conflicts with the default branch — resolve and merge`
+          : "PR still conflicts with the default branch — resolve and merge",
+        action: link(pr ? `Resolve PR #${pr}` : "Resolve PR"),
+      });
+    } else {
+      needsYou.push({
+        cause: "signoff",
+        severity: "amber",
+        context: runContext(run),
+        body: pr
+          ? `PR #${pr} waits for your sign-off`
+          : "PR waits for your sign-off",
+        action: link(pr ? `Review PR #${pr}` : "Review PR"),
+      });
+    }
   }
 
   // An exhausted ticket needs a human until either they re-arm it (a newer
