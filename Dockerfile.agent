@@ -5,7 +5,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     iproute2 \
+    jq \
     && rm -rf /var/lib/apt/lists/*
+
+# yq (mikefarah) — a standalone YAML processor, not packaged for Debian.
+# Paired with jq (above) so in-container repo checks and review-gates tooling
+# that parse JSON/YAML can validate their own work; the platform repo's
+# checks/tests/*.sh need both (issue #71). Pinned by version and verified by
+# SHA-256 because it's a raw binary download.
+ARG YQ_VERSION=v4.53.3
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+         amd64) yq_sha256="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4" ;; \
+         arm64) yq_sha256="578648e463a11c1b6db6010cbf41eafed6bee79466fcffa1bb446672cf7945ea" ;; \
+         *) echo "unsupported arch for yq: $arch" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${arch}" -o /usr/local/bin/yq \
+    && echo "${yq_sha256}  /usr/local/bin/yq" | sha256sum -c - \
+    && chmod 0755 /usr/local/bin/yq \
+    && yq --version
 
 RUN corepack enable && corepack prepare pnpm@latest --activate
 RUN npm install -g @anthropic-ai/claude-code
