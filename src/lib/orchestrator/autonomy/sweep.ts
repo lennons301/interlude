@@ -15,6 +15,7 @@ import { fetchFileFromDefaultBranch } from "../../github/contents";
 import {
   addLabelToIssue,
   commentOnIssue,
+  listRecentIssueComments,
   parseIssueRef,
   removeLabelFromIssue,
 } from "../../github/issues";
@@ -86,6 +87,11 @@ import {
 } from "./budgets";
 
 const SWEEP_INTERVAL_MS = 30_000;
+
+/** How many of an issue's most-recent comments a retry's prompt carries as
+ * history (issue #73) — enough to reach the prior attempts' reports and any
+ * human guidance added between them, without unbounding the prompt. */
+const RETRY_COMMENT_TAIL = 20;
 
 /** Run statuses that mean "this issue is being worked" — not re-claimable,
  * and (issue #24) its containers are off-limits to the reaper. */
@@ -1808,6 +1814,24 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
       return;
     }
 
+    // A retry starts amnesiac unless it is handed the prior attempts' failure
+    // reasons and the tail of the issue's comments (issue #73). Both are
+    // gathered here — the ledger and GitHub are I/O — and injected into the
+    // prompt as context, never as instructions that widen authority. The first
+    // attempt has no history, so we skip the reads entirely.
+    let priorAttempts: Array<{ attempt: number; failureReason: string | null }> = [];
+    let recentComments: Awaited<ReturnType<typeof listRecentIssueComments>> = [];
+    if (action.attempt > 1) {
+      priorAttempts = db
+        .select()
+        .from(runs)
+        .where(and(eq(runs.githubIssue, action.issueRef), eq(runs.status, "failed")))
+        .all()
+        .sort((a, b) => a.attempt - b.attempt)
+        .map((r) => ({ attempt: r.attempt, failureReason: r.failureReason }));
+      recentComments = await listRecentIssueComments(action.issueRef, RETRY_COMMENT_TAIL);
+    }
+
     let prompt: string | null = null;
     let failure: string | null = null;
     try {
@@ -1817,6 +1841,8 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
         issueTitle: action.issueTitle,
         issueBody: action.issueBody,
         workflow: action.workflow,
+        priorAttempts,
+        recentComments,
       });
     } catch (err) {
       failure = err instanceof Error ? err.message : String(err);
