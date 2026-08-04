@@ -2,6 +2,16 @@ import Link from "next/link";
 import type { FleetView, RunningCard } from "@/lib/fleet/fleet-view";
 import { AttemptPips, Chip, Eyebrow, Gauge, Money, formatElapsed } from "./fleet-bits";
 
+// afk work is the green "the fleet is driving" state; supervised and
+// interactive are cool (a human is in the loop); a triage pass is the lightest
+// read-only work, so it stays quiet.
+const MODE_TONE: Record<RunningCard["mode"], "green" | "cool" | "quiet"> = {
+  afk: "green",
+  supervised: "cool",
+  interactive: "cool",
+  triage: "quiet",
+};
+
 export function RunningList({ view, now }: { view: FleetView; now: number }) {
   return (
     <section aria-label="Running" className="space-y-3">
@@ -29,7 +39,7 @@ function RunCard({ card, now }: { card: RunningCard; now: number }) {
           {card.projectName}
           {card.ticket && <span className="text-fl-ink"> {card.ticket}</span>}
         </span>
-        <Chip tone={card.mode === "afk" ? "green" : "cool"}>{card.mode}</Chip>
+        <Chip tone={MODE_TONE[card.mode]}>{card.mode}</Chip>
       </div>
 
       <p className="truncate text-sm text-fl-ink">{card.title}</p>

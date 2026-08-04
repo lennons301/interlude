@@ -64,6 +64,8 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     pullRequestUrl: null,
     blockedQuestion: null,
     integrationCount: 0,
+    reviewVerdict: null,
+    reviewResult: null,
     claimedAt: aug(1, 9),
     startedAt: aug(1, 9),
     finishedAt: null,
@@ -271,6 +273,9 @@ describe("renderDailyDigest — blocked on you", () => {
           projectId: "p1",
           githubIssue: "lennons301/lemons#35",
           status: "gated",
+          // An approved-but-gated PR is a genuine sign-off wait (issue #90):
+          // one human merge away.
+          reviewVerdict: "approve",
           claimedAt: aug(1, 10),
           pullRequestNumber: 55,
           pullRequestUrl: "https://github.com/lennons301/lemons/pull/55",
