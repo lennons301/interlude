@@ -40,6 +40,7 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
     expect(run.blockedQuestion).toBeNull();
     expect(run.pullRequestNumber).toBeNull();
     expect(run.pullRequestUrl).toBeNull();
+    expect(run.model).toBeNull();
     expect(run.startedAt).toBeNull();
     expect(run.finishedAt).toBeNull();
   });
@@ -65,6 +66,7 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
         reviewCycleCount: 2,
         interruptionCount: 1,
         blockedQuestion: "Which auth provider should this target?",
+        model: "claude-opus-4-8",
         claimedAt,
         startedAt,
         finishedAt,
@@ -78,6 +80,7 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
     expect(run.totalCostUsd).toBe(13.37);
     expect(run.gateCategories).toEqual(["migrations", "auth"]);
     expect(run.reviewVerdict).toBe("request-changes");
+    expect(run.model).toBe("claude-opus-4-8");
     expect(run.claimedAt).toEqual(claimedAt);
     expect(run.startedAt).toEqual(startedAt);
     expect(run.finishedAt).toEqual(finishedAt);

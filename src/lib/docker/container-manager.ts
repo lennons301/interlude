@@ -104,6 +104,11 @@ export interface TurnOptions {
   maxBudgetUsd?: number;
   /** Per-exec turn-limit override (a ticket's max-turns directive) */
   maxTurns?: number;
+  /**
+   * Model to pin for this turn, resolved from the task's kind (issue #74).
+   * Null/undefined passes no `--model` — the CLI resolves the account default.
+   */
+  model?: string | null;
 }
 
 export interface RunningContainer {
@@ -244,11 +249,17 @@ export async function execSetup(
   }
 }
 
-export async function execClaudeTurn(
-  options: TurnOptions
-): Promise<{ stream: NodeJS.ReadableStream; exec: Docker.Exec }> {
+/**
+ * Build the bash command a Claude turn runs inside the container. Pure and
+ * exported so the flag wiring — notably the per-kind `--model` pin (issue #74)
+ * — is unit-testable without a live Docker exec. `maxTurns`/`maxBudgetUsd`
+ * fall back to the configured defaults; `model`, when set, pins the tier and
+ * is otherwise omitted so the CLI resolves the account default as before.
+ */
+export function buildClaudeTurnCommand(
+  options: Pick<TurnOptions, "sessionId" | "maxBudgetUsd" | "maxTurns" | "model">
+): string {
   const config = getConfig();
-  const docker = getDocker();
 
   const cmdParts = [
     "cd /workspace/repo",
@@ -266,13 +277,28 @@ export async function execClaudeTurn(
     String(options.maxBudgetUsd ?? config.maxBudgetUsd),
   ];
 
+  if (options.model) {
+    // Single-quote the model id: real ids can carry shell glob metacharacters
+    // (e.g. "claude-opus-4-8[1m]"), and this runs under `bash -c`.
+    cmdParts.push("--model", `'${options.model}'`);
+  }
+
   if (options.sessionId) {
     cmdParts.push("--resume", options.sessionId);
   }
 
+  return cmdParts.join(" ");
+}
+
+export async function execClaudeTurn(
+  options: TurnOptions
+): Promise<{ stream: NodeJS.ReadableStream; exec: Docker.Exec }> {
+  const docker = getDocker();
+  const config = getConfig();
+
   const token = await getInstallationToken();
   const exec = await options.container.exec({
-    Cmd: ["bash", "-c", cmdParts.join(" ")],
+    Cmd: ["bash", "-c", buildClaudeTurnCommand(options)],
     Env: buildTurnEnv({
       prompt: options.prompt,
       gitAuthToken: token,
