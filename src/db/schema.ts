@@ -80,6 +80,13 @@ export const runs = sqliteTable("runs", {
     | { kind: "unparseable"; reason: string }
   >(),
   reviewCycleCount: int("review_cycle_count").notNull().default(0),
+  // Times a review pass produced an unparseable verdict this attempt (issue
+  // #89). A pure format slip — a substantively fine review whose final message
+  // just didn't lead with a VERDICT: line — buys one bounded re-queue with the
+  // parse failure fed back into the prompt, rather than costing a human
+  // intervention. Past MAX_UNPARSEABLE_REVIEW_RETRIES the verdict fails closed
+  // as before. Counted per attempt (never reset across review cycles).
+  reviewUnparseableCount: int("review_unparseable_count").notNull().default(0),
   // Repair passes run to resolve a CONFLICTING PR (issue #54). Counted per
   // conflict episode — reset to 0 once the PR is observed mergeable again, so
   // a fresh conflict earns fresh repairs; past MAX_INTEGRATION_ATTEMPTS a
