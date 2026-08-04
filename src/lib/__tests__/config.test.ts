@@ -60,3 +60,33 @@ describe("resolveAgentModel (issue #74)", () => {
     expect(resolveAgentModel("implement", c)).toBeNull();
   });
 });
+
+describe("resolveAgentModel ticket model override (issue #80)", () => {
+  it("lets a ticket model override the base for the work-carrying kinds", () => {
+    const c = cfg({ agentModel: "base-model" });
+    expect(resolveAgentModel("implement", c, "opus")).toBe("opus");
+    expect(resolveAgentModel("repair", c, "opus")).toBe("opus");
+    expect(resolveAgentModel("interactive", c, "opus")).toBe("opus");
+  });
+
+  it("overrides even when no base model is configured", () => {
+    const c = cfg({ agentModel: null });
+    expect(resolveAgentModel("implement", c, "sonnet")).toBe("sonnet");
+  });
+
+  it("never lets a ticket model touch the reviewer's or triage's tier", () => {
+    const c = cfg({
+      agentModel: "base-model",
+      agentModelReview: "review-model",
+      agentModelTriage: "triage-model",
+    });
+    expect(resolveAgentModel("review", c, "opus")).toBe("review-model");
+    expect(resolveAgentModel("triage", c, "opus")).toBe("triage-model");
+  });
+
+  it("falls back to the base when the override is null", () => {
+    const c = cfg({ agentModel: "base-model" });
+    expect(resolveAgentModel("implement", c, null)).toBe("base-model");
+    expect(resolveAgentModel("implement", c)).toBe("base-model");
+  });
+});
