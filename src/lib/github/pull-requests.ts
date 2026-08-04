@@ -14,10 +14,50 @@ interface CreatePrOptions {
 interface PrResult {
   number: number;
   url: string;
+  /**
+   * True when an existing open PR for the head was adopted rather than a new
+   * one created — i.e. a retry continuing a previous attempt's branch (#72).
+   */
+  adopted?: boolean;
 }
 
 /**
- * Create a draft PR. Returns the PR number and URL.
+ * The open PR whose head is `head` (GitHub allows at most one), or null. Used
+ * to adopt a previous attempt's PR when a retry continues its branch (#72):
+ * the head filter must be qualified with the repo owner, and same-repo agent
+ * branches always share the repo owner.
+ */
+export async function findOpenPrForHead(
+  owner: string,
+  repo: string,
+  head: string
+): Promise<PrResult | null> {
+  if (!isGitHubConfigured()) return null;
+
+  try {
+    const octokit = await getOctokit();
+    const { data } = await octokit.rest.pulls.list({
+      owner,
+      repo,
+      head: `${owner}:${head}`,
+      state: "open",
+      per_page: 1,
+    });
+    const pr = data[0];
+    return pr ? { number: pr.number, url: pr.html_url } : null;
+  } catch (err) {
+    console.error(`[github] Failed to look up open PR for head "${head}":`, err);
+    return null;
+  }
+}
+
+/**
+ * Ensure a draft PR exists for the branch, returning its number and URL.
+ * Normally this creates one. On an autonomous retry that adopted a previous
+ * attempt's branch (#72), the head already has an open PR and GitHub rejects a
+ * second create with 422 — so fall back to adopting that PR rather than
+ * dropping the retry's work: the caller must re-link it to mark it ready and
+ * route it to review.
  */
 export async function createDraftPr(options: CreatePrOptions): Promise<PrResult | null> {
   if (!isGitHubConfigured()) return null;
@@ -46,6 +86,13 @@ export async function createDraftPr(options: CreatePrOptions): Promise<PrResult 
 
     return { number: pr.number, url: pr.html_url };
   } catch (err) {
+    const existing = await findOpenPrForHead(options.owner, options.repo, options.head);
+    if (existing) {
+      console.log(
+        `[github] Adopting existing open PR #${existing.number} for head "${options.head}" (#72)`
+      );
+      return { ...existing, adopted: true };
+    }
     console.error(`[github] Failed to create draft PR:`, err);
     return null;
   }
