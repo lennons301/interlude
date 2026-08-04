@@ -51,6 +51,8 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     pullRequestUrl: null,
     blockedQuestion: null,
     integrationCount: 0,
+    reviewVerdict: null,
+    reviewResult: null,
     claimedAt: TODAY_9AM,
     startedAt: TODAY_9AM,
     finishedAt: null,
@@ -395,7 +397,7 @@ describe("buildFleetView — needs you", () => {
     });
   });
 
-  it("raises a gated PR waiting for human sign-off", () => {
+  it("raises a gated PR waiting for human sign-off once its review approves", () => {
     const view = buildFleetView(
       baseRows({
         projects: [makeProject({ id: "p1", name: "lemons" })],
@@ -404,6 +406,8 @@ describe("buildFleetView — needs you", () => {
             id: "r1",
             projectId: "p1",
             status: "gated",
+            // The review has landed as approve — the PR is one human merge away.
+            reviewVerdict: "approve",
             pullRequestNumber: 55,
             pullRequestUrl: "https://github.com/lennons301/lemons/pull/55",
           }),
@@ -423,6 +427,114 @@ describe("buildFleetView — needs you", () => {
         },
       },
     ]);
+  });
+
+  it("does not raise a gated PR whose review is still in flight (issue #90)", () => {
+    // The premature-firing bug: a gated run with no verdict yet was flagged as
+    // a sign-off wait. Until the review lands it is fleet activity, not a
+    // needs-you item.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "gated",
+            reviewVerdict: null,
+            reviewResult: null,
+            pullRequestNumber: 55,
+            pullRequestUrl: "https://github.com/lennons301/lemons/pull/55",
+          }),
+        ],
+        tasks: [
+          makeTask({
+            id: "t-review",
+            projectId: "p1",
+            runId: "r1",
+            kind: "review",
+            title: "Review PR #55: Add auth",
+            status: "running",
+            containerStatus: "running",
+          }),
+        ],
+      })
+    );
+
+    expect(view.needsYou).toEqual([]);
+    // It reads as fleet activity instead, under Running.
+    expect(view.running.map((c) => c.runId)).toEqual(["r1"]);
+  });
+
+  it("raises a gated PR whose reviewer escalated for sign-off", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "gated",
+            reviewVerdict: "escalate",
+            pullRequestNumber: 55,
+            pullRequestUrl: "https://github.com/lennons301/lemons/pull/55",
+          }),
+        ],
+      })
+    );
+
+    expect(view.needsYou).toEqual([
+      {
+        cause: "signoff",
+        severity: "amber",
+        context: "lemons #34 · attempt 1/3",
+        body: "PR #55 — the reviewer escalated for your sign-off",
+        action: {
+          label: "Review PR #55",
+          href: "https://github.com/lennons301/lemons/pull/55",
+        },
+      },
+    ]);
+  });
+
+  it("raises a run parked by an unparseable review verdict as its own cause (issue #90)", () => {
+    // Terminal by design: the review pass finished but its verdict could not
+    // be read, so the run is parked for a human. Distinct from a happy sign-off
+    // wait — it must not sit in `signoff` indistinguishable from one.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "gated",
+            reviewVerdict: null,
+            reviewResult: {
+              kind: "unparseable",
+              reason: "final message does not start with a VERDICT: line",
+            },
+            pullRequestNumber: 55,
+            pullRequestUrl: "https://github.com/lennons301/lemons/pull/55",
+          }),
+        ],
+      })
+    );
+
+    expect(view.needsYou).toEqual([
+      {
+        cause: "unparseable",
+        severity: "red",
+        context: "lemons #34 · attempt 1/3",
+        body: "Review verdict couldn't be read on PR #55 — parked, nothing merges until you look",
+        action: {
+          label: "Open PR #55",
+          href: "https://github.com/lennons301/lemons/pull/55",
+        },
+      },
+    ]);
+    // A parked run is not running — its review is over, not in flight.
+    expect(view.running).toEqual([]);
   });
 
   it("raises a gated PR stalled on a merge conflict as a distinct red state (issue #54)", () => {
@@ -459,8 +571,8 @@ describe("buildFleetView — needs you", () => {
   });
 
   it("keeps a repaired-and-mergeable gated PR as an ordinary sign-off", () => {
-    // A successful repair resets integrationCount to 0, so the run reads as a
-    // clean sign-off wait, not a conflict.
+    // A successful repair resets integrationCount to 0, so an approved run
+    // reads as a clean sign-off wait, not a conflict.
     const view = buildFleetView(
       baseRows({
         projects: [makeProject({ id: "p1", name: "lemons" })],
@@ -470,6 +582,7 @@ describe("buildFleetView — needs you", () => {
             projectId: "p1",
             status: "gated",
             integrationCount: 0,
+            reviewVerdict: "approve",
             pullRequestNumber: 55,
             pullRequestUrl: "https://github.com/lennons301/lemons/pull/55",
           }),
@@ -630,6 +743,7 @@ describe("buildFleetView — needs you", () => {
             projectId: "p1",
             githubIssue: "o/r#2",
             status: "gated",
+            reviewVerdict: "approve",
             pullRequestNumber: 9,
             pullRequestUrl: "https://github.com/o/r/pull/9",
           }),
@@ -804,7 +918,113 @@ describe("buildFleetView — running", () => {
     expect(view.running[0].title).toBe("Live review pass");
   });
 
-  it("excludes finished runs and containerless interactive tasks from running", () => {
+  it("surfaces a gated run under review as fleet activity with the review pass's spend (issue #90)", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "gated",
+            reviewVerdict: null,
+            reviewResult: null,
+            totalCostUsd: 9.5, // implement + review, rolled up on the run
+            budgetUsd: 20,
+          }),
+        ],
+        tasks: [
+          // The implement pass, parked idle awaiting a possible fix-up...
+          makeTask({
+            id: "t-impl",
+            projectId: "p1",
+            runId: "r1",
+            kind: "implement",
+            title: "Add auth",
+            status: "running",
+            containerStatus: "idle",
+            totalCostUsd: 7.4,
+            createdAt: new Date(2026, 7, 1, 9, 0, 0),
+          }),
+          // ...while the review pass actively runs.
+          makeTask({
+            id: "t-review",
+            projectId: "p1",
+            runId: "r1",
+            kind: "review",
+            title: "Review PR #55: Add auth",
+            status: "running",
+            containerStatus: "running",
+            totalCostUsd: 2.1,
+            turns: 1,
+            createdAt: new Date(2026, 7, 1, 9, 30, 0),
+          }),
+        ],
+      })
+    );
+
+    expect(view.needsYou).toEqual([]);
+    expect(view.running).toHaveLength(1);
+    expect(view.running[0]).toMatchObject({
+      taskId: "t-review",
+      runId: "r1",
+      title: "Review PR #55: Add auth",
+      mode: "afk",
+      phases: [
+        { name: "implement", state: "done" },
+        { name: "review", state: "current" },
+        { name: "merge", state: "todo" },
+      ],
+      turns: 1,
+      // The review pass's own spend against the review budget — not the run's
+      // rolled-up spend against the $20 attempt budget.
+      spend: { usd: 2.1, budgetUsd: 5 },
+    });
+  });
+
+  it("surfaces a triage pass as its own kind of fleet activity (issue #90)", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        tasks: [
+          makeTask({
+            id: "t-triage",
+            projectId: "p1",
+            runId: null,
+            kind: "triage",
+            title: "Triage: Add auth",
+            status: "running",
+            containerStatus: "running",
+            totalCostUsd: 0.8,
+            turns: 1,
+            githubIssue: "lennons301/lemons#90",
+            createdAt: TODAY_9AM,
+          }),
+        ],
+      })
+    );
+
+    expect(view.running).toEqual([
+      {
+        taskId: "t-triage",
+        runId: null,
+        projectName: "lemons",
+        ticket: "#90",
+        title: "Triage: Add auth",
+        mode: "triage",
+        phases: null,
+        attempt: null,
+        turns: 1,
+        startedAt: TODAY_9AM.toISOString(),
+        spend: { usd: 0.8, budgetUsd: 2 },
+      },
+    ]);
+  });
+
+  it("excludes finished runs and gated runs with no live pass from running", () => {
+    // A merged run is done; a gated run with no live container is either
+    // between sweeps or already resolved (a landed verdict routes it to
+    // needs-you), so neither reads as fleet activity.
     const view = buildFleetView(
       baseRows({
         projects: [makeProject({ id: "p1" })],

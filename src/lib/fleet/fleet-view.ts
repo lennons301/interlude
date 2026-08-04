@@ -6,6 +6,8 @@
  */
 
 import {
+  DEFAULT_REVIEW_BUDGET_USD,
+  DEFAULT_TRIAGE_BUDGET_USD,
   MAX_ATTEMPTS,
   MAX_INTEGRATION_ATTEMPTS,
 } from "../orchestrator/autonomy/budgets";
@@ -62,6 +64,19 @@ export interface FleetRunRow {
    * at or past MAX_INTEGRATION_ATTEMPTS is a stalled merge conflict, not a
    * plain sign-off */
   integrationCount: number;
+  /** The last verdict the orchestrator POSTED to GitHub for this run. A gated
+   * run is a sign-off wait only once this is `approve` (the PR is one human
+   * merge away) or `escalate` (the reviewer handed it to a human); until then
+   * its review is still in flight (issue #90). */
+  reviewVerdict: "approve" | "request-changes" | "escalate" | null;
+  /** A finished review pass's parsed output, held until the orchestrator acts.
+   * A stored `unparseable` result is terminal by design: the review couldn't be
+   * read, the run is parked for a human, and it reads as its own needs-you
+   * cause rather than an ordinary sign-off (issue #90). */
+  reviewResult:
+    | { kind: "approve" | "request-changes" | "escalate"; body: string }
+    | { kind: "unparseable"; reason: string }
+    | null;
   claimedAt: Date;
   startedAt: Date | null;
   finishedAt: Date | null;
@@ -91,6 +106,8 @@ export { MAX_ATTEMPTS };
 export type NeedsYouCause =
   | "blocked"
   | "signoff"
+  /** A run whose review verdict couldn't be read — parked for a human (#90) */
+  | "unparseable"
   | "conflict"
   | "exhausted"
   | "cap"
@@ -117,9 +134,11 @@ export interface RunningCard {
   projectName: string;
   ticket: string | null;
   title: string;
-  /** Mode chip: afk = full autonomy, supervised = forced human-signoff */
-  mode: "afk" | "supervised" | "interactive";
-  /** implement ▸ review ▸ merge pipeline; null for interactive sessions */
+  /** Card kind: afk = full autonomy, supervised = forced human-signoff,
+   * interactive = a chat session, triage = a read-only triage pass (#90) */
+  mode: "afk" | "supervised" | "interactive" | "triage";
+  /** implement ▸ review ▸ merge pipeline; null for standalone interactive
+   * sessions and triage passes, which sit outside the ticket pipeline */
   phases: { name: "implement" | "review" | "merge"; state: PhaseState }[] | null;
   attempt: { current: number; max: number } | null;
   turns: number;
@@ -206,6 +225,12 @@ const TERMINAL_TASK_STATUSES = new Set<FleetTaskRow["status"]>([
   "cancelled",
 ]);
 
+/** A live task still has a container and hasn't reached a terminal status — a
+ * stale container_status on a finished task (issue #46) is not "live". The one
+ * predicate behind slot occupancy and every run's card face. */
+const isLiveTask = (t: FleetTaskRow): boolean =>
+  t.containerStatus !== null && !TERMINAL_TASK_STATUSES.has(t.status);
+
 export function buildFleetView(rows: FleetRows): FleetView {
   const projectById = new Map(rows.projects.map((p) => [p.id, p]));
   const runById = new Map(rows.runs.map((r) => [r.id, r]));
@@ -224,9 +249,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
   // container_status='idle') must not resurrect it as a running session here.
   const occupants = rows.tasks.filter(
     (t) =>
-      !TERMINAL_TASK_STATUSES.has(t.status) &&
-      t.containerStatus !== null &&
-      !(t.kind !== "interactive" && t.containerStatus === "idle")
+      isLiveTask(t) && !(t.kind !== "interactive" && t.containerStatus === "idle")
   );
   const segments: SlotSegment[] = occupants.map((t) => {
     const run = t.runId ? runById.get(t.runId) : undefined;
@@ -263,10 +286,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
   const currentTaskOf = (runId: string) => {
     const owned = tasksOfRun(runId);
     return (
-      owned.find(
-        (t) =>
-          t.containerStatus !== null && !TERMINAL_TASK_STATUSES.has(t.status)
-      ) ??
+      owned.find(isLiveTask) ??
       owned.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] ??
       null
     );
@@ -288,6 +308,27 @@ export function buildFleetView(rows: FleetRows): FleetView {
     }
     const task = currentTaskOf(run.id);
     return task ? { label: "Open task", href: `/tasks/${task.id}` } : null;
+  };
+
+  // Where a gated run's review stands — the single source of truth for both
+  // its needs-you disposition and whether it still reads as fleet activity
+  // (issue #90), so the two can never disagree. A gated run is exactly one of
+  // these. Precedence: a spent-repairs conflict (issue #54) outranks a stored
+  // verdict, an unreadable verdict outranks a posted one, and only a posted
+  // approve/escalate is a sign-off wait; anything else means the review is
+  // still in flight.
+  type GatedDisposition =
+    | { kind: "conflict" }
+    | { kind: "unparseable" }
+    | { kind: "signoff"; verdict: "approve" | "escalate" }
+    | { kind: "in-flight" };
+  const classifyGated = (run: FleetRunRow): GatedDisposition => {
+    if (run.integrationCount >= MAX_INTEGRATION_ATTEMPTS) return { kind: "conflict" };
+    if (run.reviewResult?.kind === "unparseable") return { kind: "unparseable" };
+    if (run.reviewVerdict === "approve" || run.reviewVerdict === "escalate") {
+      return { kind: "signoff", verdict: run.reviewVerdict };
+    }
+    return { kind: "in-flight" };
   };
 
   // Ordered by what to do next: the fleet-wide pause first, then a parked
@@ -314,35 +355,51 @@ export function buildFleetView(rows: FleetRows): FleetView {
     });
   }
 
-  // A gated run is normally a clean sign-off wait, but one whose integration
-  // repairs are spent (issue #54) is stalled on a merge conflict — a distinct,
-  // red, "resolve it" state rather than silence or an ordinary sign-off.
+  // A gated run's needs-you disposition follows where its review stands
+  // (issue #90). Repairs spent → a red merge-conflict stall (issue #54); an
+  // unreadable verdict → a run parked for a human, its own distinct cause; a
+  // posted approve/escalate → a genuine sign-off wait, the PR one human step
+  // away. A gated run whose review is still in flight is fleet activity, not a
+  // needs-you item — it appears under Running until a verdict lands, so the
+  // sign-off bucket never fires prematurely on a still-reviewing PR.
   for (const run of rows.runs.filter((r) => r.status === "gated")) {
-    const pr = run.pullRequestNumber;
+    // "PR #55" when the number is known, a bare "PR" otherwise — the copy and
+    // the action label share it, so neither has to re-branch on the number.
+    const prTag = run.pullRequestNumber ? `PR #${run.pullRequestNumber}` : "PR";
     const link = (label: string): NeedsYouItem["action"] =>
       run.pullRequestUrl ? { label, href: run.pullRequestUrl } : null;
+    const disposition = classifyGated(run);
 
-    if (run.integrationCount >= MAX_INTEGRATION_ATTEMPTS) {
+    if (disposition.kind === "conflict") {
       needsYou.push({
         cause: "conflict",
         severity: "red",
         context: runContext(run),
-        body: pr
-          ? `PR #${pr} still conflicts with the default branch — resolve and merge`
-          : "PR still conflicts with the default branch — resolve and merge",
-        action: link(pr ? `Resolve PR #${pr}` : "Resolve PR"),
+        body: `${prTag} still conflicts with the default branch — resolve and merge`,
+        action: link(`Resolve ${prTag}`),
       });
-    } else {
+    } else if (disposition.kind === "unparseable") {
+      needsYou.push({
+        cause: "unparseable",
+        severity: "red",
+        context: runContext(run),
+        body: `Review verdict couldn't be read on ${prTag} — parked, nothing merges until you look`,
+        action: link(`Open ${prTag}`),
+      });
+    } else if (disposition.kind === "signoff") {
       needsYou.push({
         cause: "signoff",
         severity: "amber",
         context: runContext(run),
-        body: pr
-          ? `PR #${pr} waits for your sign-off`
-          : "PR waits for your sign-off",
-        action: link(pr ? `Review PR #${pr}` : "Review PR"),
+        body:
+          disposition.verdict === "escalate"
+            ? `${prTag} — the reviewer escalated for your sign-off`
+            : `${prTag} waits for your sign-off`,
+        action: link(`Review ${prTag}`),
       });
     }
+    // disposition.kind === "in-flight": review still running — fleet activity,
+    // surfaced under Running, deliberately not a needs-you item.
   }
 
   // An exhausted ticket needs a human until either they re-arm it (a newer
@@ -372,59 +429,102 @@ export function buildFleetView(rows: FleetRows): FleetView {
     });
   }
 
-  // Running = every run holding (or waiting on) a slot, then interactive
-  // sessions as quiet, unbudgeted cards — they hold slots too (review
-  // decision 2), they just answer to no ledger.
-  const ACTIVE_RUN_STATUSES = new Set([
+  // Running = active fleet work. Every run mid-pipeline shows its
+  // implement ▸ review ▸ merge phases; a gated run whose review is still in
+  // flight (issue #90) is activity too, not a premature sign-off, so it appears
+  // here until a verdict lands and moves it to needs-you. Interactive sessions
+  // and triage passes are quiet standalone cards holding slots outside the
+  // ticket pipeline.
+  const ACTIVE_RUN_STATUSES = new Set<FleetRunRow["status"]>([
     "claimed",
     "implementing",
     "reviewing",
     "blocked",
   ]);
-  const phasePipeline = (
-    status: FleetRunRow["status"]
-  ): NonNullable<RunningCard["phases"]> => {
-    const reviewReached = status === "reviewing";
-    return [
-      { name: "implement", state: reviewReached ? "done" : "current" },
-      { name: "review", state: reviewReached ? "current" : "todo" },
-      { name: "merge", state: "todo" },
-    ];
+  // The pass a run is currently executing. A run under review keeps its
+  // implement container parked (idle) for a possible fix-up while the review
+  // pass runs, so prefer the actively-running (non-idle) pass — otherwise the
+  // card would read as the paused implement rather than the live review.
+  const activePassOf = (runId: string): FleetTaskRow | null => {
+    const live = tasksOfRun(runId).filter(isLiveTask);
+    const busy = live.filter((t) => t.containerStatus !== "idle");
+    const pool = busy.length > 0 ? busy : live;
+    return (
+      pool.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] ??
+      null
+    );
   };
+  // The review stage is live for both the armed path (status `reviewing`) and a
+  // gated run whose review is still in flight (the only gated runs that reach
+  // Running — a landed verdict routes them to needs-you instead).
+  const phasePipeline = (
+    reviewing: boolean
+  ): NonNullable<RunningCard["phases"]> => [
+    { name: "implement", state: reviewing ? "done" : "current" },
+    { name: "review", state: reviewing ? "current" : "todo" },
+    { name: "merge", state: "todo" },
+  ];
 
   const running: RunningCard[] = rows.runs
-    .filter((r) => ACTIVE_RUN_STATUSES.has(r.status))
+    .filter(
+      (r) =>
+        ACTIVE_RUN_STATUSES.has(r.status) ||
+        // A gated run reads as activity only while its review is genuinely in
+        // flight — a live pass on a slot. Without one it is either between
+        // sweeps or already resolved, not something to show as running.
+        (r.status === "gated" &&
+          classifyGated(r).kind === "in-flight" &&
+          activePassOf(r.id) !== null)
+    )
     .sort((a, b) => a.claimedAt.getTime() - b.claimedAt.getTime())
     .map((run) => {
-      const task = currentTaskOf(run.id);
+      const pass = activePassOf(run.id);
+      const reviewing = run.status === "reviewing" || run.status === "gated";
+      // An in-flight review pass reads with its own spend against the review
+      // budget (issue #90); the run's rolled-up spend against the attempt
+      // budget would read as the implement pass and hide the review's cost.
+      const spend =
+        pass?.kind === "review"
+          ? { usd: pass.totalCostUsd, budgetUsd: DEFAULT_REVIEW_BUDGET_USD }
+          : { usd: run.totalCostUsd, budgetUsd: run.budgetUsd };
       return {
-        taskId: task?.id ?? null,
+        taskId: pass?.id ?? null,
         runId: run.id,
         projectName: projectName(run.projectId),
         ticket: ticketLabel(run.githubIssue),
-        title: task?.title ?? run.githubIssue,
+        title: pass?.title ?? run.githubIssue,
         mode: run.mode === "autonomous" ? ("afk" as const) : ("supervised" as const),
-        phases: phasePipeline(run.status),
+        phases: phasePipeline(reviewing),
         attempt: { current: run.attempt, max: MAX_ATTEMPTS },
-        turns: task?.turns ?? 0,
+        turns: pass?.turns ?? 0,
         startedAt: (run.startedAt ?? run.claimedAt).toISOString(),
-        spend: { usd: run.totalCostUsd, budgetUsd: run.budgetUsd },
+        spend,
       };
     });
 
-  for (const task of occupants.filter((t) => t.kind === "interactive")) {
+  // Standalone passes with no ticket pipeline: interactive chat sessions and
+  // read-only triage passes (issue #90). Triage reads as its own kind of work
+  // with the triage pass's spend against the triage budget; both take their
+  // face straight from the occupying task.
+  for (const task of occupants.filter(
+    (t) => t.kind === "interactive" || t.kind === "triage"
+  )) {
+    const triage = task.kind === "triage";
     running.push({
       taskId: task.id,
       runId: null,
       projectName: projectName(task.projectId),
       ticket: ticketLabel(task.githubIssue),
       title: task.title,
-      mode: "interactive",
+      mode: triage ? "triage" : "interactive",
       phases: null,
       attempt: null,
       turns: task.turns,
       startedAt: task.createdAt.toISOString(),
-      spend: { usd: task.totalCostUsd, budgetUsd: null },
+      spend: {
+        usd: task.totalCostUsd,
+        budgetUsd: triage ? DEFAULT_TRIAGE_BUDGET_USD : null,
+      },
     });
   }
 
