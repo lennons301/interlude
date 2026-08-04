@@ -45,6 +45,7 @@ COPY --from=build /app/custom-server.js ./custom-server.js
 COPY --from=build /app/docs/agents/workflows ./docs/agents/workflows
 # Vendored reviewer definition, injected into review pass prompts (issue #17)
 COPY --from=build /app/docs/agents/review-pass.md ./docs/agents/review-pass.md
+COPY --from=build /app/docs/agents/triage-pass.md ./docs/agents/triage-pass.md
 
 # Install the Doppler CLI so the app boots via `doppler run`, pulling orchestrator
 # secrets from the Doppler `interlude/prd` config at runtime. DOPPLER_TOKEN (a prd

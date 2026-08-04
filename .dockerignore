@@ -8,3 +8,4 @@ node_modules
 docs
 !docs/agents/workflows
 !docs/agents/review-pass.md
+!docs/agents/triage-pass.md
