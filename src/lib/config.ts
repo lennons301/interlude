@@ -16,6 +16,19 @@ export interface AppConfig {
   agentModelReview: string | null;
   /** Optional cheaper-tier override for triage passes; falls back to `agentModel` */
   agentModelTriage: string | null;
+  /**
+   * Reasoning-effort level the CLI runs an implement pass at — and the base
+   * every other pass falls back to (issue #81). The headless CLI exposes this
+   * as a first-class `--effort` flag (levels low | medium | high | xhigh |
+   * max), orthogonal to `--model`. Null = pass no `--effort`, letting the CLI
+   * resolve its own default (the pre-#81 behaviour), so leaving it unset
+   * changes nothing. Set it to pin the depth and record it on the run row.
+   */
+  agentEffort: string | null;
+  /** Optional lower-effort override for review passes; falls back to `agentEffort` */
+  agentEffortReview: string | null;
+  /** Optional lower-effort override for triage passes; falls back to `agentEffort` */
+  agentEffortTriage: string | null;
   gitUserName: string;
   gitUserEmail: string;
   keepContainers: boolean;
@@ -92,6 +105,9 @@ export function getConfig(): AppConfig {
     agentModel: process.env.AGENT_MODEL ?? null,
     agentModelReview: process.env.AGENT_MODEL_REVIEW ?? null,
     agentModelTriage: process.env.AGENT_MODEL_TRIAGE ?? null,
+    agentEffort: process.env.AGENT_EFFORT ?? null,
+    agentEffortReview: process.env.AGENT_EFFORT_REVIEW ?? null,
+    agentEffortTriage: process.env.AGENT_EFFORT_TRIAGE ?? null,
     gitUserName: process.env.GIT_USER_NAME ?? "Interlude Agent",
     gitUserEmail: process.env.GIT_USER_EMAIL ?? "agent@interlude.dev",
     keepContainers: process.env.KEEP_CONTAINERS === "true",
@@ -156,6 +172,37 @@ export function resolveAgentModel(
       return config.agentModelTriage ?? config.agentModel;
     default:
       return config.agentModel;
+  }
+}
+
+/**
+ * Which reasoning-effort level a turn of the given kind runs at (issue #81),
+ * the other half of the cost/quality dial alongside the model. `AGENT_EFFORT`
+ * is the base — implement, repair and interactive passes all use it; the
+ * read-heavy review and triage passes may name a lower level via
+ * `AGENT_EFFORT_REVIEW` / `AGENT_EFFORT_TRIAGE` and otherwise fall back to it.
+ * Null means "pass no `--effort`": the CLI resolves its own default, exactly
+ * as before this was configurable — issue #81 deliberately ships no default
+ * other than the CLI's own.
+ *
+ * `ticketEffort` is a per-ticket `effort:` directive, already clamped to the
+ * allowlist by the directive parser. When present it overrides the base for
+ * the pass kinds that carry a run's tier — implement, repair and interactive.
+ * Review and triage keep their own (lower) level regardless: the ticket
+ * chooses the effort its *work* runs at, not the reviewer's.
+ */
+export function resolveAgentEffort(
+  kind: AgentPassKind,
+  config: AppConfig = getConfig(),
+  ticketEffort: string | null = null
+): string | null {
+  switch (kind) {
+    case "review":
+      return config.agentEffortReview ?? config.agentEffort;
+    case "triage":
+      return config.agentEffortTriage ?? config.agentEffort;
+    default:
+      return ticketEffort ?? config.agentEffort;
   }
 }
 
