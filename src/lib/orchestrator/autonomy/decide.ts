@@ -115,11 +115,12 @@ export interface PendingVerdict {
   implementTaskId: string | null;
   /** Fix-up turns already bought by request-changes verdicts this attempt */
   reviewCycleCount: number;
-  /** Unparseable verdicts this attempt has already been re-queued for
+  /** Unparseable verdicts this attempt has already produced
    * (runs.reviewUnparseableCount). Below `maxUnparseableRetries` an
    * unparseable verdict buys one more review pass with the parse failure fed
-   * back; at or past it the verdict fails closed (issue #89). */
-  unparseableRetriesMade: number;
+   * back; at or past it the verdict fails closed (issue #89). Named to mirror
+   * the sibling `reviewCycleCount`. */
+  reviewUnparseableCount: number;
 }
 
 /** An implement turn that just finished, up for a park-or-proceed decision. */
@@ -714,7 +715,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       // pass earns one bounded re-queue with the parse failure fed back before
       // anyone is paged (issue #89). Like a first review, this reserves intent,
       // not a slot: the queue applies the capacity check when it starts.
-      if (pending.unparseableRetriesMade < snapshot.maxUnparseableRetries) {
+      if (pending.reviewUnparseableCount < snapshot.maxUnparseableRetries) {
         reviewsQueuedThisSweep++;
         actions.push({
           type: "retryReview",

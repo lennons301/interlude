@@ -163,7 +163,7 @@ function makeVerdict(overrides: Partial<PendingVerdict> = {}): PendingVerdict {
     result: { kind: "approve", body: "Verified against the ticket." },
     implementTaskId: "task-impl-1",
     reviewCycleCount: 0,
-    unparseableRetriesMade: 0,
+    reviewUnparseableCount: 0,
     ...overrides,
   };
 }
@@ -1355,7 +1355,7 @@ describe("decideNext — verdict-to-action mapping", () => {
         pendingVerdicts: [
           makeVerdict({
             result: { kind: "unparseable", reason: "no VERDICT line" },
-            unparseableRetriesMade: 0,
+            reviewUnparseableCount: 0,
           }),
         ],
       })
@@ -1381,7 +1381,7 @@ describe("decideNext — verdict-to-action mapping", () => {
         pendingVerdicts: [
           makeVerdict({
             result: { kind: "unparseable", reason: "still no VERDICT line" },
-            unparseableRetriesMade: 1,
+            reviewUnparseableCount: 1,
           }),
         ],
       })
@@ -1405,13 +1405,13 @@ describe("decideNext — verdict-to-action mapping", () => {
   it("never arms auto-merge from an unparseable verdict, whatever else is pending", () => {
     // The safety property: unparseable -> no armAutoMerge/postVerdict, whether
     // it retries (first) or fails closed (second).
-    for (const unparseableRetriesMade of [0, 1]) {
+    for (const reviewUnparseableCount of [0, 1]) {
       const actions = decideNext(
         makeSnapshot({
           pendingVerdicts: [
             makeVerdict({
               result: { kind: "unparseable", reason: "garbled output" },
-              unparseableRetriesMade,
+              reviewUnparseableCount,
             }),
           ],
           awaitingReview: [makeAwaitingReview({ runId: "run-2", prNumber: 44 })],
@@ -1431,7 +1431,7 @@ describe("decideNext — verdict-to-action mapping", () => {
         pendingVerdicts: [
           makeVerdict({
             result: { kind: "unparseable", reason: "no VERDICT line" },
-            unparseableRetriesMade: 1,
+            reviewUnparseableCount: 1,
           }),
         ],
         announcedVerdictErrors: ["run-1"],

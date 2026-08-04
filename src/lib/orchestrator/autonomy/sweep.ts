@@ -491,7 +491,7 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
         result: run.reviewResult,
         implementTaskId: liveImplementTaskId(run.id),
         reviewCycleCount: run.reviewCycleCount,
-        unparseableRetriesMade: run.reviewUnparseableCount,
+        reviewUnparseableCount: run.reviewUnparseableCount,
       });
       continue;
     }
