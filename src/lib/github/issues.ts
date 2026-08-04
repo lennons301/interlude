@@ -38,6 +38,49 @@ export async function commentOnIssue(
   }
 }
 
+/** One issue comment, reduced to what a retry prompt needs (issue #73). */
+export interface IssueComment {
+  /** GitHub login of the author ("" if the API omitted it) */
+  author: string;
+  body: string;
+}
+
+/**
+ * The tail of an issue's comments, oldest-first — the executor's own attempt
+ * reports plus any human guidance added between attempts (issue #73). Returns
+ * at most `limit` comments, and an empty list when GitHub is unconfigured or
+ * the read fails, so a retry prompt degrades to no history rather than
+ * blocking the claim.
+ */
+export async function listRecentIssueComments(
+  issueRef: string,
+  limit: number
+): Promise<IssueComment[]> {
+  if (!isGitHubConfigured()) return [];
+
+  const parsed = parseIssueRef(issueRef);
+  if (!parsed) return [];
+
+  try {
+    const octokit = await getOctokit();
+    // Comments come oldest-first; paginate the full history so the tail is the
+    // genuinely most-recent slice even on a comment-heavy issue.
+    const comments = await octokit.paginate(octokit.rest.issues.listComments, {
+      owner: parsed.owner,
+      repo: parsed.repo,
+      issue_number: parsed.number,
+      per_page: 100,
+    });
+    return comments.slice(-limit).map((c) => ({
+      author: c.user?.login ?? "",
+      body: c.body ?? "",
+    }));
+  } catch (err) {
+    console.error(`[github] Failed to list comments on ${issueRef}:`, err);
+    return [];
+  }
+}
+
 /**
  * Add a label to an issue. Returns false on failure so callers can retry on
  * a later sweep; adding an already-present label is a GitHub no-op.
