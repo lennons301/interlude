@@ -4,13 +4,16 @@ import { HUMAN_SIGNOFF_LABEL } from "../gates";
 
 // The check-to-status/reason mapping is the whole safety property here: a repo
 // is only "passing" when every requirement holds, and a failure must name what
-// is missing. computePreflight's GitHub I/O is a thin shell over this; the pure
-// function is what gets exhaustive coverage.
+// is missing — and, per issue #70, name the *right* missing thing: an
+// unreachable repo, a forbidden endpoint, and an unprotected branch are three
+// different owner actions. computePreflight's GitHub I/O is a thin shell over
+// this; the pure function is what gets exhaustive coverage.
 
 const ALL_PASS: PreflightChecks = {
   repoConfigured: true,
-  appInstalled: true,
-  branchProtected: true,
+  repo: "owner/repo",
+  repoAccessible: true,
+  branchProtection: "protected",
   reviewerIsCollaborator: true,
   signoffLabelExists: true,
 };
@@ -25,8 +28,9 @@ describe("evaluatePreflight", () => {
     // is the prerequisite that actually blocks the owner.
     const result = evaluatePreflight({
       repoConfigured: false,
-      appInstalled: false,
-      branchProtected: false,
+      repo: "",
+      repoAccessible: false,
+      branchProtection: "unprotected",
       reviewerIsCollaborator: false,
       signoffLabelExists: false,
     });
@@ -34,21 +38,35 @@ describe("evaluatePreflight", () => {
     expect(result.reason).toBe("no GitHub repo configured (needs gitUrl and githubRepo)");
   });
 
-  it("short-circuits to the App reason when the App is missing", () => {
-    // Prerequisite failure hides the checks that couldn't be gathered anyway.
+  it("short-circuits to the access reason, naming the repo, when unreachable", () => {
+    // Prerequisite failure hides the checks that couldn't be gathered anyway,
+    // and names the repo so the owner knows which installation to fix.
     const result = evaluatePreflight({
       ...ALL_PASS,
-      appInstalled: false,
-      branchProtected: false,
+      repoAccessible: false,
+      branchProtection: "unprotected",
       reviewerIsCollaborator: false,
       signoffLabelExists: false,
     });
     expect(result.status).toBe("failing");
-    expect(result.reason).toBe("the GitHub App is not installed on the repository");
+    expect(result.reason).toBe(
+      "the GitHub App cannot access owner/repo — add it to the App installation"
+    );
   });
 
-  it("names a missing branch protection", () => {
-    const result = evaluatePreflight({ ...ALL_PASS, branchProtected: false });
+  it("names the missing App permission when branch protection is forbidden", () => {
+    // A 403 on getBranchProtection is a permission gap, not a missing
+    // protection — the owner grants "Administration: read", they don't add a
+    // protection rule (issue #70).
+    const result = evaluatePreflight({ ...ALL_PASS, branchProtection: "forbidden" });
+    expect(result.status).toBe("failing");
+    expect(result.reason).toBe(
+      'the GitHub App lacks the "Administration: read" permission needed to read branch protection on owner/repo'
+    );
+  });
+
+  it("names a genuinely unprotected default branch", () => {
+    const result = evaluatePreflight({ ...ALL_PASS, branchProtection: "unprotected" });
     expect(result.status).toBe("failing");
     expect(result.reason).toBe("no branch protection on the default branch");
   });
@@ -68,14 +86,29 @@ describe("evaluatePreflight", () => {
   it("accumulates every independent failure into one reason", () => {
     const result = evaluatePreflight({
       repoConfigured: true,
-      appInstalled: true,
-      branchProtected: false,
+      repo: "owner/repo",
+      repoAccessible: true,
+      branchProtection: "unprotected",
       reviewerIsCollaborator: false,
       signoffLabelExists: false,
     });
     expect(result.status).toBe("failing");
     expect(result.reason).toBe(
       `no branch protection on the default branch; the reviewer account is not a collaborator; the "${HUMAN_SIGNOFF_LABEL}" label is missing`
+    );
+  });
+
+  it("accumulates a forbidden protection probe alongside other failures", () => {
+    // The forbidden reason participates in accumulation just like the others,
+    // so a repo with several gaps still lists them all in one pass.
+    const result = evaluatePreflight({
+      ...ALL_PASS,
+      branchProtection: "forbidden",
+      signoffLabelExists: false,
+    });
+    expect(result.status).toBe("failing");
+    expect(result.reason).toBe(
+      `the GitHub App lacks the "Administration: read" permission needed to read branch protection on owner/repo; the "${HUMAN_SIGNOFF_LABEL}" label is missing`
     );
   });
 });

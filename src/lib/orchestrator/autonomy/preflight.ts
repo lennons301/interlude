@@ -7,9 +7,16 @@
  *
  * The mapping from check results to a stored status + human-readable reason is
  * a pure function (`evaluatePreflight`) so it is table-testable with no I/O;
- * `computePreflight` is the thin GitHub-API shell that gathers the booleans.
+ * `computePreflight` is the thin GitHub-API shell that gathers the results.
  * The reason names what is missing, which is what the dashboard's "needs you"
  * bucket and the pause log surface to the owner.
+ *
+ * The access-failure path is deliberately fine-grained (issue #70): a repo the
+ * App can't reach, an endpoint the App lacks permission for, and a genuinely
+ * unprotected branch are three different owner actions, so they get three
+ * distinct reasons rather than collapsing into a misleading "no branch
+ * protection". We also never guess the default branch — a wrong guess would
+ * 404 the protection probe and mis-report a configured repo as unprotected.
  */
 
 import { db } from "@/db";
@@ -20,14 +27,25 @@ import { getConfig } from "../../config";
 import { getOctokit, isGitHubConfigured } from "../../github/client";
 import { HUMAN_SIGNOFF_LABEL } from "./gates";
 
-/** Every requirement autonomy depends on, as plain booleans. */
+/**
+ * Outcome of probing branch protection on the default branch. Three states
+ * because each needs a different owner action: turn protection on
+ * (`unprotected`), grant the App the "Administration: read" permission the
+ * endpoint requires (`forbidden`, a 403 "Resource not accessible by
+ * integration"), or nothing (`protected`).
+ */
+export type BranchProtectionStatus = "protected" | "unprotected" | "forbidden";
+
+/** Every requirement autonomy depends on. */
 export interface PreflightChecks {
   /** Project has both a gitUrl and an owner/repo githubRepo */
   repoConfigured: boolean;
-  /** The GitHub App installation can see the repo (clone/push + API) */
-  appInstalled: boolean;
-  /** The default branch has branch protection */
-  branchProtected: boolean;
+  /** owner/repo, named in the reasons that must point the owner at a repo */
+  repo: string;
+  /** The App installation can reach the repo at all (repos.get succeeds) */
+  repoAccessible: boolean;
+  /** Branch-protection probe on the repo's real default branch */
+  branchProtection: BranchProtectionStatus;
   /** The reviewer machine account is a collaborator on the repo */
   reviewerIsCollaborator: boolean;
   /** The `human-signoff` label exists so gated PRs can be labelled */
@@ -45,21 +63,32 @@ const PREFLIGHT_REFRESH_INTERVAL_MS = 5 * 60_000;
 
 /**
  * Pure: map gathered checks to a stored status and a reason that names what is
- * missing. `repoConfigured` and `appInstalled` are prerequisites — without them
- * the remaining checks cannot even be gathered, so a failure there short-circuits
- * to a single clear reason rather than a misleading list. The other three are
- * independent and accumulate, so the owner fixes everything in one pass.
+ * missing. `repoConfigured` and `repoAccessible` are prerequisites — without
+ * them the remaining checks cannot even be gathered, so a failure there
+ * short-circuits to a single clear reason rather than a misleading list. The
+ * rest are independent and accumulate, so the owner fixes everything in one
+ * pass. A branch-protection `forbidden` names the missing App permission, not a
+ * missing protection, so the owner grants the right thing (issue #70).
  */
 export function evaluatePreflight(checks: PreflightChecks): PreflightResult {
   if (!checks.repoConfigured) {
     return { status: "failing", reason: "no GitHub repo configured (needs gitUrl and githubRepo)" };
   }
-  if (!checks.appInstalled) {
-    return { status: "failing", reason: "the GitHub App is not installed on the repository" };
+  if (!checks.repoAccessible) {
+    return {
+      status: "failing",
+      reason: `the GitHub App cannot access ${checks.repo} — add it to the App installation`,
+    };
   }
 
   const missing: string[] = [];
-  if (!checks.branchProtected) missing.push("no branch protection on the default branch");
+  if (checks.branchProtection === "forbidden") {
+    missing.push(
+      `the GitHub App lacks the "Administration: read" permission needed to read branch protection on ${checks.repo}`
+    );
+  } else if (checks.branchProtection === "unprotected") {
+    missing.push("no branch protection on the default branch");
+  }
   if (!checks.reviewerIsCollaborator) missing.push("the reviewer account is not a collaborator");
   if (!checks.signoffLabelExists) missing.push(`the "${HUMAN_SIGNOFF_LABEL}" label is missing`);
 
@@ -70,9 +99,19 @@ export function evaluatePreflight(checks: PreflightChecks): PreflightResult {
 
 type ProjectRow = typeof projects.$inferSelect;
 
+/** The HTTP status of an Octokit error, if it carries one. */
+function httpStatus(err: unknown): number | undefined {
+  return typeof err === "object" && err !== null ? (err as { status?: number }).status : undefined;
+}
+
 /** Did an Octokit call fail with an HTTP 404 (as opposed to a real error)? */
 function isNotFound(err: unknown): boolean {
-  return typeof err === "object" && err !== null && (err as { status?: number }).status === 404;
+  return httpStatus(err) === 404;
+}
+
+/** A 403 — the App is authenticated but lacks the permission for this endpoint. */
+function isForbidden(err: unknown): boolean {
+  return httpStatus(err) === 403;
 }
 
 /**
@@ -90,6 +129,31 @@ async function apiCheck(label: string, fn: () => Promise<unknown>): Promise<bool
       console.error(`[preflight] ${label} failed:`, err);
     }
     return false;
+  }
+}
+
+/**
+ * Probe branch protection on the default branch, keeping the three outcomes
+ * distinct (issue #70): a 403 "Resource not accessible by integration" means
+ * the App is missing the "Administration: read" permission the endpoint needs,
+ * a 404 means the branch is genuinely unprotected, and success means protected.
+ * Any other (transient) error fails closed as `unprotected` but is logged, so
+ * the "no branch protection" reason it produces can be traced to its real cause.
+ */
+async function probeBranchProtection(
+  octokit: Awaited<ReturnType<typeof getOctokit>>,
+  owner: string,
+  repo: string,
+  branch: string
+): Promise<BranchProtectionStatus> {
+  try {
+    await octokit.rest.repos.getBranchProtection({ owner, repo, branch });
+    return "protected";
+  } catch (err) {
+    if (isForbidden(err)) return "forbidden";
+    if (isNotFound(err)) return "unprotected";
+    console.error(`[preflight] getBranchProtection ${owner}/${repo} failed:`, err);
+    return "unprotected";
   }
 }
 
@@ -121,11 +185,11 @@ async function isReviewerCollaborator(
 }
 
 /**
- * Gather the four autonomy checks for a project via the GitHub API. Every
- * network failure resolves a check to `false` (fail closed) so an unreachable
- * or under-permissioned repo never reads as ready. Downstream checks are only
- * attempted once the App is confirmed installed, since they all need the
- * installation token.
+ * Gather the autonomy checks for a project via the GitHub API. Every network
+ * failure resolves to the fail-closed value so an unreachable or
+ * under-permissioned repo never reads as ready. Downstream checks are only
+ * attempted once the App is confirmed to reach the repo, since they all need
+ * the installation token — and only against the repo's real default branch.
  */
 export async function computePreflight(project: ProjectRow): Promise<PreflightResult> {
   const repoConfigured = !!project.gitUrl && !!project.githubRepo;
@@ -133,53 +197,59 @@ export async function computePreflight(project: ProjectRow): Promise<PreflightRe
   if (!repoConfigured || !owner || !repo) {
     return evaluatePreflight({
       repoConfigured: false,
-      appInstalled: false,
-      branchProtected: false,
+      repo: project.githubRepo ?? "",
+      repoAccessible: false,
+      branchProtection: "unprotected",
       reviewerIsCollaborator: false,
       signoffLabelExists: false,
     });
   }
 
+  const repoLabel = `${owner}/${repo}`;
   const octokit = await getOctokit();
 
-  // App installed — a repos.get through the installation token both proves the
-  // App can see the repo and yields the default branch for the next check.
-  let appInstalled = false;
-  let defaultBranch = "main";
+  // A repos.get through the installation token both proves the App can reach the
+  // repo and yields the *real* default branch. We never fall back to a guessed
+  // "main": a wrong guess would 404 the protection probe on a non-default branch
+  // and mis-report a configured repo as unprotected (issue #70).
+  let repoAccessible = false;
+  let defaultBranch: string | null = null;
   try {
     const { data } = await octokit.rest.repos.get({ owner, repo });
-    appInstalled = true;
+    repoAccessible = true;
     defaultBranch = data.default_branch;
   } catch (err) {
-    if (!isNotFound(err)) {
-      console.error(`[preflight] repos.get failed for ${owner}/${repo}:`, err);
+    // A 404/403 both mean the installation can't see this repo — a first-class,
+    // short-circuiting failure. Anything else is a real fault worth logging.
+    if (!isNotFound(err) && !isForbidden(err)) {
+      console.error(`[preflight] repos.get failed for ${repoLabel}:`, err);
     }
   }
 
-  if (!appInstalled) {
+  if (!repoAccessible || !defaultBranch) {
     return evaluatePreflight({
       repoConfigured: true,
-      appInstalled: false,
-      branchProtected: false,
+      repo: repoLabel,
+      repoAccessible: false,
+      branchProtection: "unprotected",
       reviewerIsCollaborator: false,
       signoffLabelExists: false,
     });
   }
 
-  const [branchProtected, reviewerIsCollaborator, signoffLabelExists] = await Promise.all([
-    apiCheck(`getBranchProtection ${owner}/${repo}`, () =>
-      octokit.rest.repos.getBranchProtection({ owner, repo, branch: defaultBranch })
-    ),
+  const [branchProtection, reviewerIsCollaborator, signoffLabelExists] = await Promise.all([
+    probeBranchProtection(octokit, owner, repo, defaultBranch),
     isReviewerCollaborator(octokit, owner, repo),
-    apiCheck(`getLabel ${owner}/${repo}`, () =>
+    apiCheck(`getLabel ${repoLabel}`, () =>
       octokit.rest.issues.getLabel({ owner, repo, name: HUMAN_SIGNOFF_LABEL })
     ),
   ]);
 
   return evaluatePreflight({
     repoConfigured: true,
-    appInstalled: true,
-    branchProtected,
+    repo: repoLabel,
+    repoAccessible: true,
+    branchProtection,
     reviewerIsCollaborator,
     signoffLabelExists,
   });
