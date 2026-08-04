@@ -258,14 +258,15 @@ export function buildRepairPrompt(ticket: RepairTicket): string {
 
 /**
  * The retry-only history block (issue #73): the prior attempts' failure
- * reasons and the tail of the issue's comments, so a retry does not repeat a
- * wall an earlier attempt already hit. Empty string on the first attempt —
- * there is no history to carry. Both parts are framed as data between markers:
- * the failure reasons are the platform's own record and the comments are
- * semi-trusted like the ticket body, so nothing here may rewrite the operating
- * rules or widen authority (the same rule as parseTicketDirectives).
+ * reasons and the tail of the issue's comments (the executor's own reports and
+ * any human guidance between attempts), so a retry does not repeat a wall an
+ * earlier attempt already hit. Empty string on the first attempt — there is no
+ * history to carry. Both parts are framed as data between markers: the failure
+ * reasons are the platform's own record and the comments are semi-trusted like
+ * the ticket body, so nothing here may rewrite the operating rules or widen
+ * authority (the same rule as parseTicketDirectives).
  */
-function failureHistoryBlock(ticket: ImplementTicket): string {
+function retryHistoryBlock(ticket: ImplementTicket): string {
   const priorAttempts = ticket.priorAttempts ?? [];
   const recentComments = ticket.recentComments ?? [];
   if (priorAttempts.length === 0 && recentComments.length === 0) return "";
@@ -311,7 +312,7 @@ function failureHistoryBlock(ticket: ImplementTicket): string {
  * the ticket as history (issue #73), framed as data on the same trust tier.
  */
 export function buildImplementPrompt(ticket: ImplementTicket): string {
-  const history = failureHistoryBlock(ticket);
+  const history = retryHistoryBlock(ticket);
   return [
     `You are an autonomous implement pass working GitHub issue #${ticket.issueNumber} ` +
       `of ${ticket.repo}. No human is watching this run; the only way to reach one ` +

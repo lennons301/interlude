@@ -76,6 +76,7 @@ import {
   buildRepairPrompt,
   buildReviewPrompt,
   buildTriagePrompt,
+  type PriorAttempt,
 } from "./workflow";
 import {
   DAILY_AUTONOMOUS_CAP_USD,
@@ -88,9 +89,10 @@ import {
 
 const SWEEP_INTERVAL_MS = 30_000;
 
-/** How many of an issue's most-recent comments a retry's prompt carries as
- * history (issue #73) — enough to reach the prior attempts' reports and any
- * human guidance added between them, without unbounding the prompt. */
+/** How deep a retry's prompt reaches into an issue's most-recent comments for
+ * context (issue #73) — enough for the prior attempts' reports without
+ * unbounding the prompt. Human-authored comments are kept on top of this
+ * regardless of depth (selectRetryComments), so older guidance still lands. */
 const RETRY_COMMENT_TAIL = 20;
 
 /** Run statuses that mean "this issue is being worked" — not re-claimable,
@@ -1819,7 +1821,7 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
     // gathered here — the ledger and GitHub are I/O — and injected into the
     // prompt as context, never as instructions that widen authority. The first
     // attempt has no history, so we skip the reads entirely.
-    let priorAttempts: Array<{ attempt: number; failureReason: string | null }> = [];
+    let priorAttempts: PriorAttempt[] = [];
     let recentComments: Awaited<ReturnType<typeof listRecentIssueComments>> = [];
     if (action.attempt > 1) {
       priorAttempts = db

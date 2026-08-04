@@ -46,15 +46,33 @@ export interface IssueComment {
 }
 
 /**
- * The tail of an issue's comments, oldest-first — the executor's own attempt
- * reports plus any human guidance added between attempts (issue #73). Returns
- * at most `limit` comments, and an empty list when GitHub is unconfigured or
- * the read fails, so a retry prompt degrades to no history rather than
- * blocking the claim.
+ * Which of an issue's comments (oldest-first) a retry carries as history: the
+ * most-recent `recentTail` for context, plus every human-authored comment
+ * however old. Lifecycle chatter — the executor's own claim/PR/complete
+ * comments — is posted as a bot and can push an early human comment past the
+ * tail, but a human's guidance ("the fix is X") must still reach the next
+ * attempt (issue #73), so human comments are floored in regardless of depth.
+ * Order is preserved and a comment kept by both rules appears once. Pure.
+ */
+export function selectRetryComments<T extends { authorIsBot: boolean }>(
+  comments: T[],
+  recentTail: number
+): T[] {
+  const tailCutoff = comments.length - recentTail;
+  return comments.filter((c, i) => i >= tailCutoff || !c.authorIsBot);
+}
+
+/**
+ * The comments a retry's prompt carries as history (issue #73) — the executor's
+ * own recent attempt reports plus any human guidance added between attempts,
+ * oldest-first. Returns an empty list when GitHub is unconfigured or the read
+ * fails, so a retry prompt degrades to no history rather than blocking the
+ * claim. `recentTail` bounds the always-kept recent slice; human comments are
+ * kept on top of it (see selectRetryComments).
  */
 export async function listRecentIssueComments(
   issueRef: string,
-  limit: number
+  recentTail: number
 ): Promise<IssueComment[]> {
   if (!isGitHubConfigured()) return [];
 
@@ -63,17 +81,22 @@ export async function listRecentIssueComments(
 
   try {
     const octokit = await getOctokit();
-    // Comments come oldest-first; paginate the full history so the tail is the
-    // genuinely most-recent slice even on a comment-heavy issue.
+    // Comments come oldest-first; paginate the full history so both the tail
+    // and the human-comment floor see the genuinely complete thread.
     const comments = await octokit.paginate(octokit.rest.issues.listComments, {
       owner: parsed.owner,
       repo: parsed.repo,
       issue_number: parsed.number,
       per_page: 100,
     });
-    return comments.slice(-limit).map((c) => ({
+    const shaped = comments.map((c) => ({
       author: c.user?.login ?? "",
       body: c.body ?? "",
+      authorIsBot: c.user?.type === "Bot",
+    }));
+    return selectRetryComments(shaped, recentTail).map(({ author, body }) => ({
+      author,
+      body,
     }));
   } catch (err) {
     console.error(`[github] Failed to list comments on ${issueRef}:`, err);
