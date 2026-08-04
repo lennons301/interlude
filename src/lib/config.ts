@@ -182,10 +182,17 @@ export type AgentPassKind =
  * triage may name a cheaper tier via `AGENT_MODEL_REVIEW` / `AGENT_MODEL_TRIAGE`
  * and otherwise fall back to it. Null means "pass no `--model`": the CLI
  * resolves the account default, exactly as before this was configurable.
+ *
+ * `ticketModel` is a per-ticket `model:` directive (issue #80), already
+ * clamped to the allowlist by the directive parser. When present it overrides
+ * the base for the pass kinds that carry a run's tier — implement, repair and
+ * interactive. Review and triage keep their own (cheaper) tier regardless: the
+ * ticket chooses the model its *work* runs on, not the reviewer's.
  */
 export function resolveAgentModel(
   kind: AgentPassKind,
-  config: AppConfig = getConfig()
+  config: AppConfig = getConfig(),
+  ticketModel: string | null = null
 ): string | null {
   switch (kind) {
     case "review":
@@ -193,7 +200,7 @@ export function resolveAgentModel(
     case "triage":
       return config.agentModelTriage ?? config.agentModel;
     default:
-      return config.agentModel;
+      return ticketModel ?? config.agentModel;
   }
 }
 

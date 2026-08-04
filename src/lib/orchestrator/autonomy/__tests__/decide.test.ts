@@ -205,6 +205,7 @@ describe("decideNext — claiming", () => {
         budgetUsd: 20,
         checkpoint: null,
         maxTurns: null,
+        model: null,
         effort: null,
         workflow: { source: "default" },
       },
@@ -274,6 +275,18 @@ describe("decideNext — claiming", () => {
     const actions = decideNext(makeSnapshot());
 
     expect(claims(actions)[0]).toMatchObject({ budgetUsd: 20, maxTurns: null });
+  });
+
+  it("carries an allowlisted model directive, and ignores an unknown one", () => {
+    const honoured = "Spec.\n\n## Workflow\n\nmodel: haiku\n";
+    expect(
+      claims(decideNext(makeSnapshot({ candidates: [makeCandidate({ body: honoured })] })))[0]
+    ).toMatchObject({ model: "haiku" });
+
+    const ignored = "Spec.\n\n## Workflow\n\nmodel: gpt-4\n";
+    expect(
+      claims(decideNext(makeSnapshot({ candidates: [makeCandidate({ body: ignored })] })))[0]
+    ).toMatchObject({ model: null });
   });
 
   it("claims a checkpoint ticket as a supervised run, carrying the checkpoint text", () => {

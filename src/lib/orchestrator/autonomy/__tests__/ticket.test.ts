@@ -3,6 +3,7 @@ import {
   parseBlockedByRefs,
   parseTicketDirectives,
   rawEffortDirective,
+  rawModelDirective,
   selectWorkflow,
   shouldCreateInteractiveTask,
 } from "../ticket";
@@ -15,6 +16,7 @@ describe("parseTicketDirectives", () => {
       checkpoint: null,
       workflow: null,
       effort: null,
+      model: null,
     });
   });
 
@@ -65,6 +67,7 @@ describe("parseTicketDirectives", () => {
       "- checkpoint: pause before deploy",
       "- workflow: tdd",
       "- Effort: HIGH",
+      "- Model: Opus",
     ].join("\n");
     expect(parseTicketDirectives(body)).toEqual({
       budget: 30,
@@ -72,6 +75,7 @@ describe("parseTicketDirectives", () => {
       checkpoint: "pause before deploy",
       workflow: "tdd",
       effort: "high",
+      model: "opus",
     });
   });
 
@@ -98,6 +102,7 @@ describe("parseTicketDirectives", () => {
       checkpoint: null,
       workflow: null,
       effort: null,
+      model: null,
     });
   });
 
@@ -125,6 +130,7 @@ describe("parseTicketDirectives", () => {
       checkpoint: null,
       workflow: null,
       effort: null,
+      model: null,
     });
   });
 
@@ -158,6 +164,7 @@ describe("parseTicketDirectives", () => {
       checkpoint: null,
       workflow: null,
       effort: null,
+      model: null,
     });
   });
 
@@ -171,6 +178,26 @@ describe("parseTicketDirectives", () => {
     expect(parseTicketDirectives("## Workflow\neffort: 11").effort).toBeNull();
     expect(parseTicketDirectives("## Workflow\neffort:").effort).toBeNull();
   });
+
+  it("parses a model directive and lowercases the alias", () => {
+    expect(parseTicketDirectives("## Workflow\nmodel: sonnet").model).toBe("sonnet");
+    expect(parseTicketDirectives("## Workflow\nmodel: HAIKU").model).toBe("haiku");
+  });
+
+  it("ignores a model value that is not on the allowlist", () => {
+    // A semi-trusted body may pick a tier, never name an arbitrary model.
+    expect(parseTicketDirectives("## Workflow\nmodel: gpt-4").model).toBeNull();
+    expect(
+      parseTicketDirectives("## Workflow\nmodel: claude-opus-4-8[1m]").model
+    ).toBeNull();
+    expect(parseTicketDirectives("## Workflow\nmodel:").model).toBeNull();
+  });
+
+  it("takes the first model when the directive repeats", () => {
+    expect(parseTicketDirectives("## Workflow\nmodel: opus\nmodel: haiku").model).toBe(
+      "opus"
+    );
+  });
 });
 
 describe("rawEffortDirective (issue #81)", () => {
@@ -182,6 +209,24 @@ describe("rawEffortDirective (issue #81)", () => {
   it("is null when no effort directive is present or the section is missing", () => {
     expect(rawEffortDirective("## Workflow\nbudget: $30")).toBeNull();
     expect(rawEffortDirective("Just prose.\n\neffort: max")).toBeNull();
+  });
+});
+
+describe("rawModelDirective", () => {
+  it("returns the raw requested value, un-clamped", () => {
+    expect(rawModelDirective("## Workflow\nmodel: gpt-4")).toBe("gpt-4");
+    expect(rawModelDirective("## Workflow\nModel: Opus")).toBe("Opus");
+  });
+
+  it("returns null when there is no model directive or it is bare", () => {
+    expect(rawModelDirective("## Workflow\nbudget: $30")).toBeNull();
+    expect(rawModelDirective("## Workflow\nmodel:")).toBeNull();
+    expect(rawModelDirective("Just prose.\nmodel: opus")).toBeNull();
+  });
+
+  it("ignores a model directive inside a code fence", () => {
+    const body = ["## Workflow", "```", "model: opus", "```"].join("\n");
+    expect(rawModelDirective(body)).toBeNull();
   });
 });
 

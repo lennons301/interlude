@@ -71,6 +71,7 @@ import {
   labelNames,
   parseBlockedByRefs,
   rawEffortDirective,
+  rawModelDirective,
 } from "./ticket";
 import {
   buildImplementPrompt,
@@ -1862,6 +1863,10 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
         budgetUsd: action.budgetUsd,
         checkpoint: action.checkpoint,
         maxTurns: action.maxTurns,
+        // A `model:` directive (already allowlist-clamped) pins the tier from
+        // claim time (issue #80); the implement pass resolves through the same
+        // value and records it here. Null keeps the configured default.
+        model: action.model,
         // An `effort:` directive (already allowlist-clamped) pins the level
         // from claim time (issue #81); the implement pass resolves through the
         // same value and records it here. Null keeps the configured default.
@@ -1901,9 +1906,25 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
       `[autonomy] Claimed ${action.issueRef} (attempt ${action.attempt}) -> task ${taskId}`
     );
 
-    // Note the effort directive on the run's issue thread (issue #81): the
-    // honoured level when one was picked, or an unrecognised request that was
+    // Note the model directive on the run's issue thread (issue #80): the
+    // honoured tier when one was picked, or an unrecognised request that was
     // ignored — never silently swallowed, never fatal.
+    let modelNote = "";
+    if (action.model) {
+      modelNote = `\n\nModel: \`${action.model}\` (ticket directive).`;
+    } else {
+      const rawModel = rawModelDirective(action.issueBody);
+      if (rawModel) {
+        console.warn(
+          `[autonomy] Ignoring unrecognised model directive "${rawModel}" on ` +
+            `${action.issueRef} — using the default model`
+        );
+        modelNote = `\n\nModel directive \`${rawModel}\` not recognised — running on the default model.`;
+      }
+    }
+
+    // Note the effort directive the same way (issue #81) — the honoured level,
+    // or an unrecognised request that was ignored; never silently swallowed.
     let effortNote = "";
     if (action.effort) {
       effortNote = `\n\nEffort: \`${action.effort}\` (ticket directive).`;
@@ -1921,7 +1942,7 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
     const domain = process.env.DOMAIN ?? "interludes.co.uk";
     await commentOnIssue(
       action.issueRef,
-      `Claimed by Interlude — attempt ${action.attempt}/${MAX_ATTEMPTS}.${effortNote}\n\n` +
+      `Claimed by Interlude — attempt ${action.attempt}/${MAX_ATTEMPTS}.${modelNote}${effortNote}\n\n` +
         `[View task](https://${domain}/tasks/${taskId})`
     );
   } finally {

@@ -296,6 +296,9 @@ export type Action =
       checkpoint: string | null;
       /** Per-exec turn limit from a max-turns directive; null = the default */
       maxTurns: number | null;
+      /** Model alias from a `model:` directive (issue #80), clamped to the
+       * allowlist; null = the configured default. Recorded on runs.model. */
+      model: string | null;
       /** Reasoning-effort level from an `effort:` directive (issue #81),
        * clamped to the allowlist; null = the configured default. Recorded on
        * runs.effort. */
@@ -995,6 +998,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       budgetUsd: directives.budget ?? snapshot.attemptBudgetUsd,
       checkpoint: directives.checkpoint,
       maxTurns: directives.maxTurns,
+      model: directives.model,
       effort: directives.effort,
       workflow: selectWorkflow(candidate.body, candidate.labels),
     });

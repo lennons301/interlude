@@ -210,6 +210,17 @@ pass normally but then forces `human-signoff` regardless of gate matches, carryi
 `<text>` as the note for what needs your decision. Use it for
 agent-doable-but-risky work you want to eyeball before merge.
 
+### Model tier (`model:`)
+
+A `model: <alias>` directive in a ticket's Workflow section picks the tier the
+implement (and repair) pass runs on — `opus`, `sonnet` or `haiku`. Use it to
+match spend to the work: a mechanical rename doesn't need Opus; a gnarly
+refactor can ask for it explicitly. The set is a fixed allowlist (issue text is
+semi-trusted, so it may only select a tier, never name an arbitrary model); an
+unrecognised value is ignored — the run keeps its default model and the claim
+comment notes that it was dropped. Review and triage passes keep their own
+(cheaper) tier regardless. The chosen tier is recorded on the run.
+
 ### Reasoning effort (`effort:`)
 
 `AGENT_EFFORT` pins the CLI's reasoning depth (the `--effort` flag) for the
