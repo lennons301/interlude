@@ -5,6 +5,17 @@ export interface AppConfig {
   anthropicApiKey: string | null;
   /** Long-lived OAuth token from `claude setup-token`, injected into agent containers at exec — the sole subscription-auth path (#28) */
   claudeCodeOauthToken: string | null;
+  /**
+   * Model the CLI runs for an implement pass — and the base every other pass
+   * falls back to (issue #74). Null = pass no `--model`, letting the CLI
+   * resolve the account default (the pre-#74 behaviour), so leaving it unset
+   * changes nothing. Set it to pin the tier and record it on the run row.
+   */
+  agentModel: string | null;
+  /** Optional cheaper-tier override for review passes; falls back to `agentModel` */
+  agentModelReview: string | null;
+  /** Optional cheaper-tier override for triage passes; falls back to `agentModel` */
+  agentModelTriage: string | null;
   gitUserName: string;
   gitUserEmail: string;
   keepContainers: boolean;
@@ -78,6 +89,9 @@ export function getConfig(): AppConfig {
   _config = {
     anthropicApiKey,
     claudeCodeOauthToken,
+    agentModel: process.env.AGENT_MODEL ?? null,
+    agentModelReview: process.env.AGENT_MODEL_REVIEW ?? null,
+    agentModelTriage: process.env.AGENT_MODEL_TRIAGE ?? null,
     gitUserName: process.env.GIT_USER_NAME ?? "Interlude Agent",
     gitUserEmail: process.env.GIT_USER_EMAIL ?? "agent@interlude.dev",
     keepContainers: process.env.KEEP_CONTAINERS === "true",
@@ -114,6 +128,35 @@ export function getConfig(): AppConfig {
 /** Clear cached config so next getConfig() re-reads from env/filesystem */
 export function resetConfig(): void {
   _config = null;
+}
+
+/** The pass kinds a Claude turn can run as (mirrors `tasks.kind`). */
+export type AgentPassKind =
+  | "interactive"
+  | "implement"
+  | "review"
+  | "triage"
+  | "repair";
+
+/**
+ * Which model a turn of the given kind runs on (issue #74). `AGENT_MODEL` is
+ * the base — implement, repair and interactive passes all use it; review and
+ * triage may name a cheaper tier via `AGENT_MODEL_REVIEW` / `AGENT_MODEL_TRIAGE`
+ * and otherwise fall back to it. Null means "pass no `--model`": the CLI
+ * resolves the account default, exactly as before this was configurable.
+ */
+export function resolveAgentModel(
+  kind: AgentPassKind,
+  config: AppConfig = getConfig()
+): string | null {
+  switch (kind) {
+    case "review":
+      return config.agentModelReview ?? config.agentModel;
+    case "triage":
+      return config.agentModelTriage ?? config.agentModel;
+    default:
+      return config.agentModel;
+  }
 }
 
 // Platform repo URL — cloned into agent containers for estate-wide context

@@ -22,7 +22,7 @@ import {
   TRIAGE_MAX_TURNS,
 } from "./autonomy/budgets";
 import { scanPorts } from "./port-scanner";
-import { getConfig } from "../config";
+import { getConfig, resolveAgentModel, type AgentPassKind } from "../config";
 import { getDocker } from "../docker/client";
 import { commentOnIssue, parseIssueRef } from "../github/issues";
 import { parseRepoFromGitUrl } from "../github/repo";
@@ -36,7 +36,7 @@ const activeTasks = new Map<
   {
     container: RunningContainer;
     state: "setup" | "running" | "idle" | "completing";
-    kind: "interactive" | "implement" | "review" | "triage" | "repair";
+    kind: AgentPassKind;
   }
 >();
 
@@ -117,6 +117,11 @@ export async function startTask(taskId: string): Promise<void> {
     ? db.select().from(runs).where(eq(runs.id, task.runId)).get()
     : undefined;
 
+  // The model this pass runs on, pinned by kind (issue #74). Passed to every
+  // turn as `--model` and recorded on the run row below so spend is
+  // interpretable against the tier it was earned on.
+  const passModel = resolveAgentModel(task.kind);
+
   // Update task status
   updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
   insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
@@ -126,8 +131,16 @@ export async function startTask(taskId: string): Promise<void> {
   // pass keeps the run's original startedAt so the dashboard's elapsed time
   // does not jump when a conflict is repaired mid-life.
   if (run && isImplementShaped) {
+    // Record the implement-pass model on the run — it drives the bulk of a
+    // run's spend, so it is the tier the run's cost should be read against. A
+    // review pass writes its own (cheaper) model nowhere on the run, leaving
+    // this value stable. Repair keeps the original implement model (same tier).
     db.update(runs)
-      .set({ status: "implementing", startedAt: run.startedAt ?? new Date() })
+      .set({
+        status: "implementing",
+        startedAt: run.startedAt ?? new Date(),
+        model: passModel,
+      })
       .where(eq(runs.id, run.id))
       .run();
   }
@@ -213,6 +226,7 @@ export async function startTask(taskId: string): Promise<void> {
           ? undefined
           : (run?.maxTurns ?? undefined),
       captureRaw: isReviewPass || isTriagePass,
+      model: passModel,
     });
 
     // Store session ID and cost
@@ -353,7 +367,12 @@ async function runTurn(
   running: RunningContainer,
   prompt: string,
   sessionId?: string,
-  opts?: { maxBudgetUsd?: number; maxTurns?: number; captureRaw?: boolean }
+  opts?: {
+    maxBudgetUsd?: number;
+    maxTurns?: number;
+    captureRaw?: boolean;
+    model?: string | null;
+  }
 ): Promise<TurnResult & { raw?: string }> {
   const handler = createOutputHandler(taskId);
   const rawChunks: Buffer[] = [];
@@ -364,6 +383,7 @@ async function runTurn(
     sessionId,
     maxBudgetUsd: opts?.maxBudgetUsd,
     maxTurns: opts?.maxTurns,
+    model: opts?.model,
   });
 
   // Race: wait for the exec stream to close OR the "result" event from Claude.
@@ -487,6 +507,7 @@ export async function processQueuedMessages(
       {
         maxBudgetUsd: run ? run.budgetUsd - (task.totalCostUsd ?? 0) : undefined,
         maxTurns: run?.maxTurns ?? undefined,
+        model: resolveAgentModel(task.kind),
       }
     );
 

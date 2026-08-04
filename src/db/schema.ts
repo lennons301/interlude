@@ -48,6 +48,10 @@ export const runs = sqliteTable("runs", {
   budgetUsd: real("budget_usd").notNull(),
   // Per-exec turn limit from a ticket's max-turns directive; null = default
   maxTurns: int("max_turns"),
+  // Model the implement pass ran on (issue #74), so this run's spend is
+  // interpretable against its tier. Set when the implement pass starts; null
+  // means AGENT_MODEL was unset and the CLI resolved the account default.
+  model: text("model"),
   totalCostUsd: real("total_cost_usd").notNull().default(0),
   pullRequestNumber: int("pull_request_number"),
   pullRequestUrl: text("pull_request_url"),

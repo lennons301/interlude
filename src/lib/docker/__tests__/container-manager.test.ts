@@ -3,6 +3,7 @@ import {
   buildSetupScript,
   buildPushScript,
   buildTurnEnv,
+  buildClaudeTurnCommand,
   createWorkspaceContainer,
 } from "../container-manager";
 
@@ -36,6 +37,8 @@ vi.mock("@/lib/config", () => ({
     claudeCodeOauthToken: "sk-ant-oat01-test",
     gitUserName: "Interlude Agent",
     gitUserEmail: "agent@interlude.dev",
+    maxTurns: 50,
+    maxBudgetUsd: 20,
   }),
 }));
 
@@ -133,6 +136,45 @@ describe("buildPushScript", () => {
   it("does not embed any token", () => {
     expect(script).not.toContain("GIT_TOKEN");
     expect(script).not.toContain("GIT_AUTH_TOKEN");
+  });
+});
+
+describe("buildClaudeTurnCommand", () => {
+  it("runs Claude with stream-json and the configured limits", () => {
+    const cmd = buildClaudeTurnCommand({});
+    expect(cmd).toContain("cd /workspace/repo");
+    expect(cmd).toContain("claude -p");
+    expect(cmd).toContain("--output-format stream-json");
+    expect(cmd).toContain("--max-turns 50");
+    expect(cmd).toContain("--max-budget-usd 20");
+  });
+
+  it("prefers per-exec budget and turn overrides over the config defaults", () => {
+    const cmd = buildClaudeTurnCommand({ maxTurns: 100, maxBudgetUsd: 75 });
+    expect(cmd).toContain("--max-turns 100");
+    expect(cmd).toContain("--max-budget-usd 75");
+  });
+
+  it("omits --model entirely when no model is pinned (issue #74)", () => {
+    expect(buildClaudeTurnCommand({ model: null })).not.toContain("--model");
+    expect(buildClaudeTurnCommand({})).not.toContain("--model");
+  });
+
+  it("pins the model with --model when one is resolved (issue #74)", () => {
+    const cmd = buildClaudeTurnCommand({ model: "claude-sonnet-5" });
+    expect(cmd).toContain("--model 'claude-sonnet-5'");
+  });
+
+  it("single-quotes the model so glob metacharacters stay literal (issue #74)", () => {
+    const cmd = buildClaudeTurnCommand({ model: "claude-opus-4-8[1m]" });
+    // The bracketed id must not be exposed to bash pathname expansion.
+    expect(cmd).toContain("--model 'claude-opus-4-8[1m]'");
+    expect(cmd).not.toContain("--model claude-opus-4-8[1m]");
+  });
+
+  it("appends --resume for a follow-up turn", () => {
+    const cmd = buildClaudeTurnCommand({ sessionId: "sess-123" });
+    expect(cmd).toContain("--resume sess-123");
   });
 });
 
