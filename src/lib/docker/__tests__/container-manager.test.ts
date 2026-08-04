@@ -172,6 +172,22 @@ describe("buildClaudeTurnCommand", () => {
     expect(cmd).not.toContain("--model claude-opus-4-8[1m]");
   });
 
+  it("omits --effort entirely when no level is pinned (issue #81)", () => {
+    expect(buildClaudeTurnCommand({ effort: null })).not.toContain("--effort");
+    expect(buildClaudeTurnCommand({})).not.toContain("--effort");
+  });
+
+  it("pins the reasoning effort with --effort when one is resolved (issue #81)", () => {
+    const cmd = buildClaudeTurnCommand({ effort: "high" });
+    expect(cmd).toContain("--effort 'high'");
+  });
+
+  it("carries both --model and --effort together, independently (issue #81)", () => {
+    const cmd = buildClaudeTurnCommand({ model: "claude-opus-4-8", effort: "max" });
+    expect(cmd).toContain("--model 'claude-opus-4-8'");
+    expect(cmd).toContain("--effort 'max'");
+  });
+
   it("appends --resume for a follow-up turn", () => {
     const cmd = buildClaudeTurnCommand({ sessionId: "sess-123" });
     expect(cmd).toContain("--resume sess-123");

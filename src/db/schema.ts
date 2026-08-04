@@ -52,6 +52,12 @@ export const runs = sqliteTable("runs", {
   // interpretable against its tier. Set when the implement pass starts; null
   // means AGENT_MODEL was unset and the CLI resolved the account default.
   model: text("model"),
+  // Reasoning-effort level the implement pass ran at (issue #81) — the other
+  // half of the cost/quality dial alongside model. A ticket's `effort:`
+  // directive pins it from claim time; otherwise it is set when the implement
+  // pass starts. Null means AGENT_EFFORT was unset (no directive) and the CLI
+  // resolved its own default.
+  effort: text("effort"),
   totalCostUsd: real("total_cost_usd").notNull().default(0),
   pullRequestNumber: int("pull_request_number"),
   pullRequestUrl: text("pull_request_url"),
