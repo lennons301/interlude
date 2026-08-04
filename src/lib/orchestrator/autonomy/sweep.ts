@@ -87,6 +87,7 @@ import {
   MAX_INTERRUPTIONS_PER_TICKET,
   MAX_REVIEW_CYCLES_PER_ATTEMPT,
   MAX_TRIAGE_PASSES_PER_ISSUE,
+  MAX_UNPARSEABLE_REVIEW_RETRIES,
 } from "./budgets";
 
 const SWEEP_INTERVAL_MS = 30_000;
@@ -345,6 +346,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     maxAttempts: MAX_ATTEMPTS,
     maxInterruptions: MAX_INTERRUPTIONS_PER_TICKET,
     maxReviewCycles: MAX_REVIEW_CYCLES_PER_ATTEMPT,
+    maxUnparseableRetries: MAX_UNPARSEABLE_REVIEW_RETRIES,
     maxIntegrationAttempts: MAX_INTEGRATION_ATTEMPTS,
     todayAutonomousSpendUsd: todayAutonomousSpendUsd(now),
     dailyCapUsd: DAILY_AUTONOMOUS_CAP_USD,
@@ -489,6 +491,7 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
         result: run.reviewResult,
         implementTaskId: liveImplementTaskId(run.id),
         reviewCycleCount: run.reviewCycleCount,
+        reviewUnparseableCount: run.reviewUnparseableCount,
       });
       continue;
     }
@@ -814,6 +817,9 @@ async function executeActions(actions: Action[]): Promise<void> {
       case "startReview":
         await executeStartReview(action);
         break;
+      case "retryReview":
+        await executeRetryReview(action);
+        break;
       case "postVerdict": {
         const posted = await executePostVerdict(action);
         if (!posted) failedVerdictPosts.add(action.runId);
@@ -1014,6 +1020,69 @@ async function executeStartReview(
   const run = db.select().from(runs).where(eq(runs.id, action.runId)).get();
   if (!run) return;
 
+  const taskId = await queueReviewTask(run, ref, action.prNumber, action.armed);
+  if (taskId) {
+    console.log(
+      `[autonomy] Queued review of ${action.issueRef} PR #${action.prNumber} -> task ${taskId}`
+    );
+  }
+}
+
+/**
+ * Re-queue a review pass after an unparseable verdict (issue #89): a bounded
+ * one-shot that feeds the parse failure back so the pass can restate its
+ * verdict in shape, rather than a pure format slip costing a human's time. The
+ * stored result and the retry count are only touched once the new task is in
+ * the queue — a GitHub read failure leaves the unparseable result in place so
+ * the next sweep retries the whole step without burning the retry.
+ */
+async function executeRetryReview(
+  action: Extract<Action, { type: "retryReview" }>
+): Promise<void> {
+  const ref = parseIssueRef(action.issueRef);
+  if (!ref) return;
+
+  const run = db.select().from(runs).where(eq(runs.id, action.runId)).get();
+  if (!run) return;
+
+  const taskId = await queueReviewTask(
+    run,
+    ref,
+    action.prNumber,
+    action.armed,
+    action.parseFailure
+  );
+  if (!taskId) return;
+
+  db.update(runs)
+    .set({
+      reviewResult: null,
+      reviewUnparseableCount: run.reviewUnparseableCount + 1,
+    })
+    .where(eq(runs.id, run.id))
+    .run();
+
+  console.log(
+    `[autonomy] Re-queued review of ${action.issueRef} PR #${action.prNumber} ` +
+      `after unparseable verdict -> task ${taskId}`
+  );
+}
+
+/**
+ * Queue one review-pass task for a run: read the live issue, build the prompt
+ * from the vendored reviewer definition (never from anything a container
+ * wrote), and insert the task. `parseFailure` is set only on a retry after an
+ * unparseable verdict (issue #89). Returns the new task ID, or null if the
+ * GitHub read or definition load failed — the caller leaves the run untouched
+ * so the next sweep retries.
+ */
+async function queueReviewTask(
+  run: typeof runs.$inferSelect,
+  ref: { owner: string; repo: string; number: number },
+  prNumber: number,
+  armed: boolean,
+  parseFailure?: string
+): Promise<string | null> {
   try {
     const octokit = await getOctokit();
     const { data: issue } = await octokit.rest.issues.get({
@@ -1034,8 +1103,9 @@ async function executeStartReview(
       issueNumber: ref.number,
       issueTitle: issue.title,
       issueBody: issue.body ?? "",
-      prNumber: action.prNumber,
-      armed: action.armed,
+      prNumber,
+      armed,
+      parseFailure,
     });
 
     const now = new Date();
@@ -1044,25 +1114,27 @@ async function executeStartReview(
       .values({
         id: taskId,
         projectId: run.projectId,
-        title: `Review PR #${action.prNumber}: ${issue.title}`,
+        title: `Review PR #${prNumber}: ${issue.title}`,
         description: prompt,
         status: "queued",
         kind: "review",
         runId: run.id,
-        githubIssue: action.issueRef,
+        githubIssue: `${ref.owner}/${ref.repo}#${ref.number}`,
         branch,
         createdAt: now,
         updatedAt: now,
       })
       .run();
 
-    console.log(
-      `[autonomy] Queued review of ${action.issueRef} PR #${action.prNumber} -> task ${taskId}`
-    );
+    return taskId;
   } catch (err) {
     // Missing reviewer definition or a GitHub read failure: the run stays
     // awaiting review and the next sweep retries.
-    console.error(`[autonomy] Failed to queue review for ${action.issueRef}:`, err);
+    console.error(
+      `[autonomy] Failed to queue review for ${ref.owner}/${ref.repo}#${ref.number}:`,
+      err
+    );
+    return null;
   }
 }
 

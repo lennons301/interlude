@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { buildImplementPrompt, resolveWorkflowSkill } from "../workflow";
+import {
+  buildImplementPrompt,
+  buildReviewPrompt,
+  resolveWorkflowSkill,
+} from "../workflow";
 
 const TICKET = {
   repo: "acme/widgets",
@@ -161,5 +165,43 @@ describe("buildImplementPrompt", () => {
         prompt.indexOf("--- PRIOR ATTEMPTS")
       );
     });
+  });
+});
+
+describe("buildReviewPrompt", () => {
+  const REVIEW = {
+    repo: "acme/widgets",
+    issueNumber: 7,
+    issueTitle: "Add the frobnicator",
+    issueBody: "Make the frobnicator frob.",
+    prNumber: 41,
+    armed: true,
+  };
+
+  it("carries no retry note on a first review", () => {
+    const prompt = buildReviewPrompt(REVIEW);
+    expect(prompt).not.toContain("this is a retry");
+    expect(prompt).not.toContain("NOTE —");
+  });
+
+  it("feeds the parse failure back on a re-queue (issue #89)", () => {
+    const prompt = buildReviewPrompt({
+      ...REVIEW,
+      parseFailure: "final message does not start with a VERDICT: line",
+    });
+    expect(prompt).toContain("this is a retry");
+    expect(prompt).toContain(
+      "final message does not start with a VERDICT: line"
+    );
+    expect(prompt).toContain("last retry");
+    // Still demands the same verdict shape the parser expects.
+    expect(prompt).toContain("VERDICT: approve");
+  });
+
+  it("places the retry note after the verdict-shape instructions", () => {
+    const prompt = buildReviewPrompt({ ...REVIEW, parseFailure: "no VERDICT line" });
+    expect(prompt.indexOf("blocks the merge and pages the owner")).toBeLessThan(
+      prompt.indexOf("this is a retry")
+    );
   });
 });

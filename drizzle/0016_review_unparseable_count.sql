@@ -1,0 +1,1 @@
+ALTER TABLE `runs` ADD `review_unparseable_count` integer DEFAULT 0 NOT NULL;

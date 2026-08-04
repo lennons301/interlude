@@ -90,6 +90,16 @@ export const MAX_INTERRUPTIONS_PER_TICKET = 5;
  * request-changes fails the attempt instead of looping. */
 export const MAX_REVIEW_CYCLES_PER_ATTEMPT = 2;
 
+/** Re-queues a review pass earns after returning an unparseable verdict
+ * (issue #89). The common cause is a pure format slip — a substantively fine
+ * review whose final message just didn't lead with a `VERDICT:` line — which
+ * today fails closed terminally and costs a human intervention. One bounded
+ * retry, with the parse failure fed back into the prompt, removes it. A second
+ * unparseable verdict falls to the existing fail-closed path (nothing posted,
+ * human oversight). Counted per attempt on runs.review_unparseable_count, so a
+ * review that dies or slips its format once is retried, twice is a human's. */
+export const MAX_UNPARSEABLE_REVIEW_RETRIES = 1;
+
 /** Estate-wide daily autonomous spend cap in USD. Reaching it pauses pickup
  * until local midnight; interactive tasks (no run row) are exempt by
  * construction. */

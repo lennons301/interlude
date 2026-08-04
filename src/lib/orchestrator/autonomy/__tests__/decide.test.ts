@@ -59,6 +59,7 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     maxAttempts: 3,
     maxInterruptions: 5,
     maxReviewCycles: 2,
+    maxUnparseableRetries: 1,
     maxIntegrationAttempts: 1,
     todayAutonomousSpendUsd: 0,
     dailyCapUsd: 500,
@@ -162,6 +163,7 @@ function makeVerdict(overrides: Partial<PendingVerdict> = {}): PendingVerdict {
     result: { kind: "approve", body: "Verified against the ticket." },
     implementTaskId: "task-impl-1",
     reviewCycleCount: 0,
+    reviewUnparseableCount: 0,
     ...overrides,
   };
 }
@@ -1195,6 +1197,25 @@ describe("decideNext — queueing the review pass", () => {
     expect(actions.filter((a) => a.type === "startReview")).toHaveLength(1);
     expect(claims(actions)).toEqual([]);
   });
+
+  it("reserves a claimable slot for a review it re-queues after an unparseable verdict", () => {
+    // The re-queued review will draw the one free slot, so a new claim must
+    // not double-book it — same reservation as a first review (issue #89).
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 2, occupied: 1, occupants: ["implement: acme/widgets#7"] },
+        pendingVerdicts: [
+          makeVerdict({
+            result: { kind: "unparseable", reason: "no VERDICT line" },
+          }),
+        ],
+        candidates: [makeCandidate({ issueRef: "acme/widgets#9", number: 9 })],
+      })
+    );
+
+    expect(actions.filter((a) => a.type === "retryReview")).toHaveLength(1);
+    expect(claims(actions)).toEqual([]);
+  });
 });
 
 describe("decideNext — verdict-to-action mapping", () => {
@@ -1325,13 +1346,42 @@ describe("decideNext — verdict-to-action mapping", () => {
     ]);
   });
 
-  it("maps an unparseable verdict to a notification and nothing else", () => {
+  it("re-queues the review once on a first unparseable verdict, feeding the parse failure back", () => {
+    // Issue #89: a pure format slip earns one bounded retry before anyone is
+    // paged. The parse failure rides along so the pass can restate in shape.
     const actions = decideNext(
       makeSnapshot({
         candidates: [],
         pendingVerdicts: [
           makeVerdict({
             result: { kind: "unparseable", reason: "no VERDICT line" },
+            reviewUnparseableCount: 0,
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "retryReview",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        armed: true,
+        parseFailure: "no VERDICT line",
+      },
+    ]);
+  });
+
+  it("fails closed on a second unparseable verdict — notify, no further retry", () => {
+    // The one retry is spent, so the verdict now falls to human oversight.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingVerdicts: [
+          makeVerdict({
+            result: { kind: "unparseable", reason: "still no VERDICT line" },
+            reviewUnparseableCount: 1,
           }),
         ],
       })
@@ -1345,7 +1395,7 @@ describe("decideNext — verdict-to-action mapping", () => {
           runId: "run-1",
           issueRef: "acme/widgets#7",
           prNumber: 41,
-          reason: "no VERDICT line",
+          reason: "still no VERDICT line",
           armed: true,
         },
       },
@@ -1353,30 +1403,35 @@ describe("decideNext — verdict-to-action mapping", () => {
   });
 
   it("never arms auto-merge from an unparseable verdict, whatever else is pending", () => {
-    // The safety property named by the ticket: unparseable -> no armAutoMerge.
-    const actions = decideNext(
-      makeSnapshot({
-        pendingVerdicts: [
-          makeVerdict({
-            result: { kind: "unparseable", reason: "garbled output" },
-          }),
-        ],
-        awaitingReview: [makeAwaitingReview({ runId: "run-2", prNumber: 44 })],
-      })
-    );
+    // The safety property: unparseable -> no armAutoMerge/postVerdict, whether
+    // it retries (first) or fails closed (second).
+    for (const reviewUnparseableCount of [0, 1]) {
+      const actions = decideNext(
+        makeSnapshot({
+          pendingVerdicts: [
+            makeVerdict({
+              result: { kind: "unparseable", reason: "garbled output" },
+              reviewUnparseableCount,
+            }),
+          ],
+          awaitingReview: [makeAwaitingReview({ runId: "run-2", prNumber: 44 })],
+        })
+      );
 
-    expect(
-      actions.filter((a) => a.type === "armAutoMerge" || a.type === "postVerdict")
-    ).toEqual([]);
+      expect(
+        actions.filter((a) => a.type === "armAutoMerge" || a.type === "postVerdict")
+      ).toEqual([]);
+    }
   });
 
-  it("announces an unparseable verdict once, not once per sweep", () => {
+  it("announces an exhausted unparseable verdict once, not once per sweep", () => {
     const actions = decideNext(
       makeSnapshot({
         candidates: [],
         pendingVerdicts: [
           makeVerdict({
             result: { kind: "unparseable", reason: "no VERDICT line" },
+            reviewUnparseableCount: 1,
           }),
         ],
         announcedVerdictErrors: ["run-1"],
@@ -2038,6 +2093,7 @@ describe("arming boundary — interlude never applies ready-for-agent", () => {
     "armAutoMerge",
     "escalate",
     "startReview",
+    "retryReview",
     "postVerdict",
     "deliverFeedback",
     "finalizeRun",
