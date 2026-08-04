@@ -161,7 +161,11 @@ export async function startTask(taskId: string): Promise<void> {
       branch,
       dopplerToken:
         isReviewPass || isTriagePass ? undefined : (proj.dopplerToken ?? undefined),
-      checkoutExisting: isReviewPass || isRepairPass,
+      // Review/repair check out the PR branch (it must exist); an implement
+      // pass adopts agent/issue-<n> if a previous attempt already pushed it, so
+      // a retry continues that branch instead of racing a fresh one and being
+      // rejected non-fast-forward (issue #72); triage/interactive branch fresh.
+      checkout: isReviewPass || isRepairPass ? "existing" : isImplementPass ? "adopt" : "create",
     });
     activeTasks.set(taskId, { container: running, state: "setup", kind: task.kind });
 
@@ -1062,10 +1066,15 @@ async function runPostTurnCommitAndPush(taskId: string, running: RunningContaine
             pullRequestNumber: pr.number,
             pullRequestUrl: pr.url,
           });
-          if (task.githubIssue) {
+          // On a retry that adopted a previous attempt's PR (#72) the issue
+          // already carries its "opened" comment — don't post a duplicate;
+          // finishImplementPass will announce it "ready for review".
+          if (task.githubIssue && !pr.adopted) {
             await commentOnIssue(task.githubIssue, `Draft PR opened: #${pr.number}`);
           }
-          console.log(`[github] Draft PR #${pr.number} created for task ${taskId}`);
+          console.log(
+            `[github] Draft PR #${pr.number} ${pr.adopted ? "adopted" : "created"} for task ${taskId}`
+          );
         }
       }
     }

@@ -243,7 +243,9 @@ export function buildImplementPrompt(ticket: ImplementTicket): string {
       `is the BLOCKED marker described below.`,
     ``,
     `Operating rules:`,
-    `- You are on the branch agent/issue-${ticket.issueNumber}, already checked out.`,
+    `- You are on the branch agent/issue-${ticket.issueNumber}, already checked out. ` +
+      `If an earlier attempt already pushed commits to it, build on that work ` +
+      `rather than starting over.`,
     `- The ticket between the markers below is the complete specification. Do what ` +
       `it asks, all of it, and only it.`,
     `- Make small, atomic commits as you work. Run the repo's tests and lint before ` +

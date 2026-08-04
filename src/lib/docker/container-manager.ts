@@ -6,15 +6,44 @@ import { getInstallationToken } from "../github/client";
 import { getCapacity } from "../orchestrator/capacity";
 
 /**
+ * How setup gets onto `$GIT_BRANCH`:
+ *  - `create`  — make a fresh branch off the default (triage/interactive use a
+ *    unique per-task name that never exists on the remote).
+ *  - `existing` — check out a branch that must already exist on the remote (a
+ *    review or repair pass inspecting the PR branch).
+ *  - `adopt` — continue the branch if a previous attempt already pushed it,
+ *    else create it fresh. An autonomous retry runs in a brand-new container,
+ *    so without this it would branch off the default, redo the work, and have
+ *    its push rejected non-fast-forward against attempt 1's remote branch
+ *    (issue #72). Adopting continues the same branch — matching the laptop
+ *    runner's persistent worktree, and preserving the PR that points at it.
+ */
+export type BranchCheckoutMode = "create" | "existing" | "adopt";
+
+function checkoutCommand(mode: BranchCheckoutMode): string {
+  switch (mode) {
+    case "existing":
+      return 'git checkout "$GIT_BRANCH"';
+    case "adopt":
+      // `git rev-parse` resolves the remote-tracking ref that a full clone
+      // fetches for every remote branch; when it exists, plain `git checkout`
+      // DWIMs a local branch tracking it, otherwise branch off the default.
+      return 'if git rev-parse --verify --quiet "refs/remotes/origin/$GIT_BRANCH" >/dev/null; then git checkout "$GIT_BRANCH"; else git checkout -b "$GIT_BRANCH"; fi';
+    case "create":
+      return 'git checkout -b "$GIT_BRANCH"';
+  }
+}
+
+/**
  * Bash run at container setup: install an env-based git credential helper
  * (token supplied at exec time via GIT_AUTH_TOKEN), clone the repo with a
- * secret-free URL, clone the platform repo (best-effort), check out the task
- * branch, and pull Doppler secrets if a token is present.
- *
- * `checkoutExisting` checks out a branch that already exists on the remote
- * (a review pass inspecting the PR branch) instead of creating a fresh one.
+ * secret-free URL, clone the platform repo (best-effort), get onto the task
+ * branch (see `BranchCheckoutMode`), and pull Doppler secrets if present.
  */
-export function buildSetupScript(platformRepoUrl: string, checkoutExisting = false): string {
+export function buildSetupScript(
+  platformRepoUrl: string,
+  checkout: BranchCheckoutMode = "create"
+): string {
   return [
     'git config --global user.name "$GIT_USER_NAME"',
     'git config --global user.email "$GIT_USER_EMAIL"',
@@ -22,7 +51,7 @@ export function buildSetupScript(platformRepoUrl: string, checkoutExisting = fal
     'git clone "$GIT_URL" /workspace/repo',
     `git clone --depth 1 ${platformRepoUrl} /workspace/platform 2>/dev/null || echo "WARN: platform repo clone failed, continuing without platform context"`,
     "cd /workspace/repo",
-    checkoutExisting ? 'git checkout "$GIT_BRANCH"' : 'git checkout -b "$GIT_BRANCH"',
+    checkoutCommand(checkout),
     'if [ -n "$DOPPLER_TOKEN" ]; then curl -sf --request GET "https://api.doppler.com/v3/configs/config/secrets/download?format=env" --header "Authorization: Bearer $DOPPLER_TOKEN" > .env.local && echo "Doppler: wrote .env.local ($(wc -l < .env.local) vars)" || echo "Doppler: API request failed"; fi',
   ].join(" && ");
 }
@@ -63,8 +92,8 @@ export interface WorkspaceOptions {
   gitUrl: string;
   branch: string;
   dopplerToken?: string;
-  /** Check out an existing remote branch instead of creating a new one */
-  checkoutExisting?: boolean;
+  /** How setup gets onto the branch (default `create`) — see `BranchCheckoutMode` */
+  checkout?: BranchCheckoutMode;
 }
 
 export interface TurnOptions {
@@ -82,8 +111,8 @@ export interface RunningContainer {
   id: string;
   name: string;
   previewSubdomain: string;
-  /** Setup checks out an existing remote branch instead of creating one */
-  checkoutExisting?: boolean;
+  /** How setup gets onto the branch (default `create`) — see `BranchCheckoutMode` */
+  checkout?: BranchCheckoutMode;
 }
 
 export async function createWorkspaceContainer(
@@ -155,7 +184,7 @@ export async function createWorkspaceContainer(
     id: container.id,
     name: containerName,
     previewSubdomain,
-    checkoutExisting: options.checkoutExisting,
+    checkout: options.checkout,
   };
 }
 
@@ -164,7 +193,7 @@ export async function execSetup(
 ): Promise<void> {
   const token = await getInstallationToken();
   const exec = await running.container.exec({
-    Cmd: ["bash", "-c", buildSetupScript(PLATFORM_REPO_URL, running.checkoutExisting ?? false)],
+    Cmd: ["bash", "-c", buildSetupScript(PLATFORM_REPO_URL, running.checkout ?? "create")],
     Env: [`GIT_AUTH_TOKEN=${token}`],
     AttachStdout: true,
     AttachStderr: true,

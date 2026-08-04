@@ -63,13 +63,32 @@ describe("buildSetupScript", () => {
     expect(script).toContain('if [ -n "$DOPPLER_TOKEN" ]');
   });
 
+  it("creates a fresh branch by default", () => {
+    expect(script).toContain('git checkout -b "$GIT_BRANCH"');
+    expect(script).not.toContain("rev-parse");
+  });
+
   it("checks out the existing remote branch for a review pass", () => {
     const reviewScript = buildSetupScript(
       "https://github.com/lennons301/platform.git",
-      true
+      "existing"
     );
     expect(reviewScript).toContain('git checkout "$GIT_BRANCH"');
-    expect(reviewScript).not.toContain('git checkout -b');
+    expect(reviewScript).not.toContain("git checkout -b");
+  });
+
+  it("adopts an existing agent/issue branch on retry, else creates it (issue #72)", () => {
+    const adoptScript = buildSetupScript(
+      "https://github.com/lennons301/platform.git",
+      "adopt"
+    );
+    // Continue a previous attempt's remote branch when it exists...
+    expect(adoptScript).toContain(
+      'git rev-parse --verify --quiet "refs/remotes/origin/$GIT_BRANCH"'
+    );
+    expect(adoptScript).toContain('git checkout "$GIT_BRANCH"');
+    // ...otherwise branch fresh (first attempt).
+    expect(adoptScript).toContain('git checkout -b "$GIT_BRANCH"');
   });
 });
 
