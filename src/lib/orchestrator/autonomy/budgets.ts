@@ -16,6 +16,21 @@ export const MAX_ATTEMPT_BUDGET_USD = 75;
  * per-exec turn limit to (the default is the orchestrator's MAX_TURNS). */
 export const MAX_TURNS_CEILING = 100;
 
+/** Reasoning-effort levels a ticket's `effort:` directive may select (issue
+ * #81), the exact set the headless CLI's `--effort` flag accepts. A ticket
+ * body is semi-trusted input, so it may only choose from this fixed set —
+ * never name an arbitrary value — mirroring the reasoning behind the budget
+ * clamp. The level reaches the CLI as `--effort`; an unrecognised value is
+ * ignored (the run keeps its default effort), never fatal. Clamped in the
+ * directive parser, resolved through `resolveAgentEffort`. */
+export const ALLOWED_TICKET_EFFORTS = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+
 /** Budget for one review pass — its own allowance, separate from the
  * implement attempt's, so reviewing never eats into a fix-up's headroom. */
 export const DEFAULT_REVIEW_BUDGET_USD = 5;

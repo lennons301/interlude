@@ -205,6 +205,7 @@ describe("decideNext — claiming", () => {
         budgetUsd: 20,
         checkpoint: null,
         maxTurns: null,
+        effort: null,
         workflow: { source: "default" },
       },
     ]);
@@ -240,6 +241,24 @@ describe("decideNext — claiming", () => {
     );
 
     expect(claims(actions)[0]).toMatchObject({ budgetUsd: 40, maxTurns: 80 });
+  });
+
+  it("carries a clamped effort directive in the claim (issue #81)", () => {
+    const body = "Spec.\n\n## Workflow\n\neffort: max\n";
+    const actions = decideNext(
+      makeSnapshot({ candidates: [makeCandidate({ body })] })
+    );
+
+    expect(claims(actions)[0]).toMatchObject({ effort: "max" });
+  });
+
+  it("leaves effort null when the directive names an unknown level (issue #81)", () => {
+    const body = "Spec.\n\n## Workflow\n\neffort: turbo\n";
+    const actions = decideNext(
+      makeSnapshot({ candidates: [makeCandidate({ body })] })
+    );
+
+    expect(claims(actions)[0]).toMatchObject({ effort: null });
   });
 
   it("clamps an over-ceiling budget directive at claim time", () => {

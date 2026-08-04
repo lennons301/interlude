@@ -3,7 +3,11 @@
  * Nothing here performs I/O; the sweep gathers, these functions interpret.
  */
 
-import { MAX_ATTEMPT_BUDGET_USD, MAX_TURNS_CEILING } from "./budgets";
+import {
+  ALLOWED_TICKET_EFFORTS,
+  MAX_ATTEMPT_BUDGET_USD,
+  MAX_TURNS_CEILING,
+} from "./budgets";
 
 export const ARMING_LABEL = "ready-for-agent";
 export const READY_FOR_HUMAN_LABEL = "ready-for-human";
@@ -35,6 +39,9 @@ const WORKFLOW_LABEL_PREFIX = "workflow:";
 /** A `## Workflow` (or `### Workflow`) section heading in a ticket body. */
 const WORKFLOW_SECTION = /^#{2,3}\s+Workflow\s*$/im;
 
+/** A whole-line `key: value` directive (optionally bulleted, case-insensitive). */
+const DIRECTIVE_LINE = /^\s*(?:[-*]\s+)?([a-z-]+)\s*:\s*(.*)$/i;
+
 /**
  * The bounded directive set a ticket may carry in its Workflow section.
  * Null means "not specified — use the default". Directives can only move
@@ -51,6 +58,10 @@ export interface TicketDirectives {
   checkpoint: string | null;
   /** Named workflow — informational in v1 (selectWorkflow drives the pass) */
   workflow: string | null;
+  /** Reasoning-effort level to run the pass at (issue #81), clamped to
+   * ALLOWED_TICKET_EFFORTS. Null means unspecified or unrecognised — the run
+   * keeps its default effort; a bad value never fails the run. */
+  effort: string | null;
 }
 
 /**
@@ -65,10 +76,11 @@ export function parseTicketDirectives(body: string): TicketDirectives {
     maxTurns: null,
     checkpoint: null,
     workflow: null,
+    effort: null,
   };
 
   for (const line of workflowSectionLines(body)) {
-    const match = line.match(/^\s*(?:[-*]\s+)?([a-z-]+)\s*:\s*(.*)$/i);
+    const match = line.match(DIRECTIVE_LINE);
     if (!match) continue;
     const key = match[1].toLowerCase();
     const value = match[2].trim();
@@ -84,10 +96,31 @@ export function parseTicketDirectives(body: string): TicketDirectives {
       directives.checkpoint = value;
     } else if (key === "workflow" && directives.workflow === null) {
       directives.workflow = value;
+    } else if (key === "effort" && directives.effort === null) {
+      // Clamp to the allowlist: a semi-trusted body may pick a level, never
+      // name an arbitrary value. An unrecognised value stays null (ignored).
+      const level = value.toLowerCase();
+      if ((ALLOWED_TICKET_EFFORTS as readonly string[]).includes(level)) {
+        directives.effort = level;
+      }
     }
   }
 
   return directives;
+}
+
+/**
+ * The raw (un-clamped) value of an `effort:` directive in the Workflow
+ * section, if present — for surfacing an *ignored* request an operator
+ * otherwise couldn't see. Parsing for use goes through parseTicketDirectives,
+ * which clamps to the allowlist; this only reports what was asked for.
+ */
+export function rawEffortDirective(body: string): string | null {
+  for (const line of workflowSectionLines(body)) {
+    const match = line.match(DIRECTIVE_LINE);
+    if (match && match[1].toLowerCase() === "effort") return match[2].trim() || null;
+  }
+  return null;
 }
 
 /**

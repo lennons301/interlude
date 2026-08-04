@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseBlockedByRefs,
   parseTicketDirectives,
+  rawEffortDirective,
   selectWorkflow,
   shouldCreateInteractiveTask,
 } from "../ticket";
@@ -13,6 +14,7 @@ describe("parseTicketDirectives", () => {
       maxTurns: null,
       checkpoint: null,
       workflow: null,
+      effort: null,
     });
   });
 
@@ -54,7 +56,7 @@ describe("parseTicketDirectives", () => {
     expect(parseTicketDirectives("## Workflow\nworkflow: tdd").workflow).toBe("tdd");
   });
 
-  it("parses all four directives together, bulleted and case-insensitive", () => {
+  it("parses all directives together, bulleted and case-insensitive", () => {
     const body = [
       "## Workflow",
       "",
@@ -62,12 +64,14 @@ describe("parseTicketDirectives", () => {
       "- MAX-TURNS: 60",
       "- checkpoint: pause before deploy",
       "- workflow: tdd",
+      "- Effort: HIGH",
     ].join("\n");
     expect(parseTicketDirectives(body)).toEqual({
       budget: 30,
       maxTurns: 60,
       checkpoint: "pause before deploy",
       workflow: "tdd",
+      effort: "high",
     });
   });
 
@@ -93,6 +97,7 @@ describe("parseTicketDirectives", () => {
       maxTurns: null,
       checkpoint: null,
       workflow: null,
+      effort: null,
     });
   });
 
@@ -119,6 +124,7 @@ describe("parseTicketDirectives", () => {
       maxTurns: null,
       checkpoint: null,
       workflow: null,
+      effort: null,
     });
   });
 
@@ -151,7 +157,31 @@ describe("parseTicketDirectives", () => {
       maxTurns: null,
       checkpoint: null,
       workflow: null,
+      effort: null,
     });
+  });
+
+  it("parses an effort directive, clamped to the allowlist (issue #81)", () => {
+    expect(parseTicketDirectives("## Workflow\neffort: max").effort).toBe("max");
+    expect(parseTicketDirectives("## Workflow\nEffort: LOW").effort).toBe("low");
+  });
+
+  it("ignores an unrecognised effort level — a bad value never binds", () => {
+    expect(parseTicketDirectives("## Workflow\neffort: turbo").effort).toBeNull();
+    expect(parseTicketDirectives("## Workflow\neffort: 11").effort).toBeNull();
+    expect(parseTicketDirectives("## Workflow\neffort:").effort).toBeNull();
+  });
+});
+
+describe("rawEffortDirective (issue #81)", () => {
+  it("reports the raw requested level, even one that would be ignored", () => {
+    expect(rawEffortDirective("## Workflow\neffort: turbo")).toBe("turbo");
+    expect(rawEffortDirective("## Workflow\nEffort: HIGH")).toBe("HIGH");
+  });
+
+  it("is null when no effort directive is present or the section is missing", () => {
+    expect(rawEffortDirective("## Workflow\nbudget: $30")).toBeNull();
+    expect(rawEffortDirective("Just prose.\n\neffort: max")).toBeNull();
   });
 });
 
