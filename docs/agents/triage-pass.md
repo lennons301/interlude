@@ -70,9 +70,10 @@ directives you may suggest, and when:
   destructive migration); `<text>` names what to eyeball.
 
 Never present a directive as already set. It is advice the owner takes or
-ignores; the effect of an unfit or mistyped one is nil (an unknown or
-out-of-range directive is ignored at pickup), so err toward suggesting only
-what you are sure of.
+ignores, and pickup is defensive about it: an unknown key or an unrecognised
+`model:` alias is dropped, and an over-range `budget:` or `max-turns:` is
+clamped to its ceiling — a mistyped suggestion never fails a run. Still, err
+toward suggesting only what you are sure of.
 
 ## Rules
 
