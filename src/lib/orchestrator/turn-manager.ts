@@ -117,10 +117,12 @@ export async function startTask(taskId: string): Promise<void> {
     ? db.select().from(runs).where(eq(runs.id, task.runId)).get()
     : undefined;
 
-  // The model this pass runs on, pinned by kind (issue #74). Passed to every
-  // turn as `--model` and recorded on the run row below so spend is
-  // interpretable against the tier it was earned on.
-  const passModel = resolveAgentModel(task.kind);
+  // The model this pass runs on, pinned by kind (issue #74) and, for an
+  // implement-shaped or interactive pass, overridable by the run's `model:`
+  // directive (issue #80). Passed to every turn as `--model` and recorded on
+  // the run row below so spend is interpretable against the tier it was
+  // earned on.
+  const passModel = resolveAgentModel(task.kind, getConfig(), run?.model ?? null);
 
   // Update task status
   updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
@@ -507,7 +509,7 @@ export async function processQueuedMessages(
       {
         maxBudgetUsd: run ? run.budgetUsd - (task.totalCostUsd ?? 0) : undefined,
         maxTurns: run?.maxTurns ?? undefined,
-        model: resolveAgentModel(task.kind),
+        model: resolveAgentModel(task.kind, config, run?.model ?? null),
       }
     );
 
