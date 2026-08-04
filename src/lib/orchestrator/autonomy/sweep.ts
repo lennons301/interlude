@@ -70,6 +70,7 @@ import {
   READY_FOR_HUMAN_LABEL,
   labelNames,
   parseBlockedByRefs,
+  rawModelDirective,
 } from "./ticket";
 import {
   buildImplementPrompt,
@@ -1861,6 +1862,10 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
         budgetUsd: action.budgetUsd,
         checkpoint: action.checkpoint,
         maxTurns: action.maxTurns,
+        // A `model:` directive (already allowlist-clamped) pins the tier from
+        // claim time (issue #80); the implement pass resolves through the same
+        // value and records it here. Null keeps the configured default.
+        model: action.model,
         claimedAt: now,
         finishedAt: failure ? now : null,
         failureReason: failure ? `failed before start: ${failure}` : null,
@@ -1895,10 +1900,28 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
     console.log(
       `[autonomy] Claimed ${action.issueRef} (attempt ${action.attempt}) -> task ${taskId}`
     );
+
+    // Note the model directive on the run's issue thread (issue #80): the
+    // honoured tier when one was picked, or an unrecognised request that was
+    // ignored — never silently swallowed, never fatal.
+    let modelNote = "";
+    if (action.model) {
+      modelNote = `\n\nModel: \`${action.model}\` (ticket directive).`;
+    } else {
+      const rawModel = rawModelDirective(action.issueBody);
+      if (rawModel) {
+        console.warn(
+          `[autonomy] Ignoring unrecognised model directive "${rawModel}" on ` +
+            `${action.issueRef} — using the default model`
+        );
+        modelNote = `\n\nModel directive \`${rawModel}\` not recognised — running on the default model.`;
+      }
+    }
+
     const domain = process.env.DOMAIN ?? "interludes.co.uk";
     await commentOnIssue(
       action.issueRef,
-      `Claimed by Interlude — attempt ${action.attempt}/${MAX_ATTEMPTS}.\n\n` +
+      `Claimed by Interlude — attempt ${action.attempt}/${MAX_ATTEMPTS}.${modelNote}\n\n` +
         `[View task](https://${domain}/tasks/${taskId})`
     );
   } finally {

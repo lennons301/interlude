@@ -49,8 +49,10 @@ export const runs = sqliteTable("runs", {
   // Per-exec turn limit from a ticket's max-turns directive; null = default
   maxTurns: int("max_turns"),
   // Model the implement pass ran on (issue #74), so this run's spend is
-  // interpretable against its tier. Set when the implement pass starts; null
-  // means AGENT_MODEL was unset and the CLI resolved the account default.
+  // interpretable against its tier. A ticket's `model:` directive (issue #80)
+  // pins it from claim time; otherwise it is set when the implement pass
+  // starts. Null means AGENT_MODEL was unset (no directive) and the CLI
+  // resolved the account default.
   model: text("model"),
   totalCostUsd: real("total_cost_usd").notNull().default(0),
   pullRequestNumber: int("pull_request_number"),
