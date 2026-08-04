@@ -210,6 +210,21 @@ pass normally but then forces `human-signoff` regardless of gate matches, carryi
 `<text>` as the note for what needs your decision. Use it for
 agent-doable-but-risky work you want to eyeball before merge.
 
+### Reasoning effort (`effort:`)
+
+`AGENT_EFFORT` pins the CLI's reasoning depth (the `--effort` flag) for the
+implement/repair/interactive passes, the other half of the cost/quality dial
+alongside `AGENT_MODEL`; `AGENT_EFFORT_REVIEW` / `AGENT_EFFORT_TRIAGE` give the
+read-heavy passes a lower level. Valid levels: `low`, `medium`, `high`, `xhigh`,
+`max`. Leave them unset and the CLI keeps its own default (no `--effort`).
+
+A ticket's `effort: <level>` directive in the Workflow section raises (or lowers)
+a single run's work-pass effort — a hard ticket can ask for `max`, a trivial one
+for `low`. It is clamped to the levels above (an unrecognised value is ignored
+and noted on the issue, never fatal) and changes only the depth the ticket's
+*work* runs at — the reviewer's effort is unaffected. The honoured level is
+recorded on the run row so spend reads against the depth it was earned at.
+
 ### Capacity / slots
 
 Slots derive at boot from the Docker daemon's CPU and memory
