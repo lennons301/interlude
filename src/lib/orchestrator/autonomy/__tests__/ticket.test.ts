@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseBlockedByRefs,
   parseTicketDirectives,
+  rawEffortDirective,
   rawModelDirective,
   selectWorkflow,
   shouldCreateInteractiveTask,
@@ -14,6 +15,7 @@ describe("parseTicketDirectives", () => {
       maxTurns: null,
       checkpoint: null,
       workflow: null,
+      effort: null,
       model: null,
     });
   });
@@ -64,6 +66,7 @@ describe("parseTicketDirectives", () => {
       "- MAX-TURNS: 60",
       "- checkpoint: pause before deploy",
       "- workflow: tdd",
+      "- Effort: HIGH",
       "- Model: Opus",
     ].join("\n");
     expect(parseTicketDirectives(body)).toEqual({
@@ -71,6 +74,7 @@ describe("parseTicketDirectives", () => {
       maxTurns: 60,
       checkpoint: "pause before deploy",
       workflow: "tdd",
+      effort: "high",
       model: "opus",
     });
   });
@@ -97,6 +101,7 @@ describe("parseTicketDirectives", () => {
       maxTurns: null,
       checkpoint: null,
       workflow: null,
+      effort: null,
       model: null,
     });
   });
@@ -124,6 +129,7 @@ describe("parseTicketDirectives", () => {
       maxTurns: null,
       checkpoint: null,
       workflow: null,
+      effort: null,
       model: null,
     });
   });
@@ -157,8 +163,20 @@ describe("parseTicketDirectives", () => {
       maxTurns: null,
       checkpoint: null,
       workflow: null,
+      effort: null,
       model: null,
     });
+  });
+
+  it("parses an effort directive, clamped to the allowlist (issue #81)", () => {
+    expect(parseTicketDirectives("## Workflow\neffort: max").effort).toBe("max");
+    expect(parseTicketDirectives("## Workflow\nEffort: LOW").effort).toBe("low");
+  });
+
+  it("ignores an unrecognised effort level — a bad value never binds", () => {
+    expect(parseTicketDirectives("## Workflow\neffort: turbo").effort).toBeNull();
+    expect(parseTicketDirectives("## Workflow\neffort: 11").effort).toBeNull();
+    expect(parseTicketDirectives("## Workflow\neffort:").effort).toBeNull();
   });
 
   it("parses a model directive and lowercases the alias", () => {
@@ -179,6 +197,18 @@ describe("parseTicketDirectives", () => {
     expect(parseTicketDirectives("## Workflow\nmodel: opus\nmodel: haiku").model).toBe(
       "opus"
     );
+  });
+});
+
+describe("rawEffortDirective (issue #81)", () => {
+  it("reports the raw requested level, even one that would be ignored", () => {
+    expect(rawEffortDirective("## Workflow\neffort: turbo")).toBe("turbo");
+    expect(rawEffortDirective("## Workflow\nEffort: HIGH")).toBe("HIGH");
+  });
+
+  it("is null when no effort directive is present or the section is missing", () => {
+    expect(rawEffortDirective("## Workflow\nbudget: $30")).toBeNull();
+    expect(rawEffortDirective("Just prose.\n\neffort: max")).toBeNull();
   });
 });
 

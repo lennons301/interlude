@@ -70,6 +70,7 @@ import {
   READY_FOR_HUMAN_LABEL,
   labelNames,
   parseBlockedByRefs,
+  rawEffortDirective,
   rawModelDirective,
 } from "./ticket";
 import {
@@ -1866,6 +1867,10 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
         // claim time (issue #80); the implement pass resolves through the same
         // value and records it here. Null keeps the configured default.
         model: action.model,
+        // An `effort:` directive (already allowlist-clamped) pins the level
+        // from claim time (issue #81); the implement pass resolves through the
+        // same value and records it here. Null keeps the configured default.
+        effort: action.effort,
         claimedAt: now,
         finishedAt: failure ? now : null,
         failureReason: failure ? `failed before start: ${failure}` : null,
@@ -1918,10 +1923,26 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
       }
     }
 
+    // Note the effort directive the same way (issue #81) — the honoured level,
+    // or an unrecognised request that was ignored; never silently swallowed.
+    let effortNote = "";
+    if (action.effort) {
+      effortNote = `\n\nEffort: \`${action.effort}\` (ticket directive).`;
+    } else {
+      const rawEffort = rawEffortDirective(action.issueBody);
+      if (rawEffort) {
+        console.warn(
+          `[autonomy] Ignoring unrecognised effort directive "${rawEffort}" on ` +
+            `${action.issueRef} — using the default effort`
+        );
+        effortNote = `\n\nEffort directive \`${rawEffort}\` not recognised — running at the default effort.`;
+      }
+    }
+
     const domain = process.env.DOMAIN ?? "interludes.co.uk";
     await commentOnIssue(
       action.issueRef,
-      `Claimed by Interlude — attempt ${action.attempt}/${MAX_ATTEMPTS}.${modelNote}\n\n` +
+      `Claimed by Interlude — attempt ${action.attempt}/${MAX_ATTEMPTS}.${modelNote}${effortNote}\n\n` +
         `[View task](https://${domain}/tasks/${taskId})`
     );
   } finally {

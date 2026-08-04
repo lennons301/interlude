@@ -22,7 +22,12 @@ import {
   TRIAGE_MAX_TURNS,
 } from "./autonomy/budgets";
 import { scanPorts } from "./port-scanner";
-import { getConfig, resolveAgentModel, type AgentPassKind } from "../config";
+import {
+  getConfig,
+  resolveAgentModel,
+  resolveAgentEffort,
+  type AgentPassKind,
+} from "../config";
 import { getDocker } from "../docker/client";
 import { commentOnIssue, parseIssueRef } from "../github/issues";
 import { parseRepoFromGitUrl } from "../github/repo";
@@ -124,6 +129,12 @@ export async function startTask(taskId: string): Promise<void> {
   // earned on.
   const passModel = resolveAgentModel(task.kind, getConfig(), run?.model ?? null);
 
+  // The reasoning-effort level this pass runs at (issue #81), the other half
+  // of the cost/quality dial. Pinned by kind and, for an implement-shaped or
+  // interactive pass, overridable by the run's `effort:` directive. Passed to
+  // every turn as `--effort` and recorded on the run row below.
+  const passEffort = resolveAgentEffort(task.kind, getConfig(), run?.effort ?? null);
+
   // Update task status
   updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
   insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
@@ -133,15 +144,17 @@ export async function startTask(taskId: string): Promise<void> {
   // pass keeps the run's original startedAt so the dashboard's elapsed time
   // does not jump when a conflict is repaired mid-life.
   if (run && isImplementShaped) {
-    // Record the implement-pass model on the run — it drives the bulk of a
-    // run's spend, so it is the tier the run's cost should be read against. A
-    // review pass writes its own (cheaper) model nowhere on the run, leaving
-    // this value stable. Repair keeps the original implement model (same tier).
+    // Record the implement-pass model and effort on the run — they drive the
+    // bulk of a run's spend, so they are the tier and depth the run's cost
+    // should be read against. A review pass writes its own (cheaper/lower)
+    // model and effort nowhere on the run, leaving these stable. Repair keeps
+    // the original implement values (same tier and depth).
     db.update(runs)
       .set({
         status: "implementing",
         startedAt: run.startedAt ?? new Date(),
         model: passModel,
+        effort: passEffort,
       })
       .where(eq(runs.id, run.id))
       .run();
@@ -229,6 +242,7 @@ export async function startTask(taskId: string): Promise<void> {
           : (run?.maxTurns ?? undefined),
       captureRaw: isReviewPass || isTriagePass,
       model: passModel,
+      effort: passEffort,
     });
 
     // Store session ID and cost
@@ -374,6 +388,7 @@ async function runTurn(
     maxTurns?: number;
     captureRaw?: boolean;
     model?: string | null;
+    effort?: string | null;
   }
 ): Promise<TurnResult & { raw?: string }> {
   const handler = createOutputHandler(taskId);
@@ -386,6 +401,7 @@ async function runTurn(
     maxBudgetUsd: opts?.maxBudgetUsd,
     maxTurns: opts?.maxTurns,
     model: opts?.model,
+    effort: opts?.effort,
   });
 
   // Race: wait for the exec stream to close OR the "result" event from Claude.
@@ -510,6 +526,7 @@ export async function processQueuedMessages(
         maxBudgetUsd: run ? run.budgetUsd - (task.totalCostUsd ?? 0) : undefined,
         maxTurns: run?.maxTurns ?? undefined,
         model: resolveAgentModel(task.kind, config, run?.model ?? null),
+        effort: resolveAgentEffort(task.kind, config, run?.effort ?? null),
       }
     );
 

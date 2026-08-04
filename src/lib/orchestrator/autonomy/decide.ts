@@ -299,6 +299,10 @@ export type Action =
       /** Model alias from a `model:` directive (issue #80), clamped to the
        * allowlist; null = the configured default. Recorded on runs.model. */
       model: string | null;
+      /** Reasoning-effort level from an `effort:` directive (issue #81),
+       * clamped to the allowlist; null = the configured default. Recorded on
+       * runs.effort. */
+      effort: string | null;
       workflow: WorkflowSelection;
     }
   | { type: "pausePickup"; reason: PauseReason; detail?: string }
@@ -995,6 +999,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       checkpoint: directives.checkpoint,
       maxTurns: directives.maxTurns,
       model: directives.model,
+      effort: directives.effort,
       workflow: selectWorkflow(candidate.body, candidate.labels),
     });
   }

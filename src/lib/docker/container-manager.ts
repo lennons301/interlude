@@ -109,6 +109,12 @@ export interface TurnOptions {
    * Null/undefined passes no `--model` — the CLI resolves the account default.
    */
   model?: string | null;
+  /**
+   * Reasoning-effort level for this turn, resolved from the task's kind
+   * (issue #81). Null/undefined passes no `--effort` — the CLI resolves its
+   * own default.
+   */
+  effort?: string | null;
 }
 
 export interface RunningContainer {
@@ -252,12 +258,16 @@ export async function execSetup(
 /**
  * Build the bash command a Claude turn runs inside the container. Pure and
  * exported so the flag wiring — notably the per-kind `--model` pin (issue #74)
- * — is unit-testable without a live Docker exec. `maxTurns`/`maxBudgetUsd`
- * fall back to the configured defaults; `model`, when set, pins the tier and
- * is otherwise omitted so the CLI resolves the account default as before.
+ * and `--effort` level (issue #81) — is unit-testable without a live Docker
+ * exec. `maxTurns`/`maxBudgetUsd` fall back to the configured defaults;
+ * `model` and `effort`, when set, pin the tier and reasoning depth and are
+ * otherwise omitted so the CLI resolves its own defaults as before.
  */
 export function buildClaudeTurnCommand(
-  options: Pick<TurnOptions, "sessionId" | "maxBudgetUsd" | "maxTurns" | "model">
+  options: Pick<
+    TurnOptions,
+    "sessionId" | "maxBudgetUsd" | "maxTurns" | "model" | "effort"
+  >
 ): string {
   const config = getConfig();
 
@@ -281,6 +291,15 @@ export function buildClaudeTurnCommand(
     // Single-quote the model id: real ids can carry shell glob metacharacters
     // (e.g. "claude-opus-4-8[1m]"), and this runs under `bash -c`.
     cmdParts.push("--model", `'${options.model}'`);
+  }
+
+  if (options.effort) {
+    // The value is always one of the CLI's bounded levels — both entry points
+    // validate against the same allowlist (the ticket directive clamps, the
+    // env is checked in config.ts), so no metacharacter can reach here. Still
+    // single-quoted for the same defence-in-depth reason as the model above,
+    // since this runs under `bash -c`.
+    cmdParts.push("--effort", `'${options.effort}'`);
   }
 
   if (options.sessionId) {

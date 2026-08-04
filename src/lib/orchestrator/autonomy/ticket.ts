@@ -4,6 +4,7 @@
  */
 
 import {
+  ALLOWED_TICKET_EFFORTS,
   ALLOWED_TICKET_MODELS,
   MAX_ATTEMPT_BUDGET_USD,
   MAX_TURNS_CEILING,
@@ -62,6 +63,10 @@ export interface TicketDirectives {
    * ALLOWED_TICKET_MODELS. Null means unspecified or unrecognised — the run
    * keeps its default model; a bad value never fails the run. */
   model: string | null;
+  /** Reasoning-effort level to run the pass at (issue #81), clamped to
+   * ALLOWED_TICKET_EFFORTS. Null means unspecified or unrecognised — the run
+   * keeps its default effort; a bad value never fails the run. */
+  effort: string | null;
 }
 
 /**
@@ -77,6 +82,7 @@ export function parseTicketDirectives(body: string): TicketDirectives {
     checkpoint: null,
     workflow: null,
     model: null,
+    effort: null,
   };
 
   for (const line of workflowSectionLines(body)) {
@@ -103,6 +109,13 @@ export function parseTicketDirectives(body: string): TicketDirectives {
       if ((ALLOWED_TICKET_MODELS as readonly string[]).includes(alias)) {
         directives.model = alias;
       }
+    } else if (key === "effort" && directives.effort === null) {
+      // Clamp to the allowlist: a semi-trusted body may pick a level, never
+      // name an arbitrary value. An unrecognised value stays null (ignored).
+      const level = value.toLowerCase();
+      if ((ALLOWED_TICKET_EFFORTS as readonly string[]).includes(level)) {
+        directives.effort = level;
+      }
     }
   }
 
@@ -119,6 +132,20 @@ export function rawModelDirective(body: string): string | null {
   for (const line of workflowSectionLines(body)) {
     const match = line.match(DIRECTIVE_LINE);
     if (match && match[1].toLowerCase() === "model") return match[2].trim() || null;
+  }
+  return null;
+}
+
+/**
+ * The raw (un-clamped) value of an `effort:` directive in the Workflow
+ * section, if present — for surfacing an *ignored* request an operator
+ * otherwise couldn't see. Parsing for use goes through parseTicketDirectives,
+ * which clamps to the allowlist; this only reports what was asked for.
+ */
+export function rawEffortDirective(body: string): string | null {
+  for (const line of workflowSectionLines(body)) {
+    const match = line.match(DIRECTIVE_LINE);
+    if (match && match[1].toLowerCase() === "effort") return match[2].trim() || null;
   }
   return null;
 }

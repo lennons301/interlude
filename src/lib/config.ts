@@ -1,4 +1,26 @@
-import { DEFAULT_ATTEMPT_BUDGET_USD } from "./orchestrator/autonomy/budgets";
+import {
+  ALLOWED_TICKET_EFFORTS,
+  DEFAULT_ATTEMPT_BUDGET_USD,
+} from "./orchestrator/autonomy/budgets";
+
+/**
+ * Validate an `AGENT_EFFORT*` env value against the CLI's level set. Effort,
+ * unlike the model (an open-ended id/alias space), is a closed enum, so a bad
+ * value is both catastrophic — it reaches `--effort` on *every* turn fleet-wide
+ * — and cheap to catch. An unset var stays null (CLI default); a set-but-bad
+ * one warns and falls back to null rather than shipping a typo like
+ * `AGENT_EFFORT=hihg` to the CLI. The ticket-directive path clamps to the same
+ * set for the same reason.
+ */
+function normalizeEffort(raw: string | undefined): string | null {
+  if (raw == null || raw === "") return null;
+  if ((ALLOWED_TICKET_EFFORTS as readonly string[]).includes(raw)) return raw;
+  console.warn(
+    `Warning: ignoring unrecognised effort "${raw}" — expected one of ` +
+      `${ALLOWED_TICKET_EFFORTS.join(", ")}. Falling back to the CLI default.`
+  );
+  return null;
+}
 
 export interface AppConfig {
   /** Anthropic API key (optional if using CLAUDE_CODE_OAUTH_TOKEN) */
@@ -16,6 +38,19 @@ export interface AppConfig {
   agentModelReview: string | null;
   /** Optional cheaper-tier override for triage passes; falls back to `agentModel` */
   agentModelTriage: string | null;
+  /**
+   * Reasoning-effort level the CLI runs an implement pass at — and the base
+   * every other pass falls back to (issue #81). The headless CLI exposes this
+   * as a first-class `--effort` flag (levels low | medium | high | xhigh |
+   * max), orthogonal to `--model`. Null = pass no `--effort`, letting the CLI
+   * resolve its own default (the pre-#81 behaviour), so leaving it unset
+   * changes nothing. Set it to pin the depth and record it on the run row.
+   */
+  agentEffort: string | null;
+  /** Optional lower-effort override for review passes; falls back to `agentEffort` */
+  agentEffortReview: string | null;
+  /** Optional lower-effort override for triage passes; falls back to `agentEffort` */
+  agentEffortTriage: string | null;
   gitUserName: string;
   gitUserEmail: string;
   keepContainers: boolean;
@@ -92,6 +127,9 @@ export function getConfig(): AppConfig {
     agentModel: process.env.AGENT_MODEL ?? null,
     agentModelReview: process.env.AGENT_MODEL_REVIEW ?? null,
     agentModelTriage: process.env.AGENT_MODEL_TRIAGE ?? null,
+    agentEffort: normalizeEffort(process.env.AGENT_EFFORT),
+    agentEffortReview: normalizeEffort(process.env.AGENT_EFFORT_REVIEW),
+    agentEffortTriage: normalizeEffort(process.env.AGENT_EFFORT_TRIAGE),
     gitUserName: process.env.GIT_USER_NAME ?? "Interlude Agent",
     gitUserEmail: process.env.GIT_USER_EMAIL ?? "agent@interlude.dev",
     keepContainers: process.env.KEEP_CONTAINERS === "true",
@@ -163,6 +201,37 @@ export function resolveAgentModel(
       return config.agentModelTriage ?? config.agentModel;
     default:
       return ticketModel ?? config.agentModel;
+  }
+}
+
+/**
+ * Which reasoning-effort level a turn of the given kind runs at (issue #81),
+ * the other half of the cost/quality dial alongside the model. `AGENT_EFFORT`
+ * is the base — implement, repair and interactive passes all use it; the
+ * read-heavy review and triage passes may name a lower level via
+ * `AGENT_EFFORT_REVIEW` / `AGENT_EFFORT_TRIAGE` and otherwise fall back to it.
+ * Null means "pass no `--effort`": the CLI resolves its own default, exactly
+ * as before this was configurable — issue #81 deliberately ships no default
+ * other than the CLI's own.
+ *
+ * `ticketEffort` is a per-ticket `effort:` directive, already clamped to the
+ * allowlist by the directive parser. When present it overrides the base for
+ * the pass kinds that carry a run's tier — implement, repair and interactive.
+ * Review and triage keep their own (lower) level regardless: the ticket
+ * chooses the effort its *work* runs at, not the reviewer's.
+ */
+export function resolveAgentEffort(
+  kind: AgentPassKind,
+  config: AppConfig = getConfig(),
+  ticketEffort: string | null = null
+): string | null {
+  switch (kind) {
+    case "review":
+      return config.agentEffortReview ?? config.agentEffort;
+    case "triage":
+      return config.agentEffortTriage ?? config.agentEffort;
+    default:
+      return ticketEffort ?? config.agentEffort;
   }
 }
 
