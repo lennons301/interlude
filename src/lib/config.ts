@@ -1,4 +1,26 @@
-import { DEFAULT_ATTEMPT_BUDGET_USD } from "./orchestrator/autonomy/budgets";
+import {
+  ALLOWED_TICKET_EFFORTS,
+  DEFAULT_ATTEMPT_BUDGET_USD,
+} from "./orchestrator/autonomy/budgets";
+
+/**
+ * Validate an `AGENT_EFFORT*` env value against the CLI's level set. Effort,
+ * unlike the model (an open-ended id/alias space), is a closed enum, so a bad
+ * value is both catastrophic — it reaches `--effort` on *every* turn fleet-wide
+ * — and cheap to catch. An unset var stays null (CLI default); a set-but-bad
+ * one warns and falls back to null rather than shipping a typo like
+ * `AGENT_EFFORT=hihg` to the CLI. The ticket-directive path clamps to the same
+ * set for the same reason.
+ */
+function normalizeEffort(raw: string | undefined): string | null {
+  if (raw == null || raw === "") return null;
+  if ((ALLOWED_TICKET_EFFORTS as readonly string[]).includes(raw)) return raw;
+  console.warn(
+    `Warning: ignoring unrecognised effort "${raw}" — expected one of ` +
+      `${ALLOWED_TICKET_EFFORTS.join(", ")}. Falling back to the CLI default.`
+  );
+  return null;
+}
 
 export interface AppConfig {
   /** Anthropic API key (optional if using CLAUDE_CODE_OAUTH_TOKEN) */
@@ -105,9 +127,9 @@ export function getConfig(): AppConfig {
     agentModel: process.env.AGENT_MODEL ?? null,
     agentModelReview: process.env.AGENT_MODEL_REVIEW ?? null,
     agentModelTriage: process.env.AGENT_MODEL_TRIAGE ?? null,
-    agentEffort: process.env.AGENT_EFFORT ?? null,
-    agentEffortReview: process.env.AGENT_EFFORT_REVIEW ?? null,
-    agentEffortTriage: process.env.AGENT_EFFORT_TRIAGE ?? null,
+    agentEffort: normalizeEffort(process.env.AGENT_EFFORT),
+    agentEffortReview: normalizeEffort(process.env.AGENT_EFFORT_REVIEW),
+    agentEffortTriage: normalizeEffort(process.env.AGENT_EFFORT_TRIAGE),
     gitUserName: process.env.GIT_USER_NAME ?? "Interlude Agent",
     gitUserEmail: process.env.GIT_USER_EMAIL ?? "agent@interlude.dev",
     keepContainers: process.env.KEEP_CONTAINERS === "true",

@@ -1,5 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
+  getConfig,
+  resetConfig,
   resolveAgentModel,
   resolveAgentEffort,
   type AppConfig,
@@ -139,5 +141,51 @@ describe("resolveAgentEffort (issue #81)", () => {
   it("falls back to the base when no ticket effort is given", () => {
     const c = effortCfg({ agentEffort: "high" });
     expect(resolveAgentEffort("implement", c, null)).toBe("high");
+  });
+});
+
+describe("getConfig effort env validation (issue #81)", () => {
+  const saved = {
+    AGENT_EFFORT: process.env.AGENT_EFFORT,
+    AGENT_EFFORT_REVIEW: process.env.AGENT_EFFORT_REVIEW,
+    AGENT_EFFORT_TRIAGE: process.env.AGENT_EFFORT_TRIAGE,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+  };
+
+  beforeEach(() => {
+    // Suppress the unrelated "no Claude auth" warning so the assertions below
+    // observe only the effort-validation warning.
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    delete process.env.AGENT_EFFORT;
+  });
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    resetConfig();
+    vi.restoreAllMocks();
+  });
+
+  it("keeps a recognised env effort level", () => {
+    process.env.AGENT_EFFORT = "high";
+    resetConfig();
+    expect(getConfig().agentEffort).toBe("high");
+  });
+
+  it("drops an unrecognised env effort level to null and warns", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.AGENT_EFFORT = "hihg"; // fleet-wide typo
+    resetConfig();
+    expect(getConfig().agentEffort).toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("effort"));
+  });
+
+  it("treats an unset env effort as null without an effort warning", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    resetConfig();
+    expect(getConfig().agentEffort).toBeNull();
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("effort"));
   });
 });

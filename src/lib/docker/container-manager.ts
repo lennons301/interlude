@@ -294,9 +294,11 @@ export function buildClaudeTurnCommand(
   }
 
   if (options.effort) {
-    // Single-quote defensively for the same reason as the model above: the
-    // value is a bounded level in practice (allowlist-clamped from a ticket,
-    // or operator-set env), but this runs under `bash -c`.
+    // The value is always one of the CLI's bounded levels — both entry points
+    // validate against the same allowlist (the ticket directive clamps, the
+    // env is checked in config.ts), so no metacharacter can reach here. Still
+    // single-quoted for the same defence-in-depth reason as the model above,
+    // since this runs under `bash -c`.
     cmdParts.push("--effort", `'${options.effort}'`);
   }
 
