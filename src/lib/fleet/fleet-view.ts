@@ -225,6 +225,12 @@ const TERMINAL_TASK_STATUSES = new Set<FleetTaskRow["status"]>([
   "cancelled",
 ]);
 
+/** A live task still has a container and hasn't reached a terminal status — a
+ * stale container_status on a finished task (issue #46) is not "live". The one
+ * predicate behind slot occupancy and every run's card face. */
+const isLiveTask = (t: FleetTaskRow): boolean =>
+  t.containerStatus !== null && !TERMINAL_TASK_STATUSES.has(t.status);
+
 export function buildFleetView(rows: FleetRows): FleetView {
   const projectById = new Map(rows.projects.map((p) => [p.id, p]));
   const runById = new Map(rows.runs.map((r) => [r.id, r]));
@@ -243,9 +249,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
   // container_status='idle') must not resurrect it as a running session here.
   const occupants = rows.tasks.filter(
     (t) =>
-      !TERMINAL_TASK_STATUSES.has(t.status) &&
-      t.containerStatus !== null &&
-      !(t.kind !== "interactive" && t.containerStatus === "idle")
+      isLiveTask(t) && !(t.kind !== "interactive" && t.containerStatus === "idle")
   );
   const segments: SlotSegment[] = occupants.map((t) => {
     const run = t.runId ? runById.get(t.runId) : undefined;
@@ -282,10 +286,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
   const currentTaskOf = (runId: string) => {
     const owned = tasksOfRun(runId);
     return (
-      owned.find(
-        (t) =>
-          t.containerStatus !== null && !TERMINAL_TASK_STATUSES.has(t.status)
-      ) ??
+      owned.find(isLiveTask) ??
       owned.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] ??
       null
     );
@@ -362,7 +363,9 @@ export function buildFleetView(rows: FleetRows): FleetView {
   // needs-you item — it appears under Running until a verdict lands, so the
   // sign-off bucket never fires prematurely on a still-reviewing PR.
   for (const run of rows.runs.filter((r) => r.status === "gated")) {
-    const pr = run.pullRequestNumber;
+    // "PR #55" when the number is known, a bare "PR" otherwise — the copy and
+    // the action label share it, so neither has to re-branch on the number.
+    const prTag = run.pullRequestNumber ? `PR #${run.pullRequestNumber}` : "PR";
     const link = (label: string): NeedsYouItem["action"] =>
       run.pullRequestUrl ? { label, href: run.pullRequestUrl } : null;
     const disposition = classifyGated(run);
@@ -372,20 +375,16 @@ export function buildFleetView(rows: FleetRows): FleetView {
         cause: "conflict",
         severity: "red",
         context: runContext(run),
-        body: pr
-          ? `PR #${pr} still conflicts with the default branch — resolve and merge`
-          : "PR still conflicts with the default branch — resolve and merge",
-        action: link(pr ? `Resolve PR #${pr}` : "Resolve PR"),
+        body: `${prTag} still conflicts with the default branch — resolve and merge`,
+        action: link(`Resolve ${prTag}`),
       });
     } else if (disposition.kind === "unparseable") {
       needsYou.push({
         cause: "unparseable",
         severity: "red",
         context: runContext(run),
-        body: pr
-          ? `Review verdict couldn't be read on PR #${pr} — parked, nothing merges until you look`
-          : "Review verdict couldn't be read — parked, nothing merges until you look",
-        action: link(pr ? `Open PR #${pr}` : "Open PR"),
+        body: `Review verdict couldn't be read on ${prTag} — parked, nothing merges until you look`,
+        action: link(`Open ${prTag}`),
       });
     } else if (disposition.kind === "signoff") {
       needsYou.push({
@@ -394,13 +393,9 @@ export function buildFleetView(rows: FleetRows): FleetView {
         context: runContext(run),
         body:
           disposition.verdict === "escalate"
-            ? pr
-              ? `PR #${pr} — the reviewer escalated for your sign-off`
-              : "PR — the reviewer escalated for your sign-off"
-            : pr
-              ? `PR #${pr} waits for your sign-off`
-              : "PR waits for your sign-off",
-        action: link(pr ? `Review PR #${pr}` : "Review PR"),
+            ? `${prTag} — the reviewer escalated for your sign-off`
+            : `${prTag} waits for your sign-off`,
+        action: link(`Review ${prTag}`),
       });
     }
     // disposition.kind === "in-flight": review still running — fleet activity,
@@ -451,9 +446,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
   // pass runs, so prefer the actively-running (non-idle) pass — otherwise the
   // card would read as the paused implement rather than the live review.
   const activePassOf = (runId: string): FleetTaskRow | null => {
-    const live = tasksOfRun(runId).filter(
-      (t) => t.containerStatus !== null && !TERMINAL_TASK_STATUSES.has(t.status)
-    );
+    const live = tasksOfRun(runId).filter(isLiveTask);
     const busy = live.filter((t) => t.containerStatus !== "idle");
     const pool = busy.length > 0 ? busy : live;
     return (
