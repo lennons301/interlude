@@ -459,13 +459,7 @@ export async function startTask(taskId: string): Promise<void> {
       }).catch(console.error);
     }
 
-    if (running) {
-      activeTasks.delete(taskId);
-      if (!getConfig().keepContainers) {
-        await removeContainer(running);
-        updateTask(taskId, { containerId: null });
-      }
-    }
+    await removeTaskContainer(taskId, running);
   }
 }
 
@@ -937,16 +931,11 @@ async function failImplementAttempt(
     );
   }
 
-  const entry = activeTasks.get(taskId);
-  activeTasks.delete(taskId);
-  if (entry && !getConfig().keepContainers) {
-    await removeContainer(entry.container);
-    updateTask(taskId, { containerId: null });
-  }
+  await removeTaskContainer(taskId, activeTasks.get(taskId)?.container ?? null);
 }
 
 /**
- * Interrupt an implement attempt whose container died before finishing (issue
+ * Interrupt an implement pass whose container died before finishing (issue
  * #97): a mid-turn OOM / docker error / lost stream, not a failed attempt. The
  * run is marked `interrupted` (bumping the interruption count, never a strike),
  * the task fails, the owner learns why on the issue, and the container goes
@@ -963,26 +952,24 @@ async function interruptImplementPass(
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
   const run = db.select().from(runs).where(eq(runs.id, runId)).get();
 
-  insertSystemMessage(taskId, `Attempt interrupted: ${reason}`);
+  insertSystemMessage(taskId, `Pass interrupted: ${reason}`);
   updateTask(taskId, { status: "failed", containerStatus: null });
   syncRunCost(runId);
   interruptRun(runId, reason);
 
   if (task?.githubIssue) {
-    await commentOnIssue(
+    // Fire-and-forget: one call site awaits this from inside startTask's try,
+    // so a rejected comment must not throw back into the catch and re-run the
+    // whole interruption (a duplicate comment, a second count bump).
+    commentOnIssue(
       task.githubIssue,
       `Run interrupted (attempt ${run?.attempt ?? "?"}): ${reason}. ` +
         `Container deaths don't consume an attempt — the sweep re-claims this ` +
         `ticket (bounded). Work so far is pushed to \`${task.branch}\`.`
-    );
+    ).catch(console.error);
   }
 
-  const entry = activeTasks.get(taskId);
-  activeTasks.delete(taskId);
-  if (entry && !getConfig().keepContainers) {
-    await removeContainer(entry.container);
-    updateTask(taskId, { containerId: null });
-  }
+  await removeTaskContainer(taskId, activeTasks.get(taskId)?.container ?? null);
 }
 
 /**
@@ -1021,11 +1008,7 @@ async function finishReviewPass(
       `[orchestrator] Review task ${taskId} died without a result event — ` +
         `replacement will be queued (issue #97)`
     );
-    activeTasks.delete(taskId);
-    if (!getConfig().keepContainers) {
-      await removeContainer(running);
-      updateTask(taskId, { containerId: null });
-    }
+    await removeTaskContainer(taskId, running);
     return;
   }
 
@@ -1087,17 +1070,31 @@ export async function releaseParkedImplementTask(taskId: string, note: string): 
   await teardownTaskContainer(taskId, activeTasks.get(taskId)?.container ?? null);
 }
 
+/**
+ * Drop a task's in-memory session entry and remove its container (unless kept
+ * for debugging). The shared teardown behind every terminal path — completion,
+ * a failed attempt, an interruption, a reaped review — that must not leave a
+ * dead container holding memory or a phantom slot. The caller has already set
+ * the task's terminal status; this only lets go of the container.
+ */
+async function removeTaskContainer(
+  taskId: string,
+  running: RunningContainer | null
+): Promise<void> {
+  activeTasks.delete(taskId);
+  if (running && !getConfig().keepContainers) {
+    await removeContainer(running);
+    updateTask(taskId, { containerId: null });
+  }
+}
+
 /** Record completion and remove the container (unless kept for debugging). */
 async function teardownTaskContainer(
   taskId: string,
   running: RunningContainer | null
 ): Promise<void> {
   updateTask(taskId, { status: "completed", containerStatus: null });
-  activeTasks.delete(taskId);
-  if (running && !getConfig().keepContainers) {
-    await removeContainer(running);
-    updateTask(taskId, { containerId: null });
-  }
+  await removeTaskContainer(taskId, running);
 }
 
 /** A run's spend is the sum over the tasks it owns — implement pass plus
