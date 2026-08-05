@@ -1746,9 +1746,10 @@ async function executeExhaust(action: Extract<Action, { type: "exhaust" }>): Pro
     );
     await commentOnIssue(
       action.issueRef,
-      `${action.interruptionsMade} runs on this ticket were lost to orchestrator ` +
-        `restarts. Interruptions never consume attempts, but re-claims are bounded — ` +
-        `swapping \`${ARMING_LABEL}\` for \`${READY_FOR_HUMAN_LABEL}\`.\n\n` +
+      `${action.interruptionsMade} runs on this ticket were lost to interruptions ` +
+        `— an orchestrator restart, or a container that died before finishing ` +
+        `(OOM / docker error). Interruptions never consume attempts, but re-claims ` +
+        `are bounded — swapping \`${ARMING_LABEL}\` for \`${READY_FOR_HUMAN_LABEL}\`.\n\n` +
         (attemptLines.length > 0 ? `Failed attempts so far:\n${attemptLines.join("\n")}\n\n` : "") +
         `Total autonomous spend on this ticket: $${totalSpendUsd.toFixed(2)}.`
     );
