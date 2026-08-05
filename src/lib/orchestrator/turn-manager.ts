@@ -53,13 +53,14 @@ export function getActiveTasks() {
 
 /**
  * An idle autonomous container is *parked*: an implement pass waiting on its
- * review verdict, or blocked on a question to the owner (issue #19), keeps
- * its container (so the verdict's fix-up or the owner's answer can be a
- * follow-up turn in the same attempt) but runs no agent process, so it does
- * not hold a slot. An idle interactive session does hold its slot — its dev
- * server and the owner's next message are live concerns. Without this
- * distinction, two parked implements plus their two queued reviews would
- * deadlock a two-slot box.
+ * review verdict, or blocked on a question to the owner (issue #19), keeps its
+ * container (so the verdict's fix-up or the owner's answer can be a follow-up
+ * turn in the same attempt) but runs no agent process, so it does not hold a
+ * slot — and since #93 the container is `docker stop`ped while parked so it
+ * holds no memory either (see parkContainer). An idle interactive session does
+ * hold its slot — its dev server and the owner's next message are live
+ * concerns. Without this distinction, two parked implements plus their two
+ * queued reviews would deadlock a two-slot box.
  */
 export function isParked(entry: { state: string; kind: string }): boolean {
   return entry.state === "idle" && entry.kind !== "interactive";
@@ -618,9 +619,25 @@ export async function processQueuedMessages(
       // when there is no PR. A reviewer's fix-up turn needs neither — its
       // new commits re-enter gate evaluation from the parked state.
       const parkedBlocked = await evaluatePassOutcome(taskId, turnResult.finalMessage);
-      if (!parkedBlocked && !run?.pullRequestNumber) {
-        await finishImplementPass(taskId);
+      if (parkedBlocked) {
+        // Re-blocked mid-drain: parkBlockedRun stopped the container (#93).
+        // Stop draining — the next answer resumes it on a fresh poll, which
+        // restarts the container first. Continuing would exec the next queued
+        // message into a stopped container.
+        break;
       }
+      if (!run?.pullRequestNumber) {
+        // Blocked before its PR was handed over, now healthy: finish the pass.
+        // With a PR this parks (stopping the container, #93); with none it
+        // completes and the container is removed. Either way the pass has
+        // ended this turn, so stop draining rather than exec the next message
+        // into a stopped or removed container — a fresh resume delivers it.
+        await finishImplementPass(taskId);
+        break;
+      }
+      // Healthy fix-up on an already-handed-over PR: the container is still
+      // running and the pass re-enters gate evaluation awaiting review. Drain
+      // any further queued turn before the loop parks it below.
       continue;
     }
 
@@ -992,9 +1009,10 @@ function lastAgentTextMessage(taskId: string): string | null {
 /**
  * Park-or-proceed for an implement pass whose turn just ended (issue #19):
  * ask the reducer about the turn's final message — this turn's, from its
- * TurnResult, never an earlier turn's re-read. Blocked — park the run with
- * its container alive and post the question; returns true. Healthy —
- * returns false and the caller proceeds (park awaiting review, or complete).
+ * TurnResult, never an earlier turn's re-read. Blocked — park the run (its
+ * container stopped to free memory but preserved, #93) and post the question;
+ * returns true. Healthy — returns false and the caller proceeds (park awaiting
+ * review, or complete).
  */
 async function evaluatePassOutcome(
   taskId: string,
@@ -1022,11 +1040,13 @@ async function evaluatePassOutcome(
 }
 
 /**
- * Park a blocked run: the run and task go `blocked`, the container stays
- * alive holding its context, and the question is posted to the project's
- * linked Discord channel — or the fleet channel when the project has none,
- * so no question is silently lost. The posted message becomes the task's
- * interactive message: a reply to it queues the answer as the next turn.
+ * Park a blocked run: the run and task go `blocked`, the container is stopped
+ * to free its memory but preserved (its filesystem and branch state survive a
+ * restart in ~1s, #93), and the question is posted to the project's linked
+ * Discord channel — or the fleet channel when the project has none, so no
+ * question is silently lost. The posted message becomes the task's interactive
+ * message: a reply to it restarts the container and queues the answer as the
+ * next turn.
  */
 async function parkBlockedRun(taskId: string, runId: string, question: string): Promise<void> {
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();

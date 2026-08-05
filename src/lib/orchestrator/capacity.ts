@@ -41,6 +41,16 @@ export interface DerivedCapacity {
   cpuQuota: number;
 }
 
+/**
+ * Memory the daemon reports minus the orchestrator reserve (orchestrator +
+ * Caddy + system headroom) — what is actually available for agent containers.
+ * The single source of this figure, shared by slot derivation and the
+ * memory-admission backstop (issue #93) so they can never drift apart.
+ */
+export function usableMemoryBytes(memTotalBytes: number): number {
+  return memTotalBytes - DEFAULT_ORCHESTRATOR_RESERVE_MB * MiB;
+}
+
 export function deriveCapacity(
   daemon: DaemonInfo,
   overrides: CapacityOverrides = {}
@@ -51,7 +61,7 @@ export function deriveCapacity(
       ? memoryOverride
       : DEFAULT_AGENT_MEMORY_MB;
   const perAgentMemory = perAgentMb * MiB;
-  const available = daemon.memTotalBytes - DEFAULT_ORCHESTRATOR_RESERVE_MB * MiB;
+  const available = usableMemoryBytes(daemon.memTotalBytes);
   const byMemory = Math.floor(available / perAgentMemory);
   const capped = Math.min(byMemory, daemon.cpuCount);
   const derived = Number.isFinite(capped) ? Math.max(1, capped) : 1;
@@ -86,7 +96,7 @@ export function wouldOvercommitMemory(input: {
   liveContainers: number;
 }): boolean {
   if (input.liveContainers <= 0) return false;
-  const available = input.memTotalBytes - DEFAULT_ORCHESTRATOR_RESERVE_MB * MiB;
+  const available = usableMemoryBytes(input.memTotalBytes);
   return (input.liveContainers + 1) * input.perAgentMemory > available;
 }
 
@@ -121,9 +131,7 @@ export async function checkMemoryAdmission(): Promise<{ ok: boolean; reason?: st
       })
     ) {
       const perMb = Math.round(capacity.perAgentMemory / MiB);
-      const usableMb = Math.round(
-        (info.MemTotal - DEFAULT_ORCHESTRATOR_RESERVE_MB * MiB) / MiB
-      );
+      const usableMb = Math.round(usableMemoryBytes(info.MemTotal) / MiB);
       return {
         ok: false,
         reason: `${liveContainers} agent container(s) live × ${perMb} MiB + one more exceeds ~${usableMb} MiB usable`,
