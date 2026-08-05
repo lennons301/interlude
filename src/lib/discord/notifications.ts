@@ -486,7 +486,8 @@ export async function notifyAttemptsExhausted(
         ? new EmbedBuilder()
             .setTitle(`Interruption bound hit — ${payload.issueRef} needs you`)
             .setDescription(
-              `${payload.interruptions} runs lost to orchestrator restarts ` +
+              `${payload.interruptions} runs lost to interruptions — restarts or ` +
+                `containers that died before finishing ` +
                 `($${payload.totalSpendUsd.toFixed(2)} autonomous spend). Re-claims are ` +
                 `bounded, so the ticket is now \`ready-for-human\`; the story is on the issue.`
             )

@@ -16,6 +16,7 @@ import { checkMemoryAdmission } from "./capacity";
 import { createOutputHandler, type TurnResult } from "./output-parser";
 import { parseReviewVerdict } from "./autonomy/verdict";
 import { parseTriageExit } from "./autonomy/triage";
+import { passProducedResult } from "./autonomy/pass-output";
 import {
   DEFAULT_REPAIR_BUDGET_USD,
   DEFAULT_REVIEW_BUDGET_USD,
@@ -223,6 +224,11 @@ export async function startTask(taskId: string): Promise<void> {
   }
 
   let running: RunningContainer | null = null;
+  // Whether the initial turn reached a terminal agent result (a `result`
+  // event). Stays false if the container dies mid-turn — the signal the catch
+  // block uses to tell an infra death (interruption) from a work failure
+  // (issue #97).
+  let producedResult = false;
 
   try {
     // Create container. Review and triage passes receive no credential beyond
@@ -293,6 +299,10 @@ export async function startTask(taskId: string): Promise<void> {
       effort: passEffort,
     });
 
+    // A terminal `result` event arrived — the turn ran to completion, so any
+    // failure from here is the work's, not the container's (issue #97).
+    producedResult = turnResult.subtype !== null;
+
     // Store session ID and cost
     updateTask(taskId, {
       sessionId: turnResult.sessionId,
@@ -320,6 +330,21 @@ export async function startTask(taskId: string): Promise<void> {
     await runPostTurnCommitAndPush(taskId, running);
 
     if (isImplementShaped) {
+      // A turn that returned no terminal result event died ungracefully
+      // mid-flight (the process exited before finishing rather than throwing) —
+      // an interruption, not a spent attempt (issue #97). Checked before
+      // exhaustion: with no result there is no trustworthy cost or subtype to
+      // judge exhaustion from, and the branch is pushed after every turn so any
+      // work survives the re-claim. Repair passes are never attempts, so this
+      // only diverts a real implement pass.
+      if (isImplementPass && run && !producedResult) {
+        await interruptImplementPass(
+          taskId,
+          run.id,
+          "container exited without a terminal result"
+        );
+        return;
+      }
       // Exhaustion first (issue #18) — but only for a real implement attempt.
       // A repair pass (issue #54) is never an attempt, so a repair that spent
       // its budget without clearing the conflict still parks: the sweep's
@@ -347,6 +372,20 @@ export async function startTask(taskId: string): Promise<void> {
     await scanForDevServer(taskId, running);
     await postIdleNotification(taskId);
   } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+
+    // An implement pass that threw before delivering a terminal result died to
+    // the container, not to bad work (issue #97): a mid-turn OOM (exit 137),
+    // docker error, or lost stream. Route it to the interruption bound rather
+    // than the attempt budget — its own handler records the ledger, messages
+    // the issue and cleans up, so return before the generic failure tail
+    // (which would announce a failure and re-remove the container).
+    if (isImplementPass && task.runId && !producedResult) {
+      insertSystemMessage(taskId, `Error: ${reason}`);
+      await interruptImplementPass(taskId, task.runId, `container error: ${reason}`);
+      return;
+    }
+
     // A triage pass that died delivered no exit. Store the failure as an
     // unparseable result so the fail-closed path (nothing applied, the
     // owner told once, needs-triage kept) runs instead of a silent retry.
@@ -367,42 +406,44 @@ export async function startTask(taskId: string): Promise<void> {
         ? {
             triageResult: {
               kind: "unparseable" as const,
-              reason: `triage pass failed: ${err instanceof Error ? err.message : String(err)}`,
+              reason: `triage pass failed: ${reason}`,
             },
           }
         : {}),
     });
     if (task.runId) {
       if (isReviewPass) {
-        // A review pass that died is not a failed attempt — the implement
-        // work is intact. Store the failure as an unparseable verdict so
-        // the fail-closed path (no merge, human-signoff, owner told) runs —
-        // unless the sweep already reaped this pass and queued a replacement.
-        if (!alreadyReaped) {
+        // A review pass that died is not a failed attempt — the implement work
+        // is intact. If a terminal result arrived, the failure is the review's
+        // own: store it as an unparseable verdict so the fail-closed path (no
+        // merge, human-signoff, owner told) runs. If none did — an infra death
+        // (OOM, docker error, lost stream) — leave the result null so the sweep
+        // queues a fresh replacement review (issue #97), consuming no
+        // format-retry, exactly the #95 reaper's recovery. Never write over a
+        // verdict the sweep already reaped and replaced (issue #95).
+        if (producedResult && !alreadyReaped) {
           db.update(runs)
             .set({
               reviewResult: {
                 kind: "unparseable",
-                reason: `review pass failed: ${err instanceof Error ? err.message : String(err)}`,
+                reason: `review pass failed: ${reason}`,
               },
             })
             .where(eq(runs.id, task.runId))
             .run();
         }
       } else {
-        finishRun(
-          task.runId,
-          "failed",
-          `container error: ${err instanceof Error ? err.message : String(err)}`
-        );
+        finishRun(task.runId, "failed", `container error: ${reason}`);
       }
     }
-    insertSystemMessage(
-      taskId,
-      `Error: ${err instanceof Error ? err.message : String(err)}`
-    );
+    insertSystemMessage(taskId, `Error: ${reason}`);
 
-    if (task.githubIssue) {
+    // An infra death of a review pass auto-recovers — the sweep re-queues a
+    // replacement — so it is not a failure to announce on the issue or in
+    // Discord (issue #97). Every other death here is a genuine failure.
+    const reviewInfraDeath = isReviewPass && !producedResult;
+
+    if (task.githubIssue && !reviewInfraDeath) {
       const domain = process.env.DOMAIN ?? "interludes.co.uk";
       commentOnIssue(
         task.githubIssue,
@@ -410,21 +451,15 @@ export async function startTask(taskId: string): Promise<void> {
       ).catch(console.error);
     }
 
-    if (proj.discordChannelId) {
+    if (proj.discordChannelId && !reviewInfraDeath) {
       notifyTaskFailed(proj.discordChannelId, {
         id: taskId,
         title: task.title,
-        error: err instanceof Error ? err.message : String(err),
+        error: reason,
       }).catch(console.error);
     }
 
-    if (running) {
-      activeTasks.delete(taskId);
-      if (!getConfig().keepContainers) {
-        await removeContainer(running);
-        updateTask(taskId, { containerId: null });
-      }
-    }
+    await removeTaskContainer(taskId, running);
   }
 }
 
@@ -896,12 +931,45 @@ async function failImplementAttempt(
     );
   }
 
-  const entry = activeTasks.get(taskId);
-  activeTasks.delete(taskId);
-  if (entry && !getConfig().keepContainers) {
-    await removeContainer(entry.container);
-    updateTask(taskId, { containerId: null });
+  await removeTaskContainer(taskId, activeTasks.get(taskId)?.container ?? null);
+}
+
+/**
+ * Interrupt an implement pass whose container died before finishing (issue
+ * #97): a mid-turn OOM / docker error / lost stream, not a failed attempt. The
+ * run is marked `interrupted` (bumping the interruption count, never a strike),
+ * the task fails, the owner learns why on the issue, and the container goes
+ * away. The branch was pushed after every turn, so any work survives for the
+ * re-claim the sweep queues without consuming an attempt. Mirrors
+ * `failImplementAttempt` but routes to the interruption bound (issue #24)
+ * rather than the attempt budget.
+ */
+async function interruptImplementPass(
+  taskId: string,
+  runId: string,
+  reason: string
+): Promise<void> {
+  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+  const run = db.select().from(runs).where(eq(runs.id, runId)).get();
+
+  insertSystemMessage(taskId, `Pass interrupted: ${reason}`);
+  updateTask(taskId, { status: "failed", containerStatus: null });
+  syncRunCost(runId);
+  interruptRun(runId, reason);
+
+  if (task?.githubIssue) {
+    // Fire-and-forget: one call site awaits this from inside startTask's try,
+    // so a rejected comment must not throw back into the catch and re-run the
+    // whole interruption (a duplicate comment, a second count bump).
+    commentOnIssue(
+      task.githubIssue,
+      `Run interrupted (attempt ${run?.attempt ?? "?"}): ${reason}. ` +
+        `Container deaths don't consume an attempt — the sweep re-claims this ` +
+        `ticket (bounded). Work so far is pushed to \`${task.branch}\`.`
+    ).catch(console.error);
   }
+
+  await removeTaskContainer(taskId, activeTasks.get(taskId)?.container ?? null);
 }
 
 /**
@@ -916,6 +984,33 @@ async function finishReviewPass(
   rawStream: string
 ): Promise<void> {
   const verdict = parseReviewVerdict(rawStream);
+
+  // An unparseable verdict with no terminal result event in the stream is an
+  // infra death (issue #97): the container exited mid-review (OOM / docker
+  // error / lost stream), it did not merely mis-format a real review. Storing
+  // it as an unparseable verdict would burn the one bounded format-retry meant
+  // for genuine format slips (issue #89). Instead mark the pass `failed` and
+  // leave the verdict unstored, so the sweep queues a fresh replacement review
+  // — the same recovery the #95 reaper gives a hung review container, consuming
+  // no retry. The `running`-status guard mirrors the store below: a pass the
+  // sweep already reaped and replaced (#95) must not be touched again.
+  if (verdict.kind === "unparseable" && !passProducedResult(rawStream)) {
+    if (taskStatus(taskId) === "running") {
+      updateTask(taskId, { status: "failed", containerStatus: null });
+      insertSystemMessage(
+        taskId,
+        `Review pass produced no result event (container died mid-review): ` +
+          `${verdict.reason}. Marking it failed so a replacement review is ` +
+          `queued — no format-retry consumed.`
+      );
+    }
+    console.log(
+      `[orchestrator] Review task ${taskId} died without a result event — ` +
+        `replacement will be queued (issue #97)`
+    );
+    await removeTaskContainer(taskId, running);
+    return;
+  }
 
   // Only store the verdict if this pass is still the run's live review. If the
   // sweep reaped it as dead (container gone, task no longer `running` — issue
@@ -975,17 +1070,31 @@ export async function releaseParkedImplementTask(taskId: string, note: string): 
   await teardownTaskContainer(taskId, activeTasks.get(taskId)?.container ?? null);
 }
 
+/**
+ * Drop a task's in-memory session entry and remove its container (unless kept
+ * for debugging). The shared teardown behind every terminal path — completion,
+ * a failed attempt, an interruption, a reaped review — that must not leave a
+ * dead container holding memory or a phantom slot. The caller has already set
+ * the task's terminal status; this only lets go of the container.
+ */
+async function removeTaskContainer(
+  taskId: string,
+  running: RunningContainer | null
+): Promise<void> {
+  activeTasks.delete(taskId);
+  if (running && !getConfig().keepContainers) {
+    await removeContainer(running);
+    updateTask(taskId, { containerId: null });
+  }
+}
+
 /** Record completion and remove the container (unless kept for debugging). */
 async function teardownTaskContainer(
   taskId: string,
   running: RunningContainer | null
 ): Promise<void> {
   updateTask(taskId, { status: "completed", containerStatus: null });
-  activeTasks.delete(taskId);
-  if (running && !getConfig().keepContainers) {
-    await removeContainer(running);
-    updateTask(taskId, { containerId: null });
-  }
+  await removeTaskContainer(taskId, running);
 }
 
 /** A run's spend is the sum over the tasks it owns — implement pass plus
@@ -1316,6 +1425,33 @@ function taskStatus(taskId: string): string | null {
 function finishRun(runId: string, status: "failed" | "cancelled", reason?: string): void {
   db.update(runs)
     .set({ status, finishedAt: new Date(), ...(reason ? { failureReason: reason } : {}) })
+    .where(eq(runs.id, runId))
+    .run();
+}
+
+/**
+ * Terminalize a run as `interrupted` (issue #97): an in-flight pass whose
+ * container died without delivering a terminal agent result — OOM (exit 137),
+ * a docker error, a stream lost to host pressure — is the platform's fault,
+ * not the work's. Exactly like a restart-recovery interruption (issue #24) it
+ * counts against the interruption bound, never the attempt budget, so the
+ * sweep re-claims the ticket without consuming an attempt. The re-claim is
+ * still bounded (MAX_INTERRUPTIONS_PER_TICKET) so a ticket that reliably
+ * crashes its container eventually routes to a human instead of looping.
+ */
+function interruptRun(runId: string, reason: string): void {
+  const run = db
+    .select({ interruptionCount: runs.interruptionCount })
+    .from(runs)
+    .where(eq(runs.id, runId))
+    .get();
+  db.update(runs)
+    .set({
+      status: "interrupted",
+      failureReason: reason,
+      interruptionCount: (run?.interruptionCount ?? 0) + 1,
+      finishedAt: new Date(),
+    })
     .where(eq(runs.id, runId))
     .run();
 }

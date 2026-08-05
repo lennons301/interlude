@@ -199,6 +199,14 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
 - Review passes carry their own **~$5**; triage a small allowance with a low turn cap.
 - **3 attempts**, then the loop swaps `ready-for-agent` for **`ready-for-human`**,
   comments a summary and pings Discord.
+- **Interruptions don't count as attempts.** A run lost to an orchestrator restart
+  *or* to a container that died before finishing (OOM / exit 137 / docker error, i.e.
+  no terminal agent result) is marked `interrupted`, not `failed`: the sweep re-claims
+  the ticket without consuming an attempt. Re-claims are still bounded
+  (`MAX_INTERRUPTIONS_PER_TICKET`, 5), so a ticket that reliably kills its container
+  eventually routes to `ready-for-human` like an exhausted one. A review pass that
+  dies the same way re-queues a fresh replacement instead of burning its one
+  format-retry.
 - **$500/day** estate-wide autonomous cap pauses pickup (announced once, shown on
   the dashboard, resets at local midnight). Interactive work is exempt by
   construction (it has no run).
