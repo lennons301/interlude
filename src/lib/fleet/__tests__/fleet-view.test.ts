@@ -512,7 +512,7 @@ describe("buildFleetView — needs you", () => {
             reviewVerdict: null,
             reviewResult: {
               kind: "unparseable",
-              reason: "final message does not start with a VERDICT: line",
+              reason: "final message has no VERDICT: line",
             },
             pullRequestNumber: 55,
             pullRequestUrl: "https://github.com/lennons301/lemons/pull/55",
