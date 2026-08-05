@@ -441,3 +441,32 @@ export async function removeContainer(
     // Already removed
   }
 }
+
+/**
+ * Whether a container (by name) is still running, for the ungraceful-death
+ * reaper (issue #95). Fail-safe on the side of not touching a live pass: a
+ * container the daemon has definitively lost (404) or that has exited returns
+ * false so its stale `running` task can be reaped; any *other* daemon error
+ * (a busy or briefly unreachable socket under memory pressure) returns true —
+ * assume live and let the next sweep retry, so a transient hiccup can never
+ * terminalize a pass that is genuinely still working.
+ */
+export async function isContainerRunning(name: string): Promise<boolean> {
+  try {
+    const info = await getDocker().getContainer(name).inspect();
+    return info.State?.Running === true;
+  } catch (err) {
+    return (err as { statusCode?: number })?.statusCode !== 404;
+  }
+}
+
+/** Force-remove a container by name — for reaping a dead pass's container
+ * whose `RunningContainer` handle the orchestrator no longer holds (issue #95).
+ * Idempotent: an already-gone container is not an error. */
+export async function removeContainerByName(name: string): Promise<void> {
+  try {
+    await getDocker().getContainer(name).remove({ force: true });
+  } catch {
+    // Already removed
+  }
+}
