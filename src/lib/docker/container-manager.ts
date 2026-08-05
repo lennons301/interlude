@@ -413,6 +413,25 @@ export async function stopContainer(
   }
 }
 
+/**
+ * Start (or resume) a container's Docker process. Idempotent: the daemon
+ * answers an already-running container with a 304, which is not an error we
+ * care about — a genuine start failure (bad image, missing container) still
+ * propagates so the caller's turn fails loudly rather than execing into a dead
+ * container. Used to resume a container `stopContainer` parked to free memory
+ * (issue #93).
+ */
+export async function startContainer(
+  running: RunningContainer
+): Promise<void> {
+  try {
+    await running.container.start();
+  } catch (err) {
+    if ((err as { statusCode?: number })?.statusCode === 304) return; // Already running
+    throw err;
+  }
+}
+
 export async function removeContainer(
   running: RunningContainer
 ): Promise<void> {

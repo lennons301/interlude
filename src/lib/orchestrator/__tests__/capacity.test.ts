@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { createLocalCapacityProvider, deriveCapacity } from "../capacity";
+import {
+  createLocalCapacityProvider,
+  deriveCapacity,
+  wouldOvercommitMemory,
+} from "../capacity";
 
 const MiB = 1024 * 1024;
 const GiB = 1024 * MiB;
@@ -87,6 +91,60 @@ describe("deriveCapacity", () => {
       expect(capacity.slots).toBe(2);
     }
   );
+});
+
+describe("wouldOvercommitMemory", () => {
+  // Defense in depth for issue #93: cgroup limits cap each container but never
+  // reserve memory, so the host OOMs on overcommit before any one container
+  // hits its cap. The check charges each container (the live set plus the one
+  // about to start) its full per-agent allowance against usable memory
+  // (MemTotal minus the 1 GiB orchestrator reserve deriveCapacity uses).
+  const cx22 = deriveCapacity({ memTotalBytes: 4 * GiB, cpuCount: 2 });
+
+  it.each([
+    { live: 0, overcommit: false },
+    { live: 1, overcommit: false },
+    // The incident: a 2-slot box (usable ~3 GiB, 1200 MiB per agent) fits two
+    // live containers; the third — the review that stacked on two parked
+    // implements on 2026-08-04 — is refused before it can OOM the host.
+    { live: 2, overcommit: true },
+    { live: 3, overcommit: true },
+  ])(
+    "CX22 with $live live container(s) → overcommit=$overcommit",
+    ({ live, overcommit }) => {
+      expect(
+        wouldOvercommitMemory({
+          memTotalBytes: 4 * GiB,
+          perAgentMemory: cx22.perAgentMemory,
+          liveContainers: live,
+        })
+      ).toBe(overcommit);
+    }
+  );
+
+  it("always admits the first container, even on a box too small to fit one (matches deriveCapacity's slot floor of 1)", () => {
+    // 2 GiB box, 1 GiB reserve → ~1 GiB usable, less than a 1200 MiB agent. The
+    // box must still run a single task (its own cgroup cap is the backstop);
+    // only a second start is refused.
+    expect(
+      wouldOvercommitMemory({ memTotalBytes: 2 * GiB, perAgentMemory: 1200 * MiB, liveContainers: 0 })
+    ).toBe(false);
+    expect(
+      wouldOvercommitMemory({ memTotalBytes: 2 * GiB, perAgentMemory: 1200 * MiB, liveContainers: 1 })
+    ).toBe(true);
+  });
+
+  it("a larger per-agent allowance admits fewer containers, in step with the slot divisor", () => {
+    // 2000 MiB per agent yields deriveCapacity slots=1 on the same box — so the
+    // second container (one live, one more) must be refused.
+    const perAgentMemory = 2000 * MiB;
+    expect(
+      wouldOvercommitMemory({ memTotalBytes: 4 * GiB, perAgentMemory, liveContainers: 0 })
+    ).toBe(false);
+    expect(
+      wouldOvercommitMemory({ memTotalBytes: 4 * GiB, perAgentMemory, liveContainers: 1 })
+    ).toBe(true);
+  });
 });
 
 describe("capacity provider", () => {
