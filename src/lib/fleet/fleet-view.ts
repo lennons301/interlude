@@ -277,20 +277,58 @@ export function buildFleetView(rows: FleetRows): FleetView {
     .reduce((sum, r) => sum + r.totalCostUsd, 0);
   const capPaused = todayUsd >= rows.dailyCapUsd;
 
-  // A run's face in the UI is its latest task — the live container if one
-  // exists, otherwise the most recently created pass. A finished pass with a
-  // stale container_status is not "live" (issue #46), so the same terminal
-  // guard applies here as in the occupants filter.
   const tasksOfRun = (runId: string) =>
     rows.tasks.filter((t) => t.runId === runId);
-  const currentTaskOf = (runId: string) => {
-    const owned = tasksOfRun(runId);
-    return (
-      owned.find(isLiveTask) ??
-      owned.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] ??
-      null
-    );
+
+  // Newest pass first, with a stable id tiebreak so a createdAt collision
+  // between two passes can't resolve arbitrarily (ULIDs sort by creation time).
+  const byNewest = (a: FleetTaskRow, b: FleetTaskRow) =>
+    b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id);
+
+  // A pass whose container is actually executing: live (issue #46's terminal
+  // guard) and not parked idle. The one predicate behind both pickPass's busy
+  // preference and the gated-run activity gate (hasBusyPass).
+  const isBusyPass = (t: FleetTaskRow): boolean =>
+    isLiveTask(t) && t.containerStatus !== "idle";
+
+  // The pass kinds that make up a run's current phase: a reviewing or gated run
+  // is on its review pass; every other status is on its implement/repair pass.
+  // This mirrors the orchestrator's own workingTaskOf, which selects the working
+  // pass by kind — the view must resolve a run's face by phase, not by inferring
+  // it from container_status races (issue #96).
+  const phaseKinds = (status: FleetRunRow["status"]): FleetTaskRow["kind"][] =>
+    status === "reviewing" || status === "gated"
+      ? ["review"]
+      : ["implement", "repair"];
+
+  // Pick a run's face from the passes of its current phase: prefer the container
+  // actually executing, else the newest. When the review pass has finished but
+  // the run is still reviewing (its container gone, or idle between turns), no
+  // pass is busy, so the newest — deliberately including that finished review
+  // pass — is returned. That is the point: the card stays on the review pass
+  // rather than the parked implement beside it (issue #96, symptom 1).
+  const pickPass = (pool: FleetTaskRow[]): FleetTaskRow | null => {
+    const busy = pool.filter(isBusyPass);
+    return (busy.length > 0 ? busy : pool).sort(byNewest)[0] ?? null;
   };
+
+  // A run's live face — the task its card shows and links to — resolved within
+  // the run's current phase only. If that phase owns no pass yet (a brief window
+  // after the status flips to reviewing, before the review pass is queued), the
+  // card links nowhere rather than falling back to the wrong-phase implement
+  // pass: a non-clickable review card, not a link to the finished implement task
+  // (issue #96). It also resolves duplicate review passes (issue #95) to the one
+  // really running.
+  const currentPassOf = (run: FleetRunRow): FleetTaskRow | null =>
+    pickPass(
+      tasksOfRun(run.id).filter((t) => phaseKinds(run.status).includes(t.kind))
+    );
+
+  // Whether a run has a container actually executing right now — a live,
+  // non-idle pass on a slot. A gated run reads as fleet activity only while this
+  // holds; without it the run is between sweeps or already resolved (issue #90).
+  const hasBusyPass = (runId: string): boolean =>
+    tasksOfRun(runId).some(isBusyPass);
 
   const runContext = (run: FleetRunRow) =>
     `${projectName(run.projectId)} ${ticketLabel(run.githubIssue) ?? run.githubIssue} · attempt ${run.attempt}/${MAX_ATTEMPTS}`;
@@ -306,7 +344,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
         href: `https://discord.com/channels/${rows.discordGuildId}/${channelId}`,
       };
     }
-    const task = currentTaskOf(run.id);
+    const task = currentPassOf(run);
     return task ? { label: "Open task", href: `/tasks/${task.id}` } : null;
   };
 
@@ -441,19 +479,6 @@ export function buildFleetView(rows: FleetRows): FleetView {
     "reviewing",
     "blocked",
   ]);
-  // The pass a run is currently executing. A run under review keeps its
-  // implement container parked (idle) for a possible fix-up while the review
-  // pass runs, so prefer the actively-running (non-idle) pass — otherwise the
-  // card would read as the paused implement rather than the live review.
-  const activePassOf = (runId: string): FleetTaskRow | null => {
-    const live = tasksOfRun(runId).filter(isLiveTask);
-    const busy = live.filter((t) => t.containerStatus !== "idle");
-    const pool = busy.length > 0 ? busy : live;
-    return (
-      pool.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] ??
-      null
-    );
-  };
   // The review stage is live for both the armed path (status `reviewing`) and a
   // gated run whose review is still in flight (the only gated runs that reach
   // Running — a landed verdict routes them to needs-you instead).
@@ -474,11 +499,11 @@ export function buildFleetView(rows: FleetRows): FleetView {
         // sweeps or already resolved, not something to show as running.
         (r.status === "gated" &&
           classifyGated(r).kind === "in-flight" &&
-          activePassOf(r.id) !== null)
+          hasBusyPass(r.id))
     )
     .sort((a, b) => a.claimedAt.getTime() - b.claimedAt.getTime())
     .map((run) => {
-      const pass = activePassOf(run.id);
+      const pass = currentPassOf(run);
       const reviewing = run.status === "reviewing" || run.status === "gated";
       // An in-flight review pass reads with its own spend against the review
       // budget (issue #90); the run's rolled-up spend against the attempt
@@ -555,7 +580,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
     const outcome = RUN_OUTCOMES[run.status];
     const finishedAt = run.finishedAt;
     if (!outcome || !finishedAt || finishedAt.getTime() < windowStart) continue;
-    const task = currentTaskOf(run.id);
+    const task = currentPassOf(run);
     recentItems.push({
       title: task?.title ?? run.githubIssue,
       projectName: projectName(run.projectId),
