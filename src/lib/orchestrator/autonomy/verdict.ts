@@ -6,9 +6,11 @@
  * treat it as an approval, and `decideNext` maps it to "block the merge and
  * tell the owner".
  *
- * The contract with the pass prompt: the turn's final message begins, on its
- * first line, with `VERDICT: approve | request-changes | escalate`, and the
- * rest of the message is the review body posted verbatim to GitHub.
+ * The contract with the pass prompt: the turn's final message carries a
+ * `VERDICT: approve | request-changes | escalate` line — the prompt asks for
+ * it first, but the parser tolerates a verification preamble ahead of it
+ * (issue #94), taking the first line that starts with the marker. Everything
+ * after that line is the review body posted verbatim to GitHub.
  */
 
 import { finalPassMessage } from "./pass-output";
@@ -19,7 +21,11 @@ export type ReviewVerdictResult =
   | { kind: ReviewVerdictKind; body: string }
   | { kind: "unparseable"; reason: string };
 
-const VERDICT_LINE = /^VERDICT:[ \t]*(approve|request-changes|escalate)[ \t]*$/i;
+// Anchored to line start so the marker quoted mid-sentence ("...so my
+// conclusion is VERDICT: approve") never counts; no end anchor, so a verdict
+// line carrying trailing decoration ("VERDICT: approve — ship it") still reads.
+// The first matching line wins.
+const VERDICT_LINE = /^VERDICT:[ \t]*(approve|request-changes|escalate)/i;
 
 /**
  * The fix-up turn a request-changes verdict becomes: the reviewer's findings,
@@ -61,17 +67,31 @@ export function parseReviewVerdict(ndjson: string): ReviewVerdictResult {
     return { kind: "unparseable", reason: `review ${final.reason}` };
   }
 
+  // Scan for the first line that starts with the VERDICT: marker rather than
+  // demanding it at position zero: models routinely open with a verification
+  // summary before the verdict, and a good, evidenced review shouldn't be
+  // discarded over that layout (issue #94). The body is everything after the
+  // verdict line — the review the prompt asks to follow it.
   const lines = final.message.trim().split("\n");
-  const match = lines[0].trim().match(VERDICT_LINE);
+  let match: RegExpMatchArray | null = null;
+  let verdictIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const found = lines[i].trim().match(VERDICT_LINE);
+    if (found) {
+      match = found;
+      verdictIndex = i;
+      break;
+    }
+  }
   if (!match) {
     return {
       kind: "unparseable",
-      reason: "final message does not start with a VERDICT: line",
+      reason: "final message has no VERDICT: line",
     };
   }
 
   const kind = match[1].toLowerCase() as ReviewVerdictKind;
-  const body = lines.slice(1).join("\n").trim();
+  const body = lines.slice(verdictIndex + 1).join("\n").trim();
 
   // Findings with no content can drive neither a fix-up turn nor a human's
   // decision. Only an approval may stand on its marker alone.

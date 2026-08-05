@@ -169,14 +169,18 @@ export function buildReviewPrompt(ticket: ReviewTicket): string {
     ``,
     `Deliver your verdict as your run's final message, in exactly this shape:`,
     ``,
-    `- The first line is exactly one of \`VERDICT: approve\`, ` +
-      `\`VERDICT: request-changes\` or \`VERDICT: escalate\` — nothing else on ` +
-      `that line, and VERDICT: appears nowhere else in the message.`,
-    `- Then a blank line, then the review body in markdown. The body is ` +
-      `posted to GitHub verbatim; request-changes and escalate require a ` +
-      `non-empty body.`,
+    `- The VERDICT: line comes FIRST, before any other text. Do not open with ` +
+      `a verification summary or preamble — put those in the body below. The ` +
+      `first line is exactly one of \`VERDICT: approve\`, ` +
+      `\`VERDICT: request-changes\` or \`VERDICT: escalate\`, with nothing ` +
+      `else on that line.`,
+    `- Then a blank line, then the review body in markdown — your verification ` +
+      `notes and findings go here. The body is posted to GitHub verbatim; ` +
+      `request-changes and escalate require a non-empty body.`,
     ``,
-    `A final message in any other shape blocks the merge and pages the owner.`,
+    `The orchestrator reads the first line that starts with VERDICT:; a final ` +
+      `message it can find no VERDICT: line in blocks the merge and pages the ` +
+      `owner.`,
     ...retryNote,
   ].join("\n");
 }
