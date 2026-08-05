@@ -9,8 +9,10 @@ import {
   execFallbackCommitAndPush,
   removeContainer,
   stopContainer,
+  startContainer,
   type RunningContainer,
 } from "../docker/container-manager";
+import { checkMemoryAdmission } from "./capacity";
 import { createOutputHandler, type TurnResult } from "./output-parser";
 import { parseReviewVerdict } from "./autonomy/verdict";
 import { parseTriageExit } from "./autonomy/triage";
@@ -61,6 +63,51 @@ export function getActiveTasks() {
  */
 export function isParked(entry: { state: string; kind: string }): boolean {
   return entry.state === "idle" && entry.kind !== "interactive";
+}
+
+/**
+ * Free a parked autonomous container's memory (issue #93). A pass awaiting its
+ * review verdict or blocked on a question keeps its container so a fix-up or
+ * answer can resume the *same* attempt — but it runs no agent process, so the
+ * node/dev-server RSS it held while parked was pure overcommit risk: several
+ * parked at once OOM-thrashed the host on 2026-08-04. `docker stop` frees all
+ * of it; the container's filesystem and branch state survive, and
+ * `resumeParkedContainer` restarts it in ~1s when the next turn arrives.
+ * Interactive sessions are never parked (their dev server and next message are
+ * live concerns), so they keep their container. Idempotent — a no-op when the
+ * task has no active entry or is not parked.
+ */
+async function parkContainer(taskId: string): Promise<void> {
+  const entry = activeTasks.get(taskId);
+  if (!entry || !isParked(entry)) return;
+  await stopContainer(entry.container);
+  console.log(`[orchestrator] Parked container for task ${taskId} stopped to free memory`);
+}
+
+/**
+ * Restart a container `parkContainer` stopped, before delivering its next turn
+ * (issue #93). Refuses when the box has no memory headroom — the caller defers
+ * to a later poll rather than overcommit, since resuming a parked container is
+ * not slot-gated. Returns false when the resume was deferred (the container is
+ * left stopped and the queued turn undelivered); true once it is running. A
+ * no-op success for interactive containers, which are never stopped.
+ */
+async function resumeParkedContainer(
+  taskId: string,
+  running: RunningContainer
+): Promise<boolean> {
+  const entry = activeTasks.get(taskId);
+  if (!entry || !isParked(entry)) return true;
+
+  const admission = await checkMemoryAdmission();
+  if (!admission.ok) {
+    console.log(
+      `[orchestrator] Deferring resume of parked task ${taskId} — ${admission.reason}`
+    );
+    return false;
+  }
+  await startContainer(running);
+  return true;
 }
 
 export function getTaskState(taskId: string) {
@@ -431,6 +478,12 @@ export async function processQueuedMessages(
 ): Promise<void> {
   const config = getConfig();
 
+  // Resume a parked autonomous container (#93): it was docker-stopped to free
+  // memory while awaiting its verdict or an answer. Restart it before running
+  // the queued turn — but defer to a later poll if the box has no memory
+  // headroom, leaving the message queued rather than overcommitting.
+  if (!(await resumeParkedContainer(taskId, running))) return;
+
   while (true) {
     // Get current task state. A blocked implement pass is resumable — the
     // queued message is the answer to its question (issue #19).
@@ -573,6 +626,12 @@ export async function processQueuedMessages(
 
     if (task.kind === "interactive") await scanForDevServer(taskId, running);
   }
+
+  // Re-park (#93): a resumed autonomous pass that ended its turn(s) still idle
+  // (awaiting review again after a fix-up, or blocked on a fresh question)
+  // keeps its container for the next turn — stop it again to free memory until
+  // then. A no-op when the task completed, failed, or is interactive.
+  await parkContainer(taskId);
 }
 
 /**
@@ -605,6 +664,10 @@ export async function completeTask(taskId: string): Promise<void> {
 
   try {
     if (running) {
+      // A parked autonomous container is stopped to free memory (#93); a
+      // complete triggered while parked (an owner action) must restart it
+      // before the final push exec. A no-op for a live interactive container.
+      await startContainer(running);
       await execFallbackCommitAndPush(running);
       insertSystemMessage(taskId, `Branch '${task.branch}' pushed.`);
     } else {
@@ -746,6 +809,10 @@ async function finishImplementPass(taskId: string): Promise<void> {
       `Implement pass complete -- PR #${task.pullRequestNumber} ready for review ($${cost})`
     );
   }
+
+  // The pass is now parked awaiting its review verdict — stop the container to
+  // free its memory until a fix-up turn (or its release) arrives (issue #93).
+  await parkContainer(taskId);
 }
 
 /**
@@ -972,6 +1039,11 @@ async function parkBlockedRun(taskId: string, runId: string, question: string): 
   updateTask(taskId, { status: "blocked" });
   insertSystemMessage(taskId, `Run blocked — waiting for an answer: ${question}`);
   console.log(`[autonomy] Run ${runId} blocked on: ${question}`);
+
+  // Parked on the owner's answer — stop the container to free its memory until
+  // the reply lands as the next turn (issue #93). The question below is posted
+  // out-of-band (Discord + the task chat), so nothing needs the container now.
+  await parkContainer(taskId);
 
   const proj = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
   const channelId = proj?.discordChannelId ?? getConfig().discordFleetChannelId;
