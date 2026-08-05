@@ -881,7 +881,7 @@ describe("buildFleetView — running", () => {
   });
 
   it("picks a run's live pass as its face, ignoring a finished pass with a stale container_status", () => {
-    // Issue #46, sibling path: currentTaskOf must not surface a terminal task
+    // Issue #46, sibling path: currentPassOf must not surface a terminal task
     // as a run's current face just because it still carries container_status.
     const view = buildFleetView(
       baseRows({
@@ -916,6 +916,143 @@ describe("buildFleetView — running", () => {
     expect(view.running).toHaveLength(1);
     expect(view.running[0].taskId).toBe("t-live");
     expect(view.running[0].title).toBe("Live review pass");
+  });
+
+  it("keeps a reviewing run's card on its review pass after the review container is gone (issue #96)", () => {
+    // Symptom 1: the review pass has completed (terminal task.status, container
+    // torn down) but the run is still `reviewing` until the next sweep posts the
+    // verdict, and the implement pass sits parked running/idle beside it. The
+    // card must point at the review task, not the finished implement pass.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", status: "reviewing" })],
+        tasks: [
+          makeTask({
+            id: "t-impl",
+            projectId: "p1",
+            runId: "r1",
+            kind: "implement",
+            title: "Add auth",
+            status: "running",
+            containerStatus: "idle",
+            createdAt: new Date(2026, 7, 1, 9, 0, 0),
+          }),
+          makeTask({
+            id: "t-review",
+            projectId: "p1",
+            runId: "r1",
+            kind: "review",
+            title: "Review PR #55: Add auth",
+            status: "completed",
+            containerStatus: null,
+            createdAt: new Date(2026, 7, 1, 9, 30, 0),
+          }),
+        ],
+      })
+    );
+
+    expect(view.running).toHaveLength(1);
+    expect(view.running[0].taskId).toBe("t-review");
+    expect(view.running[0].title).toBe("Review PR #55: Add auth");
+  });
+
+  it("resolves a reviewing run's face by phase, not by a stale busy implement (issue #96)", () => {
+    // An ungraceful death can leave the implement pass at running/running
+    // instead of parked idle. Selecting purely by container-busyness would pick
+    // that stale implement; selecting within the run's phase (review) picks the
+    // review pass even while its own container is momentarily idle between turns.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", status: "reviewing" })],
+        tasks: [
+          makeTask({
+            id: "t-impl",
+            projectId: "p1",
+            runId: "r1",
+            kind: "implement",
+            status: "running",
+            containerStatus: "running", // stale — never parked to idle
+            createdAt: new Date(2026, 7, 1, 9, 0, 0),
+          }),
+          makeTask({
+            id: "t-review",
+            projectId: "p1",
+            runId: "r1",
+            kind: "review",
+            title: "Review PR #55",
+            status: "running",
+            containerStatus: "idle", // between review turns
+            createdAt: new Date(2026, 7, 1, 9, 30, 0),
+          }),
+        ],
+      })
+    );
+
+    expect(view.running[0].taskId).toBe("t-review");
+  });
+
+  it("resolves duplicate review passes to the one actually running (issue #95)", () => {
+    // Two review passes on one run (issue #95): the card links to the container
+    // that is really executing, not the dead earlier attempt.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", status: "reviewing" })],
+        tasks: [
+          makeTask({
+            id: "t-review-old",
+            projectId: "p1",
+            runId: "r1",
+            kind: "review",
+            status: "failed",
+            containerStatus: null,
+            createdAt: new Date(2026, 7, 1, 9, 0, 0),
+          }),
+          makeTask({
+            id: "t-review-live",
+            projectId: "p1",
+            runId: "r1",
+            kind: "review",
+            title: "Review PR #55 (retry)",
+            status: "running",
+            containerStatus: "running",
+            createdAt: new Date(2026, 7, 1, 9, 30, 0),
+          }),
+        ],
+      })
+    );
+
+    expect(view.running[0].taskId).toBe("t-review-live");
+  });
+
+  it("does not link a reviewing run to the parked implement before its review pass exists (issue #96)", () => {
+    // The status flips to `reviewing` a sweep before the review pass is queued.
+    // In that window the card must not fall back to the parked implement — it
+    // shows as a non-clickable review card until the review task appears, rather
+    // than deep-linking to the finished implement task (the exact symptom 1).
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", status: "reviewing" })],
+        tasks: [
+          makeTask({
+            id: "t-impl",
+            projectId: "p1",
+            runId: "r1",
+            kind: "implement",
+            title: "Add auth",
+            status: "running",
+            containerStatus: "idle",
+          }),
+        ],
+      })
+    );
+
+    expect(view.running).toHaveLength(1);
+    expect(view.running[0].runId).toBe("r1");
+    expect(view.running[0].taskId).toBeNull();
   });
 
   it("surfaces a gated run under review as fleet activity with the review pass's spend (issue #90)", () => {
