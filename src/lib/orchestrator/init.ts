@@ -135,12 +135,13 @@ async function reapStaleContainers(): Promise<void> {
 
     if (containers.length === 0) return;
 
-    // Get all tasks that should have a live container. Blocked tasks are
-    // parked, not dead: their container is deliberately kept alive holding
-    // its context while the question waits (issue #19). Any task owned by a
-    // live run is likewise protected whatever its own status (issue #24):
-    // recovery must never be fighting cleanup, so while the run is being
-    // worked, only the run's own lifecycle may take its containers.
+    // Get all tasks that should keep their container. Blocked tasks are
+    // parked, not dead: their container is deliberately preserved (stopped to
+    // free memory since #93, but its filesystem and branch state kept) while
+    // the question waits (issue #19), so the reaper must not remove it. Any
+    // task owned by a live run is likewise protected whatever its own status
+    // (issue #24): recovery must never be fighting cleanup, so while the run is
+    // being worked, only the run's own lifecycle may take its containers.
     const activeTasks = await db
       .select({ containerName: tasks.containerName })
       .from(tasks)

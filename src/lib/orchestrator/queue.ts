@@ -6,6 +6,7 @@ import { getActiveTasks, isParked, processQueuedMessages, scanForDevServer } fro
 import {
   createLocalCapacityProvider,
   getCapacity,
+  checkMemoryAdmission,
   type CapacityProvider,
 } from "./capacity";
 
@@ -71,7 +72,13 @@ export function startQueue(): void {
           );
         }
 
-        if (await capacityProvider.isSlotAvailable()) {
+        // The slot count gates concurrency; the memory-admission probe is the
+        // backstop against overcommit (issue #93) — it asks the daemon what is
+        // actually running, catching any drift the slot bookkeeping missed
+        // before the host OOMs. Both must clear before a task starts.
+        const slotFree = await capacityProvider.isSlotAvailable();
+        const admission = slotFree ? await checkMemoryAdmission() : { ok: false };
+        if (slotFree && admission.ok) {
           saturationLogged = false;
           processingTasks.add(next.id);
           console.log(
@@ -85,7 +92,9 @@ export function startQueue(): void {
         } else if (!saturationLogged) {
           saturationLogged = true;
           console.log(
-            `[orchestrator] All ${capacityProvider.capacity.slots} slot(s) busy — task ${next.id} waits in queue`
+            !slotFree
+              ? `[orchestrator] All ${capacityProvider.capacity.slots} slot(s) busy — task ${next.id} waits in queue`
+              : `[orchestrator] Memory headroom low (${admission.reason}) — task ${next.id} waits in queue`
           );
         }
       }
@@ -131,6 +140,11 @@ export function startQueue(): void {
         for (const [taskId, entry] of activeTasks) {
           if (entry.state !== "idle") continue;
           if (processingTasks.has(taskId)) continue;
+          // A parked autonomous container is stopped to free memory (#93) —
+          // execing a port scan into it would fail, and its dev server is not
+          // a live preview concern anyway. Only interactive idle sessions are
+          // scanned.
+          if (isParked(entry)) continue;
           scanForDevServer(taskId, entry.container).catch(console.error);
         }
       }
