@@ -38,6 +38,7 @@ import {
   notifyTriageRecommendation,
 } from "../../discord/notifications";
 import { recordBacklog } from "../../fleet/backlog";
+import { isContainerRunning, removeContainerByName } from "../../docker/container-manager";
 import { getCapacity } from "../capacity";
 import { occupiedSlots } from "../queue";
 import { startOfLocalDay, todayAutonomousSpendUsd } from "../spend";
@@ -80,6 +81,7 @@ import {
   buildTriagePrompt,
   type PriorAttempt,
 } from "./workflow";
+import { inFlightReviewTaskId, reapDeadReviewTasks } from "./review-tasks";
 import {
   DAILY_AUTONOMOUS_CAP_USD,
   MAX_ATTEMPTS,
@@ -169,6 +171,7 @@ export async function runAutonomySweep(): Promise<void> {
   sweeping = true;
 
   try {
+    await reapOrphanedReviewPasses();
     const snapshot = await gatherSnapshot(new Date());
     const actions = decideNext(snapshot);
     await executeActions(actions);
@@ -182,6 +185,33 @@ export async function runAutonomySweep(): Promise<void> {
     }
   } finally {
     sweeping = false;
+  }
+}
+
+/**
+ * The ungraceful-death half of the exactly-one-review invariant (issue #95),
+ * run before every gather. A review pass whose container was OOM-killed or lost
+ * while the daemon hung can leave its task stuck `running` with no status
+ * transition; keyed on task status alone, the in-flight check would read it as
+ * live forever — the run stalls, and any re-queue races a duplicate. Confirm
+ * each such task's container is actually gone (the Docker probe fails safe:
+ * only a definitively dead container is reaped, a transient daemon error is
+ * left for the next sweep), mark it `failed`, then drop its in-memory session
+ * entry and remove the dead container so it holds neither a phantom slot nor
+ * leaked memory — the ordinary reaper protects live-run containers, so nothing
+ * else would clean this one up while the run is still `reviewing`.
+ */
+async function reapOrphanedReviewPasses(): Promise<void> {
+  const reaped = await reapDeadReviewTasks(db, isContainerRunning);
+  for (const task of reaped) {
+    getActiveTasks().delete(task.taskId);
+    if (task.containerName) await removeContainerByName(task.containerName);
+    // An anomaly worth surfacing (a container died ungracefully) but not a
+    // sweep failure — the reaper is recovering it cleanly.
+    console.warn(
+      `[autonomy] Reaped review task ${task.taskId}: container gone but task still ` +
+        `running — marked failed so a single replacement review can be queued`
+    );
   }
 }
 
@@ -500,24 +530,17 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
     // armed approval auto-merging) or on a human (a gated PR) — nothing to do.
     if (run.reviewVerdict != null) continue;
 
-    const reviewTask = db
-      .select({ id: tasks.id })
-      .from(tasks)
-      .where(
-        and(
-          eq(tasks.runId, run.id),
-          eq(tasks.kind, "review"),
-          inArray(tasks.status, ["queued", "running"])
-        )
-      )
-      .get();
-
+    // A review task queued or running for this run means one is already in
+    // flight — don't queue a second (issue #45). A dead-but-stuck-`running`
+    // task is cleared by reapOrphanedReviewPasses before this gather, so it
+    // stops reading as in flight and the run gets one deliberate replacement
+    // rather than stalling here forever (issue #95).
     awaitingReview.push({
       runId: run.id,
       issueRef: run.githubIssue,
       prNumber: run.pullRequestNumber!,
       armed,
-      hasReviewTask: reviewTask != null,
+      hasReviewTask: inFlightReviewTaskId(db, run.id) != null,
     });
   }
 

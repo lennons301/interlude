@@ -356,6 +356,10 @@ export async function startTask(taskId: string): Promise<void> {
     const storedExit = isTriagePass
       ? db.select().from(tasks).where(eq(tasks.id, taskId)).get()?.triageResult
       : null;
+    // A review pass the sweep already reaped as dead (issue #95) is `failed`
+    // before this catch runs — the reaper queued its replacement, so this
+    // dead pass must not store a verdict over it below.
+    const alreadyReaped = isReviewPass && taskStatus(taskId) === "failed";
     updateTask(taskId, {
       status: "failed",
       containerStatus: null,
@@ -372,16 +376,19 @@ export async function startTask(taskId: string): Promise<void> {
       if (isReviewPass) {
         // A review pass that died is not a failed attempt — the implement
         // work is intact. Store the failure as an unparseable verdict so
-        // the fail-closed path (no merge, human-signoff, owner told) runs.
-        db.update(runs)
-          .set({
-            reviewResult: {
-              kind: "unparseable",
-              reason: `review pass failed: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          })
-          .where(eq(runs.id, task.runId))
-          .run();
+        // the fail-closed path (no merge, human-signoff, owner told) runs —
+        // unless the sweep already reaped this pass and queued a replacement.
+        if (!alreadyReaped) {
+          db.update(runs)
+            .set({
+              reviewResult: {
+                kind: "unparseable",
+                reason: `review pass failed: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            })
+            .where(eq(runs.id, task.runId))
+            .run();
+        }
       } else {
         finishRun(
           task.runId,
@@ -910,7 +917,11 @@ async function finishReviewPass(
 ): Promise<void> {
   const verdict = parseReviewVerdict(rawStream);
 
-  if (runId) {
+  // Only store the verdict if this pass is still the run's live review. If the
+  // sweep reaped it as dead (container gone, task no longer `running` — issue
+  // #95) while its turn was hung, a replacement review may already be in
+  // flight; writing this pass's verdict now would clobber it.
+  if (runId && taskStatus(taskId) === "running") {
     db.update(runs).set({ reviewResult: verdict }).where(eq(runs.id, runId)).run();
   }
 
@@ -1290,6 +1301,15 @@ function updateTask(
     .set({ ...fields, updatedAt: new Date() })
     .where(eq(tasks.id, taskId))
     .run();
+}
+
+/** A task's current status, or null if it has vanished — used to tell whether
+ * a review pass was reaped out from under itself (issue #95). */
+function taskStatus(taskId: string): string | null {
+  return (
+    db.select({ status: tasks.status }).from(tasks).where(eq(tasks.id, taskId)).get()?.status ??
+    null
+  );
 }
 
 /** Terminalize a run: failed consumes an attempt, cancelled does not. */
