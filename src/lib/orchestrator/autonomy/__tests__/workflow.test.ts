@@ -187,12 +187,10 @@ describe("buildReviewPrompt", () => {
   it("feeds the parse failure back on a re-queue (issue #89)", () => {
     const prompt = buildReviewPrompt({
       ...REVIEW,
-      parseFailure: "final message does not start with a VERDICT: line",
+      parseFailure: "final message has no VERDICT: line",
     });
     expect(prompt).toContain("this is a retry");
-    expect(prompt).toContain(
-      "final message does not start with a VERDICT: line"
-    );
+    expect(prompt).toContain("final message has no VERDICT: line");
     expect(prompt).toContain("last retry");
     // Still demands the same verdict shape the parser expects.
     expect(prompt).toContain("VERDICT: approve");

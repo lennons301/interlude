@@ -39,11 +39,40 @@ describe("parseReviewVerdict", () => {
     });
   });
 
+  // Issue #94: models routinely open with a verification summary before the
+  // verdict. A good, evidenced review must not be discarded over that layout —
+  // the verdict is scanned for, not required at position zero, and the body is
+  // what follows it (the preamble is dropped, not posted).
+  it("parses an approve verdict preceded by a verification summary", () => {
+    expect(
+      parseReviewVerdict(fixture("verdict-approve-with-preamble.ndjson"))
+    ).toEqual({
+      kind: "approve",
+      body:
+        "Reviewed against issue #7: the change does what the ticket asked, " +
+        "tests cover the failure paths, and lint is clean.",
+    });
+  });
+
+  it("parses a request-changes verdict preceded by a preamble", () => {
+    expect(
+      parseReviewVerdict(fixture("verdict-request-changes-with-preamble.ndjson"))
+    ).toEqual({
+      kind: "request-changes",
+      body:
+        "- The ticket asks for oldest-first ordering; the query sorts by id.\n" +
+        "- `parseBlockedByRefs` has no test for the bulleted form the ticket names.",
+    });
+  });
+
   // The unparseable cases are the safety property: a review pass that did
-  // not deliver a clean first-line marker must block the merge, never
-  // default toward approval.
+  // not deliver a clean VERDICT: line must block the merge, never default
+  // toward approval.
   describe("unparseable output", () => {
-    it("rejects a verdict mentioned mid-message rather than on the first line", () => {
+    // The marker appears mid-sentence ("...my conclusion is VERDICT: approve"),
+    // not at the start of any line — line-start anchoring keeps this rejected
+    // even though the parser now scans past a preamble (issue #94).
+    it("rejects a verdict quoted mid-line rather than starting a line", () => {
       expect(parseReviewVerdict(fixture("verdict-malformed.ndjson"))).toMatchObject({
         kind: "unparseable",
       });
