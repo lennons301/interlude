@@ -2,10 +2,8 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb } from "@/test/create-test-db";
-import { inFlightReviewTaskId, reapDeadReviewTasks } from "../review-tasks";
+import { inFlightReviewTaskId, reapDeadReviewTasks, type Db } from "../review-tasks";
 import { decideNext, passOutcomeSnapshot, type AutonomySnapshot } from "../decide";
-
-type Db = ReturnType<typeof createTestDb>["db"];
 
 const ISSUE_REF = "owner/repo#141";
 

@@ -27,7 +27,9 @@ import * as schema from "@/db/schema";
 import { messages, tasks } from "@/db/schema";
 import { newId } from "../../ulid";
 
-type Db = BetterSQLite3Database<typeof schema>;
+/** The injected database handle — the app singleton in the sweep, an
+ * in-memory one in tests. Exported so both sides name the seam the same way. */
+export type Db = BetterSQLite3Database<typeof schema>;
 
 /**
  * The id of a review task for this run that is still in flight — `queued` or

@@ -432,14 +432,20 @@ export async function startContainer(
   }
 }
 
-export async function removeContainer(
-  running: RunningContainer
-): Promise<void> {
+/** Force-remove a container, idempotently — an already-gone container is not
+ * an error. Shared by the handle- and name-based removers below. */
+async function forceRemove(container: Docker.Container): Promise<void> {
   try {
-    await running.container.remove({ force: true });
+    await container.remove({ force: true });
   } catch {
     // Already removed
   }
+}
+
+export async function removeContainer(
+  running: RunningContainer
+): Promise<void> {
+  await forceRemove(running.container);
 }
 
 /**
@@ -461,12 +467,7 @@ export async function isContainerRunning(name: string): Promise<boolean> {
 }
 
 /** Force-remove a container by name — for reaping a dead pass's container
- * whose `RunningContainer` handle the orchestrator no longer holds (issue #95).
- * Idempotent: an already-gone container is not an error. */
+ * whose `RunningContainer` handle the orchestrator no longer holds (issue #95). */
 export async function removeContainerByName(name: string): Promise<void> {
-  try {
-    await getDocker().getContainer(name).remove({ force: true });
-  } catch {
-    // Already removed
-  }
+  await forceRemove(getDocker().getContainer(name));
 }

@@ -206,7 +206,9 @@ async function reapOrphanedReviewPasses(): Promise<void> {
   for (const task of reaped) {
     getActiveTasks().delete(task.taskId);
     if (task.containerName) await removeContainerByName(task.containerName);
-    console.error(
+    // An anomaly worth surfacing (a container died ungracefully) but not a
+    // sweep failure — the reaper is recovering it cleanly.
+    console.warn(
       `[autonomy] Reaped review task ${task.taskId}: container gone but task still ` +
         `running — marked failed so a single replacement review can be queued`
     );

@@ -359,10 +359,7 @@ export async function startTask(taskId: string): Promise<void> {
     // A review pass the sweep already reaped as dead (issue #95) is `failed`
     // before this catch runs — the reaper queued its replacement, so this
     // dead pass must not store a verdict over it below.
-    const alreadyReaped =
-      isReviewPass &&
-      db.select({ status: tasks.status }).from(tasks).where(eq(tasks.id, taskId)).get()?.status ===
-        "failed";
+    const alreadyReaped = isReviewPass && taskStatus(taskId) === "failed";
     updateTask(taskId, {
       status: "failed",
       containerStatus: null,
@@ -924,8 +921,7 @@ async function finishReviewPass(
   // sweep reaped it as dead (container gone, task no longer `running` — issue
   // #95) while its turn was hung, a replacement review may already be in
   // flight; writing this pass's verdict now would clobber it.
-  const current = db.select({ status: tasks.status }).from(tasks).where(eq(tasks.id, taskId)).get();
-  if (runId && current?.status === "running") {
+  if (runId && taskStatus(taskId) === "running") {
     db.update(runs).set({ reviewResult: verdict }).where(eq(runs.id, runId)).run();
   }
 
@@ -1305,6 +1301,15 @@ function updateTask(
     .set({ ...fields, updatedAt: new Date() })
     .where(eq(tasks.id, taskId))
     .run();
+}
+
+/** A task's current status, or null if it has vanished — used to tell whether
+ * a review pass was reaped out from under itself (issue #95). */
+function taskStatus(taskId: string): string | null {
+  return (
+    db.select({ status: tasks.status }).from(tasks).where(eq(tasks.id, taskId)).get()?.status ??
+    null
+  );
 }
 
 /** Terminalize a run: failed consumes an attempt, cancelled does not. */
