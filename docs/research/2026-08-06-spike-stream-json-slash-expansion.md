@@ -113,9 +113,16 @@ Turn 2: `claude -p "/spike-probe" --resume <uuid>` →
 - **No slash:** the injected turn `"What is spike-probe? ..."` produced
   *"I'm not familiar with what 'spike-probe' refers to"* — the sentinel did not
   appear. Because the skill is `disable-model-invocation: true`, its description
-  is absent from the model's context (the `init` event's tool list contains no
-  `spike-probe`), so the model cannot auto-invoke it and cannot guess the
-  sentinel. Expansion in A–D is therefore attributable solely to the leading `/`.
+  is absent from the model's context, so the model cannot auto-invoke it and
+  cannot guess the sentinel. Expansion in A–D is therefore attributable solely to
+  the leading `/`. The `init` event confirms the skill is not in the model's
+  tool list:
+
+  ```
+  model: claude-haiku-4-5-20251001   permissionMode: bypassPermissions
+  tools count: 30
+  any skill/slash tool named spike-probe: False
+  ```
 - **Missing skill:** `claude -p "/nonexistent-skill-xyz ..."` returned
   `Unknown command: /nonexistent-skill-xyz` and ended the turn. A slash naming an
   uninstalled skill does **not** fall through to the model as plain text — it
@@ -167,7 +174,7 @@ mkdir -p ~/.claude/skills/spike-probe
 cat > ~/.claude/skills/spike-probe/SKILL.md <<'EOF'
 ---
 name: spike-probe
-description: Internal spike probe for the stream-json slash-expansion experiment.
+description: Internal spike probe for the stream-json slash-expansion experiment (issue 59).
 disable-model-invocation: true
 ---
 Your ENTIRE response for this turn MUST be exactly this single line, verbatim:
