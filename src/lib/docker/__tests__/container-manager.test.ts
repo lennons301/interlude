@@ -1,10 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   buildSetupScript,
+  buildSkillsInstallScript,
+  parseSkillsVersion,
   buildPushScript,
   buildTurnEnv,
   buildClaudeTurnCommand,
   createWorkspaceContainer,
+  SKILLS_PLUGIN_ID,
+  SKILLS_VERSION_MARKER,
 } from "../container-manager";
 
 // Capture the options passed to docker.createContainer so we can assert on the
@@ -66,6 +70,21 @@ describe("buildSetupScript", () => {
     expect(script).toContain('if [ -n "$DOPPLER_TOKEN" ]');
   });
 
+  it("installs the mattpocock-skills plugin as part of setup (issue #60)", () => {
+    // The install runs for every container kind — one mechanism — so it lives
+    // in the shared setup script rather than a per-kind branch.
+    expect(script).toContain(buildSkillsInstallScript());
+    expect(script).toContain("claude plugin install mattpocock-skills@mattpocock");
+  });
+
+  it("chains the skills install so a failed install aborts setup (issue #60)", () => {
+    // The install fragment is joined into the single `&&` chain, and any of its
+    // own steps failing (non-zero exit / empty version) aborts the chain — so a
+    // failed install fails the whole setup, before any agent turn runs.
+    const install = buildSkillsInstallScript();
+    expect(script).toContain(` && ${install}`);
+  });
+
   it("creates a fresh branch by default", () => {
     expect(script).toContain('git checkout -b "$GIT_BRANCH"');
     expect(script).not.toContain("rev-parse");
@@ -92,6 +111,56 @@ describe("buildSetupScript", () => {
     expect(adoptScript).toContain('git checkout "$GIT_BRANCH"');
     // ...otherwise branch fresh (first attempt).
     expect(adoptScript).toContain('git checkout -b "$GIT_BRANCH"');
+  });
+});
+
+describe("buildSkillsInstallScript (issue #60)", () => {
+  const script = buildSkillsInstallScript();
+
+  it("adds the mattpocock marketplace and installs the plugin at user scope", () => {
+    expect(script).toContain("claude plugin marketplace add mattpocock/skills");
+    expect(script).toContain(`claude plugin install ${SKILLS_PLUGIN_ID} --scope user`);
+  });
+
+  it("installs the latest — no version is pinned", () => {
+    // Deliberately unpinned (issue #60): the plugin id carries a marketplace,
+    // never an @version, and the install passes no version flag.
+    expect(script).not.toMatch(/mattpocock-skills@\d/);
+  });
+
+  it("resolves and echoes the version behind the shared marker", () => {
+    expect(script).toContain("claude plugin list --json");
+    expect(script).toContain(`echo "${SKILLS_VERSION_MARKER}$SKILLS_VERSION"`);
+  });
+
+  it("fails fast when the install resolves no version", () => {
+    // The guard turns a silent no-op install into a hard, visible failure —
+    // the exit propagates up the setup chain before any agent turn runs. A
+    // self-contained `if` (not `|| { exit 1; }`) keeps its failure path scoped
+    // to the skills steps, never an earlier clone/checkout failure.
+    expect(script).toContain('if [ -z "$SKILLS_VERSION" ]; then');
+    expect(script).toContain("exit 1");
+    expect(script).not.toContain("||");
+  });
+});
+
+describe("parseSkillsVersion (issue #60)", () => {
+  it("lifts the version out of setup output", () => {
+    const output = [
+      "Cloning into '/workspace/repo'...",
+      "Installing mattpocock-skills plugin (latest)...",
+      `${SKILLS_VERSION_MARKER}1.2.0`,
+    ].join("\n");
+    expect(parseSkillsVersion(output)).toBe("1.2.0");
+  });
+
+  it("takes the last marker when several are present", () => {
+    const output = `${SKILLS_VERSION_MARKER}1.0.0\nnoise\n${SKILLS_VERSION_MARKER}1.2.0`;
+    expect(parseSkillsVersion(output)).toBe("1.2.0");
+  });
+
+  it("returns null when the marker is absent", () => {
+    expect(parseSkillsVersion("no marker here")).toBeNull();
   });
 });
 

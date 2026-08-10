@@ -259,7 +259,18 @@ export async function startTask(taskId: string): Promise<void> {
 
     // Start container and run setup
     await running.container.start();
-    await execSetup(running);
+    const { skillsVersion } = await execSetup(running);
+
+    // Log the resolved mattpocock-skills version at session start (issue #60):
+    // visibly in the feed, and on the run ledger where a run exists — the
+    // forensic trail for "what skill version ran?". A failed install never
+    // reaches here — execSetup throws before any agent turn.
+    if (skillsVersion) {
+      insertSystemMessage(taskId, `mattpocock-skills plugin installed (v${skillsVersion})`);
+      if (task.runId) {
+        db.update(runs).set({ skillsVersion }).where(eq(runs.id, task.runId)).run();
+      }
+    }
 
     insertSystemMessage(taskId, "Agent started.");
     updateTask(taskId, { containerStatus: "running" });
