@@ -16,6 +16,7 @@ const ALL_PASS: PreflightChecks = {
   branchProtection: "protected",
   reviewerIsCollaborator: true,
   signoffLabelExists: true,
+  issuesWritable: true,
 };
 
 describe("evaluatePreflight", () => {
@@ -33,6 +34,7 @@ describe("evaluatePreflight", () => {
       branchProtection: "unprotected",
       reviewerIsCollaborator: false,
       signoffLabelExists: false,
+      issuesWritable: false,
     });
     expect(result.status).toBe("failing");
     expect(result.reason).toBe("no GitHub repo configured (needs gitUrl and githubRepo)");
@@ -97,6 +99,17 @@ describe("evaluatePreflight", () => {
     expect(result.reason).toBe(`the "${HUMAN_SIGNOFF_LABEL}" label is missing`);
   });
 
+  it("names a missing Issues:write permission for generation sessions", () => {
+    // The one grant every generation skill needs — issue creation, comments,
+    // labels, dependency edges, and sub-issues all live under Issues:write, so a
+    // single failure names them all (issue #62).
+    const result = evaluatePreflight({ ...ALL_PASS, issuesWritable: false });
+    expect(result.status).toBe("failing");
+    expect(result.reason).toBe(
+      'the GitHub App lacks the "Issues: write" permission needed for issue creation, comments, labels, dependency edges, and sub-issues'
+    );
+  });
+
   it("accumulates every independent failure into one reason", () => {
     const result = evaluatePreflight({
       repoConfigured: true,
@@ -105,10 +118,11 @@ describe("evaluatePreflight", () => {
       branchProtection: "unprotected",
       reviewerIsCollaborator: false,
       signoffLabelExists: false,
+      issuesWritable: false,
     });
     expect(result.status).toBe("failing");
     expect(result.reason).toBe(
-      `no branch protection on the default branch; the reviewer account is not a collaborator; the "${HUMAN_SIGNOFF_LABEL}" label is missing`
+      `no branch protection on the default branch; the reviewer account is not a collaborator; the "${HUMAN_SIGNOFF_LABEL}" label is missing; the GitHub App lacks the "Issues: write" permission needed for issue creation, comments, labels, dependency edges, and sub-issues`
     );
   });
 
