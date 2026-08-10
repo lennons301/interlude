@@ -151,7 +151,8 @@ chat/preview is never affected.
 ### 4. Answer a blocked agent from Discord
 
 When an agent hits a decision the ticket doesn't settle, it emits
-`BLOCKED: <question>` as the first line of its turn. The orchestrator parks the
+`BLOCKED: <question>` on its own line (a short lead-in above it is fine — the
+detector scans every line, not just the first). The orchestrator parks the
 run (status `blocked`, container kept alive but **holding no slot**) and posts the
 question to the project's linked Discord channel — or, if the project has none, to
 the fleet channel (`DISCORD_FLEET_CHANNEL_ID`).
