@@ -529,6 +529,11 @@ fleet channel. My reply becomes a queued user message on the task and the
 existing queue delivers it as the next turn — the Phase 4 idle-and-reply plumbing
 carries this whole feature.
 
+> **Superseded by #107/#106 (2026-08-10):** the detector now matches `BLOCKED:`
+> at the start of *any* line, not first-line-only. The false-negative rationale
+> above was overturned — a missed marker did **not** merely idle the task; it
+> left the run a permanent non-terminal ghost (#106).
+
 Supervised mode (from a `checkpoint:` directive) runs the implement pass
 normally, then forces `human-signoff` regardless of gate matches and pings me
 with the checkpoint text. It reuses the gate machinery rather than adding a
