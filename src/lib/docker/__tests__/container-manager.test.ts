@@ -162,6 +162,13 @@ describe("parseSkillsVersion (issue #60)", () => {
   it("returns null when the marker is absent", () => {
     expect(parseSkillsVersion("no marker here")).toBeNull();
   });
+
+  it("stops at a trailing exec-frame header byte", () => {
+    // A demux frame header (non-version bytes) can abut the line; the capture
+    // must not swallow it into the version.
+    const output = `${SKILLS_VERSION_MARKER}1.2.3\x01\x00\x00\x00`;
+    expect(parseSkillsVersion(output)).toBe("1.2.3");
+  });
 });
 
 describe("buildTurnEnv", () => {

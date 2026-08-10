@@ -74,7 +74,10 @@ export function buildSkillsInstallScript(): string {
     'echo "Installing mattpocock-skills plugin (latest)..."',
     `claude plugin marketplace add ${SKILLS_MARKETPLACE_SOURCE}`,
     `claude plugin install ${SKILLS_PLUGIN_ID} --scope user`,
-    `SKILLS_VERSION="$(claude plugin list --json 2>/dev/null | jq -r '.[] | select(.id == "${SKILLS_PLUGIN_ID}") | .version // empty')"`,
+    // No `2>/dev/null`: only stdout is piped to jq, so any CLI status on
+    // stderr can't corrupt the JSON — but it stays visible in the captured
+    // setup output for debugging a failed resolve.
+    `SKILLS_VERSION="$(claude plugin list --json | jq -r '.[] | select(.id == "${SKILLS_PLUGIN_ID}") | .version // empty')"`,
     // A self-contained `if` (not `... || { exit 1; }`): as an `&&` operand it
     // can only fire for an empty version after the install ran, so it never
     // contaminates an earlier setup failure with a misleading skills error.
@@ -86,11 +89,14 @@ export function buildSkillsInstallScript(): string {
 /**
  * Lift the mattpocock-skills version out of captured setup output (issue #60),
  * or null when the marker is absent. Takes the last marker so a version echoed
- * amid other setup chatter still resolves.
+ * amid other setup chatter still resolves. The capture is restricted to
+ * version characters (word chars, dot, plus, hyphen) rather than `\S+`, so a
+ * stray Docker exec-frame header byte adjacent to the marker can't bleed into
+ * the parsed version.
  */
 export function parseSkillsVersion(setupOutput: string): string | null {
   const matches = [
-    ...setupOutput.matchAll(new RegExp(`${SKILLS_VERSION_MARKER}(\\S+)`, "g")),
+    ...setupOutput.matchAll(new RegExp(`${SKILLS_VERSION_MARKER}([\\w.+-]+)`, "g")),
   ];
   return matches.length ? matches[matches.length - 1][1] : null;
 }
