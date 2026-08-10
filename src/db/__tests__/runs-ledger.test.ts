@@ -86,7 +86,7 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
     expect(run.finishedAt).toEqual(finishedAt);
   });
 
-  it("defaults tasks to kind interactive with no run", () => {
+  it("defaults tasks to kind interactive with no run and no session skill", () => {
     db.insert(schema.tasks)
       .values({
         id: "t1",
@@ -100,6 +100,28 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
     const task = db.select().from(schema.tasks).get()!;
     expect(task.kind).toBe("interactive");
     expect(task.runId).toBeNull();
+    expect(task.sessionSkill).toBeNull();
+    expect(task.sessionIssue).toBeNull();
+  });
+
+  it("records a generation session as an interactive task with no run (#61)", () => {
+    db.insert(schema.tasks)
+      .values({
+        id: "t-session",
+        projectId: "p1",
+        title: "Grill a fresh idea",
+        sessionSkill: "grill-me",
+        sessionIssue: "owner/repo#61",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .run();
+
+    const task = db.select().from(schema.tasks).get()!;
+    expect(task.kind).toBe("interactive");
+    expect(task.runId).toBeNull();
+    expect(task.sessionSkill).toBe("grill-me");
+    expect(task.sessionIssue).toBe("owner/repo#61");
   });
 
   it("links a task to its run and enforces the foreign key", () => {

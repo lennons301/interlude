@@ -79,6 +79,8 @@ function makeTask(overrides: Partial<FleetTaskRow> = {}): FleetTaskRow {
     projectId: "proj-1",
     runId: null,
     kind: "interactive",
+    sessionSkill: null,
+    sessionIssue: null,
     title: "Polish the header",
     status: "running",
     containerStatus: "idle",
@@ -246,6 +248,26 @@ describe("renderDailyDigest — in flight", () => {
       "lemons #34 · Add pagination to the list · attempt 2/3 · $7.80 of $20.00",
       "lemons #35 · lennons301/lemons#35 · attempt 1/3 · $3.00 of $20.00 · supervised",
       "interlude · Polish the header · interactive · $1.23",
+    ]);
+  });
+
+  it("labels a generation session by its skill, not 'interactive' (issue #61)", () => {
+    const content = render({
+      projects: [makeProject({ id: "p1", name: "interlude" })],
+      tasks: [
+        makeTask({
+          id: "t-session",
+          projectId: "p1",
+          title: "Grill a fresh idea",
+          sessionSkill: "grill-me",
+          containerStatus: "idle",
+          totalCostUsd: 2.4,
+        }),
+      ],
+    });
+
+    expect(section(content, "In flight")).toEqual([
+      "interlude · Grill a fresh idea · session grill-me · $2.40",
     ]);
   });
 

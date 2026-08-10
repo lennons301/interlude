@@ -39,7 +39,12 @@ function RunCard({ card, now }: { card: RunningCard; now: number }) {
           {card.projectName}
           {card.ticket && <span className="text-fl-ink"> {card.ticket}</span>}
         </span>
-        <Chip tone={MODE_TONE[card.mode]}>{card.mode}</Chip>
+        {/* A generation session reads as "session · grill-me", not the bare
+            "interactive" mode, so grilling is distinct from an agent driving
+            (issue #61). */}
+        <Chip tone={MODE_TONE[card.mode]}>
+          {card.sessionSkill ? `session · ${card.sessionSkill}` : card.mode}
+        </Chip>
       </div>
 
       <p className="truncate text-sm text-fl-ink">{card.title}</p>

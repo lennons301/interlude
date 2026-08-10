@@ -97,6 +97,8 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
       projectId: t.projectId,
       runId: t.runId,
       kind: t.kind,
+      sessionSkill: t.sessionSkill,
+      sessionIssue: t.sessionIssue,
       title: t.title,
       status: t.status,
       containerStatus: t.containerStatus,

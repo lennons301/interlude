@@ -82,11 +82,26 @@ export interface FleetRunRow {
   finishedAt: Date | null;
 }
 
+/** Generation-session skills (issue #61) — kept as a decoupled union here, in
+ * step with the row types the view defines rather than importing from the DB
+ * schema. Its single runtime source of truth is SESSION_SKILLS in the schema. */
+export type SessionSkill =
+  | "grill-me"
+  | "grill-with-docs"
+  | "triage"
+  | "to-spec"
+  | "to-tickets"
+  | "wayfinder";
+
 export interface FleetTaskRow {
   id: string;
   projectId: string;
   runId: string | null;
   kind: "interactive" | "implement" | "review" | "triage" | "repair";
+  /** Non-null marks an interactive task as a generation session (issue #61) */
+  sessionSkill: SessionSkill | null;
+  /** GitHub issue the session is anchored to (owner/repo#n), or null */
+  sessionIssue: string | null;
   title: string;
   status: "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled";
   containerStatus: "setup" | "running" | "idle" | "completing" | null;
@@ -137,6 +152,10 @@ export interface RunningCard {
   /** Card kind: afk = full autonomy, supervised = forced human-signoff,
    * interactive = a chat session, triage = a read-only triage pass (#90) */
   mode: "afk" | "supervised" | "interactive" | "triage";
+  /** Non-null on a generation session (issue #61): the dashboard and digest
+   * label it "session · <skill>" to distinguish it from a plain chat task.
+   * Always null for afk/supervised/triage cards. */
+  sessionSkill: SessionSkill | null;
   /** implement ▸ review ▸ merge pipeline; null for standalone interactive
    * sessions and triage passes, which sit outside the ticket pipeline */
   phases: { name: "implement" | "review" | "merge"; state: PhaseState }[] | null;
@@ -519,6 +538,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
         ticket: ticketLabel(run.githubIssue),
         title: pass?.title ?? run.githubIssue,
         mode: run.mode === "autonomous" ? ("afk" as const) : ("supervised" as const),
+        sessionSkill: null,
         phases: phasePipeline(reviewing),
         attempt: { current: run.attempt, max: MAX_ATTEMPTS },
         turns: pass?.turns ?? 0,
@@ -539,9 +559,14 @@ export function buildFleetView(rows: FleetRows): FleetView {
       taskId: task.id,
       runId: null,
       projectName: projectName(task.projectId),
-      ticket: ticketLabel(task.githubIssue),
+      // A generation session shows the issue it's anchored to (issue #61); the
+      // anchor lives in sessionIssue, never githubIssue, on an interactive task.
+      ticket: ticketLabel(task.githubIssue ?? task.sessionIssue),
       title: task.title,
       mode: triage ? "triage" : "interactive",
+      // Only an interactive session carries a skill; the autonomous triage pass
+      // (kind=triage) is never a generation session.
+      sessionSkill: triage ? null : task.sessionSkill,
       phases: null,
       attempt: null,
       turns: task.turns,
