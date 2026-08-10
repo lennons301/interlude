@@ -62,9 +62,11 @@ export interface PreflightChecks {
   signoffLabelExists: boolean;
   /**
    * The App installation grants "Issues: write" (issue #62). It is the one
-   * permission every generation skill relies on — issue creation, comments,
-   * labels, native dependency edges, and sub-issue creation all require it — so
-   * a single check covers everything a generation session does via `gh`.
+   * permission a generation session's every operation relies on — issue
+   * creation, comments, labels, native dependency edges, and sub-issue creation
+   * all require it, so a single check covers everything a session does via `gh`.
+   * The autonomous loop needs it too (its own issue comments and label moves),
+   * which is why the check belongs in this shared preflight.
    */
   issuesWritable: boolean;
 }
@@ -116,7 +118,7 @@ export function evaluatePreflight(checks: PreflightChecks): PreflightResult {
   if (!checks.signoffLabelExists) missing.push(`the "${HUMAN_SIGNOFF_LABEL}" label is missing`);
   if (!checks.issuesWritable)
     missing.push(
-      'the GitHub App lacks the "Issues: write" permission generation sessions need (issue creation, comments, labels, dependency edges, sub-issues)'
+      'the GitHub App lacks the "Issues: write" permission needed for issue creation, comments, labels, dependency edges, and sub-issues'
     );
 
   return missing.length === 0

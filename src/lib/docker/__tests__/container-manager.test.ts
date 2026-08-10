@@ -256,8 +256,11 @@ describe("GH_TOKEN injection is gated on generation sessions (issue #62)", () =>
     }
   });
 
-  it("withholds GH_TOKEN from implement, review, and triage execs", () => {
-    for (const kind of ["implement", "review", "triage"] as const) {
+  it("withholds GH_TOKEN from every autonomous kind", () => {
+    // The isolation boundary is per-kind: no unattended exec may hold an
+    // issue-writing token, so `repair` is asserted alongside implement/review/
+    // triage even though #62 names only the latter three.
+    for (const kind of ["implement", "review", "triage", "repair"] as const) {
       const env = envFor({ kind, sessionSkill: null });
       expect(env.some((e) => e.startsWith("GH_TOKEN"))).toBe(false);
     }

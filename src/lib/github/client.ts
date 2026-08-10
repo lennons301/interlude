@@ -4,6 +4,11 @@ import { getConfig } from "../config";
 
 let cachedToken: string | null = null;
 let tokenExpiresAt = 0;
+// The installation's granted repository permissions, captured from the same
+// mint as the token (issue #62) — an unnarrowed installation token carries the
+// installation's full grant, so there is nothing extra to fetch. Set alongside
+// cachedToken and read via getInstallationPermissions.
+let cachedPermissions: Record<string, string> = {};
 
 function createAppJwt(): string {
   const config = getConfig();
@@ -58,6 +63,7 @@ export async function getInstallationToken(): Promise<string> {
 
   cachedToken = installation.token;
   tokenExpiresAt = new Date(installation.expires_at).getTime();
+  cachedPermissions = (installation.permissions ?? {}) as Record<string, string>;
 
   return cachedToken;
 }
@@ -69,29 +75,17 @@ export async function getOctokit(): Promise<Octokit> {
 
 /**
  * The repository permissions the App installation was granted, as an
- * `{ issues: "write", contents: "write", ... }` map (issue #62). Read via the
- * App JWT off the installation itself, so it reflects exactly what was granted
- * at install time and is independent of any one repo. Preflight uses it to
- * confirm generation sessions have the "Issues: write" they need — every
- * generation operation (issue creation, comments, labels, dependency edges,
- * sub-issues) lives under that one permission.
+ * `{ issues: "write", contents: "write", ... }` map (issue #62). Reuses the
+ * cached mint from getInstallationToken — the installation token carries the
+ * installation's full grant, so there is one round-trip and one minting path to
+ * audit, not a second `apps.getInstallation` call per project. Preflight uses it
+ * to confirm the App has the "Issues: write" every generation operation needs
+ * (issue creation, comments, labels, dependency edges, sub-issues all live under
+ * that one permission).
  */
 export async function getInstallationPermissions(): Promise<
   Record<string, string>
 > {
-  const config = getConfig();
-  if (
-    !config.githubAppId ||
-    !config.githubAppPrivateKey ||
-    !config.githubAppInstallationId
-  ) {
-    throw new Error(
-      "GitHub App required to read installation permissions (set GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY / GITHUB_APP_INSTALLATION_ID)"
-    );
-  }
-  const appOctokit = new Octokit({ auth: createAppJwt() });
-  const { data } = await appOctokit.rest.apps.getInstallation({
-    installation_id: parseInt(config.githubAppInstallationId, 10),
-  });
-  return (data.permissions ?? {}) as Record<string, string>;
+  await getInstallationToken();
+  return cachedPermissions;
 }

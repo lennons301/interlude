@@ -106,7 +106,7 @@ describe("evaluatePreflight", () => {
     const result = evaluatePreflight({ ...ALL_PASS, issuesWritable: false });
     expect(result.status).toBe("failing");
     expect(result.reason).toBe(
-      'the GitHub App lacks the "Issues: write" permission generation sessions need (issue creation, comments, labels, dependency edges, sub-issues)'
+      'the GitHub App lacks the "Issues: write" permission needed for issue creation, comments, labels, dependency edges, and sub-issues'
     );
   });
 
@@ -122,7 +122,7 @@ describe("evaluatePreflight", () => {
     });
     expect(result.status).toBe("failing");
     expect(result.reason).toBe(
-      `no branch protection on the default branch; the reviewer account is not a collaborator; the "${HUMAN_SIGNOFF_LABEL}" label is missing; the GitHub App lacks the "Issues: write" permission generation sessions need (issue creation, comments, labels, dependency edges, sub-issues)`
+      `no branch protection on the default branch; the reviewer account is not a collaborator; the "${HUMAN_SIGNOFF_LABEL}" label is missing; the GitHub App lacks the "Issues: write" permission needed for issue creation, comments, labels, dependency edges, and sub-issues`
     );
   });
 
