@@ -66,6 +66,8 @@ function makeTask(overrides: Partial<FleetTaskRow> = {}): FleetTaskRow {
     projectId: "proj-1",
     runId: null,
     kind: "interactive",
+    sessionSkill: null,
+    sessionIssue: null,
     title: "Polish the header",
     status: "running",
     containerStatus: "idle",
@@ -805,6 +807,7 @@ describe("buildFleetView — running", () => {
         ticket: "#34",
         title: "Add pagination to the list",
         mode: "afk",
+        sessionSkill: null,
         phases: [
           { name: "implement", state: "current" },
           { name: "review", state: "todo" },
@@ -871,6 +874,7 @@ describe("buildFleetView — running", () => {
         ticket: null,
         title: "Polish the header",
         mode: "interactive",
+        sessionSkill: null,
         phases: null,
         attempt: null,
         turns: 3,
@@ -878,6 +882,57 @@ describe("buildFleetView — running", () => {
         spend: { usd: 1.23, budgetUsd: null },
       },
     ]);
+  });
+
+  it("labels a generation session with its skill and issue anchor (issue #61)", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "interlude" })],
+        tasks: [
+          makeTask({
+            id: "t1",
+            projectId: "p1",
+            title: "Grill the fleet dashboard",
+            sessionSkill: "grill-me",
+            // The anchor lives in sessionIssue, never githubIssue, on a session.
+            sessionIssue: "lennons301/interlude#61",
+            containerStatus: "idle",
+            turns: 2,
+            createdAt: TODAY_9AM,
+          }),
+        ],
+      })
+    );
+
+    expect(view.running).toHaveLength(1);
+    const card = view.running[0];
+    // Still an interactive session — a skill doesn't change the mode — but the
+    // dashboard reads the skill to label it distinctly from a plain chat task.
+    expect(card.mode).toBe("interactive");
+    expect(card.sessionSkill).toBe("grill-me");
+    expect(card.ticket).toBe("#61");
+  });
+
+  it("does not treat an autonomous triage pass as a generation session (issue #61)", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "interlude" })],
+        tasks: [
+          makeTask({
+            id: "t-triage",
+            projectId: "p1",
+            kind: "triage",
+            title: "Triage: something",
+            containerStatus: "running",
+            createdAt: TODAY_9AM,
+          }),
+        ],
+      })
+    );
+
+    expect(view.running).toHaveLength(1);
+    expect(view.running[0].mode).toBe("triage");
+    expect(view.running[0].sessionSkill).toBeNull();
   });
 
   it("picks a run's live pass as its face, ignoring a finished pass with a stale container_status", () => {
@@ -1149,6 +1204,7 @@ describe("buildFleetView — running", () => {
         ticket: "#90",
         title: "Triage: Add auth",
         mode: "triage",
+        sessionSkill: null,
         phases: null,
         attempt: null,
         turns: 1,
