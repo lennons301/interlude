@@ -1,0 +1,1 @@
+ALTER TABLE `runs` ADD `skills_version` text;

@@ -259,7 +259,31 @@ export async function startTask(taskId: string): Promise<void> {
 
     // Start container and run setup
     await running.container.start();
-    await execSetup(running);
+    const { skillsVersion } = await execSetup(running);
+
+    // Log the resolved mattpocock-skills version at session start (issue #60):
+    // visibly in the feed, and on the run ledger where a run exists — the
+    // forensic trail for "what skill version ran?". A failed install never
+    // reaches here — execSetup throws before any agent turn.
+    if (skillsVersion) {
+      insertSystemMessage(taskId, `mattpocock-skills plugin installed (v${skillsVersion})`);
+      // First-write-wins on the ledger: a run's later review/repair pass runs
+      // its own setup, but the forensic value is the implement pass's version
+      // (the run's first pass) — mirroring how model/effort pin to the
+      // implement pass. The `isNull` guard stops a later pass clobbering it,
+      // since the plugin is unpinned and its version may drift between passes.
+      if (task.runId) {
+        db.update(runs)
+          .set({ skillsVersion })
+          .where(and(eq(runs.id, task.runId), isNull(runs.skillsVersion)))
+          .run();
+      }
+    } else {
+      // A successful setup always echoes the version marker, so a null here
+      // means it was lost/mangled in the exec stream — surface it rather than
+      // silently dropping the forensic trail.
+      console.warn(`[orchestrator] Task ${taskId} setup produced no skills version marker`);
+    }
 
     insertSystemMessage(taskId, "Agent started.");
     updateTask(taskId, { containerStatus: "running" });

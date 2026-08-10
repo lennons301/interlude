@@ -25,6 +25,20 @@ RUN arch="$(dpkg --print-architecture)" \
     && chmod 0755 /usr/local/bin/yq \
     && yq --version
 
+# GitHub CLI (`gh`) — generation-session skills (issue #60) and the ticket-loop
+# tooling read and comment on issues through `gh`; the container's short-lived
+# GitHub App token is exposed per exec exactly like git's. Installed from
+# GitHub's own apt repository (the canonical install), so it tracks upstream
+# `stable`; the `arch=` clause keeps it correct on the amd64/arm64 hosts the
+# estate runs on.
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN corepack enable && corepack prepare pnpm@latest --activate
 RUN npm install -g @anthropic-ai/claude-code
 

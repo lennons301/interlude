@@ -127,6 +127,13 @@
       "when": 1786752000000,
       "tag": "0017_ordinary_vance_astro",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1786838400000,
+      "tag": "0018_run_skills_version",
+      "breakpoints": true
     }
   ]
 }

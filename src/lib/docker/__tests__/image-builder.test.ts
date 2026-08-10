@@ -96,3 +96,15 @@ describe("imageExists", () => {
     expect(await imageExists()).toBe(false);
   });
 });
+
+describe("Dockerfile.agent contents (issue #60)", () => {
+  const dockerfile = readFileSync(
+    path.join(process.cwd(), "Dockerfile.agent"),
+    "utf8"
+  );
+
+  it("installs the GitHub CLI so generation-session skills can drive the tracker", () => {
+    expect(dockerfile).toContain("install -y --no-install-recommends gh");
+    expect(dockerfile).toContain("https://cli.github.com/packages");
+  });
+});

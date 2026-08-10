@@ -75,6 +75,11 @@ export const runs = sqliteTable("runs", {
   // pass starts. Null means AGENT_EFFORT was unset (no directive) and the CLI
   // resolved its own default.
   effort: text("effort"),
+  // Resolved version of the mattpocock-skills plugin the container installed at
+  // start (issue #60) — the forensic trail for "what skill version ran?".
+  // Recorded when the run's first pass sets up; null for a run whose container
+  // predates this, or an interactive task (which has no run row at all).
+  skillsVersion: text("skills_version"),
   totalCostUsd: real("total_cost_usd").notNull().default(0),
   pullRequestNumber: int("pull_request_number"),
   pullRequestUrl: text("pull_request_url"),
