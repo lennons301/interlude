@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
-import { tasks } from "@/db/schema";
+import { SESSION_SKILLS, tasks, type SessionSkill } from "@/db/schema";
 import { newId } from "@/lib/ulid";
 import { desc, eq } from "drizzle-orm";
 
@@ -24,10 +24,14 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   const body = await request.json();
-  const { title, description, projectId } = body as {
+  const { title, description, projectId, sessionSkill, sessionIssue } = body as {
     title: string;
     description?: string;
     projectId: string;
+    // A generation session's skill (issue #61); omitted for a plain chat task.
+    sessionSkill?: string;
+    // Optional issue anchor (owner/repo#n) passed through to the session.
+    sessionIssue?: string;
   };
 
   if (!title?.trim()) {
@@ -36,8 +40,20 @@ export async function POST(request: Request) {
   if (!projectId) {
     return NextResponse.json({ error: "projectId is required" }, { status: 400 });
   }
+  if (
+    sessionSkill !== undefined &&
+    !SESSION_SKILLS.includes(sessionSkill as SessionSkill)
+  ) {
+    return NextResponse.json(
+      {
+        error: `sessionSkill must be one of: ${SESSION_SKILLS.join(", ")}`,
+      },
+      { status: 400 }
+    );
+  }
 
   const now = new Date();
+  // Kind stays `interactive` — a session is a first-class chat task, not a run.
   const task = {
     id: newId(),
     projectId,
@@ -45,6 +61,8 @@ export async function POST(request: Request) {
     description: description?.trim() ?? "",
     status: "queued" as const,
     githubIssue: null,
+    sessionSkill: (sessionSkill as SessionSkill | undefined) ?? null,
+    sessionIssue: sessionIssue?.trim() || null,
     createdAt: now,
     updatedAt: now,
   };

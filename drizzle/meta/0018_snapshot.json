@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "72a82044-b9b4-4f06-be45-13e408e3b5d0",
-  "prevId": "bcb2718c-7d82-449d-95c7-847f551cf116",
+  "id": "1d61cc62-45e0-4903-bad8-67245191f45f",
+  "prevId": "72a82044-b9b4-4f06-be45-13e408e3b5d0",
   "tables": {
     "messages": {
       "name": "messages",
@@ -235,6 +235,13 @@
         },
         "effort": {
           "name": "effort",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "skills_version": {
+          "name": "skills_version",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
