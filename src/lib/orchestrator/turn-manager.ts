@@ -381,9 +381,10 @@ export async function startTask(taskId: string): Promise<void> {
           return;
         }
       }
-      // The pass's turn is over: park it blocked if its final message leads
-      // with the BLOCKED marker — container kept alive, question escalated
-      // to the owner (issue #19). Otherwise the initial turn is the whole
+      // The pass's turn is over: park it blocked if its final message carries
+      // the BLOCKED marker on any line (issue #107) — container kept alive,
+      // question escalated to the owner (issue #19). Otherwise the initial turn
+      // is the whole
       // pass: mark the PR ready and park the container awaiting review — it
       // stays alive (holding no slot) so a request-changes verdict can
       // deliver a fix-up turn into the same attempt. The run stays
