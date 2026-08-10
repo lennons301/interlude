@@ -37,6 +37,7 @@ import { parseRepoFromGitUrl } from "../github/repo";
 import { createDraftPr, markPrReady } from "../github/pull-requests";
 import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed, notifyTaskIdle, notifyRunBlocked } from "../discord/notifications";
 import { decideNext, passOutcomeSnapshot } from "./autonomy/decide";
+import { composeSeed, composeSessionTurn } from "../sessions/seed";
 
 /** Track all active task containers for cancellation and idle polling */
 const activeTasks = new Map<
@@ -163,9 +164,20 @@ export async function startTask(taskId: string): Promise<void> {
   const userPrompt = task.description
     ? `${task.title}\n\n${task.description}`
     : task.title;
-  const prompt = isAutonomousPass
-    ? task.description
-    : `${userPrompt}\n\nWhen you are done with each request, commit all your changes with a descriptive commit message. Stay ready for follow-up instructions.`;
+  // A generation session's first turn is the composed seed (issue #63): the
+  // deterministic slash-passthrough prompt for its session skill, with the
+  // user's title/description as the skill's agenda and any issue anchor passed
+  // as a reference the agent fetches itself. Sessions are always interactive
+  // (no run row), so this never collides with the autonomous-pass branch.
+  const prompt = task.sessionSkill
+    ? composeSeed({
+        sessionSkill: task.sessionSkill,
+        sessionIssue: task.sessionIssue,
+        agenda: userPrompt,
+      })
+    : isAutonomousPass
+      ? task.description
+      : `${userPrompt}\n\nWhen you are done with each request, commit all your changes with a descriptive commit message. Stay ready for follow-up instructions.`;
 
   const run = task.runId
     ? db.select().from(runs).where(eq(runs.id, task.runId)).get()
@@ -632,6 +644,16 @@ export async function processQueuedMessages(
       if (parsed.text) promptText = parsed.text;
     } catch {
       // Plain text content — use as-is
+    }
+
+    // Follow-on slash routing (issue #63): in a generation session, a follow-up
+    // message that leads with a known skill slash (the /to-spec → /to-tickets →
+    // arm progression) is re-framed through the same seed-composition path, so
+    // a typed slash carries the same framing (arming convention included) as the
+    // seed turn and never degrades into the agent improvising the skill. A
+    // non-slash message, or any message on a plain chat task, is untouched.
+    if (task.sessionSkill) {
+      promptText = composeSessionTurn(promptText);
     }
 
     // A follow-up turn on a run-owned task is capped at what remains of the
