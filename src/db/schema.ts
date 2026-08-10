@@ -1,5 +1,20 @@
 import { int, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
+// Generation-session skills (issue #61): the estate's ticket-loop generation
+// half, runnable from an interactive session. The single source of truth for
+// the runtime list — the DB column enum, the task-creation API's validation,
+// and the fleet dashboard's own decoupled union all answer to this tuple.
+export const SESSION_SKILLS = [
+  "grill-me",
+  "grill-with-docs",
+  "triage",
+  "to-spec",
+  "to-tickets",
+  "wayfinder",
+] as const;
+
+export type SessionSkill = (typeof SESSION_SKILLS)[number];
+
 export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
@@ -124,6 +139,19 @@ export const tasks = sqliteTable("tasks", {
   })
     .notNull()
     .default("interactive"),
+  // Generation sessions (issue #61): a non-null value makes an interactive task
+  // a first-class generation session running one of the estate's generation
+  // skills. Null = an ordinary chat task. Kind stays `interactive` and no run
+  // row exists, so spend-cap exemption and the autonomy reducer are unchanged
+  // by construction. Distinct from the autonomous `kind=triage` pass: a
+  // `sessionSkill=triage` session is a human-driven, runless triage.
+  sessionSkill: text("session_skill", { enum: SESSION_SKILLS }),
+  // The GitHub issue a session is anchored to (owner/repo#n), passed through so
+  // the session can open with the issue as context. Deliberately separate from
+  // `githubIssue`, which drives implement-lifecycle machinery (issue comments,
+  // a `Closes #n` draft PR) that an anchored generation session must not
+  // trigger.
+  sessionIssue: text("session_issue"),
   runId: text("run_id").references(() => runs.id),
   containerId: text("container_id"),
   branch: text("branch"),
