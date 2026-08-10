@@ -352,10 +352,11 @@ export function buildImplementPrompt(ticket: ImplementTicket): string {
     `- Make small, atomic commits as you work. Run the repo's tests and lint before ` +
       `you finish, and do not finish with either failing.`,
     `- If you hit a decision the ticket does not resolve, do not guess: stop and ` +
-      `end your turn with a final message whose first line is exactly ` +
-      "`BLOCKED: <your question>` — the marker must start the first line, with " +
-      `nothing before it, or it will not be seen. The question goes to the owner ` +
-      `and the answer arrives as your next turn, with your context intact.`,
+      `end your turn with a final message that puts, on its own line, exactly ` +
+      "`BLOCKED: <your question>` — the marker must start the line, with nothing " +
+      `before it. A short lead-in above it is fine, but keep the marker on its ` +
+      `own line so it is seen. The question goes to the owner and the answer ` +
+      `arrives as your next turn, with your context intact.`,
     `- End with a short summary of what you built and anything a reviewer should know.`,
     ``,
     workflowBlock(ticket),
