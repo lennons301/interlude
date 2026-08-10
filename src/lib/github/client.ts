@@ -66,3 +66,32 @@ export async function getOctokit(): Promise<Octokit> {
   const token = await getInstallationToken();
   return new Octokit({ auth: token });
 }
+
+/**
+ * The repository permissions the App installation was granted, as an
+ * `{ issues: "write", contents: "write", ... }` map (issue #62). Read via the
+ * App JWT off the installation itself, so it reflects exactly what was granted
+ * at install time and is independent of any one repo. Preflight uses it to
+ * confirm generation sessions have the "Issues: write" they need — every
+ * generation operation (issue creation, comments, labels, dependency edges,
+ * sub-issues) lives under that one permission.
+ */
+export async function getInstallationPermissions(): Promise<
+  Record<string, string>
+> {
+  const config = getConfig();
+  if (
+    !config.githubAppId ||
+    !config.githubAppPrivateKey ||
+    !config.githubAppInstallationId
+  ) {
+    throw new Error(
+      "GitHub App required to read installation permissions (set GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY / GITHUB_APP_INSTALLATION_ID)"
+    );
+  }
+  const appOctokit = new Octokit({ auth: createAppJwt() });
+  const { data } = await appOctokit.rest.apps.getInstallation({
+    installation_id: parseInt(config.githubAppInstallationId, 10),
+  });
+  return (data.permissions ?? {}) as Record<string, string>;
+}

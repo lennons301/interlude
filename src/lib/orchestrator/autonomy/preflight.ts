@@ -24,7 +24,7 @@ import { projects } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { Octokit } from "octokit";
 import { getConfig } from "../../config";
-import { getOctokit, isGitHubConfigured } from "../../github/client";
+import { getInstallationPermissions, getOctokit, isGitHubConfigured } from "../../github/client";
 import { HUMAN_SIGNOFF_LABEL } from "./gates";
 
 /**
@@ -60,6 +60,13 @@ export interface PreflightChecks {
   reviewerIsCollaborator: boolean;
   /** The `human-signoff` label exists so gated PRs can be labelled */
   signoffLabelExists: boolean;
+  /**
+   * The App installation grants "Issues: write" (issue #62). It is the one
+   * permission every generation skill relies on — issue creation, comments,
+   * labels, native dependency edges, and sub-issue creation all require it — so
+   * a single check covers everything a generation session does via `gh`.
+   */
+  issuesWritable: boolean;
 }
 
 export interface PreflightResult {
@@ -107,6 +114,10 @@ export function evaluatePreflight(checks: PreflightChecks): PreflightResult {
   }
   if (!checks.reviewerIsCollaborator) missing.push("the reviewer account is not a collaborator");
   if (!checks.signoffLabelExists) missing.push(`the "${HUMAN_SIGNOFF_LABEL}" label is missing`);
+  if (!checks.issuesWritable)
+    missing.push(
+      'the GitHub App lacks the "Issues: write" permission generation sessions need (issue creation, comments, labels, dependency edges, sub-issues)'
+    );
 
   return missing.length === 0
     ? { status: "passing", reason: null }
@@ -201,6 +212,23 @@ async function isReviewerCollaborator(
 }
 
 /**
+ * Does the App installation grant "Issues: write"? Read off the installation's
+ * declared permissions (issue #62) rather than probed by mutating an issue —
+ * the declared grant is the deterministic, side-effect-free source of truth.
+ * Any failure to read it fails closed as `false`, so an under-permissioned or
+ * unreachable App never reads as ready for a generation session.
+ */
+async function hasIssuesWrite(): Promise<boolean> {
+  try {
+    const permissions = await getInstallationPermissions();
+    return permissions.issues === "write";
+  } catch (err) {
+    console.error("[preflight] Could not read App installation permissions:", err);
+    return false;
+  }
+}
+
+/**
  * Gather the autonomy checks for a project via the GitHub API. Every network
  * failure resolves to the fail-closed value so an unreachable or
  * under-permissioned repo never reads as ready. Downstream checks are only
@@ -218,6 +246,7 @@ export async function computePreflight(project: ProjectRow): Promise<PreflightRe
       branchProtection: "unprotected",
       reviewerIsCollaborator: false,
       signoffLabelExists: false,
+      issuesWritable: false,
     });
   }
 
@@ -256,16 +285,19 @@ export async function computePreflight(project: ProjectRow): Promise<PreflightRe
       branchProtection: "unprotected",
       reviewerIsCollaborator: false,
       signoffLabelExists: false,
+      issuesWritable: false,
     });
   }
 
-  const [branchProtection, reviewerIsCollaborator, signoffLabelExists] = await Promise.all([
-    probeBranchProtection(octokit, owner, repo, defaultBranch),
-    isReviewerCollaborator(octokit, owner, repo),
-    apiCheck(`getLabel ${repoLabel}`, () =>
-      octokit.rest.issues.getLabel({ owner, repo, name: HUMAN_SIGNOFF_LABEL })
-    ),
-  ]);
+  const [branchProtection, reviewerIsCollaborator, signoffLabelExists, issuesWritable] =
+    await Promise.all([
+      probeBranchProtection(octokit, owner, repo, defaultBranch),
+      isReviewerCollaborator(octokit, owner, repo),
+      apiCheck(`getLabel ${repoLabel}`, () =>
+        octokit.rest.issues.getLabel({ owner, repo, name: HUMAN_SIGNOFF_LABEL })
+      ),
+      hasIssuesWrite(),
+    ]);
 
   return evaluatePreflight({
     repoConfigured: true,
@@ -274,6 +306,7 @@ export async function computePreflight(project: ProjectRow): Promise<PreflightRe
     branchProtection,
     reviewerIsCollaborator,
     signoffLabelExists,
+    issuesWritable,
   });
 }
 
