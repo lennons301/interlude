@@ -1,5 +1,5 @@
 import { db } from "@/db";
-import { tasks, messages, projects, runs } from "@/db/schema";
+import { tasks, messages, projects, runs, isGenerationSession } from "@/db/schema";
 import { eq, and, isNull, asc, desc } from "drizzle-orm";
 import { newId } from "../ulid";
 import {
@@ -321,6 +321,8 @@ export async function startTask(taskId: string): Promise<void> {
       captureRaw: isReviewPass || isTriagePass,
       model: passModel,
       effort: passEffort,
+      // A generation session's exec gets a `gh` token; no autonomous pass does (#62).
+      isGenerationSession: isGenerationSession(task),
     });
 
     // A terminal `result` event arrived — the turn ran to completion, so any
@@ -503,6 +505,7 @@ async function runTurn(
     captureRaw?: boolean;
     model?: string | null;
     effort?: string | null;
+    isGenerationSession?: boolean;
   }
 ): Promise<TurnResult & { raw?: string }> {
   const handler = createOutputHandler(taskId);
@@ -516,6 +519,7 @@ async function runTurn(
     maxTurns: opts?.maxTurns,
     model: opts?.model,
     effort: opts?.effort,
+    isGenerationSession: opts?.isGenerationSession,
   });
 
   // Race: wait for the exec stream to close OR the "result" event from Claude.
@@ -647,6 +651,8 @@ export async function processQueuedMessages(
         maxTurns: run?.maxTurns ?? undefined,
         model: resolveAgentModel(task.kind, config, run?.model ?? null),
         effort: resolveAgentEffort(task.kind, config, run?.effort ?? null),
+        // A generation session's follow-up exec gets a `gh` token too (#62).
+        isGenerationSession: isGenerationSession(task),
       }
     );
 
