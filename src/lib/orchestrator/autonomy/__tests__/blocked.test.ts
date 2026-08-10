@@ -7,13 +7,52 @@ describe("detectBlockedQuestion — positive cases", () => {
       detectBlockedQuestion("BLOCKED: Should retries be configurable or fixed at 3?")
     ).toBe("Should retries be configurable or fixed at 3?");
   });
-});
 
-describe("detectBlockedQuestion — negative cases (biased toward false negatives)", () => {
-  it("ignores the marker mid-message", () => {
+  it("detects the marker after a preamble paragraph — narrate-then-BLOCKED (issue #107)", () => {
+    // The real moontide #32 message: a preamble line, a blank line, then the
+    // marker. First-line-only detection returned null and the run dangled.
+    const moontide =
+      "The ticket's premise doesn't hold, and the resolution changes the " +
+      "deliverable materially, so I'm stopping rather than guessing.\n\n" +
+      "BLOCKED: `README.md` is not empty — it's a deliberate 89-line README. " +
+      "Should I cut it down to the minimal three-section README the ticket " +
+      "specifies (deleting the existing content)?";
+
+    expect(detectBlockedQuestion(moontide)).toBe(
+      "`README.md` is not empty — it's a deliberate 89-line README. Should I " +
+        "cut it down to the minimal three-section README the ticket specifies " +
+        "(deleting the existing content)?"
+    );
+  });
+
+  it("detects the marker after a single preamble line", () => {
     expect(
       detectBlockedQuestion(
         "I reviewed the ticket.\nBLOCKED: Should retries be configurable?"
+      )
+    ).toBe("Should retries be configurable?");
+  });
+
+  it("detects the marker preceded by a blank first line", () => {
+    expect(detectBlockedQuestion("\nBLOCKED: Should retries be configurable?")).toBe(
+      "Should retries be configurable?"
+    );
+  });
+
+  it("detects the marker after a preceding fenced code block", () => {
+    expect(
+      detectBlockedQuestion(
+        "Here is the diff:\n```\nsome code\n```\nBLOCKED: Should retries be configurable?"
+      )
+    ).toBe("Should retries be configurable?");
+  });
+});
+
+describe("detectBlockedQuestion — negative cases (false-positive guards)", () => {
+  it("ignores the marker mid-line inside prose", () => {
+    expect(
+      detectBlockedQuestion(
+        'The spec says to emit "BLOCKED: <question>" when stuck, which I did not need.'
       )
     ).toBeNull();
   });
@@ -24,22 +63,10 @@ describe("detectBlockedQuestion — negative cases (biased toward false negative
     ).toBeNull();
   });
 
-  it("ignores a marker mentioned inside first-line prose", () => {
-    expect(
-      detectBlockedQuestion(
-        'The spec says to emit "BLOCKED: <question>" when stuck, which I did not need.'
-      )
-    ).toBeNull();
-  });
-
   it("ignores a marker inside a code fence", () => {
     expect(
       detectBlockedQuestion("```\nBLOCKED: Should retries be configurable?\n```")
     ).toBeNull();
-  });
-
-  it("ignores a marker preceded by a blank first line", () => {
-    expect(detectBlockedQuestion("\nBLOCKED: Should retries be configurable?")).toBeNull();
   });
 
   it("ignores an indented marker", () => {
@@ -57,6 +84,9 @@ describe("detectBlockedQuestion — negative cases (biased toward false negative
   it("ignores a marker with no question — there is nothing to ask", () => {
     expect(detectBlockedQuestion("BLOCKED:")).toBeNull();
     expect(detectBlockedQuestion("BLOCKED:   ")).toBeNull();
+    expect(
+      detectBlockedQuestion("I reviewed the ticket.\nBLOCKED:   ")
+    ).toBeNull();
   });
 
   it("returns null for an empty or missing final message", () => {
@@ -66,7 +96,7 @@ describe("detectBlockedQuestion — negative cases (biased toward false negative
 });
 
 describe("detectBlockedQuestion — question extraction", () => {
-  it("returns only the first line — context below stays in the task chat", () => {
+  it("returns only the marker's line — context below stays in the task chat", () => {
     expect(
       detectBlockedQuestion(
         "BLOCKED: Postgres or SQLite for the cache?\n\nThe ticket names neither and both fit."

@@ -1704,13 +1704,39 @@ describe("decideNext — blocked escalation", () => {
     expect(actions).toEqual([]);
   });
 
-  it("does not park a run for a mid-message marker", () => {
+  it("escalates a pass whose marker follows a preamble (issue #107)", () => {
     const actions = decideNext(
       makeSnapshot({
         candidates: [],
         completedPasses: [
           makePass({
-            finalMessage: "All done.\nBLOCKED: this is a summary, not a question.",
+            finalMessage:
+              "I'm stopping rather than guessing.\n\n" +
+              "BLOCKED: The ticket names neither Postgres nor SQLite — which one?",
+          }),
+        ],
+      })
+    );
+
+    expect(escalations(actions)).toEqual([
+      {
+        type: "escalate",
+        reason: "blocked",
+        runId: "run-1",
+        taskId: "task-1",
+        issueRef: "acme/widgets#7",
+        question: "The ticket names neither Postgres nor SQLite — which one?",
+      },
+    ]);
+  });
+
+  it("does not park a run for a marker mid-line inside prose", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [
+          makePass({
+            finalMessage: "All done — no BLOCKED: markers were needed here.",
           }),
         ],
       })
