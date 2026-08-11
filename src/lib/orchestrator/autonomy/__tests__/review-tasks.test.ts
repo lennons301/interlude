@@ -73,6 +73,9 @@ function awaitingReviewSnapshot(hasReviewTask: boolean): AutonomySnapshot {
     taskId: "task-implement",
     issueRef: ISSUE_REF,
     finalMessage: null,
+    // The implement pass is awaiting review, so it produced a PR (moot here —
+    // completedPasses is cleared below — but keeps the outcome well-formed).
+    producedPr: true,
   });
   return {
     ...base,
