@@ -139,6 +139,7 @@ function makePass(overrides: Partial<PassOutcome> = {}): PassOutcome {
     taskId: "task-1",
     issueRef: "acme/widgets#7",
     finalMessage: "Implemented the frobnicator; tests and lint pass.",
+    producedPr: true,
     ...overrides,
   };
 }
@@ -1827,6 +1828,90 @@ describe("decideNext — blocked escalation", () => {
   });
 });
 
+describe("decideNext — finalizing an empty implement pass (issue #106)", () => {
+  function finalizes(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "finalizeEmptyPass");
+  }
+
+  it("finalizes a healthy pass that left no PR — nothing to review or merge", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [makePass({ producedPr: false })],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "finalizeEmptyPass",
+        runId: "run-1",
+        taskId: "task-1",
+        issueRef: "acme/widgets#7",
+      },
+    ]);
+  });
+
+  it("leaves a pass that produced a PR alone — the gate machinery takes over", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [makePass({ producedPr: true })],
+      })
+    );
+
+    expect(finalizes(actions)).toEqual([]);
+  });
+
+  it("prefers blocking over finalizing when a pass with no PR leads with the marker", () => {
+    // A pass can both lead with the marker and have produced no PR; parking on
+    // the question outranks finalizing, so exactly one action is emitted.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [
+          makePass({ producedPr: false, finalMessage: "BLOCKED: which database?" }),
+        ],
+      })
+    );
+
+    expect(finalizes(actions)).toEqual([]);
+    expect(actions).toEqual([
+      {
+        type: "escalate",
+        reason: "blocked",
+        runId: "run-1",
+        taskId: "task-1",
+        issueRef: "acme/widgets#7",
+        question: "which database?",
+      },
+    ]);
+  });
+
+  it("finalizes an empty pass without stopping pickup of new work", () => {
+    const actions = decideNext(
+      makeSnapshot({ completedPasses: [makePass({ producedPr: false })] })
+    );
+
+    expect(finalizes(actions)).toHaveLength(1);
+    expect(claims(actions)).toHaveLength(1);
+  });
+
+  it("decides a single empty pass via passOutcomeSnapshot", () => {
+    const actions = decideNext(
+      passOutcomeSnapshot(NOW, makePass({ producedPr: false }))
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "finalizeEmptyPass",
+        runId: "run-1",
+        taskId: "task-1",
+        issueRef: "acme/widgets#7",
+      },
+    ]);
+  });
+});
+
 describe("decideNext — triage pickup", () => {
   it("starts a triage pass for a stray needs-triage issue", () => {
     const actions = decideNext(
@@ -2097,6 +2182,7 @@ describe("arming boundary — interlude never applies ready-for-agent", () => {
     "postVerdict",
     "deliverFeedback",
     "finalizeRun",
+    "finalizeEmptyPass",
     "startTriage",
     "applyTriage",
   ];
