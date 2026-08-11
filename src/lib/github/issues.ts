@@ -38,6 +38,51 @@ export async function commentOnIssue(
   }
 }
 
+/** An open issue reduced to what the session issue-picker needs (issue #64). */
+export interface OpenIssue {
+  number: number;
+  title: string;
+  /** Full `owner/repo#n` ref — what a session's `sessionIssue` anchor stores. */
+  ref: string;
+}
+
+/**
+ * List a repo's open issues for the mobile session issue-picker (issue #64).
+ * `repoFullName` is the project's `owner/repo`. Pull requests are excluded —
+ * `listForRepo` returns them alongside issues, but a session anchors to an
+ * issue, never a PR. Returns an empty list when GitHub is unconfigured, the
+ * repo is unparseable, or the read fails, so the picker degrades to
+ * freeform-only rather than blocking session creation. Capped at the first
+ * page (100, newest first) — the picker surfaces recent issues, not the whole
+ * backlog; anything older is still reachable by typing a freeform agenda.
+ */
+export async function listOpenIssues(repoFullName: string): Promise<OpenIssue[]> {
+  if (!isGitHubConfigured()) return [];
+
+  const [owner, repo] = (repoFullName ?? "").split("/");
+  if (!owner || !repo) return [];
+
+  try {
+    const octokit = await getOctokit();
+    const { data: issues } = await octokit.rest.issues.listForRepo({
+      owner,
+      repo,
+      state: "open",
+      per_page: 100,
+    });
+    return issues
+      .filter((issue) => !issue.pull_request)
+      .map((issue) => ({
+        number: issue.number,
+        title: issue.title,
+        ref: `${repoFullName}#${issue.number}`,
+      }));
+  } catch (err) {
+    console.error(`[github] Failed to list open issues for ${repoFullName}:`, err);
+    return [];
+  }
+}
+
 /** One issue comment, reduced to what a retry prompt needs (issue #73). */
 export interface IssueComment {
   /** GitHub login of the author ("" if the API omitted it) */
