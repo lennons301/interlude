@@ -15,6 +15,15 @@ import { isDiscordConfigured, startDiscordBot } from "../discord/client";
 let initialized = false;
 
 /**
+ * The non-terminal run statuses boot recovery reclaims: a run in one of these
+ * with no live turn is either interruptible (issue #24) or a dangling ghost
+ * (issue #106). Deliberately excludes `gated`/`blocked` (waiting on a human)
+ * and every terminal status. Named once so the two boot passes below can never
+ * drift apart on which statuses count as reclaimable.
+ */
+const RECLAIMABLE_RUN_STATUSES = ["claimed", "implementing", "reviewing"] as const;
+
+/**
  * Restart recovery for the runs ledger (issue #24): a run that was being
  * actively worked when the process died lost its containers' exec streams
  * with it. Mark it `interrupted` — a separate ledger outcome from `failed`,
@@ -35,7 +44,7 @@ async function markInterruptedRuns(): Promise<void> {
   const activeRuns = await db
     .select()
     .from(runs)
-    .where(inArray(runs.status, ["claimed", "implementing", "reviewing"]));
+    .where(inArray(runs.status, [...RECLAIMABLE_RUN_STATUSES]));
 
   const now = new Date();
   for (const run of activeRuns) {
@@ -68,6 +77,74 @@ async function markInterruptedRuns(): Promise<void> {
     console.log(
       `[orchestrator] Run ${run.id} (${run.githubIssue}) interrupted by restart — ` +
         `the sweep will re-claim without consuming an attempt`
+    );
+  }
+}
+
+/**
+ * Boot reconciliation for dangling runs (issue #106): before the pass-
+ * completion path was fixed, a run whose implement pass finished with no PR
+ * and no `BLOCKED:` question was left in `implementing`/`reviewing` with all
+ * its tasks already terminal — nothing drives it forward, so it renders as a
+ * permanent ghost `running` card on the fleet dashboard (`slots.used = 0`, no
+ * container). markInterruptedRuns skips it (it owns no `running` task) and the
+ * sweep never re-claims it (its run is still "active"), so it never self-heals.
+ * Finalize any such run to `failed` here so pre-existing ghosts clear on the
+ * next boot without a manual DB nudge.
+ *
+ * Deliberately narrow, so a run that is legitimately mid-flight is never
+ * touched:
+ * - `gated`/`blocked` runs are waiting on a human, not dangling — left alone,
+ *   exactly as markInterruptedRuns leaves them.
+ * - a stored `reviewResult` is left for the verdict path, as markInterruptedRuns
+ *   does — acting on the verdict after a restart is why it is stored.
+ * - a run holding a PR has something to gate/review/merge and the sweep
+ *   advances it, so only PR-less runs qualify.
+ * - a run that still owns a queued/running/blocked task will be resumed by the
+ *   queue (or was just handled by markInterruptedRuns), so only runs whose
+ *   tasks are all terminal (or which own none at all) qualify.
+ *
+ * Runs after markInterruptedRuns, whose running-task cases this must not
+ * re-handle.
+ */
+async function finalizeDanglingRuns(): Promise<void> {
+  const candidates = await db
+    .select()
+    .from(runs)
+    .where(inArray(runs.status, [...RECLAIMABLE_RUN_STATUSES]));
+
+  const now = new Date();
+  for (const run of candidates) {
+    if (run.reviewResult != null) continue;
+    if (run.pullRequestNumber != null) continue;
+
+    const owned = await db
+      .select({ status: tasks.status })
+      .from(tasks)
+      .where(eq(tasks.runId, run.id));
+    // Anything still live (or queued to go live) will advance this run — only
+    // an all-terminal (or task-less) run is genuinely dangling.
+    if (
+      owned.some(
+        (t) => t.status === "running" || t.status === "blocked" || t.status === "queued"
+      )
+    ) {
+      continue;
+    }
+
+    await db
+      .update(runs)
+      .set({
+        status: "failed",
+        failureReason:
+          "dangling run reconciled at boot: implement pass left no PR and no open question (issue #106)",
+        finishedAt: now,
+      })
+      .where(eq(runs.id, run.id));
+
+    console.log(
+      `[orchestrator] Run ${run.id} (${run.githubIssue}) finalized — dangling ` +
+        `non-terminal with no PR and all tasks terminal (issue #106)`
     );
   }
 }
@@ -210,6 +287,7 @@ export async function initOrchestrator(): Promise<void> {
       console.log("[orchestrator] Discord bot not configured -- running without Discord integration");
     }
     await markInterruptedRuns();
+    await finalizeDanglingRuns();
     await recoverOrphanedTasks();
     await reapStaleContainers();
     startQueue();

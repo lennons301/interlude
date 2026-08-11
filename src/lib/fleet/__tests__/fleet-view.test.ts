@@ -1233,6 +1233,39 @@ describe("buildFleetView — running", () => {
 
     expect(view.running).toEqual([]);
   });
+
+  it("keeps a dangling run visible but drops it once finalized (issue #106)", () => {
+    // The #106 ghost: an implement pass ended with no PR and no BLOCKED
+    // question, so its task completed but nothing drove the run out of
+    // `implementing` — the slot is free (the task holds no container) yet the
+    // run still reads as active fleet work. This asserts the read model's half
+    // of the contract: a non-terminal run renders a running card, and the same
+    // run finalized (the fix drives it to `failed`) renders none.
+    const danglingRows = (status: FleetRunRow["status"]) =>
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", status })],
+        tasks: [
+          makeTask({
+            id: "t1",
+            projectId: "p1",
+            runId: "r1",
+            kind: "implement",
+            status: "completed",
+            containerStatus: null,
+          }),
+        ],
+      });
+
+    // Before the fix: the dangling `implementing` run is the ghost running card.
+    const ghost = buildFleetView(danglingRows("implementing"));
+    expect(ghost.running.map((c) => c.runId)).toEqual(["r1"]);
+    expect(ghost.slots.used).toBe(0);
+
+    // After the fix drives the run terminal: no running card, no ghost.
+    const finalized = buildFleetView(danglingRows("failed"));
+    expect(finalized.running).toEqual([]);
+  });
 });
 
 describe("buildFleetView — recent completions", () => {

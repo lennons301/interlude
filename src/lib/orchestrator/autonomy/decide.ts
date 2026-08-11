@@ -131,6 +131,13 @@ export interface PassOutcome {
   issueRef: string;
   /** The turn's final agent text message; null when the turn produced none */
   finalMessage: string | null;
+  /** Whether the pass left a PR behind — the run has something to review and
+   * merge. A pass that ends with neither a PR nor a `BLOCKED:` question has
+   * nothing to advance its run, so the reducer finalizes it here rather than
+   * letting the run dangle non-terminal as a ghost `running` card (issue
+   * #106). Only ever false for a genuine implement pass — a repair always
+   * operates on an existing PR, so its callers report `true`. */
+  producedPr: boolean;
 }
 
 /** An open issue awaiting triage (`needs-triage`), as gathered by the sweep. */
@@ -412,6 +419,20 @@ export type Action =
       question: string;
     }
   | {
+      // An implement pass finished with neither a PR nor a `BLOCKED:` question:
+      // it left nothing to review or merge, so the run would otherwise dangle
+      // non-terminal forever and render as a permanent ghost `running` card
+      // (issue #106). Drive the run to a terminal (failed) status at pass
+      // completion — the branch was pushed after the turn, so any work
+      // survives, and the strike counts toward the attempt cap like any other
+      // empty attempt. The turn manager is the sole executor: a sweep always
+      // passes `completedPasses: []`, so this never fires from a sweep.
+      type: "finalizeEmptyPass";
+      runId: string;
+      taskId: string;
+      issueRef: string;
+    }
+  | {
       type: "startTriage";
       issueRef: string;
       projectId: string;
@@ -558,6 +579,20 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
         taskId: pass.taskId,
         issueRef: pass.issueRef,
         question,
+      });
+      continue;
+    }
+    // A pass that ended with neither a PR nor a blocked question left the run
+    // with nothing to review or merge. Without this it would sit in
+    // `implementing`/`reviewing` indefinitely and render as a permanent ghost
+    // `running` card (issue #106) — so finalize the run here, at the same
+    // pass-completion seam that parks a blocked run.
+    if (!pass.producedPr) {
+      actions.push({
+        type: "finalizeEmptyPass",
+        runId: pass.runId,
+        taskId: pass.taskId,
+        issueRef: pass.issueRef,
       });
     }
   }

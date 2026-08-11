@@ -397,14 +397,15 @@ export async function startTask(taskId: string): Promise<void> {
       }
       // The pass's turn is over: park it blocked if its final message carries
       // the BLOCKED marker on any line (issue #107) — container kept alive,
-      // question escalated to the owner (issue #19). Otherwise the initial turn
-      // is the whole
-      // pass: mark the PR ready and park the container awaiting review — it
-      // stays alive (holding no slot) so a request-changes verdict can
-      // deliver a fix-up turn into the same attempt. The run stays
-      // `implementing`; the sweep's gate evaluation takes over from here.
-      const parkedBlocked = await evaluatePassOutcome(taskId, turnResult.finalMessage);
-      if (!parkedBlocked) await finishImplementPass(taskId);
+      // question escalated to the owner (issue #19); or fail the attempt if it
+      // left no PR and no question, so the run cannot dangle as a ghost (issue
+      // #106). Otherwise the initial turn is the whole pass: mark the PR ready
+      // and park the container awaiting review — it stays alive (holding no
+      // slot) so a request-changes verdict can deliver a fix-up turn into the
+      // same attempt. The run stays `implementing`; the sweep's gate evaluation
+      // takes over from here.
+      const decision = await evaluatePassOutcome(taskId, turnResult.finalMessage);
+      if (decision === "proceed") await finishImplementPass(taskId);
       return;
     }
 
@@ -713,12 +714,17 @@ export async function processQueuedMessages(
       // initial turn: PR marked ready, run recorded, or completed outright
       // when there is no PR. A reviewer's fix-up turn needs neither — its
       // new commits re-enter gate evaluation from the parked state.
-      const parkedBlocked = await evaluatePassOutcome(taskId, turnResult.finalMessage);
-      if (parkedBlocked) {
+      const decision = await evaluatePassOutcome(taskId, turnResult.finalMessage);
+      if (decision === "blocked") {
         // Re-blocked mid-drain: parkBlockedRun stopped the container (#93).
         // Stop draining — the next answer resumes it on a fresh poll, which
         // restarts the container first. Continuing would exec the next queued
         // message into a stopped container.
+        break;
+      }
+      if (decision === "finalized") {
+        // Empty pass (no PR, no question): the attempt was failed and its
+        // container removed (issue #106) — nothing left to drain.
         break;
       }
       if (!run?.pullRequestNumber) {
@@ -1180,19 +1186,40 @@ function lastAgentTextMessage(taskId: string): string | null {
 }
 
 /**
+ * What the reducer decided about an implement pass whose turn just ended:
+ * - `blocked`   — parked on a question (issue #19); container preserved (#93)
+ * - `finalized` — no PR and no question, so the run was failed to a terminal
+ *                 status rather than left dangling (issue #106)
+ * - `proceed`   — healthy; the caller finishes the pass (park awaiting review,
+ *                 or complete the task when there is a PR to hand over)
+ *
+ * The first two are fully handled inside `evaluatePassOutcome`; only `proceed`
+ * leaves anything for the caller.
+ */
+type PassDecision = "blocked" | "finalized" | "proceed";
+
+/**
  * Park-or-proceed for an implement pass whose turn just ended (issue #19):
  * ask the reducer about the turn's final message — this turn's, from its
- * TurnResult, never an earlier turn's re-read. Blocked — park the run (its
- * container stopped to free memory but preserved, #93) and post the question;
- * returns true. Healthy — returns false and the caller proceeds (park awaiting
- * review, or complete).
+ * TurnResult, never an earlier turn's re-read — and the PR the pass left (if
+ * any). Blocked — park the run (its container stopped to free memory but
+ * preserved, #93) and post the question. Empty (no PR, no question) — fail the
+ * attempt so the run reaches a terminal status (issue #106). Otherwise the
+ * caller proceeds.
  */
 async function evaluatePassOutcome(
   taskId: string,
   finalMessage: string | null
-): Promise<boolean> {
+): Promise<PassDecision> {
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
-  if (!task?.runId || !task.githubIssue) return false;
+  if (!task?.runId || !task.githubIssue) return "proceed";
+
+  // Only a genuine implement pass can be "empty" in the #106 sense: a repair
+  // pass (issue #54) always operates on an existing PR and is never an
+  // attempt, so it must never be finalized here — report producedPr = true for
+  // it whatever the task row carries.
+  const producedPr =
+    task.kind !== "implement" || task.pullRequestNumber != null;
 
   const actions = decideNext(
     passOutcomeSnapshot(new Date(), {
@@ -1200,16 +1227,29 @@ async function evaluatePassOutcome(
       taskId,
       issueRef: task.githubIssue,
       finalMessage,
+      producedPr,
     })
   );
 
   for (const action of actions) {
     if (action.type === "escalate" && action.reason === "blocked") {
       await parkBlockedRun(taskId, action.runId, action.question);
-      return true;
+      return "blocked";
+    }
+    if (action.type === "finalizeEmptyPass") {
+      // Nothing to review or merge — finalize the run as a failed attempt so it
+      // reaches a terminal status instead of dangling as a ghost `running`
+      // card (issue #106). The branch was pushed after the turn, so any work
+      // survives for the next attempt.
+      await failImplementAttempt(
+        taskId,
+        action.runId,
+        "implement pass produced no PR and no BLOCKED question"
+      );
+      return "finalized";
     }
   }
-  return false;
+  return "proceed";
 }
 
 /**
