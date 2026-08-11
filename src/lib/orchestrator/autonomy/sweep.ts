@@ -82,7 +82,12 @@ import {
   buildTriagePrompt,
   type PriorAttempt,
 } from "./workflow";
-import { inFlightReviewTaskId, reapDeadReviewTasks } from "./review-tasks";
+import {
+  cancelOrphanedRunTasks,
+  inFlightReviewTaskId,
+  queuedTasksReservingSlots,
+  reapDeadReviewTasks,
+} from "./review-tasks";
 import {
   DAILY_AUTONOMOUS_CAP_USD,
   MAX_ATTEMPTS,
@@ -226,13 +231,25 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     .where(isNotNull(projects.githubRepo))
     .all();
 
-  const queuedTasks = db
-    .select({ kind: tasks.kind })
-    .from(tasks)
-    .where(eq(tasks.status, "queued"))
-    .all();
-
   const allRuns = db.select().from(runs).all();
+
+  // The queued tasks that reserve a slot for pickup accounting (issue #124):
+  // only those whose run is still live, plus run-less passes (interactive,
+  // triage). A task left `queued` under a now-terminal run — the review a
+  // hand-merged PR orphaned — is dropped here so it can never suppress a new
+  // claim while a slot sits free (the LPS #135 wedge). `runId` is carried
+  // solely for this filter.
+  const liveRunIds = new Set(
+    allRuns.filter((r) => ACTIVE_RUN_STATUS_SET.has(r.status)).map((r) => r.id)
+  );
+  const queuedTasks = queuedTasksReservingSlots(
+    db
+      .select({ kind: tasks.kind, runId: tasks.runId })
+      .from(tasks)
+      .where(eq(tasks.status, "queued"))
+      .all(),
+    liveRunIds
+  );
 
   // Occupant labels for the saturation announcement. Parked containers
   // (implement passes idling while their PR is reviewed) hold no slot.
@@ -1550,6 +1567,9 @@ async function executeFinalizeRun(
       ? `PR #${action.prNumber} merged — releasing container.`
       : `PR #${action.prNumber} closed without merging — releasing container.`
   );
+  // The PR is settled, so an owed review is moot: cancel any pass still queued
+  // (or running) under this now-terminal run so it cannot wedge pickup (#124).
+  await terminalizeFinalizedRunTasks(action.runId);
 
   console.log(`[autonomy] Run ${action.runId} settled: ${action.issueRef} ${action.outcome}`);
 }
@@ -1752,6 +1772,10 @@ async function executeExhaust(action: Extract<Action, { type: "exhaust" }>): Pro
   ].filter((r) => r != null);
   for (const marker of markers) {
     db.update(runs).set({ status: "exhausted" }).where(eq(runs.id, marker.id)).run();
+    // Defence-in-depth: a marked run was already failed/interrupted, so its
+    // tasks are terminal — but keep the "no task outlives its run" invariant
+    // total even here (issue #124).
+    await terminalizeFinalizedRunTasks(marker.id);
   }
 
   // The strikes are the failed (or interrupted) runs, but the ticket's bill
@@ -1848,6 +1872,9 @@ async function executeFailAttempt(
     action.runId,
     "Review cycles exhausted — attempt failed, releasing container."
   );
+  // Defence-in-depth: the failing verdict's review already completed, but if
+  // any pass is still non-terminal under this now-failed run, cancel it (#124).
+  await terminalizeFinalizedRunTasks(action.runId);
 
   console.log(
     `[autonomy] Run ${action.runId} failed: review cycles exhausted (${action.issueRef})`
@@ -1916,6 +1943,33 @@ async function releaseImplementContainer(runId: string, note: string): Promise<v
   const workingTask = workingTaskOf(runId);
   if (workingTask?.status === "running") {
     await releaseParkedImplementTask(workingTask.id, note);
+  }
+}
+
+/**
+ * The run-finalization cleanup (issue #124): once a run reaches a terminal
+ * status, cancel any task it still owns that never terminalized and let go of
+ * any container such a task held. The orphan this exists to catch is a review
+ * pass left `queued` because the single slot was busy when its gated PR was
+ * merged by hand — the run finalized to `merged`, but its queued review sat
+ * non-terminal, read as a reserved slot, and halted all new pickup (the
+ * LPS #135 incident).
+ *
+ * Call this *after* `releaseImplementContainer` at each finalization point:
+ * that releases the parked implement/repair task to `completed`, so what
+ * remains here is the genuine orphan. A queued orphan has no container; a
+ * running one (a review a hand-merge raced) is removed by name, mirroring
+ * `reapOrphanedReviewPasses`.
+ */
+async function terminalizeFinalizedRunTasks(runId: string): Promise<void> {
+  const cancelled = cancelOrphanedRunTasks(db, runId);
+  for (const task of cancelled) {
+    getActiveTasks().delete(task.taskId);
+    if (task.containerName) await removeContainerByName(task.containerName);
+    console.log(
+      `[autonomy] Cancelled orphaned task ${task.taskId} under finalized run ${runId} ` +
+        `— a pass must not outlive its run (issue #124)`
+    );
   }
 }
 
