@@ -95,6 +95,9 @@ export function FleetDashboard() {
           <LiveDot state={dotState} />
         </span>
         <nav className="flex items-center gap-3 font-plex-mono text-[11px] lowercase">
+          <Link href="/tasks/new" className="text-fl-ink-3 hover:text-fl-ink">
+            new
+          </Link>
           <Link href="/tasks" className="text-fl-ink-3 hover:text-fl-ink">
             tasks
           </Link>

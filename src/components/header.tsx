@@ -5,8 +5,9 @@ import { usePathname } from "next/navigation";
 
 export function Header() {
   const pathname = usePathname();
-  // The fleet dashboard (home) carries its own instrument-panel chrome
-  if (pathname === "/") return null;
+  // The fleet dashboard (home) and the session entry screen (/tasks/new) carry
+  // their own instrument-panel chrome (issue #64)
+  if (pathname === "/" || pathname === "/tasks/new") return null;
 
   return (
     <header className="sticky top-0 z-50 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
