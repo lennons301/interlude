@@ -19,9 +19,8 @@ export async function GET(
   if (!project) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-  if (!project.githubRepo) {
-    return NextResponse.json([]);
-  }
-  const issues = await listOpenIssues(project.githubRepo);
+  // listOpenIssues degrades to [] on its own when the repo/GitHub is
+  // unconfigured, so no separate null-repo branch here.
+  const issues = await listOpenIssues(project.githubRepo ?? "");
   return NextResponse.json(issues);
 }

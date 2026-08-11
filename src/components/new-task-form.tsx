@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { SessionSkill } from "@/db/schema";
 import type { OpenIssue } from "@/lib/github/issues";
@@ -38,10 +38,15 @@ export function NewTaskForm() {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
-  const [issues, setIssues] = useState<OpenIssue[]>([]);
-  const [issuesLoading, setIssuesLoading] = useState(false);
+  // null = the current project's issues aren't loaded yet (a session picker
+  // renders "loading…"); an array = the loaded list ([] means none open).
+  const [issues, setIssues] = useState<OpenIssue[] | null>(null);
+  // The project the loaded issues belong to, so toggling chat↔session for the
+  // same project doesn't re-hit GitHub.
+  const loadedFor = useRef<string | null>(null);
 
   const isSession = taskType !== "chat";
 
@@ -52,34 +57,36 @@ export function NewTaskForm() {
       .catch(() => setProjects([]));
   }, []);
 
-  // A new repo invalidates any picked issue, so clearing the anchor rides the
-  // project change (not the load effect — that would be a synchronous setState
-  // in an effect body). Switching between session types keeps the anchor: the
-  // issue is still valid for the same project.
+  // A new repo invalidates the loaded issues and any picked anchor, so both
+  // reset on the project change (an event handler — not the load effect, where
+  // a synchronous setState is a cascading-render smell). Switching between
+  // session types keeps them: the same project's issues are still valid.
   function handleProjectChange(id: string) {
     setProjectId(id);
     setIssueRef("");
+    setIssues(null);
+    loadedFor.current = null;
   }
 
-  // Load the picked project's open issues once a session is being composed.
-  // The picker only renders when a session and project are chosen, so there's
-  // nothing to reset when they aren't — a fresh load replaces any stale list,
-  // clearing it first so a prior project's issues never flash. Freeform stays
+  // Load the picked project's open issues once a session is being composed,
+  // once per project (the ref guards the chat↔session toggle). Freeform stays
   // available whatever the fetch returns.
   useEffect(() => {
-    if (!isSession || !projectId) return;
+    if (!isSession || !projectId || loadedFor.current === projectId) return;
     let cancelled = false;
     const load = async () => {
-      setIssuesLoading(true);
-      setIssues([]);
       try {
         const res = await fetch(`/api/projects/${projectId}/issues`);
         const data: OpenIssue[] = res.ok ? await res.json() : [];
-        if (!cancelled) setIssues(data);
+        if (!cancelled) {
+          setIssues(data);
+          loadedFor.current = projectId;
+        }
       } catch {
-        if (!cancelled) setIssues([]);
-      } finally {
-        if (!cancelled) setIssuesLoading(false);
+        if (!cancelled) {
+          setIssues([]);
+          loadedFor.current = projectId;
+        }
       }
     };
     load();
@@ -93,6 +100,7 @@ export function NewTaskForm() {
     if (!title.trim() || !projectId || submitting) return;
 
     setSubmitting(true);
+    setError(null);
     // Plain chat sends exactly what it always did — no session fields — so its
     // creation path is unchanged. A session adds the skill and (if anchored)
     // the issue ref; the orchestrator composes the seed from these on run.
@@ -103,19 +111,28 @@ export function NewTaskForm() {
     };
     if (isSession) {
       payload.sessionSkill = taskType;
-      if (issueRef) payload.sessionIssue = issueRef;
+      // Only anchor to an issue still present in the shown list, so a ref the
+      // picker no longer offers is never submitted silently.
+      if (issueRef && issues?.some((i) => i.ref === issueRef)) {
+        payload.sessionIssue = issueRef;
+      }
     }
 
-    const res = await fetch("/api/tasks", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-
-    if (res.ok) {
-      const task = await res.json();
-      router.push(`/tasks/${task.id}`);
-      return; // navigating away; leave submitting set to avoid a re-enable flash
+    try {
+      const res = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        const task = await res.json();
+        router.push(`/tasks/${task.id}`);
+        return; // navigating away; leave submitting set to avoid a re-enable flash
+      }
+      const body = await res.json().catch(() => null);
+      setError(body?.error ?? `Could not create the task (HTTP ${res.status}).`);
+    } catch {
+      setError("Could not reach the server. Check your connection and try again.");
     }
     setSubmitting(false);
   }
@@ -136,29 +153,28 @@ export function NewTaskForm() {
         </SelectField>
       </div>
 
-      <div className="space-y-2">
+      <fieldset className="m-0 space-y-2 border-0 p-0">
+        <legend className="sr-only">Task type</legend>
         <Eyebrow>type</Eyebrow>
-        <div role="radiogroup" aria-label="Task type" className="space-y-2">
+        <TypeOption
+          name="chat"
+          blurb="A plain chat task — the agent works from your prompt"
+          selected={taskType === "chat"}
+          onSelect={() => setTaskType("chat")}
+        />
+        <p className="pt-1 font-plex-mono text-[11px] uppercase tracking-[0.14em] text-fl-ink-3">
+          or start a session
+        </p>
+        {SESSION_ORDER.map((skill) => (
           <TypeOption
-            name="chat"
-            blurb="A plain chat task — the agent works from your prompt"
-            selected={taskType === "chat"}
-            onSelect={() => setTaskType("chat")}
+            key={skill}
+            name={skill}
+            blurb={SESSION_BLURBS[skill]}
+            selected={taskType === skill}
+            onSelect={() => setTaskType(skill)}
           />
-          <p className="pt-1 font-plex-mono text-[11px] uppercase tracking-[0.14em] text-fl-ink-3">
-            or start a session
-          </p>
-          {SESSION_ORDER.map((skill) => (
-            <TypeOption
-              key={skill}
-              name={skill}
-              blurb={SESSION_BLURBS[skill]}
-              selected={taskType === skill}
-              onSelect={() => setTaskType(skill)}
-            />
-          ))}
-        </div>
-      </div>
+        ))}
+      </fieldset>
 
       {isSession && (
         <div className="space-y-2">
@@ -167,7 +183,7 @@ export function NewTaskForm() {
             <p className="font-plex-mono text-[11px] text-fl-ink-3">
               pick a project to list its issues
             </p>
-          ) : issuesLoading ? (
+          ) : issues === null ? (
             <p className="font-plex-mono text-[11px] text-fl-ink-3">loading issues…</p>
           ) : issues.length === 0 ? (
             <p className="font-plex-mono text-[11px] text-fl-ink-3">
@@ -193,6 +209,7 @@ export function NewTaskForm() {
         <Eyebrow>{isSession ? "agenda" : "task"}</Eyebrow>
         <input
           className={FIELD}
+          aria-label={isSession ? "Session agenda" : "Task title"}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           placeholder={isSession ? "What should this session focus on?" : "What should the agent do?"}
@@ -209,6 +226,7 @@ export function NewTaskForm() {
         <Eyebrow>{isSession ? "context" : "description"}</Eyebrow>
         <textarea
           className={`${FIELD} min-h-24`}
+          aria-label={isSession ? "Session context" : "Task description"}
           rows={4}
           value={description}
           onChange={(e) => setDescription(e.target.value)}
@@ -219,6 +237,12 @@ export function NewTaskForm() {
           }
         />
       </div>
+
+      {error && (
+        <p role="alert" className="text-[13px] text-fl-red">
+          {error}
+        </p>
+      )}
 
       <button
         type="submit"
@@ -237,8 +261,10 @@ export function NewTaskForm() {
   );
 }
 
-/** One tappable task-type row. Cool marks the selection — everything started
- * here is the owner driving, the fleet's one cool hue (issue #21). */
+/** One tappable task-type option, a native radio styled as a fleet row: native
+ * radios give the group arrow-key navigation and screen-reader semantics for
+ * free. Cool marks the selection — everything started here is the owner
+ * driving, the fleet's one cool hue (issue #21). */
 function TypeOption({
   name,
   blurb,
@@ -251,17 +277,20 @@ function TypeOption({
   onSelect: () => void;
 }) {
   return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={selected}
-      onClick={onSelect}
-      className={`flex w-full items-start gap-3 rounded-[4px] border px-3 py-2.5 text-left transition-colors ${
+    <label
+      className={`flex w-full cursor-pointer items-start gap-3 rounded-[4px] border px-3 py-2.5 text-left transition-colors focus-within:border-fl-cool ${
         selected
           ? "border-fl-cool/45 bg-fl-cool/13"
           : "border-fl-line bg-fl-card hover:border-fl-line-strong"
       }`}
     >
+      <input
+        type="radio"
+        name="task-type"
+        className="sr-only"
+        checked={selected}
+        onChange={onSelect}
+      />
       <span
         aria-hidden
         className={`mt-0.5 h-3.5 w-3.5 shrink-0 rounded-full border ${
@@ -274,7 +303,7 @@ function TypeOption({
         </span>
         <span className="block text-[13px] text-fl-ink-3">{blurb}</span>
       </span>
-    </button>
+    </label>
   );
 }
 
