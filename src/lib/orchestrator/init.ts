@@ -15,6 +15,15 @@ import { isDiscordConfigured, startDiscordBot } from "../discord/client";
 let initialized = false;
 
 /**
+ * The non-terminal run statuses boot recovery reclaims: a run in one of these
+ * with no live turn is either interruptible (issue #24) or a dangling ghost
+ * (issue #106). Deliberately excludes `gated`/`blocked` (waiting on a human)
+ * and every terminal status. Named once so the two boot passes below can never
+ * drift apart on which statuses count as reclaimable.
+ */
+const RECLAIMABLE_RUN_STATUSES = ["claimed", "implementing", "reviewing"] as const;
+
+/**
  * Restart recovery for the runs ledger (issue #24): a run that was being
  * actively worked when the process died lost its containers' exec streams
  * with it. Mark it `interrupted` — a separate ledger outcome from `failed`,
@@ -35,7 +44,7 @@ async function markInterruptedRuns(): Promise<void> {
   const activeRuns = await db
     .select()
     .from(runs)
-    .where(inArray(runs.status, ["claimed", "implementing", "reviewing"]));
+    .where(inArray(runs.status, [...RECLAIMABLE_RUN_STATUSES]));
 
   const now = new Date();
   for (const run of activeRuns) {
@@ -102,7 +111,7 @@ async function finalizeDanglingRuns(): Promise<void> {
   const candidates = await db
     .select()
     .from(runs)
-    .where(inArray(runs.status, ["claimed", "implementing", "reviewing"]));
+    .where(inArray(runs.status, [...RECLAIMABLE_RUN_STATUSES]));
 
   const now = new Date();
   for (const run of candidates) {
