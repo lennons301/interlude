@@ -1,8 +1,9 @@
 /**
- * Review-pass task bookkeeping shared by the sweep (issue #95).
+ * Task bookkeeping shared by the sweep, DB-only and side-effect-light so it is
+ * unit-testable against an in-memory database (issues #95, #124).
  *
- * Two mechanisms that must work together so a run has *exactly one* review
- * pass in flight — never zero when one is owed, never two racing the same PR:
+ * The exactly-one-review invariant — a run has *exactly one* review pass in
+ * flight, never zero when one is owed, never two racing the same PR:
  *
  *  1. `inFlightReviewTaskId` — the idempotency rule. Before queueing a review
  *     pass, any review task for the same run that is still `queued` or
@@ -17,8 +18,18 @@
  *     container is confirmed gone, so the next sweep's rule-1 check queues one
  *     deliberate replacement rather than stalling or racing.
  *
+ * The finalized-run cleanup (issue #124):
+ *
+ *  3. `cancelOrphanedRunTasks` — when a run reaches a terminal status, cancel
+ *     any pass it still owns so nothing outlives its run.
+ *  4. `queuedTasksReservingSlots` — the mirror on the read side: only a queued
+ *     task whose run is still live reserves a slot for pickup accounting, so a
+ *     task orphaned under a dead run can never wedge new claims.
+ *
  * DB-only by design (no Docker/GitHub imports): the container-liveness probe
- * is injected so the sweep passes the real daemon check and tests pass a fake.
+ * is injected so the sweep passes the real daemon check and tests pass a fake,
+ * and cancelled tasks are returned so the caller — not this module — removes
+ * their containers.
  */
 
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
@@ -117,4 +128,78 @@ export async function reapDeadReviewTasks(
     reaped.push({ taskId: task.id, containerName: task.containerName });
   }
   return reaped;
+}
+
+/**
+ * Terminalize every task a run still owns that is `queued` or `running`,
+ * setting it `cancelled` — the shared cleanup called from every run-
+ * finalization point (issue #124). When a run reaches a terminal status — its
+ * PR merged or closed, or the run failed/exhausted — any pass it still owns
+ * must not outlive it. The classic orphan is a review task left `queued`
+ * because the single slot was busy when a human merged the gated PR by hand:
+ * the run finalized to `merged`, but its queued review sat non-terminal
+ * forever, read as a reserved slot by the claim accounting, and wedged all
+ * new pickup (the LPS #135 incident).
+ *
+ * `cancelled` (not `failed`) by design: an orphaned pass is abandoned, not bad
+ * work, so it consumes no attempt — matching how a user-cancelled task and a
+ * restart-interrupted run's queued pass are handled (init.ts). A parked
+ * implement/repair container is released to `completed` by its own path
+ * *before* this runs, so this only sweeps up the genuinely-orphaned tasks;
+ * anything already terminal is skipped by the status filter.
+ *
+ * DB-only: returns the cancelled tasks with their container names so the
+ * caller removes any container that was still live, exactly like
+ * `reapDeadReviewTasks`. (A `queued` orphan has no container; only a `running`
+ * one — a review pass a hand-merge raced — carries a name to clean up.)
+ */
+export function cancelOrphanedRunTasks(db: Db, runId: string): ReapedReviewTask[] {
+  const orphaned = db
+    .select({ id: tasks.id, containerName: tasks.containerName, kind: tasks.kind })
+    .from(tasks)
+    .where(and(eq(tasks.runId, runId), inArray(tasks.status, ["queued", "running"])))
+    .all();
+
+  const cancelled: ReapedReviewTask[] = [];
+  const now = new Date();
+  for (const task of orphaned) {
+    db.update(tasks)
+      .set({ status: "cancelled", containerId: null, containerStatus: null, updatedAt: now })
+      .where(eq(tasks.id, task.id))
+      .run();
+    db.insert(messages)
+      .values({
+        id: newId(),
+        taskId: task.id,
+        role: "system",
+        type: "system",
+        content: JSON.stringify({
+          text:
+            `Run finalized while this ${task.kind} pass was still pending — ` +
+            "cancelling it so no task outlives its run (issue #124).",
+        }),
+        createdAt: now,
+      })
+      .run();
+    cancelled.push({ taskId: task.id, containerName: task.containerName });
+  }
+  return cancelled;
+}
+
+/**
+ * The queued tasks that reserve a slot for new-pickup accounting (issue #124):
+ * a task counts only if its run is still live, or it has no run at all
+ * (interactive and triage passes, which are real queued intent, never a dead
+ * run's ghost). `liveRunIds` is the set of run IDs in a non-terminal status
+ * (`ACTIVE_RUN_STATUSES`). A task orphaned under a finalized run — the queued
+ * review left behind by a hand-merged PR — is excluded, so it can never force
+ * `claimableSlots` to 0 and halt the frontier while a slot sits free. This is
+ * the read-side mirror of `cancelOrphanedRunTasks`: even if a finalization
+ * point were ever missed, a dead-run task still cannot suppress a claim.
+ */
+export function queuedTasksReservingSlots<T extends { runId: string | null }>(
+  queuedTasks: readonly T[],
+  liveRunIds: ReadonlySet<string>
+): T[] {
+  return queuedTasks.filter((t) => t.runId == null || liveRunIds.has(t.runId));
 }

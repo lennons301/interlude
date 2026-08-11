@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb } from "@/test/create-test-db";
-import { inFlightReviewTaskId, reapDeadReviewTasks, type Db } from "../review-tasks";
+import {
+  cancelOrphanedRunTasks,
+  inFlightReviewTaskId,
+  queuedTasksReservingSlots,
+  reapDeadReviewTasks,
+  type Db,
+} from "../review-tasks";
 import { decideNext, passOutcomeSnapshot, type AutonomySnapshot } from "../decide";
 
 const ISSUE_REF = "owner/repo#141";
@@ -169,5 +175,139 @@ describe("review-pass in-flight + ungraceful-death reaping (issue #95)", () => {
       (a) => a.type === "startReview"
     );
     expect(startReviews).toEqual([]);
+  });
+});
+
+describe("cancelOrphanedRunTasks — no task outlives its run (issue #124)", () => {
+  let db: Db;
+  beforeEach(() => {
+    db = createTestDb().db;
+    db.insert(schema.projects).values({ id: "p1", name: "Test", createdAt: new Date() }).run();
+  });
+
+  function seedRun(id: string, status: (typeof schema.runs.$inferInsert)["status"]): void {
+    db.insert(schema.runs)
+      .values({
+        id,
+        projectId: "p1",
+        githubIssue: ISSUE_REF,
+        attempt: 1,
+        mode: "autonomous",
+        status,
+        budgetUsd: 20,
+        pullRequestNumber: 144,
+        claimedAt: new Date(),
+      })
+      .run();
+  }
+
+  function seedTask(opts: {
+    id: string;
+    runId: string;
+    kind: (typeof schema.tasks.$inferInsert)["kind"];
+    status: (typeof schema.tasks.$inferInsert)["status"];
+    containerName?: string | null;
+  }): void {
+    db.insert(schema.tasks)
+      .values({
+        id: opts.id,
+        projectId: "p1",
+        title: opts.id,
+        kind: opts.kind,
+        runId: opts.runId,
+        status: opts.status,
+        containerName: opts.containerName ?? null,
+        containerStatus: opts.status === "running" ? "idle" : null,
+        githubIssue: ISSUE_REF,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .run();
+  }
+
+  const statusOf = (id: string) =>
+    db.select().from(schema.tasks).where(eq(schema.tasks.id, id)).get()!.status;
+
+  it("cancels a review task left queued when its run finalized to merged", () => {
+    seedRun("run-1", "merged");
+    // The parked implement pass was released to `completed` by its own path
+    // before this runs; only the never-started review is the orphan.
+    seedTask({ id: "task-impl", runId: "run-1", kind: "implement", status: "completed" });
+    seedTask({ id: "task-review", runId: "run-1", kind: "review", status: "queued" });
+
+    const cancelled = cancelOrphanedRunTasks(db, "run-1");
+
+    expect(cancelled).toEqual([{ taskId: "task-review", containerName: null }]);
+    expect(statusOf("task-review")).toBe("cancelled");
+    // A terminal task is left exactly as it was.
+    expect(statusOf("task-impl")).toBe("completed");
+  });
+
+  it("returns a still-running pass's container so the caller can remove it, and clears container_status", () => {
+    // A human merged the PR while the review pass was actually running.
+    seedRun("run-1", "merged");
+    seedTask({
+      id: "task-review",
+      runId: "run-1",
+      kind: "review",
+      status: "running",
+      containerName: "interlude-task-review",
+    });
+
+    const cancelled = cancelOrphanedRunTasks(db, "run-1");
+
+    expect(cancelled).toEqual([{ taskId: "task-review", containerName: "interlude-task-review" }]);
+    const row = db.select().from(schema.tasks).where(eq(schema.tasks.id, "task-review")).get()!;
+    expect(row.status).toBe("cancelled");
+    // Cleared alongside the terminal status so the row can never later read as
+    // a live session (cf. issue #46).
+    expect(row.containerStatus).toBeNull();
+  });
+
+  it("touches only the finalized run's tasks — a live run's owed review is untouched (self-heal preserved, AC #4)", () => {
+    seedRun("dead", "failed");
+    seedRun("live", "reviewing");
+    seedTask({ id: "dead-review", runId: "dead", kind: "review", status: "queued" });
+    seedTask({ id: "live-review", runId: "live", kind: "review", status: "queued" });
+
+    cancelOrphanedRunTasks(db, "dead");
+
+    expect(statusOf("dead-review")).toBe("cancelled");
+    expect(statusOf("live-review")).toBe("queued");
+    // The existing self-heal still sees the live run's owed review in flight.
+    expect(inFlightReviewTaskId(db, "live")).toBe("live-review");
+  });
+
+  it("is a no-op when the run owns no non-terminal task", () => {
+    seedRun("run-1", "exhausted");
+    seedTask({ id: "task-impl", runId: "run-1", kind: "implement", status: "failed" });
+
+    expect(cancelOrphanedRunTasks(db, "run-1")).toEqual([]);
+    expect(statusOf("task-impl")).toBe("failed");
+  });
+});
+
+describe("queuedTasksReservingSlots — dead-run tasks never reserve a slot (issue #124)", () => {
+  it("keeps live-run and run-less tasks, drops tasks under a terminal run", () => {
+    const liveRunIds = new Set(["r-live"]);
+    const queued = [
+      { kind: "review", runId: "r-dead" }, // orphan under a finalized run
+      { kind: "review", runId: "r-live" }, // a genuinely owed review
+      { kind: "implement", runId: "r-live" },
+      { kind: "interactive", runId: null }, // no run — always real intent
+      { kind: "triage", runId: null },
+    ];
+
+    expect(queuedTasksReservingSlots(queued, liveRunIds)).toEqual([
+      { kind: "review", runId: "r-live" },
+      { kind: "implement", runId: "r-live" },
+      { kind: "interactive", runId: null },
+      { kind: "triage", runId: null },
+    ]);
+  });
+
+  it("drops every task when no run is live (the wedge: one dead-run review must not count)", () => {
+    const queued = [{ kind: "review", runId: "r-dead" }];
+    expect(queuedTasksReservingSlots(queued, new Set())).toEqual([]);
   });
 });

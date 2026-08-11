@@ -781,6 +781,41 @@ describe("decideNext — pause reasons", () => {
     expect(pauses(decideNext(makeSnapshot()))).toEqual([]);
   });
 
+  it("does not park on 'no-slots' when the only queued review belongs to a finalized run (issue #124)", () => {
+    // The LPS #135 wedge: a gated PR was merged by hand, finalizing its run,
+    // but the run's review task sat `queued`. The snapshot builder now excludes
+    // that dead-run task from the reservation counts (queuedTasksReservingSlots
+    // — unit-tested in review-tasks.test.ts), so the count the reducer sees is
+    // 0. With a slot free and a ready ticket, the frontier claims it rather
+    // than parking on `no-slots` — the ~1.5h stall this fixes.
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 1, occupied: 0, occupants: [] },
+        queuedReviewCount: 0,
+        candidates: [makeCandidate()],
+      })
+    );
+
+    expect(actions.some((a) => a.type === "pausePickup" && a.reason === "no-slots")).toBe(false);
+    expect(claims(actions)).toHaveLength(1);
+  });
+
+  it("still reserves a slot for a live-run queued review (the count is not blanket-zeroed, issue #124)", () => {
+    // The mirror case: a review owed by a *live* reviewing/gated run legitimately
+    // reserves the free slot, so a new claim waits. Only dead-run tasks are
+    // dropped — a genuinely owed review is not.
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 1, occupied: 0, occupants: [] },
+        queuedReviewCount: 1,
+        candidates: [makeCandidate()],
+      })
+    );
+
+    expect(actions).toContainEqual({ type: "pausePickup", reason: "no-slots" });
+    expect(claims(actions)).toHaveLength(0);
+  });
+
   it("pauses with 'daily-cap' and announces it once when today's spend meets the cap", () => {
     const actions = decideNext(
       makeSnapshot({ todayAutonomousSpendUsd: 500, dailyCapUsd: 500 })
