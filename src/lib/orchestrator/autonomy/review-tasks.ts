@@ -65,12 +65,16 @@ export function inFlightReviewTaskId(db: Db, runId: string): string | null {
   return task?.id ?? null;
 }
 
-/** A review task the reaper terminalized — returned so the caller can drop its
- * in-memory session entry and remove the dead container. */
-export interface ReapedReviewTask {
+/** A task some path terminalized — returned so the caller can drop its
+ * in-memory session entry and remove any container it held. */
+export interface TerminalizedTask {
   taskId: string;
   containerName: string | null;
 }
+
+/** @deprecated alias kept for the reaper's existing name — see
+ * {@link TerminalizedTask}. */
+export type ReapedReviewTask = TerminalizedTask;
 
 /**
  * Mark review tasks stuck `running` whose container is gone as `failed`, the
@@ -146,21 +150,24 @@ export async function reapDeadReviewTasks(
  * restart-interrupted run's queued pass are handled (init.ts). A parked
  * implement/repair container is released to `completed` by its own path
  * *before* this runs, so this only sweeps up the genuinely-orphaned tasks;
- * anything already terminal is skipped by the status filter.
+ * anything already terminal is skipped by the status filter. `blocked` is
+ * swept too (not just `queued`/`running`) so the invariant is total — no task
+ * in any non-terminal status outlives its run.
  *
  * DB-only: returns the cancelled tasks with their container names so the
  * caller removes any container that was still live, exactly like
- * `reapDeadReviewTasks`. (A `queued` orphan has no container; only a `running`
- * one — a review pass a hand-merge raced — carries a name to clean up.)
+ * `reapDeadReviewTasks`. (A `queued` orphan has no container; a `running` one —
+ * a review pass a hand-merge raced — or a `blocked` one's parked container
+ * carries a name to clean up.)
  */
-export function cancelOrphanedRunTasks(db: Db, runId: string): ReapedReviewTask[] {
+export function cancelOrphanedRunTasks(db: Db, runId: string): TerminalizedTask[] {
   const orphaned = db
     .select({ id: tasks.id, containerName: tasks.containerName, kind: tasks.kind })
     .from(tasks)
-    .where(and(eq(tasks.runId, runId), inArray(tasks.status, ["queued", "running"])))
+    .where(and(eq(tasks.runId, runId), inArray(tasks.status, ["queued", "running", "blocked"])))
     .all();
 
-  const cancelled: ReapedReviewTask[] = [];
+  const cancelled: TerminalizedTask[] = [];
   const now = new Date();
   for (const task of orphaned) {
     db.update(tasks)
@@ -175,7 +182,7 @@ export function cancelOrphanedRunTasks(db: Db, runId: string): ReapedReviewTask[
         type: "system",
         content: JSON.stringify({
           text:
-            `Run finalized while this ${task.kind} pass was still pending — ` +
+            `Run finalized while this ${task.kind} pass had not terminalized — ` +
             "cancelling it so no task outlives its run (issue #124).",
         }),
         createdAt: now,

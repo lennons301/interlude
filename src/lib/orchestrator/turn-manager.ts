@@ -17,6 +17,7 @@ import { createOutputHandler, type TurnResult } from "./output-parser";
 import { parseReviewVerdict } from "./autonomy/verdict";
 import { parseTriageExit } from "./autonomy/triage";
 import { passProducedResult } from "./autonomy/pass-output";
+import { cancelOrphanedRunTasks } from "./autonomy/review-tasks";
 import {
   DEFAULT_REPAIR_BUDGET_USD,
   DEFAULT_REVIEW_BUDGET_USD,
@@ -1514,12 +1515,23 @@ function taskStatus(taskId: string): string | null {
   );
 }
 
-/** Terminalize a run: failed consumes an attempt, cancelled does not. */
+/**
+ * Terminalize a run: failed consumes an attempt, cancelled does not. Any pass
+ * the run still owns is cancelled alongside it, so no task outlives its run
+ * (issue #124) — the same invariant the sweep's finalization points enforce,
+ * centralized here for the turn-manager terminal transitions (a container
+ * error, or a user cancelling a task whose run had a review already queued).
+ * DB-only and idempotent: the caller has already terminalized the task in hand,
+ * so this reaches only *other* non-terminal siblings; a queued orphan holds no
+ * container, and the rare parked/running one becomes reaper-eligible the moment
+ * its run turns terminal here.
+ */
 function finishRun(runId: string, status: "failed" | "cancelled", reason?: string): void {
   db.update(runs)
     .set({ status, finishedAt: new Date(), ...(reason ? { failureReason: reason } : {}) })
     .where(eq(runs.id, runId))
     .run();
+  cancelOrphanedRunTasks(db, runId);
 }
 
 /**

@@ -278,12 +278,58 @@ describe("cancelOrphanedRunTasks — no task outlives its run (issue #124)", () 
     expect(inFlightReviewTaskId(db, "live")).toBe("live-review");
   });
 
+  it("cancels a blocked pass too — the invariant covers every non-terminal status", () => {
+    // A blocked pass holds a parked (stopped-but-preserved) container; if its
+    // run is finalized, the pass must not be left waiting on an answer forever.
+    seedRun("run-1", "cancelled");
+    seedTask({
+      id: "task-impl",
+      runId: "run-1",
+      kind: "implement",
+      status: "blocked",
+      containerName: "interlude-task-impl",
+    });
+
+    const cancelled = cancelOrphanedRunTasks(db, "run-1");
+
+    expect(cancelled).toEqual([{ taskId: "task-impl", containerName: "interlude-task-impl" }]);
+    expect(statusOf("task-impl")).toBe("cancelled");
+  });
+
   it("is a no-op when the run owns no non-terminal task", () => {
     seedRun("run-1", "exhausted");
     seedTask({ id: "task-impl", runId: "run-1", kind: "implement", status: "failed" });
 
     expect(cancelOrphanedRunTasks(db, "run-1")).toEqual([]);
     expect(statusOf("task-impl")).toBe("failed");
+  });
+
+  it("regression: a hand-merged gated PR neither strands its review nor lets it reserve a slot (issue #124)", () => {
+    // The LPS #135 shape at the DB seam the sweep drives: a gated run's PR was
+    // merged by hand while its review pass sat queued (the single slot busy),
+    // and a separate live run holds the slot with its own owed review.
+    seedRun("merged", "merged");
+    seedRun("live", "reviewing");
+    seedTask({ id: "orphan-review", runId: "merged", kind: "review", status: "queued" });
+    seedTask({ id: "live-review", runId: "live", kind: "review", status: "queued" });
+
+    // executeFinalizeRun's cleanup terminalizes the orphan and leaves the live
+    // run's owed review in flight (self-heal preserved).
+    cancelOrphanedRunTasks(db, "merged");
+    expect(statusOf("orphan-review")).toBe("cancelled");
+    expect(statusOf("live-review")).toBe("queued");
+
+    // gatherSnapshot's reservation accounting then counts only the live run's
+    // review, so the dead-run orphan can never force claimableSlots to 0 — the
+    // ~1.5h wedge this fixes.
+    const stillQueued = db
+      .select({ kind: schema.tasks.kind, runId: schema.tasks.runId })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.status, "queued"))
+      .all();
+    expect(queuedTasksReservingSlots(stillQueued, new Set(["live"]))).toEqual([
+      { kind: "review", runId: "live" },
+    ]);
   });
 });
 
