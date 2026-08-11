@@ -101,6 +101,54 @@ export function wouldOvercommitMemory(input: {
 }
 
 /**
+ * How long the memory-admission probe may wait on the Docker daemon before it
+ * gives up and fails open. A hung daemon connection has no timeout of its own,
+ * so an unbounded probe blocks every queue poll before it can dispatch — during
+ * the 2026-08-11 incident (issue #115) this silently stalled *all* dispatch,
+ * interactive included, for ~1.5h with the slot count reading free. The bound
+ * guarantees a poll can always make progress.
+ */
+export const ADMISSION_PROBE_TIMEOUT_MS = 5000;
+
+/** Sentinel the timeout resolves with, distinct from any value the probe can
+ * return, so the race can tell "timed out" from a genuine `{ ok }` verdict. */
+const PROBE_TIMED_OUT = Symbol("memory-admission-probe-timeout");
+
+/**
+ * Gather the live numbers from the daemon and decide admission. Split out from
+ * `checkMemoryAdmission` so the timeout wrapper stays thin and the Docker calls
+ * — the ones that can hang on an unresponsive connection — are exactly what the
+ * timeout races against.
+ */
+async function probeMemoryAdmission(): Promise<{ ok: boolean; reason?: string }> {
+  const docker = getDocker();
+  const capacity = await getCapacity();
+  const info = await docker.info();
+  // Default listing (no `all`) returns only running containers — the ones
+  // holding memory right now.
+  const running = await docker.listContainers({
+    filters: { name: ["interlude-task-"] },
+  });
+  const liveContainers = running.length;
+
+  if (
+    wouldOvercommitMemory({
+      memTotalBytes: info.MemTotal,
+      perAgentMemory: capacity.perAgentMemory,
+      liveContainers,
+    })
+  ) {
+    const perMb = Math.round(capacity.perAgentMemory / MiB);
+    const usableMb = Math.round(usableMemoryBytes(info.MemTotal) / MiB);
+    return {
+      ok: false,
+      reason: `${liveContainers} agent container(s) live × ${perMb} MiB + one more exceeds ~${usableMb} MiB usable`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
  * Ask the daemon how many agent containers are actually *running* and refuse
  * to start another when the live set plus the newcomer would overcommit host
  * memory (issue #93). Independent of the in-memory slot count, so it also
@@ -108,39 +156,39 @@ export function wouldOvercommitMemory(input: {
  * containers are `docker stop`ped since #93, so they are correctly absent from
  * the running set and weigh nothing here.
  *
- * Fails open: a Docker probe error logs and allows, so a transient daemon
- * hiccup never wedges the queue behind a phantom memory ceiling.
+ * Fails open on both failure modes so an unhealthy daemon can never wedge the
+ * queue behind a phantom memory ceiling: a probe *error* logs and allows (a
+ * transient daemon hiccup), and a probe that *hangs* past
+ * `ADMISSION_PROBE_TIMEOUT_MS` logs and allows too (issue #115) — an
+ * unresponsive connection can never freeze dispatch. `probe`/`timeoutMs` are
+ * injectable for tests; production callers use the defaults.
  */
-export async function checkMemoryAdmission(): Promise<{ ok: boolean; reason?: string }> {
+export async function checkMemoryAdmission(
+  probe: () => Promise<{ ok: boolean; reason?: string }> = probeMemoryAdmission,
+  timeoutMs: number = ADMISSION_PROBE_TIMEOUT_MS
+): Promise<{ ok: boolean; reason?: string }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const docker = getDocker();
-    const capacity = await getCapacity();
-    const info = await docker.info();
-    // Default listing (no `all`) returns only running containers — the ones
-    // holding memory right now.
-    const running = await docker.listContainers({
-      filters: { name: ["interlude-task-"] },
+    const probePromise = probe();
+    // Keep a losing (timed-out) probe's eventual rejection from surfacing as an
+    // unhandled rejection once nothing awaits the race any more.
+    probePromise.catch(() => {});
+    const timeout = new Promise<typeof PROBE_TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => resolve(PROBE_TIMED_OUT), timeoutMs);
     });
-    const liveContainers = running.length;
-
-    if (
-      wouldOvercommitMemory({
-        memTotalBytes: info.MemTotal,
-        perAgentMemory: capacity.perAgentMemory,
-        liveContainers,
-      })
-    ) {
-      const perMb = Math.round(capacity.perAgentMemory / MiB);
-      const usableMb = Math.round(usableMemoryBytes(info.MemTotal) / MiB);
-      return {
-        ok: false,
-        reason: `${liveContainers} agent container(s) live × ${perMb} MiB + one more exceeds ~${usableMb} MiB usable`,
-      };
+    const result = await Promise.race([probePromise, timeout]);
+    if (result === PROBE_TIMED_OUT) {
+      console.error(
+        `[capacity] memory-admission probe timed out after ${timeoutMs}ms, allowing start`
+      );
+      return { ok: true };
     }
-    return { ok: true };
+    return result;
   } catch (err) {
     console.error("[capacity] memory-admission probe failed, allowing start:", err);
     return { ok: true };
+  } finally {
+    clearTimeout(timer);
   }
 }
 

@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
+  checkMemoryAdmission,
   createLocalCapacityProvider,
   deriveCapacity,
   wouldOvercommitMemory,
@@ -144,6 +145,40 @@ describe("wouldOvercommitMemory", () => {
     expect(
       wouldOvercommitMemory({ memTotalBytes: 4 * GiB, perAgentMemory, liveContainers: 1 })
     ).toBe(true);
+  });
+});
+
+describe("checkMemoryAdmission", () => {
+  // Issue #115: a hung Docker daemon connection must never freeze dispatch.
+  // The probe is raced against a bounded timeout and fails open on both a hang
+  // and an error, matching how it already fails open on a probe error.
+  it("fails open when the probe hangs past the timeout, and logs it", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // A probe that never resolves — the signature of a hung daemon connection.
+    const hangingProbe = () => new Promise<{ ok: boolean }>(() => {});
+
+    const result = await checkMemoryAdmission(hangingProbe, 20);
+
+    expect(result.ok).toBe(true);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("timed out")
+    );
+    errSpy.mockRestore();
+  });
+
+  it("returns the probe's verdict when it resolves before the timeout", async () => {
+    const refused = { ok: false, reason: "2 live + one more overcommits" };
+    const result = await checkMemoryAdmission(async () => refused, 1000);
+    expect(result).toEqual(refused);
+  });
+
+  it("fails open when the probe rejects (existing on-error behaviour)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = await checkMemoryAdmission(async () => {
+      throw new Error("daemon unreachable");
+    }, 1000);
+    expect(result.ok).toBe(true);
+    errSpy.mockRestore();
   });
 });
 
