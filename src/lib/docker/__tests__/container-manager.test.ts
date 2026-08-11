@@ -10,6 +10,11 @@ import {
   SKILLS_PLUGIN_ID,
   SKILLS_VERSION_MARKER,
 } from "../container-manager";
+import {
+  isGenerationSession,
+  SESSION_SKILLS,
+  type SessionSkill,
+} from "@/db/schema";
 
 // Capture the options passed to docker.createContainer so we can assert on the
 // HostConfig the orchestrator asks Docker for.
@@ -177,6 +182,7 @@ describe("buildTurnEnv", () => {
       prompt: "do the thing",
       gitAuthToken: "ghs_abc",
       claudeCodeOauthToken: null,
+      ghToken: null,
     });
     expect(env).toContain("CLAUDE_PROMPT=do the thing");
     expect(env).toContain("GIT_AUTH_TOKEN=ghs_abc");
@@ -187,6 +193,7 @@ describe("buildTurnEnv", () => {
       prompt: "p",
       gitAuthToken: "t",
       claudeCodeOauthToken: "sk-ant-oat01-xyz",
+      ghToken: null,
     });
     expect(env).toContain("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-xyz");
   });
@@ -196,8 +203,72 @@ describe("buildTurnEnv", () => {
       prompt: "p",
       gitAuthToken: "t",
       claudeCodeOauthToken: null,
+      ghToken: null,
     });
     expect(env.some((e) => e.startsWith("CLAUDE_CODE_OAUTH_TOKEN"))).toBe(false);
+  });
+
+  // Issue #62: `gh` inside a generation-session container authenticates from
+  // GH_TOKEN. It is exposed only when the caller passes a token — for autonomous
+  // execs the caller passes null, so the negative case is that GH_TOKEN is simply
+  // never in the env.
+  it("exposes GH_TOKEN to gh when a generation-session token is supplied", () => {
+    const env = buildTurnEnv({
+      prompt: "p",
+      gitAuthToken: "ghs_git",
+      claudeCodeOauthToken: null,
+      ghToken: "ghs_gh",
+    });
+    expect(env).toContain("GH_TOKEN=ghs_gh");
+  });
+
+  it("omits GH_TOKEN entirely when no generation-session token is supplied", () => {
+    const env = buildTurnEnv({
+      prompt: "p",
+      gitAuthToken: "ghs_git",
+      claudeCodeOauthToken: null,
+      ghToken: null,
+    });
+    expect(env.some((e) => e.startsWith("GH_TOKEN"))).toBe(false);
+  });
+});
+
+// Issue #62: the exec-config wiring — a generation session (interactive task
+// with a sessionSkill) receives the App token as GH_TOKEN; every autonomous kind
+// receives none. This mirrors execClaudeTurn's `isGenerationSession(task) ? token
+// : null`, testing the predicate and the env builder as one path. The negative
+// assertions for implement/review/triage are the isolation boundary from #62.
+describe("GH_TOKEN injection is gated on generation sessions (issue #62)", () => {
+  const APP_TOKEN = "ghs_installation";
+
+  const envFor = (task: { kind: string; sessionSkill: SessionSkill | null }) =>
+    buildTurnEnv({
+      prompt: "p",
+      gitAuthToken: APP_TOKEN,
+      claudeCodeOauthToken: null,
+      ghToken: isGenerationSession(task) ? APP_TOKEN : null,
+    });
+
+  it("injects GH_TOKEN for a generation-session exec", () => {
+    for (const sessionSkill of SESSION_SKILLS) {
+      const env = envFor({ kind: "interactive", sessionSkill });
+      expect(env).toContain(`GH_TOKEN=${APP_TOKEN}`);
+    }
+  });
+
+  it("withholds GH_TOKEN from every autonomous kind", () => {
+    // The isolation boundary is per-kind: no unattended exec may hold an
+    // issue-writing token, so `repair` is asserted alongside implement/review/
+    // triage even though #62 names only the latter three.
+    for (const kind of ["implement", "review", "triage", "repair"] as const) {
+      const env = envFor({ kind, sessionSkill: null });
+      expect(env.some((e) => e.startsWith("GH_TOKEN"))).toBe(false);
+    }
+  });
+
+  it("withholds GH_TOKEN from an ordinary chat task (no session skill)", () => {
+    const env = envFor({ kind: "interactive", sessionSkill: null });
+    expect(env.some((e) => e.startsWith("GH_TOKEN"))).toBe(false);
   });
 });
 

@@ -46,11 +46,11 @@ describe("buildImplementPrompt", () => {
     expect(prompt).toContain("agent/issue-7");
   });
 
-  it("carries the blocked-marker contract: stop and lead the final message with it", () => {
+  it("carries the blocked-marker contract: stop and put the marker on its own line", () => {
     const prompt = buildImplementPrompt({ ...TICKET, workflow: { source: "default" } });
 
     expect(prompt).toContain("BLOCKED: <your question>");
-    expect(prompt).toContain("first line");
+    expect(prompt).toContain("on its own line");
     expect(prompt).toMatch(/stop/i);
   });
 

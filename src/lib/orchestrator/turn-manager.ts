@@ -1,5 +1,5 @@
 import { db } from "@/db";
-import { tasks, messages, projects, runs } from "@/db/schema";
+import { tasks, messages, projects, runs, isGenerationSession } from "@/db/schema";
 import { eq, and, isNull, asc, desc } from "drizzle-orm";
 import { newId } from "../ulid";
 import {
@@ -37,6 +37,7 @@ import { parseRepoFromGitUrl } from "../github/repo";
 import { createDraftPr, markPrReady } from "../github/pull-requests";
 import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed, notifyTaskIdle, notifyRunBlocked } from "../discord/notifications";
 import { decideNext, passOutcomeSnapshot } from "./autonomy/decide";
+import { composeSeed, composeSessionTurn } from "../sessions/seed";
 
 /** Track all active task containers for cancellation and idle polling */
 const activeTasks = new Map<
@@ -163,9 +164,20 @@ export async function startTask(taskId: string): Promise<void> {
   const userPrompt = task.description
     ? `${task.title}\n\n${task.description}`
     : task.title;
-  const prompt = isAutonomousPass
-    ? task.description
-    : `${userPrompt}\n\nWhen you are done with each request, commit all your changes with a descriptive commit message. Stay ready for follow-up instructions.`;
+  // A generation session's first turn is the composed seed (issue #63): the
+  // deterministic slash-passthrough prompt for its session skill, with the
+  // user's title/description as the skill's agenda and any issue anchor passed
+  // as a reference the agent fetches itself. Sessions are always interactive
+  // (no run row), so this never collides with the autonomous-pass branch.
+  const prompt = task.sessionSkill
+    ? composeSeed({
+        sessionSkill: task.sessionSkill,
+        sessionIssue: task.sessionIssue,
+        agenda: userPrompt,
+      })
+    : isAutonomousPass
+      ? task.description
+      : `${userPrompt}\n\nWhen you are done with each request, commit all your changes with a descriptive commit message. Stay ready for follow-up instructions.`;
 
   const run = task.runId
     ? db.select().from(runs).where(eq(runs.id, task.runId)).get()
@@ -321,6 +333,8 @@ export async function startTask(taskId: string): Promise<void> {
       captureRaw: isReviewPass || isTriagePass,
       model: passModel,
       effort: passEffort,
+      // A generation session's exec gets a `gh` token; no autonomous pass does (#62).
+      isGenerationSession: isGenerationSession(task),
     });
 
     // A terminal `result` event arrived — the turn ran to completion, so any
@@ -381,14 +395,14 @@ export async function startTask(taskId: string): Promise<void> {
           return;
         }
       }
-      // The pass's turn is over: park it blocked if its final message leads
-      // with the BLOCKED marker — container kept alive, question escalated
-      // to the owner (issue #19); or fail the attempt if it left no PR and no
-      // question, so the run cannot dangle as a ghost (issue #106). Otherwise
-      // the initial turn is the whole pass: mark the PR ready and park the
-      // container awaiting review — it stays alive (holding no slot) so a
-      // request-changes verdict can deliver a fix-up turn into the same
-      // attempt. The run stays `implementing`; the sweep's gate evaluation
+      // The pass's turn is over: park it blocked if its final message carries
+      // the BLOCKED marker on any line (issue #107) — container kept alive,
+      // question escalated to the owner (issue #19); or fail the attempt if it
+      // left no PR and no question, so the run cannot dangle as a ghost (issue
+      // #106). Otherwise the initial turn is the whole pass: mark the PR ready
+      // and park the container awaiting review — it stays alive (holding no
+      // slot) so a request-changes verdict can deliver a fix-up turn into the
+      // same attempt. The run stays `implementing`; the sweep's gate evaluation
       // takes over from here.
       const decision = await evaluatePassOutcome(taskId, turnResult.finalMessage);
       if (decision === "proceed") await finishImplementPass(taskId);
@@ -505,6 +519,7 @@ async function runTurn(
     captureRaw?: boolean;
     model?: string | null;
     effort?: string | null;
+    isGenerationSession?: boolean;
   }
 ): Promise<TurnResult & { raw?: string }> {
   const handler = createOutputHandler(taskId);
@@ -518,6 +533,7 @@ async function runTurn(
     maxTurns: opts?.maxTurns,
     model: opts?.model,
     effort: opts?.effort,
+    isGenerationSession: opts?.isGenerationSession,
   });
 
   // Race: wait for the exec stream to close OR the "result" event from Claude.
@@ -636,6 +652,16 @@ export async function processQueuedMessages(
       // Plain text content — use as-is
     }
 
+    // Follow-on slash routing (issue #63): in a generation session, a follow-up
+    // message that leads with a known skill slash (the /to-spec → /to-tickets →
+    // arm progression) is re-framed through the same seed-composition path, so
+    // a typed slash carries the same framing (arming convention included) as the
+    // seed turn and never degrades into the agent improvising the skill. A
+    // non-slash message, or any message on a plain chat task, is untouched.
+    if (task.sessionSkill) {
+      promptText = composeSessionTurn(promptText);
+    }
+
     // A follow-up turn on a run-owned task is capped at what remains of the
     // attempt budget, not the whole allowance again — the pre-turn check
     // above guarantees the remainder is positive here.
@@ -649,6 +675,8 @@ export async function processQueuedMessages(
         maxTurns: run?.maxTurns ?? undefined,
         model: resolveAgentModel(task.kind, config, run?.model ?? null),
         effort: resolveAgentEffort(task.kind, config, run?.effort ?? null),
+        // A generation session's follow-up exec gets a `gh` token too (#62).
+        isGenerationSession: isGenerationSession(task),
       }
     );
 

@@ -133,11 +133,20 @@ export function buildSetupScript(
  * CLAUDE_CODE_OAUTH_TOKEN is the sole subscription-auth path — the mounted
  * host credentials file it once fell back to was removed with the host
  * `~/.claude` mount (#28); ANTHROPIC_API_KEY remains an alternative.
+ *
+ * `ghToken` is exposed to `gh` as GH_TOKEN for generation-session execs only
+ * (issue #62): it is the same short-lived App installation token as
+ * GIT_AUTH_TOKEN, so there is one minting path to audit, not two, and like
+ * GIT_AUTH_TOKEN it is exec-scoped and never persisted in the container. It is
+ * `null` for every autonomous kind (implement/review/triage) — a token that can
+ * create issues can also apply the launch-button label, so no unattended kind
+ * may ever hold it; the caller decides via TurnOptions.isGenerationSession.
  */
 export function buildTurnEnv(options: {
   prompt: string;
   gitAuthToken: string;
   claudeCodeOauthToken: string | null;
+  ghToken: string | null;
 }): string[] {
   const env = [
     `CLAUDE_PROMPT=${options.prompt}`,
@@ -145,6 +154,9 @@ export function buildTurnEnv(options: {
   ];
   if (options.claudeCodeOauthToken) {
     env.push(`CLAUDE_CODE_OAUTH_TOKEN=${options.claudeCodeOauthToken}`);
+  }
+  if (options.ghToken) {
+    env.push(`GH_TOKEN=${options.ghToken}`);
   }
   return env;
 }
@@ -186,6 +198,15 @@ export interface TurnOptions {
    * own default.
    */
   effort?: string | null;
+  /**
+   * True only for a generation-session exec — an interactive task carrying a
+   * sessionSkill (issue #62). When set, the exec receives the App installation
+   * token as GH_TOKEN so the generation skills can read and write issues via
+   * `gh`. Never set for an autonomous implement/review/triage pass: a token
+   * that can create issues can also apply the launch-button label, so no
+   * unattended kind may hold it.
+   */
+  isGenerationSession?: boolean;
 }
 
 export interface RunningContainer {
@@ -397,6 +418,9 @@ export async function execClaudeTurn(
       prompt: options.prompt,
       gitAuthToken: token,
       claudeCodeOauthToken: config.claudeCodeOauthToken,
+      // Only a generation session's exec gets an issue-writing token (#62); the
+      // same App token as GIT_AUTH_TOKEN, so one minting path, exec-scoped.
+      ghToken: options.isGenerationSession ? token : null,
     }),
     AttachStdout: true,
     AttachStderr: true,

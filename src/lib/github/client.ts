@@ -4,6 +4,11 @@ import { getConfig } from "../config";
 
 let cachedToken: string | null = null;
 let tokenExpiresAt = 0;
+// The installation's granted repository permissions, captured from the same
+// mint as the token (issue #62) — an unnarrowed installation token carries the
+// installation's full grant, so there is nothing extra to fetch. Set alongside
+// cachedToken and read via getInstallationPermissions.
+let cachedPermissions: Record<string, string> = {};
 
 function createAppJwt(): string {
   const config = getConfig();
@@ -58,6 +63,7 @@ export async function getInstallationToken(): Promise<string> {
 
   cachedToken = installation.token;
   tokenExpiresAt = new Date(installation.expires_at).getTime();
+  cachedPermissions = (installation.permissions ?? {}) as Record<string, string>;
 
   return cachedToken;
 }
@@ -65,4 +71,21 @@ export async function getInstallationToken(): Promise<string> {
 export async function getOctokit(): Promise<Octokit> {
   const token = await getInstallationToken();
   return new Octokit({ auth: token });
+}
+
+/**
+ * The repository permissions the App installation was granted, as an
+ * `{ issues: "write", contents: "write", ... }` map (issue #62). Reuses the
+ * cached mint from getInstallationToken — the installation token carries the
+ * installation's full grant, so there is one round-trip and one minting path to
+ * audit, not a second `apps.getInstallation` call per project. Preflight uses it
+ * to confirm the App has the "Issues: write" every generation operation needs
+ * (issue creation, comments, labels, dependency edges, sub-issues all live under
+ * that one permission).
+ */
+export async function getInstallationPermissions(): Promise<
+  Record<string, string>
+> {
+  await getInstallationToken();
+  return cachedPermissions;
 }

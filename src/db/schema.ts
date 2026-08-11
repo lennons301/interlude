@@ -15,6 +15,22 @@ export const SESSION_SKILLS = [
 
 export type SessionSkill = (typeof SESSION_SKILLS)[number];
 
+/**
+ * A generation session is an interactive task running one of the estate's
+ * generation skills (issue #61): kind stays `interactive`, and the non-null
+ * sessionSkill is what distinguishes it from an ordinary chat task and from the
+ * autonomous `kind=triage` pass. This predicate is the single definition of the
+ * concept — issue #62 keys the per-exec `gh` token off it, so that a token able
+ * to create issues (and therefore apply the launch-button label) only ever
+ * reaches an attended session, never an unattended implement/review/triage exec.
+ */
+export function isGenerationSession(task: {
+  kind: string;
+  sessionSkill: SessionSkill | null;
+}): boolean {
+  return task.kind === "interactive" && task.sessionSkill !== null;
+}
+
 export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
