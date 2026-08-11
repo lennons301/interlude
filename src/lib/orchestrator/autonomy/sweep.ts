@@ -39,6 +39,7 @@ import {
 } from "../../discord/notifications";
 import { recordBacklog } from "../../fleet/backlog";
 import { isContainerRunning, removeContainerByName } from "../../docker/container-manager";
+import { recordNeedsHuman } from "../../fleet/needs-human";
 import { getCapacity } from "../capacity";
 import { occupiedSlots } from "../queue";
 import { startOfLocalDay, todayAutonomousSpendUsd } from "../spend";
@@ -353,6 +354,29 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     } catch (err) {
       // One repo's API failure must not stall the whole fleet's sweep
       console.error(`[autonomy] Failed to list candidates for ${repoFullName}:`, err);
+    }
+
+    // The open `ready-for-human` set — the read model retires an exhausted
+    // needs-you card once its issue leaves this set (a human closed it or
+    // dropped the label). Recorded only on success, so a transient API error
+    // can't wrongly clear a card; the 7-day window remains the safe backstop.
+    try {
+      const { data: waiting } = await octokit.rest.issues.listForRepo({
+        owner,
+        repo,
+        labels: READY_FOR_HUMAN_LABEL,
+        state: "open",
+        per_page: 100,
+      });
+      const refs = waiting
+        .filter((issue) => !issue.pull_request)
+        .map((issue) => `${repoFullName}#${issue.number}`);
+      recordNeedsHuman(project.id, refs);
+    } catch (err) {
+      console.error(
+        `[autonomy] Failed to list ready-for-human issues for ${repoFullName}:`,
+        err
+      );
     }
   }
 

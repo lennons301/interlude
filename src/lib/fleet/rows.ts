@@ -10,6 +10,7 @@ import { and, eq, gte, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { getConfig } from "../config";
 import { getCapacity } from "../orchestrator/capacity";
 import { getBacklogByProject } from "./backlog";
+import { getNeedsHumanByProject } from "./needs-human";
 import { DAILY_AUTONOMOUS_CAP_USD } from "../orchestrator/autonomy/budgets";
 import {
   buildFleetView,
@@ -114,6 +115,9 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     // The sweep's last tracker observation; null (never observed) renders
     // as "queue unknown" rather than a wrong zero.
     backlogByProject: getBacklogByProject(),
+    // Open `ready-for-human` refs from the same sweep; null (never observed)
+    // leaves the exhausted needs-you cards on the 7-day window alone.
+    needsHumanByProject: getNeedsHumanByProject(),
   };
 }
 
