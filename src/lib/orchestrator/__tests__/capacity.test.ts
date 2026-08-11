@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   checkMemoryAdmission,
   createLocalCapacityProvider,
@@ -149,6 +149,11 @@ describe("wouldOvercommitMemory", () => {
 });
 
 describe("checkMemoryAdmission", () => {
+  // Restore in a hook, not inline, so a failing assertion can't leave
+  // console.error stubbed for the rest of the suite (vitest config sets no
+  // restoreMocks).
+  afterEach(() => vi.restoreAllMocks());
+
   // Issue #115: a hung Docker daemon connection must never freeze dispatch.
   // The probe is raced against a bounded timeout and fails open on both a hang
   // and an error, matching how it already fails open on a probe error.
@@ -163,7 +168,6 @@ describe("checkMemoryAdmission", () => {
     expect(errSpy).toHaveBeenCalledWith(
       expect.stringContaining("timed out")
     );
-    errSpy.mockRestore();
   });
 
   it("returns the probe's verdict when it resolves before the timeout", async () => {
@@ -173,12 +177,11 @@ describe("checkMemoryAdmission", () => {
   });
 
   it("fails open when the probe rejects (existing on-error behaviour)", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
     const result = await checkMemoryAdmission(async () => {
       throw new Error("daemon unreachable");
     }, 1000);
     expect(result.ok).toBe(true);
-    errSpy.mockRestore();
   });
 });
 

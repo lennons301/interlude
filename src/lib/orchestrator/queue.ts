@@ -77,25 +77,44 @@ export function startQueue(): void {
         // actually running, catching any drift the slot bookkeeping missed
         // before the host OOMs. Both must clear before a task starts.
         const slotFree = await capacityProvider.isSlotAvailable();
-        const admission = slotFree ? await checkMemoryAdmission() : { ok: false };
-        if (slotFree && admission.ok) {
-          saturationLogged = false;
+        if (!slotFree) {
+          if (!saturationLogged) {
+            saturationLogged = true;
+            console.log(
+              `[orchestrator] All ${capacityProvider.capacity.slots} slot(s) busy — task ${next.id} waits in queue`
+            );
+          }
+        } else {
+          // Reserve the task before probing. The probe can now block for up to
+          // ADMISSION_PROBE_TIMEOUT_MS on a slow or hung daemon (issue #125) —
+          // longer than the 2s poll interval — so without reserving first, an
+          // overlapping poll would still see this task queued, clear its own
+          // slot check, and dispatch it a second time: two containers for one
+          // task, the exact overcommit #93 guards against. Reserving also caps
+          // the probe to one in-flight call per free slot, since a full box
+          // short-circuits above without probing. Released again if the probe
+          // refuses the start.
           processingTasks.add(next.id);
-          console.log(
-            `[orchestrator] Picked up task: ${next.id} — ${next.title}`
-          );
-          startTask(next.id)
-            .catch((err) =>
-              console.error(`[orchestrator] Task ${next.id} failed:`, err)
-            )
-            .finally(() => processingTasks.delete(next.id));
-        } else if (!saturationLogged) {
-          saturationLogged = true;
-          console.log(
-            !slotFree
-              ? `[orchestrator] All ${capacityProvider.capacity.slots} slot(s) busy — task ${next.id} waits in queue`
-              : `[orchestrator] Memory headroom low (${admission.reason}) — task ${next.id} waits in queue`
-          );
+          const admission = await checkMemoryAdmission();
+          if (admission.ok) {
+            saturationLogged = false;
+            console.log(
+              `[orchestrator] Picked up task: ${next.id} — ${next.title}`
+            );
+            startTask(next.id)
+              .catch((err) =>
+                console.error(`[orchestrator] Task ${next.id} failed:`, err)
+              )
+              .finally(() => processingTasks.delete(next.id));
+          } else {
+            processingTasks.delete(next.id);
+            if (!saturationLogged) {
+              saturationLogged = true;
+              console.log(
+                `[orchestrator] Memory headroom low (${admission.reason}) — task ${next.id} waits in queue`
+              );
+            }
+          }
         }
       }
 
