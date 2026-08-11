@@ -21,6 +21,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     runs: [],
     tasks: [],
     backlogByProject: null,
+    needsHumanByProject: null,
     ...overrides,
   };
 }
@@ -664,6 +665,71 @@ describe("buildFleetView — needs you", () => {
     );
 
     expect(view.needsYou).toEqual([]);
+  });
+
+  it("drops an exhausted ticket the tracker shows a human has dealt with", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            attempt: 3,
+            status: "exhausted",
+            finishedAt: TODAY_9AM, // still well inside the 7-day window
+          }),
+        ],
+        // p1 was observed and #34 is no longer open + ready-for-human: the
+        // human closed it or dropped the label, so it stops needing you even
+        // though no newer run exists and the window hasn't elapsed.
+        needsHumanByProject: { p1: [] },
+      })
+    );
+
+    expect(view.needsYou).toEqual([]);
+  });
+
+  it("keeps an exhausted ticket still open and ready-for-human on the tracker", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            attempt: 3,
+            status: "exhausted",
+            finishedAt: TODAY_9AM,
+          }),
+        ],
+        needsHumanByProject: { p1: ["lennons301/lemons#34"] },
+      })
+    );
+
+    expect(view.needsYou.map((i) => i.cause)).toEqual(["exhausted"]);
+  });
+
+  it("keeps an exhausted ticket when its project was never observed", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            attempt: 3,
+            status: "exhausted",
+            finishedAt: TODAY_9AM,
+          }),
+        ],
+        // Another project was observed, but not p1 — absence here is "unknown",
+        // not "resolved", so the window remains the only release valve for p1.
+        needsHumanByProject: { "other-project": [] },
+      })
+    );
+
+    expect(view.needsYou.map((i) => i.cause)).toEqual(["exhausted"]);
   });
 
   it("raises a cap pause card when today's spend reaches the cap", () => {

@@ -27,6 +27,13 @@ export interface FleetRows {
   /** Tickets armed `ready-for-agent` and not yet claimed, keyed by project
    * id — the sweep's last tracker observation; null = never observed */
   backlogByProject: Record<string, number> | null;
+  /** Open `ready-for-human` issue refs, keyed by project id — the sweep's last
+   * tracker observation of tickets still awaiting a human. An exhausted run
+   * whose project was observed but whose issue is absent has been dealt with
+   * (closed, or the label dropped) and stops needing you. null = never
+   * observed; a project absent from the map = not yet observed (both fall back
+   * to the 7-day window). See {@link buildFleetView}'s exhausted filter. */
+  needsHumanByProject: Record<string, string[]> | null;
 }
 
 export interface FleetProjectRow {
@@ -459,14 +466,25 @@ export function buildFleetView(rows: FleetRows): FleetView {
     // surfaced under Running, deliberately not a needs-you item.
   }
 
-  // An exhausted ticket needs a human until either they re-arm it (a newer
-  // run exists for the issue) or it ages out of the recent window — the DB
-  // can't see the tracker, so the window is the release valve.
+  // An exhausted ticket needs a human until they re-arm it (a newer run
+  // exists for the issue), until the tracker shows they've dealt with it, or
+  // — the backstop — until it ages out of the recent window. The DB can't see
+  // the tracker on its own, so the sweep records which issues are still open
+  // and `ready-for-human` (needsHumanByProject); an exhausted run whose
+  // project was observed but whose issue has left that set was resolved
+  // outside a fresh loop (a human merged the fix or dropped the label) and no
+  // longer names an outstanding action. Only the window applies to a project
+  // the sweep hasn't observed — clearing on absence there would be guessing.
   const windowStart = rows.now.getTime() - RECENT_WINDOW_DAYS * DAY_MS;
+  const resolvedOnTracker = (r: FleetRunRow): boolean => {
+    const observed = rows.needsHumanByProject?.[r.projectId];
+    return observed !== undefined && !observed.includes(r.githubIssue);
+  };
   const exhausted = rows.runs.filter(
     (r) =>
       r.status === "exhausted" &&
       (r.finishedAt?.getTime() ?? 0) >= windowStart &&
+      !resolvedOnTracker(r) &&
       !rows.runs.some(
         (newer) =>
           newer.githubIssue === r.githubIssue &&
