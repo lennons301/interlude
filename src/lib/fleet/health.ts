@@ -76,12 +76,7 @@ export interface FleetHealthInput {
   queueLastProgressMs: number | null;
 }
 
-export interface OwedReviewStall {
-  runId: string;
-  issueRef: string;
-  prNumber: number;
-  prUrl: string | null;
-  reason: string;
+export interface OwedReviewStall extends OwedReviewObservation {
   stalledForMs: number;
 }
 
@@ -167,14 +162,7 @@ export function evaluateFleetHealth(
     const stalledForMs = now - since;
     if (stalledForMs < thresholds.owedReviewStallMs) continue;
 
-    const stall: OwedReviewStall = {
-      runId: obs.runId,
-      issueRef: obs.issueRef,
-      prNumber: obs.prNumber,
-      prUrl: obs.prUrl,
-      reason: obs.reason,
-      stalledForMs,
-    };
+    const stall: OwedReviewStall = { ...obs, stalledForMs };
     owedReviewStalls.push(stall);
     owedReviewAnnounced.push(obs.runId);
     if (!prev.owedReviewAnnounced.includes(obs.runId)) announcedStalls.push(stall);
@@ -233,6 +221,18 @@ export function evaluateFleetHealth(
       queueStaleAnnounced,
     },
   };
+}
+
+/** A coarse "34m" / "1h 30m" for a health duration. Shared by the dashboard
+ * card and the Discord ping so the same `stalledForMs` never renders a minute
+ * apart between them (both floor). Durations here are minutes-to-hours and shown
+ * at 30s sweep granularity, so seconds are noise. */
+export function formatDuration(ms: number): string {
+  const mins = Math.floor(ms / 60_000);
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  const rem = mins % 60;
+  return rem ? `${hrs}h ${rem}m` : `${hrs}h`;
 }
 
 function pickupWedgeDetail(input: FleetHealthInput): string {

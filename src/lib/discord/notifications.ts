@@ -1,6 +1,11 @@
 import { Client, EmbedBuilder, TextChannel, type Message } from "discord.js";
 import { DIGEST_TITLE_PREFIX, type DigestContent } from "../fleet/digest";
-import type { OwedReviewStall, PickupWedge, QueueStale } from "../fleet/health";
+import {
+  formatDuration,
+  type OwedReviewStall,
+  type PickupWedge,
+  type QueueStale,
+} from "../fleet/health";
 
 // The bot client is set once, in the instrumentation/orchestrator context where
 // the Discord bot connects (client.ts -> setBotClient). But notification helpers
@@ -232,12 +237,6 @@ export async function notifySlotsSaturated(
   }
 }
 
-/** Whole minutes for a fleet-health ping body — durations are minutes-to-hours
- * and shown at sweep granularity, so seconds would be noise. */
-function minutesOf(ms: number): number {
-  return Math.max(1, Math.round(ms / 60_000));
-}
-
 /**
  * Fleet-health watchdog (issue #126): a run's review pass has not started for
  * too long — the PR sits owed a review while the slot is busy. Sent once per
@@ -259,7 +258,7 @@ export async function notifyOwedReviewStalled(
       .setTitle(`Owed review stalled — PR #${payload.prNumber}`)
       .setDescription(
         `${payload.issueRef} (PR #${payload.prNumber}) has been owed a review for ` +
-          `~${minutesOf(payload.stalledForMs)}m without it starting: ${payload.reason}.\n\n` +
+          `~${formatDuration(payload.stalledForMs)} without it starting: ${payload.reason}.\n\n` +
           `Nothing merges until the review lands — free a slot or check the queue.`
       )
       .setColor(0xef4444);
@@ -289,7 +288,7 @@ export async function notifyPickupWedged(
     const embed = new EmbedBuilder()
       .setTitle(`Pickup wedged — a slot is free but nothing dispatches`)
       .setDescription(
-        `${payload.detail} for ~${minutesOf(payload.wedgedForMs)}m. The queue is not ` +
+        `${payload.detail} for ~${formatDuration(payload.wedgedForMs)}. The queue is not ` +
           `picking up claimable work — check the orchestrator (a hung Docker daemon ` +
           `or a stuck poll loop).`
       )
@@ -320,7 +319,7 @@ export async function notifyQueueStale(
     const embed = new EmbedBuilder()
       .setTitle(`Queue loop stalled`)
       .setDescription(
-        `The queue poll loop hasn't made progress for ~${minutesOf(payload.staleForMs)}m ` +
+        `The queue poll loop hasn't made progress for ~${formatDuration(payload.staleForMs)} ` +
           `(it should tick every 2s). Dispatch is likely wedged — check the ` +
           `orchestrator process.`
       )

@@ -11,7 +11,7 @@ import {
   MAX_ATTEMPTS,
   MAX_INTEGRATION_ATTEMPTS,
 } from "../orchestrator/autonomy/budgets";
-import type { FleetHealthSignals } from "./health";
+import { formatDuration, type FleetHealthSignals } from "./health";
 
 export interface FleetRows {
   /** Current time — passed in, never read inside */
@@ -258,16 +258,6 @@ function issueUrl(githubIssue: string): string | null {
 function repoTicket(issueRef: string): string {
   const match = issueRef.match(/^[^/#]+\/([^/#]+)#(\d+)$/);
   return match ? `${match[1]} #${match[2]}` : issueRef;
-}
-
-/** A coarse "34m" / "1h 5m" for a needs-you body. Health durations are only ever
- * minutes-to-hours and shown at sweep granularity, so seconds are noise. */
-function formatDuration(ms: number): string {
-  const mins = Math.floor(ms / 60_000);
-  if (mins < 60) return `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  const rem = mins % 60;
-  return rem ? `${hrs}h ${rem}m` : `${hrs}h`;
 }
 
 const RECENT_WINDOW_DAYS = 7;

@@ -274,23 +274,32 @@ function gatherFleetHealthInput(
 
   // A run owed a review with no review *container running* — no task at all, or
   // one queued but starved of a slot. A running review is progressing, not
-  // stalled, and shows under Running instead.
-  const owedReviews = snapshot.awaitingReview
-    .filter((a) => runningReviewTaskId(db, a.runId) == null)
-    .map((a) => {
-      const run = db
-        .select({ prUrl: runs.pullRequestUrl })
-        .from(runs)
-        .where(eq(runs.id, a.runId))
-        .get();
-      return {
-        runId: a.runId,
-        issueRef: a.issueRef,
-        prNumber: a.prNumber,
-        prUrl: run?.prUrl ?? null,
-        reason,
-      };
-    });
+  // stalled, and shows under Running instead. Sourced straight from the DB
+  // (not the GitHub-gated `awaitingReview` set) so a transient PR-read failure
+  // that drops a run for one sweep can't reset its 30-min stall timer: any
+  // reviewing/gated run with a PR, no stored/posted verdict, and no running
+  // review is owed. A spent-repairs conflict has its own needs-you card
+  // (classifyGated), so it is excluded here rather than double-surfaced.
+  const owedReviews = db
+    .select()
+    .from(runs)
+    .all()
+    .filter(
+      (r) =>
+        (r.status === "reviewing" || r.status === "gated") &&
+        r.pullRequestNumber != null &&
+        r.reviewResult == null &&
+        r.reviewVerdict == null &&
+        r.integrationCount < MAX_INTEGRATION_ATTEMPTS &&
+        runningReviewTaskId(db, r.id) == null
+    )
+    .map((r) => ({
+      runId: r.id,
+      issueRef: r.githubIssue,
+      prNumber: r.pullRequestNumber!,
+      prUrl: r.pullRequestUrl,
+      reason,
+    }));
 
   // Queued dispatchable tasks observed while a slot sits free — the exact
   // incident shape (#115): a review left queued while a slot is open.
