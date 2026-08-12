@@ -22,6 +22,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     tasks: [],
     backlogByProject: null,
     needsHumanByProject: null,
+    fleetHealth: null,
     ...overrides,
   };
 }
@@ -784,10 +785,24 @@ describe("buildFleetView — needs you", () => {
     ]);
   });
 
-  it("orders causes: cap, blocked, sign-off, exhausted, preflight", () => {
+  it("orders causes: cap, machinery health, blocked, sign-off, exhausted, preflight", () => {
     const view = buildFleetView(
       baseRows({
         dailyCapUsd: 10,
+        fleetHealth: {
+          owedReviewStalls: [
+            {
+              runId: "run-x",
+              issueRef: "o/r#5",
+              prNumber: 12,
+              prUrl: "https://github.com/o/r/pull/12",
+              reason: "a slot is held by an interactive session (1/1 busy)",
+              stalledForMs: 31 * 60_000,
+            },
+          ],
+          pickupWedged: { detail: "1 slot free but pickup is paused (no-slots)", wedgedForMs: 4 * 60_000 },
+          queueStale: { staleForMs: 3 * 60_000 },
+        },
         projects: [
           makeProject({
             id: "p1",
@@ -828,11 +843,141 @@ describe("buildFleetView — needs you", () => {
 
     expect(view.needsYou.map((item) => item.cause)).toEqual([
       "cap",
+      "queue-stale",
+      "pickup-wedged",
+      "review-stalled",
       "blocked",
       "signoff",
       "exhausted",
       "preflight",
     ]);
+  });
+});
+
+describe("buildFleetView — fleet health (#126)", () => {
+  it("renders no health cards when the sweep has not evaluated (null)", () => {
+    const view = buildFleetView(baseRows({ fleetHealth: null }));
+    expect(view.needsYou).toEqual([]);
+  });
+
+  it("raises a stale-queue card, red, no action", () => {
+    const view = buildFleetView(
+      baseRows({
+        fleetHealth: {
+          owedReviewStalls: [],
+          pickupWedged: null,
+          queueStale: { staleForMs: 3 * 60_000 },
+        },
+      })
+    );
+    expect(view.needsYou).toEqual([
+      {
+        cause: "queue-stale",
+        severity: "red",
+        context: "queue loop",
+        body: "Queue poll loop hasn't made progress for 3m — dispatch is likely wedged",
+        action: null,
+      },
+    ]);
+  });
+
+  it("raises a pickup-wedged card carrying the sweep's detail", () => {
+    const view = buildFleetView(
+      baseRows({
+        fleetHealth: {
+          owedReviewStalls: [],
+          pickupWedged: {
+            detail: '1 slot free but "review: o/r#5" has not dispatched',
+            wedgedForMs: 5 * 60_000,
+          },
+          queueStale: null,
+        },
+      })
+    );
+    expect(view.needsYou).toEqual([
+      {
+        cause: "pickup-wedged",
+        severity: "red",
+        context: "pickup",
+        body: '1 slot free but "review: o/r#5" has not dispatched for 5m',
+        action: null,
+      },
+    ]);
+  });
+
+  it("raises an owed-review-stalled card naming the PR, with a link when known", () => {
+    const view = buildFleetView(
+      baseRows({
+        fleetHealth: {
+          owedReviewStalls: [
+            {
+              runId: "run-1",
+              issueRef: "lennons301/last-person-standing#135",
+              prNumber: 159,
+              prUrl: "https://github.com/lennons301/last-person-standing/pull/159",
+              reason: "a slot is held by an interactive session (1/1 busy)",
+              stalledForMs: 34 * 60_000,
+            },
+          ],
+          pickupWedged: null,
+          queueStale: null,
+        },
+      })
+    );
+    expect(view.needsYou).toEqual([
+      {
+        cause: "review-stalled",
+        severity: "red",
+        context: "last-person-standing #135 · PR #159",
+        body: "Review hasn't started for 34m — a slot is held by an interactive session (1/1 busy)",
+        action: {
+          label: "Open PR #159",
+          href: "https://github.com/lennons301/last-person-standing/pull/159",
+        },
+      },
+    ]);
+  });
+
+  it("omits the link on a stalled review whose PR URL is unknown", () => {
+    const view = buildFleetView(
+      baseRows({
+        fleetHealth: {
+          owedReviewStalls: [
+            {
+              runId: "run-1",
+              issueRef: "o/r#7",
+              prNumber: 7,
+              prUrl: null,
+              reason: "all 2 slots busy",
+              stalledForMs: 90 * 60_000,
+            },
+          ],
+          pickupWedged: null,
+          queueStale: null,
+        },
+      })
+    );
+    expect(view.needsYou[0]).toMatchObject({
+      cause: "review-stalled",
+      body: "Review hasn't started for 1h 30m — all 2 slots busy",
+      action: null,
+    });
+  });
+
+  it("raises one card per stalled review", () => {
+    const view = buildFleetView(
+      baseRows({
+        fleetHealth: {
+          owedReviewStalls: [
+            { runId: "a", issueRef: "o/r#1", prNumber: 1, prUrl: null, reason: "x", stalledForMs: 31 * 60_000 },
+            { runId: "b", issueRef: "o/r#2", prNumber: 2, prUrl: null, reason: "x", stalledForMs: 31 * 60_000 },
+          ],
+          pickupWedged: null,
+          queueStale: null,
+        },
+      })
+    );
+    expect(view.needsYou.filter((i) => i.cause === "review-stalled")).toHaveLength(2);
   });
 });
 

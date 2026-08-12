@@ -120,16 +120,20 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
 
 - **slots** — total vs used, and what occupies each (autonomous / interactive).
 - **needs you** — blocked questions, `human-signoff` PRs, exhausted tickets, a
-  daily-cap pause, and failing preflights, each with a link.
+  daily-cap pause, failing preflights, and the fleet-health watchdog's stall
+  signals (issue #126: an owed review that never started, a wedged pickup, a
+  stale queue heartbeat), each with a link where one applies.
 - **running** — each active run's ticket, attempt (n/3), turn, spend vs budget,
   and phase (implement ▸ review ▸ merge).
 - **recent** — the last 7 days of completions.
 - **spend** — today's autonomous spend vs the $500/day cap.
 
 Discord is **push-only**: it tells you *when to look* (claimed, blocked question,
-sign-off needed, attempts exhausted, cap pause, slots saturated, daily digest).
-Autonomous success is deliberately silent — it shows on the dashboard. There is
-no `!status` command; the dashboard answers "what's happening".
+sign-off needed, attempts exhausted, cap pause, slots saturated, a fleet-health
+stall — owed review / wedged pickup / stale queue, issue #126 — daily digest).
+Each stall pings once per occurrence, not every sweep. Autonomous success is
+deliberately silent — it shows on the dashboard. There is no `!status` command;
+the dashboard answers "what's happening".
 
 ### 3. Pause pickup
 
@@ -263,6 +267,7 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 | `DISCORD_FLEET_CHANNEL_ID` | Channel for fleet events + fallback for blocked questions when a project has no linked channel. |
 | `MAX_BUDGET_USD` | Per-attempt default budget ($20). |
 | `CAPACITY_SLOTS`, `AGENT_MEMORY_MB` | Override derived capacity — only when the derivation is wrong. |
+| `OWED_REVIEW_STALL_MINUTES`, `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES` | Fleet-health watchdog thresholds in minutes (issue #126). Defaults 30 / 3 / 2. |
 
 ### Labels
 

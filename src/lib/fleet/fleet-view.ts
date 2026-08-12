@@ -11,6 +11,7 @@ import {
   MAX_ATTEMPTS,
   MAX_INTEGRATION_ATTEMPTS,
 } from "../orchestrator/autonomy/budgets";
+import { formatDuration, type FleetHealthSignals } from "./health";
 
 export interface FleetRows {
   /** Current time — passed in, never read inside */
@@ -34,6 +35,13 @@ export interface FleetRows {
    * observed; a project absent from the map = not yet observed (both fall back
    * to the 7-day window). See {@link buildFleetView}'s exhausted filter. */
   needsHumanByProject: Record<string, string[]> | null;
+  /** The sweep's last fleet-health evaluation (issue #126) — owed-review
+   * stalls, a wedged pickup, a stale queue heartbeat. null = never evaluated
+   * (no sweep yet), which renders no health cards. Computed by the sweep, not
+   * derivable from DB rows alone (it needs live orchestrator state: the queue
+   * heartbeat and occupied-vs-total slots), so it arrives via a store like the
+   * backlog/needs-human observations. */
+  fleetHealth: FleetHealthSignals | null;
 }
 
 export interface FleetProjectRow {
@@ -133,7 +141,12 @@ export type NeedsYouCause =
   | "conflict"
   | "exhausted"
   | "cap"
-  | "preflight";
+  | "preflight"
+  /** Fleet-health watchdog (issue #126): an owed review that never started, a
+   * wedged pickup, a queue poll loop gone quiet. */
+  | "review-stalled"
+  | "pickup-wedged"
+  | "queue-stale";
 
 export interface NeedsYouItem {
   cause: NeedsYouCause;
@@ -238,6 +251,13 @@ function issueUrl(githubIssue: string): string | null {
   return match
     ? `https://github.com/${match[1]}/${match[2]}/issues/${match[3]}`
     : null;
+}
+
+/** "owner/repo#34" -> "repo #34" — a compact context label for a fleet-health
+ * card, which has no run/project row to hand (the signal carries only a ref). */
+function repoTicket(issueRef: string): string {
+  const match = issueRef.match(/^[^/#]+\/([^/#]+)#(\d+)$/);
+  return match ? `${match[1]} #${match[2]}` : issueRef;
 }
 
 const RECENT_WINDOW_DAYS = 7;
@@ -406,6 +426,47 @@ export function buildFleetView(rows: FleetRows): FleetView {
       context: `$${todayUsd.toFixed(2)} / $${rows.dailyCapUsd.toFixed(2)} today`,
       body: "Autonomous pickup paused until midnight — interactive work unaffected",
       action: null,
+    });
+  }
+
+  // Fleet-health watchdog (issue #126): the machinery itself has stalled, so
+  // these outrank any single run's question or sign-off. A dead queue or a
+  // wedged pickup halts the whole frontier (the parent #115 incident hid one for
+  // ~1.5h behind a dashboard that read healthy); an owed review that never
+  // started strands a specific PR. All red — nothing progresses until you look.
+  const health = rows.fleetHealth;
+  if (health?.queueStale) {
+    needsYou.push({
+      cause: "queue-stale",
+      severity: "red",
+      context: "queue loop",
+      body: `Queue poll loop hasn't made progress for ${formatDuration(
+        health.queueStale.staleForMs
+      )} — dispatch is likely wedged`,
+      action: null,
+    });
+  }
+  if (health?.pickupWedged) {
+    needsYou.push({
+      cause: "pickup-wedged",
+      severity: "red",
+      context: "pickup",
+      body: `${health.pickupWedged.detail} for ${formatDuration(
+        health.pickupWedged.wedgedForMs
+      )}`,
+      action: null,
+    });
+  }
+  for (const stall of health?.owedReviewStalls ?? []) {
+    const prTag = `PR #${stall.prNumber}`;
+    needsYou.push({
+      cause: "review-stalled",
+      severity: "red",
+      context: `${repoTicket(stall.issueRef)} · ${prTag}`,
+      body: `Review hasn't started for ${formatDuration(
+        stall.stalledForMs
+      )} — ${stall.reason}`,
+      action: stall.prUrl ? { label: `Open ${prTag}`, href: stall.prUrl } : null,
     });
   }
 

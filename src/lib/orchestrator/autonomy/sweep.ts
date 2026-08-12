@@ -33,6 +33,9 @@ import {
   notifyDailyCapReached,
   notifyGateConfigError,
   notifyIntegrationEscalation,
+  notifyOwedReviewStalled,
+  notifyPickupWedged,
+  notifyQueueStale,
   notifyReviewBlocked,
   notifySlotsSaturated,
   notifyTriageRecommendation,
@@ -40,8 +43,16 @@ import {
 import { recordBacklog } from "../../fleet/backlog";
 import { isContainerRunning, removeContainerByName } from "../../docker/container-manager";
 import { recordNeedsHuman } from "../../fleet/needs-human";
+import {
+  EMPTY_FLEET_HEALTH_STATE,
+  evaluateFleetHealth,
+  type FleetHealthInput,
+  type FleetHealthState,
+  type QueuedTaskObservation,
+} from "../../fleet/health";
+import { recordFleetHealth } from "../../fleet/health-store";
 import { getCapacity } from "../capacity";
-import { occupiedSlots } from "../queue";
+import { getQueueLastProgress, isQueueRunning, occupiedSlots } from "../queue";
 import { startOfLocalDay, todayAutonomousSpendUsd } from "../spend";
 import { getActiveTasks, isParked, releaseParkedImplementTask } from "../turn-manager";
 import {
@@ -87,6 +98,7 @@ import {
   inFlightReviewTaskId,
   queuedTasksReservingSlots,
   reapDeadReviewTasks,
+  runningReviewTaskId,
 } from "./review-tasks";
 import {
   DAILY_AUTONOMOUS_CAP_USD,
@@ -120,6 +132,11 @@ const ACTIVE_RUN_STATUS_SET = new Set<string>(ACTIVE_RUN_STATUSES);
 let sweepInterval: ReturnType<typeof setInterval> | null = null;
 let sweeping = false;
 let saturationAnnounced = false;
+// Fleet-health watchdog memory (issue #126): per-signal since-timers plus which
+// signals were already pinged, carried across sweeps so each stall fires one
+// Discord ping, not one per 30s sweep. In-memory like the saturation/cap flags
+// above — a redeploy re-arms, which is fine for a watchdog.
+let fleetHealthState: FleetHealthState = EMPTY_FLEET_HEALTH_STATE;
 // The local day (startOfLocalDay ms) whose cap pause was announced — keyed by
 // day rather than a boolean so the announcement re-arms itself at midnight.
 let dailyCapAnnouncedDay: number | null = null;
@@ -189,9 +206,159 @@ export async function runAutonomySweep(): Promise<void> {
     } else if (actions.some((a) => a.type === "notify" && a.event === "slots-saturated")) {
       saturationAnnounced = true;
     }
+
+    // Fleet-health watchdog (issue #126): surface silent pickup/review stalls.
+    await evaluateFleetHealthSignals(snapshot, actions);
   } finally {
     sweeping = false;
   }
+}
+
+/**
+ * The fleet-health watchdog (issue #126). After a sweep has decided and acted,
+ * evaluate the three signals that make a silent stall loud — an owed review that
+ * never started, a wedged pickup, a quiet queue loop — record them for the
+ * dashboard's needs-you cards, and fire a one-time Discord ping for any that
+ * just crossed threshold. State is held across sweeps in `fleetHealthState`, the
+ * same in-memory debounce the saturation/cap announcements use.
+ */
+async function evaluateFleetHealthSignals(
+  snapshot: AutonomySnapshot,
+  actions: Action[]
+): Promise<void> {
+  const input = gatherFleetHealthInput(snapshot, actions);
+  const { signals, announce, state } = evaluateFleetHealth(
+    input,
+    fleetHealthState,
+    getConfig().fleetHealthThresholds
+  );
+  fleetHealthState = state;
+  recordFleetHealth(signals);
+
+  const channelId = getConfig().discordFleetChannelId;
+  for (const stall of announce.owedReviewStalls) {
+    console.warn(
+      `[autonomy] Owed review stalled: ${stall.issueRef} (PR #${stall.prNumber}) — ` +
+        `not started for ~${Math.round(stall.stalledForMs / 60_000)}m (${stall.reason})`
+    );
+    await notifyOwedReviewStalled(channelId, stall);
+  }
+  if (announce.pickupWedged) {
+    console.warn(
+      `[autonomy] Pickup wedged: ${announce.pickupWedged.detail} ` +
+        `(~${Math.round(announce.pickupWedged.wedgedForMs / 60_000)}m)`
+    );
+    await notifyPickupWedged(channelId, announce.pickupWedged);
+  }
+  if (announce.queueStale) {
+    console.warn(
+      `[autonomy] Queue heartbeat stale: no progress for ` +
+        `~${Math.round(announce.queueStale.staleForMs / 60_000)}m`
+    );
+    await notifyQueueStale(channelId, announce.queueStale);
+  }
+}
+
+/**
+ * Assemble the fleet-health input from a decided sweep. The reducer snapshot is
+ * left untouched (it carries only the facts the reducer needs); the extra facts
+ * the watchdog wants — a review task's *running* status, a run's PR URL, the
+ * queued tasks' labels, the live queue heartbeat — are read here.
+ */
+function gatherFleetHealthInput(
+  snapshot: AutonomySnapshot,
+  actions: Action[]
+): FleetHealthInput {
+  const slotFree = snapshot.slots.occupied < snapshot.slots.total;
+  const reason = owedReviewReason(snapshot.slots);
+
+  // A run owed a review with no review *container running* — no task at all, or
+  // one queued but starved of a slot. A running review is progressing, not
+  // stalled, and shows under Running instead. Sourced straight from the DB
+  // (not the GitHub-gated `awaitingReview` set) so a transient PR-read failure
+  // that drops a run for one sweep can't reset its 30-min stall timer: any
+  // reviewing/gated run with a PR, no stored/posted verdict, and no running
+  // review is owed. A spent-repairs conflict has its own needs-you card
+  // (classifyGated), so it is excluded here rather than double-surfaced.
+  const owedReviews = db
+    .select()
+    .from(runs)
+    .all()
+    .filter(
+      (r) =>
+        (r.status === "reviewing" || r.status === "gated") &&
+        r.pullRequestNumber != null &&
+        r.reviewResult == null &&
+        r.reviewVerdict == null &&
+        r.integrationCount < MAX_INTEGRATION_ATTEMPTS &&
+        runningReviewTaskId(db, r.id) == null
+    )
+    .map((r) => ({
+      runId: r.id,
+      issueRef: r.githubIssue,
+      prNumber: r.pullRequestNumber!,
+      prUrl: r.pullRequestUrl,
+      reason,
+    }));
+
+  // Queued dispatchable tasks observed while a slot sits free — the exact
+  // incident shape (#115): a review left queued while a slot is open.
+  const queuedWhileSlotFree = slotFree ? gatherQueuedDispatchable() : [];
+
+  const pickupPausedWithFreeSlot =
+    slotFree &&
+    actions.some((a) => a.type === "pausePickup" && a.reason === "no-slots");
+
+  return {
+    nowMs: snapshot.now.getTime(),
+    owedReviews,
+    slots: { total: snapshot.slots.total, occupied: snapshot.slots.occupied },
+    pickupPausedWithFreeSlot,
+    queuedWhileSlotFree,
+    queueRunning: isQueueRunning(),
+    queueLastProgressMs: getQueueLastProgress()?.getTime() ?? null,
+  };
+}
+
+/** Why an owed review can't run right now, for the stalled-review card body. */
+function owedReviewReason(slots: AutonomySnapshot["slots"]): string {
+  if (slots.occupied < slots.total) {
+    return "a slot is free but the review is not dispatching";
+  }
+  if (slots.occupants.some((o) => o.startsWith("interactive:"))) {
+    return `a slot is held by an interactive session (${slots.occupied}/${slots.total} busy)`;
+  }
+  return `all ${slots.total} slot${slots.total === 1 ? "" : "s"} busy`;
+}
+
+/** Queued tasks that reserve a slot (interactive/triage, or a pass under a live
+ * run) with a label for the wedged-pickup card. Mirrors the reservation filter
+ * gatherSnapshot uses for claim accounting (issue #124), so a dead-run orphan is
+ * never counted as dispatchable work. */
+function gatherQueuedDispatchable(): QueuedTaskObservation[] {
+  const liveRunIds = new Set(
+    db
+      .select({ id: runs.id, status: runs.status })
+      .from(runs)
+      .all()
+      .filter((r) => ACTIVE_RUN_STATUS_SET.has(r.status))
+      .map((r) => r.id)
+  );
+  const queued = db
+    .select({
+      id: tasks.id,
+      kind: tasks.kind,
+      runId: tasks.runId,
+      title: tasks.title,
+      githubIssue: tasks.githubIssue,
+    })
+    .from(tasks)
+    .where(eq(tasks.status, "queued"))
+    .all();
+  return queuedTasksReservingSlots(queued, liveRunIds).map((t) => ({
+    taskId: t.id,
+    label: `${t.kind}: ${t.githubIssue ?? t.title}`,
+  }));
 }
 
 /**

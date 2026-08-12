@@ -12,6 +12,13 @@ import {
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let pollCount = 0;
+/** Last time a poll cycle ran to completion — the queue-loop heartbeat (issue
+ * #126). Stamped at the END of each cycle so that a cycle which hangs on an
+ * un-returned await (the #125 daemon-freeze shape) never advances it, letting
+ * the sweep's watchdog see the loop stop making progress. A healthy idle loop
+ * still finishes its cycle every 2s, so an idle fleet keeps this fresh and never
+ * false-alarms. Null while the loop is stopped (boot/shutdown, not a wedge). */
+let lastProgressAt: Date | null = null;
 
 /** Track which tasks are currently being processed to prevent double-dispatch */
 const processingTasks = new Set<string>();
@@ -42,6 +49,8 @@ export function startQueue(): void {
   if (pollInterval) return;
 
   console.log("[orchestrator] Queue started, polling every 2s");
+  // Seed the heartbeat so a freshly-started loop is not immediately "stale".
+  lastProgressAt = new Date();
 
   pollInterval = setInterval(async () => {
     try {
@@ -167,6 +176,11 @@ export function startQueue(): void {
           scanForDevServer(taskId, entry.container).catch(console.error);
         }
       }
+
+      // Heartbeat: the cycle completed. Reached only on a clean pass, so a hung
+      // await (a wedged dispatch path) or a run of consecutive poll errors leaves
+      // it stale for the watchdog; an idle-but-alive loop stamps it every 2s.
+      lastProgressAt = new Date();
     } catch (err) {
       console.error("[orchestrator] Queue poll error:", err);
     }
@@ -178,8 +192,16 @@ export function stopQueue(): void {
     clearInterval(pollInterval);
     pollInterval = null;
   }
+  lastProgressAt = null;
 }
 
 export function isQueueRunning(): boolean {
   return pollInterval !== null;
+}
+
+/** The queue poll loop's last completed-cycle time, or null when the loop is
+ * stopped or has not finished its first tick — the heartbeat the fleet-health
+ * watchdog reads (issue #126). See {@link lastProgressAt}. */
+export function getQueueLastProgress(): Date | null {
+  return lastProgressAt;
 }
