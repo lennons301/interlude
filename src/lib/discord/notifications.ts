@@ -1,5 +1,6 @@
 import { Client, EmbedBuilder, TextChannel, type Message } from "discord.js";
 import { DIGEST_TITLE_PREFIX, type DigestContent } from "../fleet/digest";
+import type { OwedReviewStall, PickupWedge, QueueStale } from "../fleet/health";
 
 // The bot client is set once, in the instrumentation/orchestrator context where
 // the Discord bot connects (client.ts -> setBotClient). But notification helpers
@@ -228,6 +229,106 @@ export async function notifySlotsSaturated(
     await sendWithRetry(channel as TextChannel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send saturation notification:`, err);
+  }
+}
+
+/** Whole minutes for a fleet-health ping body — durations are minutes-to-hours
+ * and shown at sweep granularity, so seconds would be noise. */
+function minutesOf(ms: number): number {
+  return Math.max(1, Math.round(ms / 60_000));
+}
+
+/**
+ * Fleet-health watchdog (issue #126): a run's review pass has not started for
+ * too long — the PR sits owed a review while the slot is busy. Sent once per
+ * stall (the sweep tracks the announcement; this just delivers). No-op when no
+ * fleet channel is configured: the sweep already logged it.
+ */
+export async function notifyOwedReviewStalled(
+  channelId: string | null,
+  payload: OwedReviewStall
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await botClient.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Owed review stalled — PR #${payload.prNumber}`)
+      .setDescription(
+        `${payload.issueRef} (PR #${payload.prNumber}) has been owed a review for ` +
+          `~${minutesOf(payload.stalledForMs)}m without it starting: ${payload.reason}.\n\n` +
+          `Nothing merges until the review lands — free a slot or check the queue.`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel as TextChannel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send owed-review-stalled notification:`, err);
+  }
+}
+
+/**
+ * Fleet-health watchdog (issue #126): pickup is wedged — a slot is free but
+ * claimable work is not dispatching. Sent once per wedge. No-op when no fleet
+ * channel is configured: the sweep already logged it.
+ */
+export async function notifyPickupWedged(
+  channelId: string | null,
+  payload: PickupWedge
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await botClient.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Pickup wedged — a slot is free but nothing dispatches`)
+      .setDescription(
+        `${payload.detail} for ~${minutesOf(payload.wedgedForMs)}m. The queue is not ` +
+          `picking up claimable work — check the orchestrator (a hung Docker daemon ` +
+          `or a stuck poll loop).`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel as TextChannel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send pickup-wedged notification:`, err);
+  }
+}
+
+/**
+ * Fleet-health watchdog (issue #126): the queue poll loop, which should tick
+ * every 2s, has stopped making progress. Sent once per stall. No-op when no
+ * fleet channel is configured: the sweep already logged it.
+ */
+export async function notifyQueueStale(
+  channelId: string | null,
+  payload: QueueStale
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await botClient.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Queue loop stalled`)
+      .setDescription(
+        `The queue poll loop hasn't made progress for ~${minutesOf(payload.staleForMs)}m ` +
+          `(it should tick every 2s). Dispatch is likely wedged — check the ` +
+          `orchestrator process.`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel as TextChannel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send queue-stale notification:`, err);
   }
 }
 
