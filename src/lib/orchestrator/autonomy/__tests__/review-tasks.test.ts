@@ -7,6 +7,7 @@ import {
   inFlightReviewTaskId,
   queuedTasksReservingSlots,
   reapDeadReviewTasks,
+  runningReviewTaskId,
   type Db,
 } from "../review-tasks";
 import { decideNext, passOutcomeSnapshot, type AutonomySnapshot } from "../decide";
@@ -175,6 +176,31 @@ describe("review-pass in-flight + ungraceful-death reaping (issue #95)", () => {
       (a) => a.type === "startReview"
     );
     expect(startReviews).toEqual([]);
+  });
+});
+
+describe("runningReviewTaskId — only a running review counts as started (issue #126)", () => {
+  let db: Db;
+  beforeEach(() => {
+    db = createTestDb().db;
+    seedReviewingRun(db);
+  });
+
+  it("returns null when the review is only queued (owed, not started)", () => {
+    const taskId = seedReviewTask(db, { status: "queued", containerName: null });
+    // A queued review still blocks a duplicate...
+    expect(inFlightReviewTaskId(db, "run-1")).toBe(taskId);
+    // ...but has not started, so the owed-review watchdog sees no running pass.
+    expect(runningReviewTaskId(db, "run-1")).toBeNull();
+  });
+
+  it("returns the task id once the review is running", () => {
+    const taskId = seedReviewTask(db, { status: "running" });
+    expect(runningReviewTaskId(db, "run-1")).toBe(taskId);
+  });
+
+  it("returns null when the run has no review task at all", () => {
+    expect(runningReviewTaskId(db, "run-1")).toBeNull();
   });
 });
 

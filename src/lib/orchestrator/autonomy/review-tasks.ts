@@ -65,6 +65,29 @@ export function inFlightReviewTaskId(db: Db, runId: string): string | null {
   return task?.id ?? null;
 }
 
+/**
+ * The id of a review task for this run whose container is actually *running*,
+ * or null. Distinct from {@link inFlightReviewTaskId}, which also counts a
+ * `queued` task: a review that is merely queued has not started — it may be
+ * starved of a slot — so the owed-review-stalled watchdog (issue #126) treats
+ * it as not-yet-started work, while inFlightReviewTaskId still (correctly)
+ * blocks a duplicate from being queued.
+ */
+export function runningReviewTaskId(db: Db, runId: string): string | null {
+  const task = db
+    .select({ id: tasks.id })
+    .from(tasks)
+    .where(
+      and(
+        eq(tasks.runId, runId),
+        eq(tasks.kind, "review"),
+        eq(tasks.status, "running")
+      )
+    )
+    .get();
+  return task?.id ?? null;
+}
+
 /** A task some path terminalized — returned so the caller can drop its
  * in-memory session entry and remove any container it held. */
 export interface TerminalizedTask {
