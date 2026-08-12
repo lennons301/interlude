@@ -104,3 +104,16 @@ export const MAX_UNPARSEABLE_REVIEW_RETRIES = 1;
  * until local midnight; interactive tasks (no run row) are exempt by
  * construction. */
 export const DAILY_AUTONOMOUS_CAP_USD = 500;
+
+/**
+ * Fleet-health watchdog thresholds (issue #126). Defaults chosen in the parent
+ * design (#115): a review owed for over half an hour, a pickup wedged for a few
+ * minutes, and a queue poll loop (which should tick every 2s) gone quiet for a
+ * couple of minutes are each surfaced as a needs-you card + one Discord ping.
+ * Env-overridable in minutes via config.ts (`OWED_REVIEW_STALL_MINUTES`,
+ * `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES`); kept here as ms so
+ * the leaf that holds every tunable also holds these.
+ */
+export const DEFAULT_OWED_REVIEW_STALL_MS = 30 * 60_000;
+export const DEFAULT_PICKUP_WEDGED_MS = 3 * 60_000;
+export const DEFAULT_QUEUE_HEARTBEAT_STALE_MS = 2 * 60_000;

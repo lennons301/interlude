@@ -1,7 +1,20 @@
 import {
   ALLOWED_TICKET_EFFORTS,
   DEFAULT_ATTEMPT_BUDGET_USD,
+  DEFAULT_OWED_REVIEW_STALL_MS,
+  DEFAULT_PICKUP_WEDGED_MS,
+  DEFAULT_QUEUE_HEARTBEAT_STALE_MS,
 } from "./orchestrator/autonomy/budgets";
+import type { FleetHealthThresholds } from "./fleet/health";
+
+/** Parse an env value expressed in minutes into ms, falling back to a default.
+ * A blank, non-numeric or non-positive value keeps the default (a mistyped
+ * threshold must never silently become 0 and alarm every sweep). */
+function minutesEnvMs(raw: string | undefined, defaultMs: number): number {
+  if (raw == null || raw === "") return defaultMs;
+  const mins = parseFloat(raw);
+  return Number.isFinite(mins) && mins > 0 ? mins * 60_000 : defaultMs;
+}
 
 /**
  * Validate an `AGENT_EFFORT*` env value against the CLI's level set. Effort,
@@ -100,6 +113,10 @@ export interface AppConfig {
   autonomyAllowedAuthors: string[];
   /** Discord channel for fleet-level events (e.g. slot saturation). Null = log only */
   discordFleetChannelId: string | null;
+  /** Thresholds for the fleet-health watchdog (issue #126), in ms. Overridable
+   * in minutes via OWED_REVIEW_STALL_MINUTES / PICKUP_WEDGED_MINUTES /
+   * QUEUE_HEARTBEAT_STALE_MINUTES. */
+  fleetHealthThresholds: FleetHealthThresholds;
 }
 
 let _config: AppConfig | null = null;
@@ -158,6 +175,20 @@ export function getConfig(): AppConfig {
       .map((a) => a.trim())
       .filter(Boolean),
     discordFleetChannelId: process.env.DISCORD_FLEET_CHANNEL_ID ?? null,
+    fleetHealthThresholds: {
+      owedReviewStallMs: minutesEnvMs(
+        process.env.OWED_REVIEW_STALL_MINUTES,
+        DEFAULT_OWED_REVIEW_STALL_MS
+      ),
+      pickupWedgedMs: minutesEnvMs(
+        process.env.PICKUP_WEDGED_MINUTES,
+        DEFAULT_PICKUP_WEDGED_MS
+      ),
+      heartbeatStaleMs: minutesEnvMs(
+        process.env.QUEUE_HEARTBEAT_STALE_MINUTES,
+        DEFAULT_QUEUE_HEARTBEAT_STALE_MS
+      ),
+    },
   };
 
   return _config;
