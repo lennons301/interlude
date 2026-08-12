@@ -10,6 +10,9 @@ const CAUSE_LABEL: Record<NeedsYouItem["cause"], string> = {
   exhausted: "exhausted",
   cap: "cap pause",
   preflight: "preflight",
+  "review-stalled": "review stalled",
+  "pickup-wedged": "pickup wedged",
+  "queue-stale": "queue stalled",
 };
 
 const CAUSE_TONE: Record<NeedsYouItem["cause"], "amber" | "red"> = {
@@ -20,6 +23,9 @@ const CAUSE_TONE: Record<NeedsYouItem["cause"], "amber" | "red"> = {
   exhausted: "red",
   cap: "red",
   preflight: "amber",
+  "review-stalled": "red",
+  "pickup-wedged": "red",
+  "queue-stale": "red",
 };
 
 /** Quiet confirmation sub-line: "No active runs · queue empty · autonomy on" */

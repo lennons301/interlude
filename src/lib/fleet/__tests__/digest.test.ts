@@ -35,6 +35,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     tasks: [],
     backlogByProject: null,
     needsHumanByProject: null,
+    fleetHealth: null,
     ...overrides,
   };
 }

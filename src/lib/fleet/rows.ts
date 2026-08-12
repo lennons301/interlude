@@ -11,6 +11,7 @@ import { getConfig } from "../config";
 import { getCapacity } from "../orchestrator/capacity";
 import { getBacklogByProject } from "./backlog";
 import { getNeedsHumanByProject } from "./needs-human";
+import { getFleetHealth } from "./health-store";
 import { DAILY_AUTONOMOUS_CAP_USD } from "../orchestrator/autonomy/budgets";
 import {
   buildFleetView,
@@ -118,6 +119,9 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     // Open `ready-for-human` refs from the same sweep; null (never observed)
     // leaves the exhausted needs-you cards on the 7-day window alone.
     needsHumanByProject: getNeedsHumanByProject(),
+    // The sweep's last fleet-health evaluation (issue #126); null until the
+    // first sweep, which renders no health cards.
+    fleetHealth: getFleetHealth(),
   };
 }
 
