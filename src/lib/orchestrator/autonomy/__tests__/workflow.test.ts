@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  buildCiRepairPrompt,
   buildImplementPrompt,
   buildReviewPrompt,
   resolveWorkflowSkill,
@@ -25,6 +26,45 @@ describe("resolveWorkflowSkill", () => {
   it("rejects skill names that are not simple slugs", () => {
     expect(() => resolveWorkflowSkill("../../etc/passwd")).toThrow();
     expect(() => resolveWorkflowSkill("tdd/../secret")).toThrow();
+  });
+});
+
+describe("buildCiRepairPrompt (issue #130)", () => {
+  const CI_TICKET = {
+    repo: "acme/widgets",
+    issueNumber: 7,
+    prNumber: 41,
+    headSha: "d9d06fc",
+    failedChecks: [
+      { name: "Type Check", url: "https://github.com/acme/widgets/runs/1" },
+      { name: "vercel", url: null },
+    ],
+  };
+
+  it("names the failing checks and where to read them", () => {
+    const prompt = buildCiRepairPrompt(CI_TICKET);
+
+    expect(prompt).toContain("Type Check");
+    expect(prompt).toContain("https://github.com/acme/widgets/runs/1");
+    // A check GitHub gave no URL for is still named, without a dangling link
+    expect(prompt).toContain("vercel");
+    expect(prompt).not.toContain("null");
+  });
+
+  it("scopes the pass to the failure: no feature work, no silencing", () => {
+    const prompt = buildCiRepairPrompt(CI_TICKET);
+
+    expect(prompt).toContain("PR #41");
+    expect(prompt).toContain("d9d06fc");
+    expect(prompt).toContain("agent/issue-7");
+    expect(prompt).toMatch(/do no feature work/i);
+    // The failure must be fixed, not hidden — the reason this pass is bounded
+    expect(prompt).toMatch(/never rebase/i);
+    expect(prompt).toMatch(/skip|delete|disable/i);
+  });
+
+  it("routes a failure the repo cannot fix to a human instead of guessing", () => {
+    expect(buildCiRepairPrompt(CI_TICKET)).toContain("BLOCKED:");
   });
 });
 
