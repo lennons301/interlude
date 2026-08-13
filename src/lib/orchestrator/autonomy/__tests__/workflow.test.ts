@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildImplementPrompt,
+  buildRepairPrompt,
   buildReviewPrompt,
   resolveWorkflowSkill,
 } from "../workflow";
@@ -164,6 +165,138 @@ describe("buildImplementPrompt", () => {
       expect(prompt.indexOf("--- END TICKET ---")).toBeLessThan(
         prompt.indexOf("--- PRIOR ATTEMPTS")
       );
+    });
+  });
+
+  // Issue #132: a fix-up cycle can regenerate a migration for the same reason a
+  // conflict resolution can, so the implement pass carries the timestamp rule.
+  describe("migration timestamp rule (issue #132)", () => {
+    const prompt = buildImplementPrompt({ ...TICKET, workflow: { source: "default" } });
+
+    it("says renaming is safe but re-stamping `when` is not", () => {
+      expect(prompt).toContain("Renaming a migration file is safe");
+      expect(prompt).toContain("`when` in `_journal.json` is not");
+      expect(prompt).toContain("preserve the original timestamp");
+    });
+
+    it("bounds the preserved timestamp on both sides", () => {
+      expect(prompt).toContain("GREATER than the migration that now precedes it");
+      expect(prompt).toContain("EQUAL to whatever any database already recorded");
+    });
+
+    it("names the quieter failure: a too-early stamp is skipped forever", () => {
+      expect(prompt).toContain("skip that migration forever");
+    });
+
+    it("warns that unmerged does not mean unapplied", () => {
+      expect(prompt).toContain('"It is unmerged" does not mean "it is unapplied"');
+      expect(prompt).toContain("preview deploy");
+    });
+
+    it("places the rule in the pass's own instructions, before the ticket data", () => {
+      expect(prompt.indexOf("Renaming a migration file is safe")).toBeLessThan(
+        prompt.indexOf("--- TICKET")
+      );
+    });
+  });
+});
+
+describe("buildRepairPrompt", () => {
+  const REPAIR = {
+    repo: "acme/widgets",
+    issueNumber: 7,
+    prNumber: 41,
+    baseBranch: "main",
+  };
+
+  it("merges the base branch — never rebase, never force-push", () => {
+    const prompt = buildRepairPrompt(REPAIR);
+    expect(prompt).toContain("git merge origin/main");
+    expect(prompt).toContain("Never rebase and never force-push");
+    expect(prompt).toContain("agent/issue-7");
+  });
+
+  // Issue #132: "tests and lint" let PR #180 finish with a failing Type Check
+  // job, because CI runs lint / type check / test / build separately.
+  describe("verification is the repo's real check set (issue #132)", () => {
+    const prompt = buildRepairPrompt(REPAIR);
+
+    it("no longer stops at tests and lint", () => {
+      expect(prompt).not.toContain("Run the repo's tests and lint after resolving");
+      expect(prompt).toContain("not just tests and lint");
+    });
+
+    it("points at where the repo's checks are declared", () => {
+      expect(prompt).toContain(".github/workflows/");
+      expect(prompt).toContain("package.json");
+      expect(prompt).toContain("every check that gates a merge");
+    });
+
+    it("calls out type check and build as separate jobs", () => {
+      expect(prompt).toContain("tsc --noEmit");
+      expect(prompt).toContain("next build");
+      expect(prompt).toMatch(/separate from lint and test/i);
+    });
+
+    it("requires an unrunnable check to be reported, not skipped silently", () => {
+      expect(prompt).toContain("cannot be run in this container");
+      expect(prompt).toContain("Never finish silently");
+    });
+  });
+
+  // Issue #132: PR #180's breakage came from a merge with no textual conflict —
+  // main added a caller of a prop the PR had deleted.
+  describe("semantic breakage is in scope (issue #132)", () => {
+    const prompt = buildRepairPrompt(REPAIR);
+
+    it("states that a conflict-marker-free merge is not the bar", () => {
+      expect(prompt).toContain("conflict-marker-free merge is NOT the bar");
+      expect(prompt).toContain("compiles and passes the repo's checks");
+    });
+
+    it("gives the removed-prop / changed-signature shape as the example", () => {
+      expect(prompt).toContain("a new caller of a prop your PR removed");
+      expect(prompt).toContain("a signature your PR changed");
+      expect(prompt).toContain("an export your PR renamed");
+    });
+
+    it("forbids unrelated work without forbidding the follow-on fixes", () => {
+      expect(prompt).toContain("fix it in this same pass");
+      expect(prompt).toContain("follow-on fixes the merged code needs");
+      expect(prompt).toContain("No new features, no refactors, no unrelated files");
+      // The old wording read as "do not look outside the conflict markers".
+      expect(prompt).not.toContain("Do not change anything the conflict did not require");
+    });
+  });
+
+  // Issue #132, from moontide#43: regenerating a migration to resolve a
+  // numbering collision re-runs DDL on every database that already applied it.
+  describe("migration rule (issue #132)", () => {
+    const prompt = buildRepairPrompt(REPAIR);
+
+    it("says renaming is safe but re-stamping `when` is not", () => {
+      expect(prompt).toContain("Renaming a migration file is safe");
+      expect(prompt).toContain("`when` in `_journal.json` is not");
+      expect(prompt).toContain("preserve the original timestamp");
+    });
+
+    it("bounds the preserved timestamp on both sides", () => {
+      expect(prompt).toContain("GREATER than the migration that now precedes it");
+      expect(prompt).toContain("EQUAL to whatever any database already recorded");
+    });
+
+    it("names the quieter failure: a too-early stamp is skipped forever", () => {
+      expect(prompt).toContain("skip that migration forever");
+    });
+
+    it("prefers idempotent DDL as defence in depth", () => {
+      expect(prompt).toContain("ADD COLUMN IF NOT EXISTS");
+      expect(prompt).toContain("CREATE INDEX IF NOT EXISTS");
+    });
+
+    it("warns that unmerged does not mean unapplied", () => {
+      expect(prompt).toContain('"It is unmerged" does not mean "it is unapplied"');
+      expect(prompt).toContain("preview deploy");
     });
   });
 });
