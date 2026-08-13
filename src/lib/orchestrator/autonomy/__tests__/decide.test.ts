@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
+import { observeCheckRollup } from "../checks";
 import { ADVISORY_TRIAGE_LABELS, ARMING_LABEL } from "../ticket";
 import { parseTriageExit } from "../triage";
 import {
@@ -86,7 +87,7 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     checksFailingPrs: [],
     resolvedCheckFailures: [],
     maxCiRepairAttempts: 1,
-    checkFailureConfirmations: 2,
+    minCheckFailureSweeps: 2,
     announcedCheckEscalations: [],
     queuedRepairCount: 0,
     announcedIntegrationEscalations: [],
@@ -126,7 +127,7 @@ function makeChecksFailingPr(overrides: Partial<ChecksFailingPr> = {}): ChecksFa
     armed: false,
     failedChecks: FAILED_CHECKS,
     // Confirmed by default: two consecutive sweeps saw this head's rollup red
-    sweepsObservedFailing: 2,
+    sweepsFailing: 2,
     ciRepairsMade: 0,
     hasRepairTask: false,
     ...overrides,
@@ -1751,12 +1752,29 @@ describe("decideNext — parked PRs with failing checks (issue #130)", () => {
     ]);
   });
 
+  it("does nothing while the rollup is still pending", () => {
+    // Pending is treated like unknown mergeability. Wired through the fold the
+    // sweep uses, so this asserts the real path: a pending reading produces no
+    // observation, so no entry reaches the reducer and the PR is re-polled.
+    const entry = observeCheckRollup({ headSha: "d9d06fc", sweepsFailing: 1 }, "d9d06fc", "pending");
+    expect(entry).toBeNull();
+
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        checksFailingPrs: entry ? [makeChecksFailingPr()] : [],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
   it("spends nothing on a single-sweep failure", () => {
     // The flake guard: one red reading is re-polled, not acted on.
     const actions = decideNext(
       makeSnapshot({
         candidates: [],
-        checksFailingPrs: [makeChecksFailingPr({ sweepsObservedFailing: 1 })],
+        checksFailingPrs: [makeChecksFailingPr({ sweepsFailing: 1 })],
       })
     );
 
@@ -1829,7 +1847,7 @@ describe("decideNext — parked PRs with failing checks (issue #130)", () => {
         candidates: [],
         maxCiRepairAttempts: 1,
         checksFailingPrs: [
-          makeChecksFailingPr({ ciRepairsMade: 1, sweepsObservedFailing: 1 }),
+          makeChecksFailingPr({ ciRepairsMade: 1, sweepsFailing: 1 }),
         ],
       })
     );

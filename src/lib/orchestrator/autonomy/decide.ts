@@ -238,7 +238,7 @@ export interface ChecksFailingPr {
   failedChecks: FailedCheck[];
   /** Consecutive sweeps this head's rollup has been observed failing — a
    * single-sweep failure is a suspected flake and spends nothing */
-  sweepsObservedFailing: number;
+  sweepsFailing: number;
   /** CI-repair passes already run this episode (runs.ciRepairCount) */
   ciRepairsMade: number;
   /** A repair task already queued or running for this run (idempotency) */
@@ -326,7 +326,7 @@ export interface AutonomySnapshot {
   maxCiRepairAttempts: number;
   /** Consecutive sweeps a rollup must be seen failing before a repair is spent
    * — the flake guard, so an infrastructure blip does not burn the one repair */
-  checkFailureConfirmations: number;
+  minCheckFailureSweeps: number;
   /** Run IDs whose failing-checks escalation was already announced (once) */
   announcedCheckEscalations: string[];
   /** Repair tasks sitting in the queue — each has a slot spoken for */
@@ -612,7 +612,7 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     checksFailingPrs: [],
     resolvedCheckFailures: [],
     maxCiRepairAttempts: 0,
-    checkFailureConfirmations: 0,
+    minCheckFailureSweeps: 0,
     announcedCheckEscalations: [],
     queuedRepairCount: 0,
     announcedIntegrationEscalations: [],
@@ -759,7 +759,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     if (blockedRunIds.has(failing.runId)) continue;
     // The flake guard: a red rollup must be seen on consecutive sweeps before
     // it costs anything at all — neither a repair nor an escalation.
-    if (failing.sweepsObservedFailing < snapshot.checkFailureConfirmations) continue;
+    if (failing.sweepsFailing < snapshot.minCheckFailureSweeps) continue;
     if (failing.ciRepairsMade >= snapshot.maxCiRepairAttempts) {
       if (!snapshot.announcedCheckEscalations.includes(failing.runId)) {
         actions.push({

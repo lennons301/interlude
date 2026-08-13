@@ -137,10 +137,12 @@ export interface PrCheckRollup {
   failed: FailedCheck[];
 }
 
-/** CheckRun conclusions that are a settled failure. SKIPPED and NEUTRAL are
- * not failures (the motivating PR had a deliberately skipped Build job);
- * ACTION_REQUIRED is — it blocks the merge and only a human clears it, so it
- * belongs on the path that ends in escalation. */
+/** CheckRun conclusions that are a settled failure — GitHub's own rollup
+ * semantics, which is what actually blocks the merge. SKIPPED and NEUTRAL are
+ * not failures (the motivating PR had a deliberately skipped Build job).
+ * ACTION_REQUIRED and CANCELLED are: both leave a required check unsatisfied, so
+ * the PR is stuck, and a bounded repair that cannot fix it ends in escalation to
+ * a human — which is the right destination for a check only a human can clear. */
 const FAILING_CONCLUSIONS = new Set([
   "FAILURE",
   "TIMED_OUT",
