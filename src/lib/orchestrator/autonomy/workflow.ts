@@ -13,6 +13,7 @@
 
 import path from "path";
 import fs from "fs";
+import type { FailedCheck } from "../../github/pull-requests";
 import type { WorkflowSelection } from "./ticket";
 
 const WORKFLOWS_DIR = path.join(process.cwd(), "docs", "agents", "workflows");
@@ -351,6 +352,67 @@ export function buildRepairPrompt(ticket: RepairTicket): string {
     ...MIGRATION_TIMESTAMP_RULE,
     `- Prefer idempotent DDL (\`ADD COLUMN IF NOT EXISTS\`, ` +
       `\`CREATE INDEX IF NOT EXISTS\`) as defence in depth.`,
+  ].join("\n");
+}
+
+export interface CiRepairTicket {
+  /** "owner/repo" */
+  repo: string;
+  issueNumber: number;
+  prNumber: number;
+  /** The head whose rollup failed — the commit this pass starts from */
+  headSha: string;
+  failedChecks: FailedCheck[];
+}
+
+/**
+ * The full prompt for a CI-repair pass (issue #130). The PR merges cleanly but
+ * its checks are red — classically because the default branch grew a caller of
+ * an API this PR changed, so git merged happily and the type check did not. This
+ * pass makes the checks pass and nothing else, after which the normal gate +
+ * review machinery re-runs on the push.
+ *
+ * The named checks come from GitHub, not from the container, and are framed as
+ * the observation they are: what to fix, not instructions to follow.
+ */
+export function buildCiRepairPrompt(ticket: CiRepairTicket): string {
+  const checkLines = ticket.failedChecks.map((check) =>
+    check.url ? `- ${check.name} — ${check.url}` : `- ${check.name}`
+  );
+  return [
+    `You are an autonomous CI-repair pass for PR #${ticket.prNumber} of ` +
+      `${ticket.repo}, which implements GitHub issue #${ticket.issueNumber}. ` +
+      `No human is watching this run and follow-up questions are not possible.`,
+    ``,
+    `The PR merges cleanly but its checks are failing at head ${ticket.headSha}. ` +
+      `Your only job is to make them pass — do no feature work.`,
+    ``,
+    `Checks failing on that commit:`,
+    ...checkLines,
+    ``,
+    `Operating rules:`,
+    `- You are on the PR branch agent/issue-${ticket.issueNumber}, already ` +
+      `checked out at /workspace/repo with its existing commits.`,
+    `- Reproduce each failure locally with the repo's own commands (its test, ` +
+      `lint, typecheck and build scripts) rather than inferring the cause from ` +
+      `the check's name. Read the linked logs if you need them.`,
+    `- A clean merge that breaks compilation usually means the default branch ` +
+      `gained a caller of something this PR changed or deleted. Fix the real ` +
+      `incompatibility — update the caller, or restore the API — keeping this ` +
+      `PR's intent intact.`,
+    `- Fix causes, never silence symptoms: do not skip, delete or disable ` +
+      `tests, do not weaken types (no new \`any\`, no \`@ts-ignore\`), and do ` +
+      `not relax lint or CI config to make a failure go away.`,
+    `- Change only what the failures require. Add no features and touch no ` +
+      `files the fix does not need.`,
+    `- Never rebase and never force-push: the PR's commits and its review ` +
+      `history must be preserved. Commit with a descriptive message.`,
+    `- Leave the repo's own checks green before you finish.`,
+    `- If a failure cannot be fixed from this repository — an expired ` +
+      `credential, a provider outage, a check that needs a human to approve it ` +
+      `— do not guess or work around it. End your final message with ` +
+      `\`BLOCKED: <the question>\` and a human will answer.`,
+    `- End with a short summary of what was failing and what you changed.`,
   ].join("\n");
 }
 

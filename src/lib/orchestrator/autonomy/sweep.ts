@@ -26,11 +26,13 @@ import {
   labelPr,
   listChangedFiles,
   postReviewAsReviewer,
+  type FailedCheck,
 } from "../../github/pull-requests";
 import { parseRepoFromGitUrl } from "../../github/repo";
 import {
   notifyAttemptsExhausted,
   notifyDailyCapReached,
+  notifyChecksEscalation,
   notifyGateConfigError,
   notifyIntegrationEscalation,
   notifyOwedReviewStalled,
@@ -41,6 +43,7 @@ import {
   notifyTriageRecommendation,
 } from "../../discord/notifications";
 import { recordBacklog } from "../../fleet/backlog";
+import { getFailingChecks, recordFailingChecks } from "../../fleet/failing-checks";
 import { isContainerRunning, removeContainerByName } from "../../docker/container-manager";
 import { recordNeedsHuman } from "../../fleet/needs-human";
 import {
@@ -61,14 +64,17 @@ import {
   type AutonomySnapshot,
   type AwaitingReview,
   type CandidateIssue,
+  type ChecksFailingPr,
   type ConflictingPr,
   type PendingGateEvaluation,
   type PendingTriage,
   type PendingVerdict,
+  type ResolvedCheckFailure,
   type ResolvedConflict,
   type SettledPr,
   type TriageCandidate,
 } from "./decide";
+import { observeCheckRollup, type CheckObservation } from "./checks";
 import {
   ESTATE_GATES_PATH,
   HUMAN_SIGNOFF_LABEL,
@@ -87,6 +93,7 @@ import {
   rawModelDirective,
 } from "./ticket";
 import {
+  buildCiRepairPrompt,
   buildImplementPrompt,
   buildRepairPrompt,
   buildReviewPrompt,
@@ -101,8 +108,10 @@ import {
   runningReviewTaskId,
 } from "./review-tasks";
 import {
+  CHECK_FAILURE_CONFIRMATION_SWEEPS,
   DAILY_AUTONOMOUS_CAP_USD,
   MAX_ATTEMPTS,
+  MAX_CI_REPAIR_ATTEMPTS,
   MAX_INTEGRATION_ATTEMPTS,
   MAX_INTERRUPTIONS_PER_TICKET,
   MAX_REVIEW_CYCLES_PER_ATTEMPT,
@@ -153,6 +162,14 @@ const announcedReviewPostFailures = new Set<string>();
 // been told about — once per stall, not once per sweep. Pruned as runs leave
 // the conflicting set (repaired, resolved by a human, or the PR closed).
 const announcedIntegrationEscalations = new Set<string>();
+// Same, for a parked PR whose checks stayed red through its repairs (#130).
+const announcedCheckEscalations = new Set<string>();
+// Consecutive sweeps each parked run's head has been observed with a failing
+// check rollup (issue #130), keyed by run id. A red rollup must be seen twice
+// before it spends the run's one CI repair — see checks.ts for the fold. Pruned
+// as runs leave the reviewable set; a redeploy re-arms the confirmation, which
+// costs one extra sweep and never a wrong repair.
+const checkObservations = new Map<string, CheckObservation>();
 // Triage-task IDs whose unparseable exit the owner has already been told
 // about — once per failure, not once per sweep. Pruned as issues leave the
 // needs-triage set.
@@ -615,6 +632,13 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     announcedVerdictErrors: [...announcedVerdictErrors],
     conflictingPrs: reviewState.conflictingPrs,
     resolvedConflicts: reviewState.resolvedConflicts,
+    checksFailingPrs: reviewState.checksFailingPrs,
+    resolvedCheckFailures: reviewState.resolvedCheckFailures,
+    maxCiRepairAttempts: MAX_CI_REPAIR_ATTEMPTS,
+    minCheckFailureSweeps: CHECK_FAILURE_CONFIRMATION_SWEEPS,
+    announcedCheckEscalations: [...announcedCheckEscalations],
+    // Both repair kinds queue a `repair` task, so this reserves the slot for a
+    // conflict repair and a CI repair alike.
     queuedRepairCount: queuedTasks.filter((t) => t.kind === "repair").length,
     announcedIntegrationEscalations: [...announcedIntegrationEscalations],
     triageCandidates,
@@ -637,12 +661,24 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
   settledPrs: SettledPr[];
   conflictingPrs: ConflictingPr[];
   resolvedConflicts: ResolvedConflict[];
+  checksFailingPrs: ChecksFailingPr[];
+  resolvedCheckFailures: ResolvedCheckFailure[];
 }> {
   const awaitingReview: AwaitingReview[] = [];
   const pendingVerdicts: PendingVerdict[] = [];
   const settledPrs: SettledPr[] = [];
   const conflictingPrs: ConflictingPr[] = [];
   const resolvedConflicts: ResolvedConflict[] = [];
+  const checksFailingPrs: ChecksFailingPr[] = [];
+  const resolvedCheckFailures: ResolvedCheckFailure[] = [];
+  // What the dashboard and digest render as the failing-checks needs-you card
+  // (issue #130): the names observed red this sweep, recorded wholesale below so
+  // a rollup that went green simply stops appearing. A run whose PR read failed
+  // carries its last observation forward instead of blinking the card off for a
+  // sweep — the same rule the needs-human store states: a failed read is not
+  // evidence of a changed state.
+  const previousFailingChecks = getFailingChecks();
+  const failingChecksByRun: Record<string, string[]> = {};
 
   const reviewable = allRuns.filter(
     (r) =>
@@ -666,13 +702,27 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
       announcedIntegrationEscalations.delete(runId);
     }
   }
+  // The failing-checks escalation (issue #130) prunes the same way, and so does
+  // the confirmation memory: a run being CI-repaired is `implementing`, so both
+  // are dropped as soon as the repair starts and the next episode is judged on
+  // its own observations.
+  for (const runId of [...announcedCheckEscalations]) {
+    if (!reviewable.some((r) => r.id === runId)) announcedCheckEscalations.delete(runId);
+  }
+  for (const runId of [...checkObservations.keys()]) {
+    if (!reviewable.some((r) => r.id === runId)) checkObservations.delete(runId);
+  }
 
   for (const run of reviewable) {
     const ref = parseIssueRef(run.githubIssue);
     if (!ref) continue;
 
     const pr = await getPrState(ref.owner, ref.repo, run.pullRequestNumber!);
-    if (!pr) continue;
+    if (!pr) {
+      const stillRed = previousFailingChecks?.[run.id];
+      if (stillRed) failingChecksByRun[run.id] = stillRed;
+      continue;
+    }
 
     if (!pr.open) {
       settledPrs.push({
@@ -691,25 +741,13 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
     // cannot merge is wasted work, and the repair re-triggers review on its
     // push. `unknown` mergeability is re-polled next sweep, never a verdict.
     if (pr.mergeable === "conflicting") {
-      const hasRepairTask =
-        db
-          .select({ id: tasks.id })
-          .from(tasks)
-          .where(
-            and(
-              eq(tasks.runId, run.id),
-              eq(tasks.kind, "repair"),
-              inArray(tasks.status, ["queued", "running"])
-            )
-          )
-          .get() != null;
       conflictingPrs.push({
         runId: run.id,
         issueRef: run.githubIssue,
         prNumber: run.pullRequestNumber!,
         armed,
         integrationsMade: run.integrationCount,
-        hasRepairTask,
+        hasRepairTask: hasInFlightRepairTask(run.id),
       });
       continue;
     }
@@ -718,6 +756,51 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
     // proceeds through the normal pipeline below.
     if (pr.mergeable === "mergeable" && run.integrationCount > 0) {
       resolvedConflicts.push({ runId: run.id, issueRef: run.githubIssue });
+    }
+
+    // CI health (issue #130): a parked PR that merges cleanly but whose checks
+    // are red is the same invisible stall as a conflict — an armed run's
+    // auto-merge silently never fires, a gated one waits on a human nobody told.
+    // Only a *textually mergeable* PR is judged here: while mergeability is
+    // still `unknown` the PR may yet turn out to conflict, and a CI repair pass
+    // (whose prompt says the merge is clean and forbids merging anything in)
+    // would be the wrong pass — so an unknown reads as no observation and is
+    // re-polled, exactly like a pending rollup.
+    let checksFailing: ChecksFailingPr | null = null;
+    if (pr.mergeable === "mergeable") {
+      const observation = observeCheckRollup(
+        checkObservations.get(run.id),
+        pr.headSha,
+        pr.checks.state
+      );
+      if (observation) {
+        checkObservations.set(run.id, observation);
+        failingChecksByRun[run.id] = pr.checks.failed.map((check) => check.name);
+        // A review pass already in flight holds this run's container slot; let it
+        // finish and repair CI on a later sweep rather than double-booking the
+        // run (the review pipeline below is a no-op while its task is in flight).
+        if (inFlightReviewTaskId(db, run.id) == null) {
+          checksFailing = {
+            runId: run.id,
+            issueRef: run.githubIssue,
+            prNumber: run.pullRequestNumber!,
+            headSha: pr.headSha,
+            armed,
+            failedChecks: pr.checks.failed,
+            sweepsFailing: observation.sweepsFailing,
+            ciRepairsMade: run.ciRepairCount,
+            hasRepairTask: hasInFlightRepairTask(run.id),
+          };
+        }
+      } else {
+        checkObservations.delete(run.id);
+        // A green rollup ends the CI-repair episode, so a later unrelated failure
+        // earns its own repair instead of escalating on a spent count. Only
+        // `passing` counts: pending and unreadable rollups are not evidence.
+        if (pr.checks.state === "passing" && run.ciRepairCount > 0) {
+          resolvedCheckFailures.push({ runId: run.id, issueRef: run.githubIssue });
+        }
+      }
     }
 
     if (run.reviewResult != null) {
@@ -731,6 +814,18 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
         reviewCycleCount: run.reviewCycleCount,
         reviewUnparseableCount: run.reviewUnparseableCount,
       });
+      continue;
+    }
+
+    // Red checks are repaired here, after a finished verdict has been posted but
+    // ahead of any *new* review work (issue #130): the reducer must never queue a
+    // review pass against a branch that does not compile, and the repair's push
+    // re-triggers gate evaluation and review once it is green. Sitting below the
+    // stored-verdict branch is what keeps a reviewer's finished verdict from
+    // being thrown away — the repair clears the run's review state, so a verdict
+    // caught mid-flight would otherwise never reach GitHub.
+    if (checksFailing) {
+      checksFailingPrs.push(checksFailing);
       continue;
     }
 
@@ -752,7 +847,17 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
     });
   }
 
-  return { awaitingReview, pendingVerdicts, settledPrs, conflictingPrs, resolvedConflicts };
+  recordFailingChecks(failingChecksByRun);
+
+  return {
+    awaitingReview,
+    pendingVerdicts,
+    settledPrs,
+    conflictingPrs,
+    resolvedConflicts,
+    checksFailingPrs,
+    resolvedCheckFailures,
+  };
 }
 
 /**
@@ -763,6 +868,33 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
  * pass (a repaired run has both an old, completed implement task and a live
  * repair task).
  */
+/** The failing checks as prose for a log line, issue comment or Discord ping. */
+function checkNames(failedChecks: FailedCheck[]): string {
+  return failedChecks.map((check) => check.name).join(", ");
+}
+
+/**
+ * Whether a repair pass is already queued or running for this run — the
+ * idempotency anchor both repair kinds share (a merge-conflict repair, issue
+ * #54, and a CI repair, issue #130), so neither can queue a second one while the
+ * first is in flight.
+ */
+function hasInFlightRepairTask(runId: string): boolean {
+  return (
+    db
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.runId, runId),
+          eq(tasks.kind, "repair"),
+          inArray(tasks.status, ["queued", "running"])
+        )
+      )
+      .get() != null
+  );
+}
+
 function workingTaskOf(runId: string) {
   return db
     .select({ id: tasks.id, status: tasks.status, containerStatus: tasks.containerStatus })
@@ -1072,6 +1204,15 @@ async function executeActions(actions: Action[]): Promise<void> {
         break;
       case "clearIntegration":
         executeClearIntegration(action);
+        break;
+      case "repairChecks":
+        await executeRepairChecks(action);
+        break;
+      case "escalateChecks":
+        await executeEscalateChecks(action);
+        break;
+      case "clearCiRepair":
+        executeClearCiRepair(action);
         break;
       case "exhaust":
         await executeExhaust(action);
@@ -1742,6 +1883,78 @@ async function executeFinalizeRun(
 }
 
 /**
+ * Queue a repair pass for a parked run and hand the run over to it — the shape
+ * both repair kinds share: the merge-conflict repair (issue #54) and the CI
+ * repair (issue #130). Returns the new task's id, or null when the action was
+ * stale (only a parked run still awaiting its merge is repaired), so the caller
+ * can skip its logging and issue comment.
+ *
+ * The task is inserted first: it is the idempotency anchor (a queued/running
+ * repair task keeps the next sweep from double-queuing) and startTask flips the
+ * run to `implementing` when it begins, so even if the run update never lands the
+ * repair still runs and recovers the state. The PR is carried on the task so the
+ * pass pushes to the existing PR (no second draft) and parks awaiting review
+ * rather than completing outright. The run then leaves the reviewable set so the
+ * review pipeline does not also act on it, with its review state cleared because
+ * the push re-runs gate evaluation and review. `counted` is the repair's own
+ * bound — never an attempt.
+ */
+async function queueRepairPass(args: {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  issueNumber: number;
+  title: (prNumber: number) => string;
+  prompt: (run: typeof runs.$inferSelect) => string;
+  /** Why the parked container is being let go, shown on the task */
+  releaseNote: string;
+  /** The repair counter this pass spends (integrationCount or ciRepairCount) */
+  counted: (run: typeof runs.$inferSelect) => Partial<typeof runs.$inferInsert>;
+}): Promise<{ taskId: string; prNumber: number } | null> {
+  const run = db.select().from(runs).where(eq(runs.id, args.runId)).get();
+  // A stale action: only a parked run still awaiting its merge is repaired.
+  if (!run || (run.status !== "reviewing" && run.status !== "gated")) return null;
+  if (run.pullRequestNumber == null) return null;
+
+  // The repair runs in a fresh container; release any container still parked
+  // on this run (a reviewing run's implement pass) so nothing double-books.
+  await releaseImplementContainer(args.runId, args.releaseNote);
+
+  const now = new Date();
+  const taskId = newId();
+  db.insert(tasks)
+    .values({
+      id: taskId,
+      projectId: run.projectId,
+      title: args.title(run.pullRequestNumber),
+      description: args.prompt(run),
+      status: "queued",
+      kind: "repair",
+      runId: run.id,
+      githubIssue: args.issueRef,
+      branch: `agent/issue-${args.issueNumber}`,
+      pullRequestNumber: run.pullRequestNumber,
+      pullRequestUrl: run.pullRequestUrl,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .run();
+
+  db.update(runs)
+    .set({
+      status: "implementing",
+      ...args.counted(run),
+      reviewVerdict: null,
+      reviewResult: null,
+      gateCategories: [],
+    })
+    .where(eq(runs.id, args.runId))
+    .run();
+
+  return { taskId, prNumber: run.pullRequestNumber };
+}
+
+/**
  * A CONFLICTING parked PR (issue #54): queue an integration-repair pass in a
  * fresh container and move the run back to `implementing` so the normal gate
  * evaluation and review pass re-run once the repair pushes. The repair counts
@@ -1753,15 +1966,9 @@ async function executeRepairPr(action: Extract<Action, { type: "repairPr" }>): P
   const ref = parseIssueRef(action.issueRef);
   if (!ref) return;
 
-  const run = db.select().from(runs).where(eq(runs.id, action.runId)).get();
-  // A stale action: only a parked run still awaiting its merge is repaired.
-  if (!run || (run.status !== "reviewing" && run.status !== "gated")) return;
-  if (run.pullRequestNumber == null) return;
-
   // The default branch to merge in. A read failure skips this sweep with no
   // mutation; the PR is still CONFLICTING next sweep and the repair retries.
   let baseBranch: string;
-  let prompt: string;
   try {
     const octokit = await getOctokit();
     const { data: repo } = await octokit.rest.repos.get({
@@ -1769,66 +1976,34 @@ async function executeRepairPr(action: Extract<Action, { type: "repairPr" }>): P
       repo: ref.repo,
     });
     baseBranch = repo.default_branch;
-    prompt = buildRepairPrompt({
-      repo: `${ref.owner}/${ref.repo}`,
-      issueNumber: ref.number,
-      prNumber: run.pullRequestNumber,
-      baseBranch,
-    });
   } catch (err) {
     console.error(`[autonomy] Could not prepare repair for ${action.issueRef}:`, err);
     return;
   }
 
-  // The repair runs in a fresh container; release any container still parked
-  // on this run (a reviewing run's implement pass) so nothing double-books.
-  await releaseImplementContainer(action.runId, "Repairing a merge conflict in a fresh container.");
-
-  // Queue the repair task first: it is the idempotency anchor (a queued/running
-  // repair task keeps the next sweep from double-queuing) and startTask flips
-  // the run to `implementing` when it begins, so even if the run update below
-  // never lands the repair still runs and recovers the state. The PR is carried
-  // on the task so the pass pushes to the existing PR (no second draft) and
-  // parks awaiting review rather than completing outright.
-  const now = new Date();
-  const taskId = newId();
-  db.insert(tasks)
-    .values({
-      id: taskId,
-      projectId: run.projectId,
-      title: `Integration repair — PR #${run.pullRequestNumber}`,
-      description: prompt,
-      status: "queued",
-      kind: "repair",
-      runId: run.id,
-      githubIssue: action.issueRef,
-      branch: `agent/issue-${ref.number}`,
-      pullRequestNumber: run.pullRequestNumber,
-      pullRequestUrl: run.pullRequestUrl,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .run();
-
-  // Move the run out of the reviewable set now so the review pipeline does not
-  // also act on it, and count the repair (never an attempt).
-  db.update(runs)
-    .set({
-      status: "implementing",
-      integrationCount: run.integrationCount + 1,
-      reviewVerdict: null,
-      reviewResult: null,
-      gateCategories: [],
-    })
-    .where(eq(runs.id, action.runId))
-    .run();
+  const queued = await queueRepairPass({
+    runId: action.runId,
+    issueRef: action.issueRef,
+    issueNumber: ref.number,
+    title: (prNumber) => `Integration repair — PR #${prNumber}`,
+    prompt: (run) =>
+      buildRepairPrompt({
+        repo: `${ref.owner}/${ref.repo}`,
+        issueNumber: ref.number,
+        prNumber: run.pullRequestNumber!,
+        baseBranch,
+      }),
+    releaseNote: "Repairing a merge conflict in a fresh container.",
+    counted: (run) => ({ integrationCount: run.integrationCount + 1 }),
+  });
+  if (!queued) return;
 
   console.log(
-    `[autonomy] Repair ${action.integration} for ${action.issueRef} PR #${run.pullRequestNumber} -> task ${taskId}`
+    `[autonomy] Repair ${action.integration} for ${action.issueRef} PR #${queued.prNumber} -> task ${queued.taskId}`
   );
   await commentOnIssue(
     action.issueRef,
-    `PR #${run.pullRequestNumber} conflicts with the default branch — starting an ` +
+    `PR #${queued.prNumber} conflicts with the default branch — starting an ` +
       `integration repair (merge \`${baseBranch}\` in, no rebase or force-push). ` +
       `Gate evaluation and review re-run on the push.`
   );
@@ -1898,6 +2073,133 @@ function executeClearIntegration(
     .run();
   announcedIntegrationEscalations.delete(action.runId);
   console.log(`[autonomy] ${action.issueRef} is mergeable again — integration counter reset`);
+}
+
+/**
+ * A parked PR whose checks are red (issue #130): queue a CI-repair pass in a
+ * fresh container and move the run back to `implementing` so gate evaluation and
+ * review re-run once the repair pushes. Mirrors executeRepairPr — the same task
+ * kind (`repair`, so it inherits the modest repair budget and the turn manager's
+ * implement-shaped handling), the same idempotency (the status flip takes the run
+ * out of the reviewable set), the same freedom from attempt accounting — but it
+ * counts against ciRepairCount, its own bound. Runs whether or not auto-merge is
+ * armed: a gated PR with red checks is equally stuck, and the human still owns
+ * the merge.
+ */
+async function executeRepairChecks(
+  action: Extract<Action, { type: "repairChecks" }>
+): Promise<void> {
+  const ref = parseIssueRef(action.issueRef);
+  if (!ref) return;
+
+  const queued = await queueRepairPass({
+    runId: action.runId,
+    issueRef: action.issueRef,
+    issueNumber: ref.number,
+    title: (prNumber) => `CI repair — PR #${prNumber}`,
+    prompt: (run) =>
+      buildCiRepairPrompt({
+        repo: `${ref.owner}/${ref.repo}`,
+        issueNumber: ref.number,
+        prNumber: run.pullRequestNumber!,
+        headSha: action.headSha,
+        failedChecks: action.failedChecks,
+      }),
+    releaseNote: "Repairing failing checks in a fresh container.",
+    counted: (run) => ({ ciRepairCount: run.ciRepairCount + 1 }),
+  });
+  if (!queued) return;
+
+  const names = checkNames(action.failedChecks);
+  // The confirmation is named in the log: the settled choice (2026-08-12) is to
+  // confirm a red rollup over consecutive sweeps rather than re-run the failed
+  // check, so the record says which guard let this repair through.
+  console.log(
+    `[autonomy] CI repair ${action.ciRepair} for ${action.issueRef} PR #${queued.prNumber} ` +
+      `(${names}) after ${CHECK_FAILURE_CONFIRMATION_SWEEPS} failing sweeps, no check re-runs ` +
+      `-> task ${queued.taskId}`
+  );
+  await commentOnIssue(
+    action.issueRef,
+    `PR #${queued.prNumber} merges cleanly but its checks are failing at ` +
+      `\`${action.headSha.slice(0, 7)}\` (${names}) — starting a CI repair pass. ` +
+      `Gate evaluation and review re-run on the push.`
+  );
+}
+
+/**
+ * A PR whose checks are still red after its CI repairs are spent (issue #130):
+ * hand it to a human. Disarm (if armed), label the PR `human-signoff`, land the
+ * run in `gated`, release its container, and swap the issue's `ready-for-agent`
+ * for `ready-for-human` so the tracker queue shows it too — the loop has given
+ * up on this red build, and the ticket must not read as still-in-progress.
+ * Mutations run before the announcement, so a failure leaves it un-announced and
+ * the next sweep retries the whole step.
+ */
+async function executeEscalateChecks(
+  action: Extract<Action, { type: "escalateChecks" }>
+): Promise<void> {
+  const ref = parseIssueRef(action.issueRef);
+  if (!ref) return;
+
+  if (action.armed) {
+    const disarmed = await disarmAutoMerge(ref.owner, ref.repo, action.prNumber);
+    if (!disarmed) return;
+  }
+  const labeled = await labelPr(ref.owner, ref.repo, action.prNumber, HUMAN_SIGNOFF_LABEL);
+  if (!labeled) return;
+  // Ready-for-human added before ready-for-agent is removed, so the issue is
+  // never in neither queue (the same ordering as exhaustion).
+  if (!(await addLabelToIssue(action.issueRef, READY_FOR_HUMAN_LABEL))) return;
+  if (!(await removeLabelFromIssue(action.issueRef, ARMING_LABEL))) return;
+
+  db.update(runs)
+    .set({ status: "gated", reviewResult: null })
+    .where(eq(runs.id, action.runId))
+    .run();
+  await releaseImplementContainer(
+    action.runId,
+    "Failing checks need a human — releasing container."
+  );
+
+  announcedCheckEscalations.add(action.runId);
+  const repairs =
+    action.ciRepairsMade === 1
+      ? "an automated repair"
+      : `${action.ciRepairsMade} automated repairs`;
+  const names = checkNames(action.failedChecks);
+  console.error(
+    `[autonomy] CI repair exhausted for ${action.issueRef} PR #${action.prNumber} ` +
+      `(${names}) — needs a human`
+  );
+  await commentOnIssue(
+    action.issueRef,
+    `PR #${action.prNumber} still has failing checks after ${repairs}: ${names}. ` +
+      `Auto-merge is disarmed, the PR is labelled \`${HUMAN_SIGNOFF_LABEL}\` and the ` +
+      `ticket is back to \`${READY_FOR_HUMAN_LABEL}\` — please take this one.`
+  );
+  await notifyChecksEscalation(getConfig().discordFleetChannelId, {
+    issueRef: action.issueRef,
+    prNumber: action.prNumber,
+    ciRepairsMade: action.ciRepairsMade,
+    failedChecks: action.failedChecks.map((check) => check.name),
+  });
+}
+
+/**
+ * A repaired PR whose rollup is green again: close out the episode by resetting
+ * the run's CI-repair counter, so a later, unrelated failure is judged on its
+ * own repairs rather than a stale count.
+ */
+function executeClearCiRepair(
+  action: Extract<Action, { type: "clearCiRepair" }>
+): void {
+  db.update(runs)
+    .set({ ciRepairCount: 0 })
+    .where(eq(runs.id, action.runId))
+    .run();
+  announcedCheckEscalations.delete(action.runId);
+  console.log(`[autonomy] ${action.issueRef} checks are green again — CI repair counter reset`);
 }
 
 /**

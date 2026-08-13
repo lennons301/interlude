@@ -60,6 +60,22 @@ export const DEFAULT_REPAIR_BUDGET_USD = 5;
  * again) and, unlike an attempt, never charged against MAX_ATTEMPTS. */
 export const MAX_INTEGRATION_ATTEMPTS = 1;
 
+/** CI-repair passes run to make a red check rollup green before a parked PR
+ * escalates to a human (issue #130). Bounded at one for the same reason as
+ * MAX_INTEGRATION_ATTEMPTS: one pass either fixes the failing checks or the
+ * failure needs human judgement, which an identical second pass would not
+ * supply. Counted per episode on runs.ciRepairCount (reset once the rollup is
+ * observed green) and, unlike an attempt, never charged against MAX_ATTEMPTS.
+ * Deliberately its own counter rather than integrationCount's: a conflict
+ * repair followed by an unrelated CI failure must not escalate on a spent count. */
+export const MAX_CI_REPAIR_ATTEMPTS = 1;
+
+/** Consecutive sweeps a rollup must be observed failing before a CI repair is
+ * spent (issue #130). The motivating failure sat beside an infrastructure-shaped
+ * one, and the ticket gets exactly one repair — so one sweep (30s) of latency
+ * buys confirmation that the red is real. See checks.ts for the fold. */
+export const CHECK_FAILURE_CONFIRMATION_SWEEPS = 2;
+
 /** Per-exec turn cap for a triage pass: read the issue against the repo's
  * context, judge, exit. Not raisable — triage reads semi-trusted input and
  * has no directive surface. */

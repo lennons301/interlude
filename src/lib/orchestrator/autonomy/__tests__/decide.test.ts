@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
+import { observeCheckRollup } from "../checks";
 import { ADVISORY_TRIAGE_LABELS, ARMING_LABEL } from "../ticket";
 import { parseTriageExit } from "../triage";
 import {
@@ -9,6 +10,7 @@ import {
   type AutonomySnapshot,
   type AwaitingReview,
   type CandidateIssue,
+  type ChecksFailingPr,
   type ConflictingPr,
   type PassOutcome,
   type PendingGateEvaluation,
@@ -82,6 +84,11 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     announcedVerdictErrors: [],
     conflictingPrs: [],
     resolvedConflicts: [],
+    checksFailingPrs: [],
+    resolvedCheckFailures: [],
+    maxCiRepairAttempts: 1,
+    minCheckFailureSweeps: 2,
+    announcedCheckEscalations: [],
     queuedRepairCount: 0,
     announcedIntegrationEscalations: [],
     triageCandidates: [],
@@ -101,6 +108,27 @@ function makeConflictingPr(
     prNumber: 41,
     armed: false,
     integrationsMade: 0,
+    hasRepairTask: false,
+    ...overrides,
+  };
+}
+
+const FAILED_CHECKS = [
+  { name: "Type Check", url: "https://github.com/acme/widgets/runs/1" },
+  { name: "vercel", url: "https://vercel.com/acme/widgets/dep-1" },
+];
+
+function makeChecksFailingPr(overrides: Partial<ChecksFailingPr> = {}): ChecksFailingPr {
+  return {
+    runId: "run-1",
+    issueRef: "acme/widgets#7",
+    prNumber: 41,
+    headSha: "d9d06fc",
+    armed: false,
+    failedChecks: FAILED_CHECKS,
+    // Confirmed by default: two consecutive sweeps saw this head's rollup red
+    sweepsFailing: 2,
+    ciRepairsMade: 0,
     hasRepairTask: false,
     ...overrides,
   };
@@ -1697,6 +1725,174 @@ describe("decideNext — CONFLICTING parked PRs (issue #54)", () => {
       })
     );
 
+    expect(actions.some((a) => a.type === "claimIssue")).toBe(false);
+    expect(actions).toContainEqual({ type: "pausePickup", reason: "no-slots" });
+  });
+});
+
+describe("decideNext — parked PRs with failing checks (issue #130)", () => {
+  it("repairs a rollup confirmed failing over two sweeps", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        checksFailingPrs: [makeChecksFailingPr()],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "repairChecks",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        headSha: "d9d06fc",
+        failedChecks: FAILED_CHECKS,
+        ciRepair: 1,
+      },
+    ]);
+  });
+
+  it("does nothing while the rollup is still pending", () => {
+    // Pending is treated like unknown mergeability. Wired through the fold the
+    // sweep uses, so this asserts the real path: a pending reading produces no
+    // observation, so no entry reaches the reducer and the PR is re-polled.
+    const entry = observeCheckRollup({ headSha: "d9d06fc", sweepsFailing: 1 }, "d9d06fc", "pending");
+    expect(entry).toBeNull();
+
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        checksFailingPrs: entry ? [makeChecksFailingPr()] : [],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("spends nothing on a single-sweep failure", () => {
+    // The flake guard: one red reading is re-polled, not acted on.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        checksFailingPrs: [makeChecksFailingPr({ sweepsFailing: 1 })],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("does not queue a second CI repair while one is in flight", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        checksFailingPrs: [makeChecksFailingPr({ hasRepairTask: true })],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("repairs a gated PR too, not only an armed one", () => {
+    // Settled decision: a human-signoff PR with red checks is equally stuck,
+    // so the loop makes the branch green regardless of arming.
+    const gated = decideNext(
+      makeSnapshot({ candidates: [], checksFailingPrs: [makeChecksFailingPr({ armed: false })] })
+    );
+    const armed = decideNext(
+      makeSnapshot({ candidates: [], checksFailingPrs: [makeChecksFailingPr({ armed: true })] })
+    );
+
+    expect(gated.map((a) => a.type)).toEqual(["repairChecks"]);
+    expect(armed.map((a) => a.type)).toEqual(["repairChecks"]);
+  });
+
+  it("escalates once the CI repairs are spent and the checks still fail", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxCiRepairAttempts: 1,
+        checksFailingPrs: [makeChecksFailingPr({ armed: true, ciRepairsMade: 1 })],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "escalateChecks",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        armed: true,
+        ciRepairsMade: 1,
+        failedChecks: FAILED_CHECKS,
+      },
+    ]);
+  });
+
+  it("announces the check escalation only once", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxCiRepairAttempts: 1,
+        checksFailingPrs: [makeChecksFailingPr({ ciRepairsMade: 1 })],
+        announcedCheckEscalations: ["run-1"],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("does not escalate on an unconfirmed failure even with repairs spent", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxCiRepairAttempts: 1,
+        checksFailingPrs: [
+          makeChecksFailingPr({ ciRepairsMade: 1, sweepsFailing: 1 }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("resets the counter when the rollup goes green again", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        resolvedCheckFailures: [{ runId: "run-1", issueRef: "acme/widgets#7" }],
+      })
+    );
+
+    expect(actions).toEqual([
+      { type: "clearCiRepair", runId: "run-1", issueRef: "acme/widgets#7" },
+    ]);
+  });
+
+  it("never repairs or escalates a run that just blocked on a question", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [makePass({ finalMessage: "BLOCKED: which database?" })],
+        maxCiRepairAttempts: 1,
+        checksFailingPrs: [makeChecksFailingPr({ ciRepairsMade: 1 })],
+      })
+    );
+
+    expect(actions.some((a) => a.type === "repairChecks")).toBe(false);
+    expect(actions.some((a) => a.type === "escalateChecks")).toBe(false);
+    expect(actions.some((a) => a.type === "escalate")).toBe(true);
+  });
+
+  it("a CI repair queued this sweep reserves its slot away from new claims", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 1, occupied: 0, occupants: [] },
+        checksFailingPrs: [makeChecksFailingPr()],
+        candidates: [makeCandidate()],
+      })
+    );
+
+    expect(actions.some((a) => a.type === "repairChecks")).toBe(true);
     expect(actions.some((a) => a.type === "claimIssue")).toBe(false);
     expect(actions).toContainEqual({ type: "pausePickup", reason: "no-slots" });
   });

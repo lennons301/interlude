@@ -9,6 +9,7 @@
  * returned here.
  */
 
+import type { FailedCheck } from "../../github/pull-requests";
 import { detectBlockedQuestion } from "./blocked";
 import { evaluateGates, type GateConfig } from "./gates";
 import {
@@ -213,6 +214,48 @@ export interface ResolvedConflict {
   issueRef: string;
 }
 
+/**
+ * A parked run (reviewing/gated) whose open, textually-mergeable PR has a red
+ * check rollup (issue #130) — the same invisible-stall shape as ConflictingPr,
+ * for the case where the merge is clean but the branch does not build. Left
+ * alone an armed run's auto-merge silently never fires and a gated one waits on
+ * a human nobody told, so the reducer drives a bounded CI repair or, once those
+ * are spent, escalates. A rollup that is pending or unreadable never reaches
+ * this list, and a red one only does so once confirmed over consecutive sweeps.
+ */
+export interface ChecksFailingPr {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  prNumber: number;
+  /** The head the rollup was read at — carried so the repair prompt and any
+   * later stale-review handling (#131) name the commit that actually failed */
+  headSha: string;
+  /** Auto-merge armed (reviewing) vs gated — the executor disarms on escalate.
+   * Either way the repair runs: a gated PR with red checks is equally stuck. */
+  armed: boolean;
+  /** The failed checks, for the repair prompt and the needs-you card */
+  failedChecks: FailedCheck[];
+  /** Consecutive sweeps this head's rollup has been observed failing — a
+   * single-sweep failure is a suspected flake and spends nothing */
+  sweepsFailing: number;
+  /** CI-repair passes already run this episode (runs.ciRepairCount) */
+  ciRepairsMade: number;
+  /** A repair task already queued or running for this run (idempotency) */
+  hasRepairTask: boolean;
+}
+
+/**
+ * A parked run whose rollup is green again after a CI-repair episode
+ * (ciRepairCount > 0): the episode is over, so its counter resets and a later
+ * unrelated failure earns its own repair rather than escalating on a spent one.
+ */
+export interface ResolvedCheckFailure {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+}
+
 export interface AutonomySnapshot {
   now: Date;
   autonomyEnabledGlobal: boolean;
@@ -273,6 +316,19 @@ export interface AutonomySnapshot {
   conflictingPrs: ConflictingPr[];
   /** Parked runs whose PR is mergeable again after a conflict — counter reset */
   resolvedConflicts: ResolvedConflict[];
+  /** Parked runs whose mergeable PR has a red check rollup (issue #130) —
+   * CI-repaired or escalated */
+  checksFailingPrs: ChecksFailingPr[];
+  /** Parked runs whose rollup is green again after a CI repair — counter reset */
+  resolvedCheckFailures: ResolvedCheckFailure[];
+  /** CI-repair passes allowed per failure episode before a still-red parked PR
+   * escalates to a human */
+  maxCiRepairAttempts: number;
+  /** Consecutive sweeps a rollup must be seen failing before a repair is spent
+   * — the flake guard, so an infrastructure blip does not burn the one repair */
+  minCheckFailureSweeps: number;
+  /** Run IDs whose failing-checks escalation was already announced (once) */
+  announcedCheckEscalations: string[];
   /** Repair tasks sitting in the queue — each has a slot spoken for */
   queuedRepairCount: number;
   /** Run IDs whose conflict escalation was already announced (once per stall) */
@@ -411,6 +467,33 @@ export type Action =
     }
   | { type: "clearIntegration"; runId: string; issueRef: string }
   | {
+      // A parked PR whose checks are red (issue #130): a bounded CI-repair pass
+      // in a fresh container reads the failing checks, fixes them and pushes.
+      type: "repairChecks";
+      runId: string;
+      issueRef: string;
+      prNumber: number;
+      /** The head whose rollup failed — named in the prompt so the pass fixes
+       * the failure that was actually observed */
+      headSha: string;
+      failedChecks: FailedCheck[];
+      /** Which CI repair this is (ciRepairsMade + 1) — for the issue comment */
+      ciRepair: number;
+    }
+  | {
+      type: "escalateChecks";
+      runId: string;
+      issueRef: string;
+      prNumber: number;
+      /** Auto-merge armed — disarm before handing to a human */
+      armed: boolean;
+      /** CI repairs spent before giving up — named in the escalation */
+      ciRepairsMade: number;
+      /** The checks still failing — named on the issue and in Discord */
+      failedChecks: FailedCheck[];
+    }
+  | { type: "clearCiRepair"; runId: string; issueRef: string }
+  | {
       type: "escalate";
       reason: "blocked";
       runId: string;
@@ -526,6 +609,11 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     announcedVerdictErrors: [],
     conflictingPrs: [],
     resolvedConflicts: [],
+    checksFailingPrs: [],
+    resolvedCheckFailures: [],
+    maxCiRepairAttempts: 0,
+    minCheckFailureSweeps: 0,
+    announcedCheckEscalations: [],
     queuedRepairCount: 0,
     announcedIntegrationEscalations: [],
     triageCandidates: [],
@@ -652,6 +740,60 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     if (blockedRunIds.has(resolved.runId)) continue;
     actions.push({
       type: "clearIntegration",
+      runId: resolved.runId,
+      issueRef: resolved.issueRef,
+    });
+  }
+
+  // Parked PRs whose checks are red (issue #130) — the merge is textually clean
+  // but the branch does not build, which is how a changed API meets a new caller
+  // added on the default branch. Same skeleton as the conflict branch above: a
+  // bounded CI-repair pass in a fresh container, never charged against
+  // MAX_ATTEMPTS, then escalation to a human once the repairs are spent. The
+  // repair runs whether or not auto-merge is armed — a gated PR with red checks
+  // is equally stuck (settled decision), and the human still owns the merge.
+  // Ordering against #131: CI is repaired first and any re-review happens once
+  // the rollup is green, so no review pass is ever queued against a branch that
+  // does not compile.
+  for (const failing of snapshot.checksFailingPrs) {
+    if (blockedRunIds.has(failing.runId)) continue;
+    // The flake guard: a red rollup must be seen on consecutive sweeps before
+    // it costs anything at all — neither a repair nor an escalation.
+    if (failing.sweepsFailing < snapshot.minCheckFailureSweeps) continue;
+    if (failing.ciRepairsMade >= snapshot.maxCiRepairAttempts) {
+      if (!snapshot.announcedCheckEscalations.includes(failing.runId)) {
+        actions.push({
+          type: "escalateChecks",
+          runId: failing.runId,
+          issueRef: failing.issueRef,
+          prNumber: failing.prNumber,
+          armed: failing.armed,
+          ciRepairsMade: failing.ciRepairsMade,
+          failedChecks: failing.failedChecks,
+        });
+      }
+      continue;
+    }
+    if (failing.hasRepairTask) continue; // a repair is already in flight
+    // Both repair kinds queue a `repair` task, so they share the slot count.
+    repairsQueuedThisSweep++;
+    actions.push({
+      type: "repairChecks",
+      runId: failing.runId,
+      issueRef: failing.issueRef,
+      prNumber: failing.prNumber,
+      headSha: failing.headSha,
+      failedChecks: failing.failedChecks,
+      ciRepair: failing.ciRepairsMade + 1,
+    });
+  }
+
+  // A parked run whose rollup is green again after a CI-repair episode: reset
+  // the counter so a later, unrelated failure earns its own repair.
+  for (const resolved of snapshot.resolvedCheckFailures) {
+    if (blockedRunIds.has(resolved.runId)) continue;
+    actions.push({
+      type: "clearCiRepair",
       runId: resolved.runId,
       issueRef: resolved.issueRef,
     });

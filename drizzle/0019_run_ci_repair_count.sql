@@ -1,0 +1,1 @@
+ALTER TABLE `runs` ADD `ci_repair_count` integer DEFAULT 0 NOT NULL;

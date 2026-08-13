@@ -9,6 +9,7 @@ import {
   DEFAULT_REVIEW_BUDGET_USD,
   DEFAULT_TRIAGE_BUDGET_USD,
   MAX_ATTEMPTS,
+  MAX_CI_REPAIR_ATTEMPTS,
   MAX_INTEGRATION_ATTEMPTS,
 } from "../orchestrator/autonomy/budgets";
 import { formatDuration, type FleetHealthSignals } from "./health";
@@ -42,6 +43,12 @@ export interface FleetRows {
    * heartbeat and occupied-vs-total slots), so it arrives via a store like the
    * backlog/needs-human observations. */
   fleetHealth: FleetHealthSignals | null;
+  /** Failing check names keyed by run id (issue #130) — the sweep's last rollup
+   * observation for each parked PR it saw red. A run absent from the map has no
+   * red rollup right now, so a spent CI-repair counter alone never raises a card
+   * (the window after a repair pushes, while the new head's checks run, is not a
+   * stall). null = never observed (no sweep yet), which renders no such cards. */
+  failingChecksByRun: Record<string, string[]> | null;
 }
 
 export interface FleetProjectRow {
@@ -79,6 +86,10 @@ export interface FleetRunRow {
    * at or past MAX_INTEGRATION_ATTEMPTS is a stalled merge conflict, not a
    * plain sign-off */
   integrationCount: number;
+  /** CI repairs spent this failing-checks episode (issue #130): a gated run at
+   * or past MAX_CI_REPAIR_ATTEMPTS whose rollup is still observed red is a
+   * stalled red build, not a plain sign-off */
+  ciRepairCount: number;
   /** The last verdict the orchestrator POSTED to GitHub for this run. A gated
    * run is a sign-off wait only once this is `approve` (the PR is one human
    * merge away) or `escalate` (the reviewer handed it to a human); until then
@@ -139,6 +150,8 @@ export type NeedsYouCause =
   /** A run whose review verdict couldn't be read — parked for a human (#90) */
   | "unparseable"
   | "conflict"
+  /** A parked PR whose checks stayed red through its repairs (issue #130) */
+  | "checks-failing"
   | "exhausted"
   | "cap"
   | "preflight"
@@ -262,6 +275,22 @@ function repoTicket(issueRef: string): string {
 
 const RECENT_WINDOW_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** "an automated repair" / "2 automated repairs" — a spent repair bound reads
+ * as prose in the card, not as a bare number. */
+function repairCount(n: number): string {
+  return n === 1 ? "an automated repair" : `${n} automated repairs`;
+}
+
+/** How many failing checks a needs-you body names before summarising the rest —
+ * one broken build matrix must not push a card off the screen. */
+const NAMED_CHECK_LIMIT = 3;
+
+function namedChecks(checks: string[]): string {
+  const rest = checks.length - NAMED_CHECK_LIMIT;
+  const shown = checks.slice(0, NAMED_CHECK_LIMIT).join(", ");
+  return rest > 0 ? `${shown} +${rest} more` : shown;
+}
 
 /** A task in one of these statuses is finished — it can hold no slot and
  * renders as no active session, regardless of a stale container_status. */
@@ -403,11 +432,19 @@ export function buildFleetView(rows: FleetRows): FleetView {
   // still in flight.
   type GatedDisposition =
     | { kind: "conflict" }
+    | { kind: "checks-failing"; checks: string[] }
     | { kind: "unparseable" }
     | { kind: "signoff"; verdict: "approve" | "escalate" }
     | { kind: "in-flight" };
   const classifyGated = (run: FleetRunRow): GatedDisposition => {
     if (run.integrationCount >= MAX_INTEGRATION_ATTEMPTS) return { kind: "conflict" };
+    // Red checks (issue #130) take both facts: the repairs are spent AND the
+    // sweep still sees the rollup red. The counter alone would raise a card in
+    // the window after a repair pushes, while the new head's checks are pending.
+    const failingChecks = rows.failingChecksByRun?.[run.id];
+    if (run.ciRepairCount >= MAX_CI_REPAIR_ATTEMPTS && failingChecks?.length) {
+      return { kind: "checks-failing", checks: failingChecks };
+    }
     if (run.reviewResult?.kind === "unparseable") return { kind: "unparseable" };
     if (run.reviewVerdict === "approve" || run.reviewVerdict === "escalate") {
       return { kind: "signoff", verdict: run.reviewVerdict };
@@ -502,6 +539,16 @@ export function buildFleetView(rows: FleetRows): FleetView {
         context: runContext(run),
         body: `${prTag} still conflicts with the default branch — resolve and merge`,
         action: link(`Resolve ${prTag}`),
+      });
+    } else if (disposition.kind === "checks-failing") {
+      needsYou.push({
+        cause: "checks-failing",
+        severity: "red",
+        context: runContext(run),
+        body:
+          `${prTag} checks still failing after ${repairCount(run.ciRepairCount)}: ` +
+          namedChecks(disposition.checks),
+        action: link(`Open ${prTag}`),
       });
     } else if (disposition.kind === "unparseable") {
       needsYou.push({
