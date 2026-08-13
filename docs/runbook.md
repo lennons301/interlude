@@ -216,6 +216,23 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   the dashboard, resets at local midnight). Interactive work is exempt by
   construction (it has no run).
 
+### Pushing to a PR the loop has already reviewed
+
+If you click *Update branch*, push a commit, or merge `main` into an agent PR
+after its review was posted, the loop notices the head moved past the commit it
+reviewed and treats the verdict as void:
+
+- auto-merge is disarmed first, so nothing lands on a head nobody read;
+- the reviewer account's own approval is **dismissed** (a standing approval keeps
+  counting for branch protection, and it is the artefact you read before merging);
+- gate evaluation and one fresh review pass re-run against the new head, and the
+  issue records the old and new SHAs.
+
+That costs one of the attempt's review cycles. If none are left — or the stale
+review can't be withdrawn — the PR is labelled `human-signoff` and pinged to
+Discord instead: review and merge it yourself. Red checks are repaired before any
+of this, so a re-review never runs against a branch that doesn't build.
+
 ### Supervised runs (`checkpoint:`)
 
 A `checkpoint: <text>` directive in a ticket's Workflow section runs the implement
