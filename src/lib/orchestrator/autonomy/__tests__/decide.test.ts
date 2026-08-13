@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
 import { observeCheckRollup } from "../checks";
+import { observeReviewedHead } from "../review-head";
 import { ADVISORY_TRIAGE_LABELS, ARMING_LABEL } from "../ticket";
 import { parseTriageExit } from "../triage";
 import {
@@ -17,6 +18,7 @@ import {
   type PendingTriage,
   type PendingVerdict,
   type ProjectSnapshot,
+  type StaleReview,
   type TriageCandidate,
 } from "../decide";
 
@@ -86,6 +88,7 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     resolvedConflicts: [],
     checksFailingPrs: [],
     resolvedCheckFailures: [],
+    staleReviews: [],
     maxCiRepairAttempts: 1,
     minCheckFailureSweeps: 2,
     announcedCheckEscalations: [],
@@ -130,6 +133,21 @@ function makeChecksFailingPr(overrides: Partial<ChecksFailingPr> = {}): ChecksFa
     sweepsFailing: 2,
     ciRepairsMade: 0,
     hasRepairTask: false,
+    ...overrides,
+  };
+}
+
+function makeStaleReview(overrides: Partial<StaleReview> = {}): StaleReview {
+  return {
+    runId: "run-1",
+    issueRef: "acme/widgets#7",
+    prNumber: 41,
+    armed: false,
+    // The LPS #180 shape: approved at d9d06fc, two "Update branch" merge
+    // commits later the head is a commit nobody reviewed.
+    reviewedHeadSha: "d9d06fc",
+    headSha: "c327f5e",
+    reviewCycleCount: 0,
     ...overrides,
   };
 }
@@ -1895,6 +1913,103 @@ describe("decideNext — parked PRs with failing checks (issue #130)", () => {
     expect(actions.some((a) => a.type === "repairChecks")).toBe(true);
     expect(actions.some((a) => a.type === "claimIssue")).toBe(false);
     expect(actions).toContainEqual({ type: "pausePickup", reason: "no-slots" });
+  });
+});
+
+describe("decideNext — a reviewed PR whose head moved (issue #131)", () => {
+  it("disarms, drops the stale verdict and buys one fresh review cycle", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        staleReviews: [makeStaleReview({ armed: true })],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "invalidateReview",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        armed: true,
+        reviewedHeadSha: "d9d06fc",
+        headSha: "c327f5e",
+        cycle: 1,
+      },
+    ]);
+  });
+
+  it("escalates instead of re-reviewing once the attempt's review cycles are spent", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxReviewCycles: 2,
+        // One fix-up cycle already spent this attempt; a re-review would be the
+        // second, so the push goes to a human rather than looping.
+        staleReviews: [makeStaleReview({ armed: true, reviewCycleCount: 1 })],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "escalateStaleReview",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        armed: true,
+        reviewedHeadSha: "d9d06fc",
+        headSha: "c327f5e",
+        reviewCycleCount: 1,
+      },
+    ]);
+  });
+
+  it("does nothing while the head is still the reviewed commit", () => {
+    // No sweep-on-sweep churn: wired through the fold the sweep uses, so this
+    // asserts the real path — an unmoved head produces no observation, so no
+    // entry reaches the reducer and the parked run is simply re-polled.
+    const moved = observeReviewedHead("d9d06fc", "d9d06fc");
+    expect(moved).toBeNull();
+
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        staleReviews: moved ? [makeStaleReview()] : [],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("does not double-handle a repair push, which already cleared the verdict", () => {
+    // A repair (issue #54 / #130) clears reviewVerdict *and* the reviewed SHA
+    // when it queues, so its own push moves a head no verdict claims — the
+    // fold reports nothing and the repair's re-gate is the only handling.
+    const moved = observeReviewedHead(null, "c327f5e");
+    expect(moved).toBeNull();
+
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        staleReviews: moved ? [makeStaleReview()] : [],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("never invalidates or escalates a run that just blocked on a question", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [makePass({ finalMessage: "BLOCKED: which database?" })],
+        staleReviews: [makeStaleReview()],
+      })
+    );
+
+    expect(actions.some((a) => a.type === "invalidateReview")).toBe(false);
+    expect(actions.some((a) => a.type === "escalateStaleReview")).toBe(false);
+    expect(actions.some((a) => a.type === "escalate")).toBe(true);
   });
 });
 

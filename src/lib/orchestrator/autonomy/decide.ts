@@ -256,6 +256,32 @@ export interface ResolvedCheckFailure {
   issueRef: string;
 }
 
+/**
+ * A parked run whose PR head has moved past the commit its posted verdict was
+ * written about (issue #131): a human clicked *Update branch*, pushed a commit,
+ * or merged the default branch in. The approval standing on the PR is now
+ * evidence about code nobody reviewed — and, left alone, an armed run would
+ * auto-merge that head — so the run is disarmed, drops its verdict and gate
+ * categories, re-gates against the new diff and takes one fresh review pass.
+ * A head that has not moved never reaches this list (see review-head.ts).
+ */
+export interface StaleReview {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  prNumber: number;
+  /** Auto-merge armed (reviewing) vs gated — the executor disarms either way
+   * before anything else, then re-derives the gate decision from the new diff */
+  armed: boolean;
+  /** The head the posted verdict was written about (runs.reviewedHeadSha) */
+  reviewedHeadSha: string;
+  /** The head the PR carries now — named on the issue beside the old one */
+  headSha: string;
+  /** Implement↔review cycles already spent this attempt: a re-review costs one
+   * like any other, and a run with none left goes to a human */
+  reviewCycleCount: number;
+}
+
 export interface AutonomySnapshot {
   now: Date;
   autonomyEnabledGlobal: boolean;
@@ -321,6 +347,9 @@ export interface AutonomySnapshot {
   checksFailingPrs: ChecksFailingPr[];
   /** Parked runs whose rollup is green again after a CI repair — counter reset */
   resolvedCheckFailures: ResolvedCheckFailure[];
+  /** Parked runs whose PR head moved past the reviewed commit (issue #131) —
+   * re-reviewed or escalated */
+  staleReviews: StaleReview[];
   /** CI-repair passes allowed per failure episode before a still-red parked PR
    * escalates to a human */
   maxCiRepairAttempts: number;
@@ -494,6 +523,41 @@ export type Action =
     }
   | { type: "clearCiRepair"; runId: string; issueRef: string }
   | {
+      // The reviewed commit moved (issue #131): disarm, drop the stale verdict
+      // and gate categories, and hand the run back to gate evaluation so the
+      // new diff is re-gated and one fresh review pass judges the head that
+      // now exists — the same path a repair push already takes.
+      type: "invalidateReview";
+      runId: string;
+      issueRef: string;
+      prNumber: number;
+      /** Auto-merge armed — disarm before anything else touches the run */
+      armed: boolean;
+      /** The head the dropped verdict was written about */
+      reviewedHeadSha: string;
+      /** The head the PR carries now */
+      headSha: string;
+      /** Which review cycle the re-review spends (reviewCycleCount + 1) */
+      cycle: number;
+    }
+  | {
+      // The reviewed commit moved with no review cycle left to spend (issue
+      // #131): the loop stops re-reviewing and hands the PR to a human, rather
+      // than trading a fresh pass against every push.
+      type: "escalateStaleReview";
+      runId: string;
+      issueRef: string;
+      prNumber: number;
+      /** Auto-merge armed — disarm before handing to a human */
+      armed: boolean;
+      /** The head the standing verdict was written about */
+      reviewedHeadSha: string;
+      /** The head the PR carries now */
+      headSha: string;
+      /** Cycles spent before giving up — named in the escalation */
+      reviewCycleCount: number;
+    }
+  | {
       type: "escalate";
       reason: "blocked";
       runId: string;
@@ -611,6 +675,7 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     resolvedConflicts: [],
     checksFailingPrs: [],
     resolvedCheckFailures: [],
+    staleReviews: [],
     maxCiRepairAttempts: 0,
     minCheckFailureSweeps: 0,
     announcedCheckEscalations: [],
@@ -796,6 +861,44 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       type: "clearCiRepair",
       runId: resolved.runId,
       issueRef: resolved.issueRef,
+    });
+  }
+
+  // A parked run whose PR head has moved past the commit its posted verdict was
+  // written about (issue #131). Only the loop's own repair path used to
+  // invalidate a verdict; any other push — a human's *Update branch*, a commit,
+  // a main merge — left the approval standing over code nobody reviewed, and an
+  // armed run would merge it. Sits after the CI branches on purpose: the settled
+  // ordering (#130) is repair the build first, re-review once the rollup is
+  // green, so no review pass is ever queued against a branch that does not
+  // compile.
+  for (const stale of snapshot.staleReviews) {
+    if (blockedRunIds.has(stale.runId)) continue;
+    // A re-review costs a cycle like the fix-up a request-changes buys, and is
+    // bounded by the same budget: past it the run goes to a human instead of
+    // trading a review pass against every push.
+    if (stale.reviewCycleCount + 1 >= snapshot.maxReviewCycles) {
+      actions.push({
+        type: "escalateStaleReview",
+        runId: stale.runId,
+        issueRef: stale.issueRef,
+        prNumber: stale.prNumber,
+        armed: stale.armed,
+        reviewedHeadSha: stale.reviewedHeadSha,
+        headSha: stale.headSha,
+        reviewCycleCount: stale.reviewCycleCount,
+      });
+      continue;
+    }
+    actions.push({
+      type: "invalidateReview",
+      runId: stale.runId,
+      issueRef: stale.issueRef,
+      prNumber: stale.prNumber,
+      armed: stale.armed,
+      reviewedHeadSha: stale.reviewedHeadSha,
+      headSha: stale.headSha,
+      cycle: stale.reviewCycleCount + 1,
     });
   }
 
