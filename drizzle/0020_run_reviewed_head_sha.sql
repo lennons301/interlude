@@ -1,0 +1,1 @@
+ALTER TABLE `runs` ADD `reviewed_head_sha` text;
