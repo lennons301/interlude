@@ -148,6 +148,7 @@ function makeStaleReview(overrides: Partial<StaleReview> = {}): StaleReview {
     reviewedHeadSha: "d9d06fc",
     headSha: "c327f5e",
     reviewCycleCount: 0,
+    dismissalFailed: false,
     ...overrides,
   };
 }
@@ -1968,14 +1969,41 @@ describe("decideNext — a reviewed PR whose head moved (issue #131)", () => {
         reviewedHeadSha: "d9d06fc",
         headSha: "c327f5e",
         reviewCycleCount: 1,
+        reason: "cycles-exhausted",
       },
     ]);
   });
 
-  it("does nothing while the head is still the reviewed commit", () => {
-    // No sweep-on-sweep churn: wired through the fold the sweep uses, so this
-    // asserts the real path — an unmoved head produces no observation, so no
-    // entry reaches the reducer and the parked run is simply re-polled.
+  it("escalates rather than re-arming when the stale review could not be withdrawn", () => {
+    // Fail closed: GitHub keeps counting an approval until it is dismissed, so
+    // a review the loop could not withdraw must not be re-armed over — dismissal
+    // on a protected branch needs rights a plain collaborator may not have.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        staleReviews: [makeStaleReview({ armed: true, dismissalFailed: true })],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "escalateStaleReview",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        armed: true,
+        reviewedHeadSha: "d9d06fc",
+        headSha: "c327f5e",
+        reviewCycleCount: 0,
+        reason: "dismissal-failed",
+      },
+    ]);
+  });
+
+  it("leaves a run whose head is still the reviewed commit in the ordinary pipeline", () => {
+    // No sweep-on-sweep churn. Wired through the fold the sweep uses: an unmoved
+    // head is no observation, so the parked run reaches the reducer through its
+    // normal list and is decided there, not re-reviewed.
     const moved = observeReviewedHead("d9d06fc", "d9d06fc");
     expect(moved).toBeNull();
 
@@ -1983,16 +2011,18 @@ describe("decideNext — a reviewed PR whose head moved (issue #131)", () => {
       makeSnapshot({
         candidates: [],
         staleReviews: moved ? [makeStaleReview()] : [],
+        pendingVerdicts: [makeVerdict()],
       })
     );
 
-    expect(actions).toEqual([]);
+    expect(actions.map((a) => a.type)).toEqual(["postVerdict"]);
   });
 
   it("does not double-handle a repair push, which already cleared the verdict", () => {
     // A repair (issue #54 / #130) clears reviewVerdict *and* the reviewed SHA
-    // when it queues, so its own push moves a head no verdict claims — the
-    // fold reports nothing and the repair's re-gate is the only handling.
+    // when it queues, so its own push moves a head no verdict claims: the fold
+    // reports nothing, and the run is re-gated once — by the repair's own return
+    // to gate evaluation — rather than gated and invalidated twice over.
     const moved = observeReviewedHead(null, "c327f5e");
     expect(moved).toBeNull();
 
@@ -2000,10 +2030,11 @@ describe("decideNext — a reviewed PR whose head moved (issue #131)", () => {
       makeSnapshot({
         candidates: [],
         staleReviews: moved ? [makeStaleReview()] : [],
+        pendingGateEvaluations: [makePending()],
       })
     );
 
-    expect(actions).toEqual([]);
+    expect(actions.map((a) => a.type)).toEqual(["armAutoMerge"]);
   });
 
   it("never invalidates or escalates a run that just blocked on a question", () => {

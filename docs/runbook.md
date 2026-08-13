@@ -228,10 +228,18 @@ reviewed and treats the verdict as void:
 - gate evaluation and one fresh review pass re-run against the new head, and the
   issue records the old and new SHAs.
 
-That costs one of the attempt's review cycles. If none are left — or the stale
-review can't be withdrawn — the PR is labelled `human-signoff` and pinged to
-Discord instead: review and merge it yourself. Red checks are repaired before any
-of this, so a re-review never runs against a branch that doesn't build.
+That costs one of the attempt's review cycles. If none are left, the PR is
+labelled `human-signoff` and pinged to Discord instead: review and merge it
+yourself. A red rollup on the new head is repaired first, so the re-review never
+runs against a branch that doesn't build.
+
+**If the dismissal is refused**, the loop stops there and hands the PR over
+rather than re-arming over a review GitHub still counts — the issue comment says
+so. GitHub only lets an administrator, or an account on the branch's dismissal
+allow-list, dismiss a review on a protected branch, so the reviewer account needs
+one of those. The alternative is to turn on *Dismiss stale pull request approvals
+when new commits are pushed* on the protected branch: GitHub then withdraws the
+approval itself on every push, and the loop finds nothing left to dismiss.
 
 ### Supervised runs (`checkpoint:`)
 

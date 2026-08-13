@@ -460,10 +460,12 @@ export async function disarmAutoMerge(
 }
 
 /**
- * Post a PR review as the reviewer machine account. This is the one place
- * the reviewer identity is exercised, and it runs in the orchestrator with
- * a token read from config at call time — the PAT never enters a container,
- * so no agent process ever holds the identity that can approve agent work.
+ * Post a PR review as the reviewer machine account. The reviewer identity is
+ * exercised here and in `dismissStaleReviewsAsReviewer` below (issue #131) —
+ * posting a verdict and withdrawing one it no longer stands behind are the two
+ * halves of the same job — and in both cases from the orchestrator, with a
+ * token read from config at call time. The PAT never enters a container, so no
+ * agent process ever holds the identity that can approve agent work.
  */
 export async function postReviewAsReviewer(
   owner: string,
@@ -511,7 +513,10 @@ export async function postReviewAsReviewer(
  *
  * Returns how many were dismissed (0 when there was nothing to withdraw), or
  * null when the dismissal could not be completed — the caller fails closed on
- * null rather than treating an approval it could not remove as gone.
+ * null rather than treating an approval it could not remove as gone. Null is a
+ * real possibility, not just an API hiccup: GitHub requires an administrator or
+ * a place on the branch's dismissal allow-list to dismiss a review on a
+ * protected branch, and the reviewer machine account is only a collaborator.
  */
 export async function dismissStaleReviewsAsReviewer(
   owner: string,
@@ -552,6 +557,7 @@ export async function dismissStaleReviewsAsReviewer(
         pull_number: prNumber,
         review_id: review.id,
         message: reason,
+        event: "DISMISS",
       });
     }
     return stale.length;

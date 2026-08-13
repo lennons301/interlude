@@ -491,6 +491,10 @@ export async function notifyStaleReviewEscalation(
     headSha: string;
     /** Why the loop stopped re-reviewing */
     detail: string;
+    /** Whether the stale review was actually withdrawn — it may still be
+     * standing (GitHub refused, or the account lacks the right on a protected
+     * branch), and an operator about to merge needs to know which */
+    reviewWithdrawn: boolean;
   }
 ): Promise<void> {
   const botClient = getBotClient();
@@ -506,8 +510,11 @@ export async function notifyStaleReviewEscalation(
         `${payload.issueRef} (PR #${payload.prNumber}) was reviewed at ` +
           `\`${payload.reviewedHeadSha}\` and its head is now \`${payload.headSha}\` — ` +
           `${payload.detail}.\n\n` +
-          `Auto-merge is disarmed and the stale review is withdrawn — review the ` +
-          `current head and merge.`
+          `Auto-merge is disarmed and ` +
+          (payload.reviewWithdrawn
+            ? `the stale review is withdrawn`
+            : `**the stale review is still standing** — read the issue for why`) +
+          ` — review the current head and merge.`
       )
       .setColor(0xef4444);
 

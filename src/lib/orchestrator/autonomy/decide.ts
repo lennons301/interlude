@@ -284,6 +284,12 @@ export interface StaleReview {
   /** Implement↔review cycles already spent this attempt: a re-review costs one
    * like any other, and a run with none left goes to a human */
   reviewCycleCount: number;
+  /** The sweep tried to withdraw the standing review and GitHub refused.
+   * Dismissing a review on a protected branch needs administrator rights or a
+   * place on the branch's dismissal allow-list, which the reviewer machine
+   * account may not have — and an approval GitHub still counts must never be
+   * re-armed over, so this routes to a human instead of another attempt. */
+  dismissalFailed: boolean;
 }
 
 export interface AutonomySnapshot {
@@ -563,6 +569,10 @@ export type Action =
       headSha: string;
       /** Cycles spent before giving up — named in the escalation */
       reviewCycleCount: number;
+      /** Why the loop stopped: the attempt's review cycles are gone, or the
+       * standing review could not be withdrawn (which names a fixable
+       * permission problem rather than a spent budget) */
+      reason: "cycles-exhausted" | "dismissal-failed";
     }
   | {
       type: "escalate";
@@ -883,10 +893,14 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // compile.
   for (const stale of snapshot.staleReviews) {
     if (blockedRunIds.has(stale.runId)) continue;
-    // A re-review costs a cycle like the fix-up a request-changes buys, and is
-    // bounded by the same budget: past it the run goes to a human instead of
-    // trading a review pass against every push.
-    if (stale.reviewCycleCount + 1 >= snapshot.maxReviewCycles) {
+    // Two ways a moved head stops being re-reviewable. A withdrawal GitHub
+    // refused is checked first: it names a fixable permission problem, and the
+    // loop must not re-arm over a review it could not remove. Otherwise the
+    // bound — a re-review costs a cycle like the fix-up a request-changes buys,
+    // and past the budget the run goes to a human rather than trading a review
+    // pass against every push.
+    const cyclesSpent = stale.reviewCycleCount + 1 >= snapshot.maxReviewCycles;
+    if (stale.dismissalFailed || cyclesSpent) {
       actions.push({
         type: "escalateStaleReview",
         runId: stale.runId,
@@ -896,6 +910,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
         reviewedHeadSha: stale.reviewedHeadSha,
         headSha: stale.headSha,
         reviewCycleCount: stale.reviewCycleCount,
+        reason: stale.dismissalFailed ? "dismissal-failed" : "cycles-exhausted",
       });
       continue;
     }
