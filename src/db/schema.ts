@@ -128,6 +128,13 @@ export const runs = sqliteTable("runs", {
   // a fresh conflict earns fresh repairs; past MAX_INTEGRATION_ATTEMPTS a
   // still-conflicting PR escalates to a human. Never consumes an attempt.
   integrationCount: int("integration_count").notNull().default(0),
+  // CI-repair passes run to make a red check rollup green (issue #130). Counted
+  // per failure episode — reset to 0 once the rollup is observed green, so an
+  // unrelated later failure earns its own repair; past MAX_CI_REPAIR_ATTEMPTS a
+  // still-failing PR escalates to a human. Deliberately separate from
+  // integrationCount: a conflict repair followed by a CI failure must not
+  // escalate on a spent count. Never consumes an attempt.
+  ciRepairCount: int("ci_repair_count").notNull().default(0),
   interruptionCount: int("interruption_count").notNull().default(0),
   blockedQuestion: text("blocked_question"),
   // A checkpoint: directive's text, stored at claim time. Non-null makes the
