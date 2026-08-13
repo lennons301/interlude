@@ -22,6 +22,7 @@ import {
 import {
   armAutoMergeSquash,
   disarmAutoMerge,
+  dismissStaleReviewsAsReviewer,
   getPrState,
   labelPr,
   listChangedFiles,
@@ -40,6 +41,7 @@ import {
   notifyQueueStale,
   notifyReviewBlocked,
   notifySlotsSaturated,
+  notifyStaleReviewEscalation,
   notifyTriageRecommendation,
 } from "../../discord/notifications";
 import { recordBacklog } from "../../fleet/backlog";
@@ -72,9 +74,11 @@ import {
   type ResolvedCheckFailure,
   type ResolvedConflict,
   type SettledPr,
+  type StaleReview,
   type TriageCandidate,
 } from "./decide";
 import { observeCheckRollup, type CheckObservation } from "./checks";
+import { observeReviewedHead } from "./review-head";
 import {
   ESTATE_GATES_PATH,
   HUMAN_SIGNOFF_LABEL,
@@ -634,6 +638,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     resolvedConflicts: reviewState.resolvedConflicts,
     checksFailingPrs: reviewState.checksFailingPrs,
     resolvedCheckFailures: reviewState.resolvedCheckFailures,
+    staleReviews: reviewState.staleReviews,
     maxCiRepairAttempts: MAX_CI_REPAIR_ATTEMPTS,
     minCheckFailureSweeps: CHECK_FAILURE_CONFIRMATION_SWEEPS,
     announcedCheckEscalations: [...announcedCheckEscalations],
@@ -663,6 +668,7 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
   resolvedConflicts: ResolvedConflict[];
   checksFailingPrs: ChecksFailingPr[];
   resolvedCheckFailures: ResolvedCheckFailure[];
+  staleReviews: StaleReview[];
 }> {
   const awaitingReview: AwaitingReview[] = [];
   const pendingVerdicts: PendingVerdict[] = [];
@@ -671,6 +677,7 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
   const resolvedConflicts: ResolvedConflict[] = [];
   const checksFailingPrs: ChecksFailingPr[] = [];
   const resolvedCheckFailures: ResolvedCheckFailure[] = [];
+  const staleReviews: StaleReview[] = [];
   // What the dashboard and digest render as the failing-checks needs-you card
   // (issue #130): the names observed red this sweep, recorded wholesale below so
   // a rollup that went green simply stops appearing. A run whose PR read failed
@@ -810,6 +817,7 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
         prNumber: run.pullRequestNumber!,
         armed,
         result: run.reviewResult,
+        headSha: pr.headSha,
         implementTaskId: liveImplementTaskId(run.id),
         reviewCycleCount: run.reviewCycleCount,
         reviewUnparseableCount: run.reviewUnparseableCount,
@@ -826,6 +834,27 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
     // caught mid-flight would otherwise never reach GitHub.
     if (checksFailing) {
       checksFailingPrs.push(checksFailing);
+      continue;
+    }
+
+    // The reviewed commit moved (issue #131): a human clicked *Update branch*,
+    // pushed a commit, or merged the default branch in after the verdict was
+    // posted, so the standing approval is about code nobody reviewed. Placed
+    // below the CI branch on purpose — the settled ordering is repair the build
+    // first, re-review once the rollup is green — and below the stored-verdict
+    // branch for the reason #130 gives: a finished verdict reaches GitHub before
+    // anything clears the run's review state.
+    const moved = observeReviewedHead(run.reviewedHeadSha, pr.headSha);
+    if (moved) {
+      staleReviews.push({
+        runId: run.id,
+        issueRef: run.githubIssue,
+        prNumber: run.pullRequestNumber!,
+        armed,
+        reviewedHeadSha: moved.reviewedHeadSha,
+        headSha: moved.headSha,
+        reviewCycleCount: run.reviewCycleCount,
+      });
       continue;
     }
 
@@ -857,6 +886,7 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
     resolvedConflicts,
     checksFailingPrs,
     resolvedCheckFailures,
+    staleReviews,
   };
 }
 
@@ -1214,6 +1244,12 @@ async function executeActions(actions: Action[]): Promise<void> {
       case "clearCiRepair":
         executeClearCiRepair(action);
         break;
+      case "invalidateReview":
+        await executeInvalidateReview(action);
+        break;
+      case "escalateStaleReview":
+        await executeEscalateStaleReview(action);
+        break;
       case "exhaust":
         await executeExhaust(action);
         break;
@@ -1276,6 +1312,7 @@ async function executeGatePr(action: Extract<Action, { type: "gatePr" }>): Promi
       gateCategories: action.categories,
       reviewVerdict: null,
       reviewResult: null,
+      reviewedHeadSha: null,
     })
     .where(eq(runs.id, action.runId))
     .run();
@@ -1339,6 +1376,7 @@ async function executeArmAutoMerge(
       gateCategories: [],
       reviewVerdict: null,
       reviewResult: null,
+      reviewedHeadSha: null,
     })
     .where(eq(runs.id, action.runId))
     .run();
@@ -1779,7 +1817,11 @@ async function executePostVerdict(
 
   if (action.verdict === "approve") {
     db.update(runs)
-      .set({ reviewVerdict: "approve", reviewResult: null })
+      .set({
+        reviewVerdict: "approve",
+        reviewResult: null,
+        reviewedHeadSha: action.headSha,
+      })
       .where(eq(runs.id, action.runId))
       .run();
     await releaseImplementContainer(action.runId, "Review approved — releasing container.");
@@ -1795,6 +1837,7 @@ async function executePostVerdict(
       .set({
         reviewVerdict: "request-changes",
         reviewResult: null,
+        reviewedHeadSha: action.headSha,
         status: "implementing",
         reviewCycleCount: (run?.reviewCycleCount ?? 0) + 1,
       })
@@ -1807,7 +1850,12 @@ async function executePostVerdict(
     );
   } else {
     db.update(runs)
-      .set({ reviewVerdict: "escalate", reviewResult: null, status: "gated" })
+      .set({
+        reviewVerdict: "escalate",
+        reviewResult: null,
+        reviewedHeadSha: action.headSha,
+        status: "gated",
+      })
       .where(eq(runs.id, action.runId))
       .run();
     await releaseImplementContainer(action.runId, "Review escalated to a human — releasing container.");
@@ -1946,6 +1994,7 @@ async function queueRepairPass(args: {
       ...args.counted(run),
       reviewVerdict: null,
       reviewResult: null,
+      reviewedHeadSha: null,
       gateCategories: [],
     })
     .where(eq(runs.id, args.runId))
@@ -2202,6 +2251,199 @@ function executeClearCiRepair(
   console.log(`[autonomy] ${action.issueRef} checks are green again — CI repair counter reset`);
 }
 
+/** A commit for prose: the short SHA humans read on GitHub. */
+function shortSha(sha: string): string {
+  return sha.slice(0, 7);
+}
+
+/** Why the reviewer's own review is being withdrawn — the message GitHub shows
+ * against the dismissal, so the PR itself explains what happened. */
+function dismissalMessage(reviewedHeadSha: string, headSha: string): string {
+  return (
+    `Dismissed automatically: this review was written about ${shortSha(reviewedHeadSha)}, ` +
+    `and the pull request's head has since moved to ${shortSha(headSha)}. ` +
+    `It is not evidence about the code that is on the branch now.`
+  );
+}
+
+/**
+ * The reviewed commit moved (issue #131): a human clicked *Update branch*,
+ * pushed a commit, or merged the default branch in after the verdict was
+ * posted, so the standing approval describes code nobody reviewed.
+ *
+ * Ordering is the safety property. Disarm first — an armed run must never
+ * auto-merge a head no one has read — then withdraw the standing review, and
+ * only then hand the run back to gate evaluation, exactly as a repair push
+ * does: the next sweep re-gates against the new diff and queues one fresh
+ * review pass. The dismissal is not optional politeness: GitHub keeps counting
+ * an approval until it is dismissed, so re-arming auto-merge over one would
+ * land the unreviewed head. If it cannot be done the loop stops and hands the
+ * PR to a human rather than proceeding over a review it could not withdraw.
+ */
+async function executeInvalidateReview(
+  action: Extract<Action, { type: "invalidateReview" }>
+): Promise<void> {
+  const ref = parseIssueRef(action.issueRef);
+  if (!ref) return;
+
+  // A stale action: only a parked run still awaiting its merge is invalidated.
+  const run = db.select().from(runs).where(eq(runs.id, action.runId)).get();
+  if (!run || (run.status !== "reviewing" && run.status !== "gated")) return;
+
+  if (action.armed) {
+    const disarmed = await disarmAutoMerge(ref.owner, ref.repo, action.prNumber);
+    if (!disarmed) return;
+  }
+
+  const dismissed = await dismissStaleReviewsAsReviewer(
+    ref.owner,
+    ref.repo,
+    action.prNumber,
+    action.headSha,
+    dismissalMessage(action.reviewedHeadSha, action.headSha)
+  );
+  if (dismissed === null) {
+    await escalateStaleReview({
+      runId: action.runId,
+      issueRef: action.issueRef,
+      prNumber: action.prNumber,
+      // Already disarmed above; disarming twice is harmless but pointless.
+      armed: false,
+      reviewedHeadSha: action.reviewedHeadSha,
+      headSha: action.headSha,
+      detail:
+        "the standing review could not be withdrawn (REVIEWER_GH_TOKEN missing or rejected), " +
+        "so the loop will not re-arm over it",
+      dismiss: false,
+    });
+    return;
+  }
+
+  db.update(runs)
+    .set({
+      status: "implementing",
+      reviewVerdict: null,
+      reviewResult: null,
+      reviewedHeadSha: null,
+      gateCategories: [],
+      reviewCycleCount: run.reviewCycleCount + 1,
+    })
+    .where(eq(runs.id, action.runId))
+    .run();
+
+  console.log(
+    `[autonomy] ${action.issueRef} PR #${action.prNumber} moved past its reviewed head ` +
+      `(${shortSha(action.reviewedHeadSha)} -> ${shortSha(action.headSha)}) — ` +
+      `${dismissed} review(s) dismissed, re-gating and re-reviewing (cycle ${action.cycle})`
+  );
+  await commentOnIssue(
+    action.issueRef,
+    `PR #${action.prNumber} has moved past the commit its review was written about ` +
+      `(\`${shortSha(action.reviewedHeadSha)}\` → \`${shortSha(action.headSha)}\`), so that ` +
+      `verdict is no longer about the code on the branch. Auto-merge is disarmed` +
+      (dismissed > 0 ? `, the stale review is dismissed` : ``) +
+      `, and gate evaluation plus a fresh review pass re-run against the new head ` +
+      `(review cycle ${action.cycle} of ${MAX_REVIEW_CYCLES_PER_ATTEMPT}).`
+  );
+}
+
+/**
+ * The reviewed commit moved with no review cycle left to spend (issue #131):
+ * the loop stops trading a review pass against every push and hands the PR to a
+ * human. Same shape as the conflict and failing-checks escalations — disarm,
+ * label `human-signoff`, land the run in `gated`, release its container — plus
+ * withdrawing the standing review, so the artefact a human reads before merging
+ * is not an approval of a commit that is no longer there.
+ */
+async function executeEscalateStaleReview(
+  action: Extract<Action, { type: "escalateStaleReview" }>
+): Promise<void> {
+  const cycles = `${action.reviewCycleCount} of ${MAX_REVIEW_CYCLES_PER_ATTEMPT} review cycles`;
+  await escalateStaleReview({
+    runId: action.runId,
+    issueRef: action.issueRef,
+    prNumber: action.prNumber,
+    armed: action.armed,
+    reviewedHeadSha: action.reviewedHeadSha,
+    headSha: action.headSha,
+    detail: `this attempt has spent ${cycles}, so the loop will not re-review it again`,
+    dismiss: true,
+  });
+}
+
+/**
+ * Hand a moved-past PR to a human. The reviewed SHA is cleared while the posted
+ * verdict is kept: the verdict is the record of what the loop said, and keeping
+ * it is what holds the run out of the review pipeline, while clearing the SHA
+ * makes the escalation a durable one-shot — a further push by the human it now
+ * belongs to must not re-announce. Mutations run before the announcement, so a
+ * failure leaves it un-announced and the next sweep retries the whole step.
+ */
+async function escalateStaleReview(args: {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  prNumber: number;
+  armed: boolean;
+  reviewedHeadSha: string;
+  headSha: string;
+  /** Why the loop stopped here — named on the issue and in Discord */
+  detail: string;
+  /** Whether to try withdrawing the standing review (skipped when the caller
+   * has already tried and that failure is what brought us here) */
+  dismiss: boolean;
+}): Promise<void> {
+  const ref = parseIssueRef(args.issueRef);
+  if (!ref) return;
+
+  if (args.armed) {
+    const disarmed = await disarmAutoMerge(ref.owner, ref.repo, args.prNumber);
+    if (!disarmed) return;
+  }
+  const labeled = await labelPr(ref.owner, ref.repo, args.prNumber, HUMAN_SIGNOFF_LABEL);
+  if (!labeled) return;
+  // Best-effort here, unlike the re-review path: nothing will be re-armed, so a
+  // review that cannot be withdrawn misinforms but cannot merge anything.
+  if (args.dismiss) {
+    await dismissStaleReviewsAsReviewer(
+      ref.owner,
+      ref.repo,
+      args.prNumber,
+      args.headSha,
+      dismissalMessage(args.reviewedHeadSha, args.headSha)
+    );
+  }
+
+  db.update(runs)
+    .set({ status: "gated", reviewResult: null, reviewedHeadSha: null })
+    .where(eq(runs.id, args.runId))
+    .run();
+  await releaseImplementContainer(
+    args.runId,
+    "The reviewed commit moved and a human owns this one — releasing container."
+  );
+
+  console.error(
+    `[autonomy] ${args.issueRef} PR #${args.prNumber} moved past its reviewed head ` +
+      `(${shortSha(args.reviewedHeadSha)} -> ${shortSha(args.headSha)}) — needs a human: ${args.detail}`
+  );
+  await commentOnIssue(
+    args.issueRef,
+    `PR #${args.prNumber} has moved past the commit its review was written about ` +
+      `(\`${shortSha(args.reviewedHeadSha)}\` → \`${shortSha(args.headSha)}\`) and ` +
+      `${args.detail}. Auto-merge is disarmed and the PR is labelled ` +
+      `\`${HUMAN_SIGNOFF_LABEL}\` — nothing on it has been reviewed at its current head, ` +
+      `so please review and merge this one.`
+  );
+  await notifyStaleReviewEscalation(getConfig().discordFleetChannelId, {
+    issueRef: args.issueRef,
+    prNumber: args.prNumber,
+    reviewedHeadSha: shortSha(args.reviewedHeadSha),
+    headSha: shortSha(args.headSha),
+    detail: args.detail,
+  });
+}
+
 /**
  * A burnt ticket goes back to a human: three failed attempts, or the
  * interruption bound (a ticket whose runs keep dying to restarts must not
@@ -2331,7 +2573,9 @@ async function executeFailAttempt(
       status: "failed",
       failureReason: "review cycles exhausted",
       reviewResult: null,
-      ...(posted ? { reviewVerdict: "request-changes" as const } : {}),
+      ...(posted
+        ? { reviewVerdict: "request-changes" as const, reviewedHeadSha: action.headSha }
+        : {}),
       finishedAt: new Date(),
     })
     .where(eq(runs.id, action.runId))

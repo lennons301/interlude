@@ -208,6 +208,9 @@ function makeVerdict(overrides: Partial<PendingVerdict> = {}): PendingVerdict {
     prNumber: 41,
     armed: true,
     result: { kind: "approve", body: "Verified against the ticket." },
+    // The head the pass judged — carried onto the posted verdict so the run
+    // records which commit it approved (issue #131).
+    headSha: "d9d06fc",
     implementTaskId: "task-impl-1",
     reviewCycleCount: 0,
     reviewUnparseableCount: 0,
@@ -1315,6 +1318,7 @@ describe("decideNext — verdict-to-action mapping", () => {
         verdict: "approve",
         body: "Verified against the ticket.",
         armed: true,
+        headSha: "d9d06fc",
       },
     ]);
   });
@@ -1340,6 +1344,7 @@ describe("decideNext — verdict-to-action mapping", () => {
         verdict: "request-changes",
         body: "The sort key is wrong.",
         armed: true,
+        headSha: "d9d06fc",
       },
       {
         type: "deliverFeedback",
@@ -1398,6 +1403,7 @@ describe("decideNext — verdict-to-action mapping", () => {
           "longer available to apply them — a human needs to pick this up.\n\n" +
           "The sort key is wrong.",
         armed: true,
+        headSha: "d9d06fc",
       },
     ]);
   });
@@ -1424,6 +1430,7 @@ describe("decideNext — verdict-to-action mapping", () => {
         verdict: "escalate",
         body: "A human should see this.",
         armed: false,
+        headSha: "d9d06fc",
       },
     ]);
   });
@@ -1548,6 +1555,7 @@ describe("decideNext — verdict-to-action mapping", () => {
         armed: true,
         reason: "review-cycles-exhausted",
         reviewBody: "Still wrong.",
+        headSha: "d9d06fc",
       },
     ]);
   });

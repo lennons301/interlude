@@ -111,6 +111,10 @@ export interface PendingVerdict {
   /** Auto-merge armed (ungated) vs gated */
   armed: boolean;
   result: ReviewVerdictResult;
+  /** The PR's head as the sweep read it — recorded on the run when the verdict
+   * is posted (runs.reviewedHeadSha, issue #131), so a later push can be seen
+   * as movement past the commit that was actually reviewed */
+  headSha: string;
   /** The implement task whose container can take a fix-up turn; null once
    * that container is gone (restart, failure, teardown) */
   implementTaskId: string | null;
@@ -456,6 +460,9 @@ export type Action =
       verdict: ReviewVerdictKind;
       body: string;
       armed: boolean;
+      /** The head this verdict is about — stored with it, so the next sweep can
+       * tell a reviewed head from one a push has moved (issue #131) */
+      headSha: string;
     }
   | { type: "deliverFeedback"; runId: string; taskId: string; issueRef: string; body: string }
   | {
@@ -635,6 +642,8 @@ export type Action =
       reason: "review-cycles-exhausted";
       /** The final review's findings — posted to the PR as the record */
       reviewBody: string;
+      /** The head those findings are about (issue #131) */
+      headSha: string;
     };
 
 /**
@@ -1041,6 +1050,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
           armed: pending.armed,
           reason: "review-cycles-exhausted",
           reviewBody: result.body,
+          headSha: pending.headSha,
         });
         continue;
       }
@@ -1055,6 +1065,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
           verdict: "escalate",
           body: undeliverableFeedbackBody(result.body),
           armed: pending.armed,
+          headSha: pending.headSha,
         });
         continue;
       }
@@ -1068,6 +1079,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
         verdict: "request-changes",
         body: result.body,
         armed: pending.armed,
+        headSha: pending.headSha,
       });
       actions.push({
         type: "deliverFeedback",
@@ -1087,6 +1099,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       verdict: result.kind,
       body: result.body,
       armed: pending.armed,
+      headSha: pending.headSha,
     });
   }
 
