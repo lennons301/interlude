@@ -765,8 +765,10 @@ async function gatherReviewState(allRuns: Array<typeof runs.$inferSelect>): Prom
     // still holds: this branch queues no review pass, and once the run comes
     // back through gate evaluation a red rollup diverts it to a CI repair before
     // any review is queued — so no review still runs against a branch that does
-    // not compile. Kept below the stored-verdict branch for the reason #130
-    // gives: a finished verdict reaches GitHub before its state is cleared.
+    // not compile. It yields to a stored verdict (the `reviewResult` guard,
+    // which is what "below the stored-verdict branch" means here) for the reason
+    // #130 gives: a finished verdict reaches GitHub before its state is cleared,
+    // and posting it re-stamps the reviewed SHA anyway.
     const moved = observeReviewedHead(run.reviewedHeadSha, pr.headSha);
     if (moved && run.reviewResult == null) {
       staleReviews.push({
