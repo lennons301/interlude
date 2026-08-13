@@ -36,6 +36,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     backlogByProject: null,
     needsHumanByProject: null,
     fleetHealth: null,
+    failingChecksByRun: null,
     ...overrides,
   };
 }
@@ -66,6 +67,7 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     pullRequestUrl: null,
     blockedQuestion: null,
     integrationCount: 0,
+    ciRepairCount: 0,
     reviewVerdict: null,
     reviewResult: null,
     claimedAt: aug(1, 9),

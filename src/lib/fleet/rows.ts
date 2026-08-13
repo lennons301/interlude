@@ -12,6 +12,7 @@ import { getCapacity } from "../orchestrator/capacity";
 import { getBacklogByProject } from "./backlog";
 import { getNeedsHumanByProject } from "./needs-human";
 import { getFleetHealth } from "./health-store";
+import { getFailingChecks } from "./failing-checks";
 import { DAILY_AUTONOMOUS_CAP_USD } from "../orchestrator/autonomy/budgets";
 import {
   buildFleetView,
@@ -122,6 +123,9 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     // The sweep's last fleet-health evaluation (issue #126); null until the
     // first sweep, which renders no health cards.
     fleetHealth: getFleetHealth(),
+    // Failing check names per parked run from the same sweep (issue #130); null
+    // until the first sweep, which renders no failing-checks cards.
+    failingChecksByRun: getFailingChecks(),
   };
 }
 

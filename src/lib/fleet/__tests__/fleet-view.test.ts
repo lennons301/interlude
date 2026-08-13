@@ -23,6 +23,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     backlogByProject: null,
     needsHumanByProject: null,
     fleetHealth: null,
+    failingChecksByRun: null,
     ...overrides,
   };
 }
@@ -53,6 +54,7 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     pullRequestUrl: null,
     blockedQuestion: null,
     integrationCount: 0,
+    ciRepairCount: 0,
     reviewVerdict: null,
     reviewResult: null,
     claimedAt: TODAY_9AM,
@@ -572,6 +574,109 @@ describe("buildFleetView — needs you", () => {
         },
       },
     ]);
+  });
+
+  it("raises a gated PR whose checks still fail, naming them (issue #130)", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "gated",
+            // CI repairs spent (MAX_CI_REPAIR_ATTEMPTS = 1), rollup still red
+            ciRepairCount: 1,
+            reviewVerdict: "approve",
+            pullRequestNumber: 55,
+            pullRequestUrl: "https://github.com/lennons301/lemons/pull/55",
+          }),
+        ],
+        failingChecksByRun: { r1: ["Type Check", "vercel"] },
+      })
+    );
+
+    expect(view.needsYou).toEqual([
+      {
+        cause: "checks-failing",
+        severity: "red",
+        context: "lemons #34 · attempt 1/3",
+        body: "PR #55 checks still failing after an automated repair: Type Check, vercel",
+        action: {
+          label: "Open PR #55",
+          href: "https://github.com/lennons301/lemons/pull/55",
+        },
+      },
+    ]);
+  });
+
+  it("summarises the tail when many checks fail at once", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "gated",
+            ciRepairCount: 1,
+            pullRequestNumber: 55,
+            pullRequestUrl: "https://github.com/lennons301/lemons/pull/55",
+          }),
+        ],
+        failingChecksByRun: { r1: ["Type Check", "Lint", "Test", "vercel", "e2e"] },
+      })
+    );
+
+    expect(view.needsYou[0].body).toBe(
+      "PR #55 checks still failing after an automated repair: Type Check, Lint, Test +2 more"
+    );
+  });
+
+  it("does not raise failing checks while the rollup is no longer observed red", () => {
+    // The window after a CI repair pushes: the counter is spent but the new
+    // head's rollup is pending, so nothing is owed to a human yet.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "gated",
+            ciRepairCount: 1,
+            reviewVerdict: "approve",
+            pullRequestNumber: 55,
+            pullRequestUrl: "https://github.com/lennons301/lemons/pull/55",
+          }),
+        ],
+        failingChecksByRun: {},
+      })
+    );
+
+    expect(view.needsYou.map((i) => i.cause)).toEqual(["signoff"]);
+  });
+
+  it("keeps a merge conflict ahead of failing checks when a run has both", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "gated",
+            integrationCount: 1,
+            ciRepairCount: 1,
+            pullRequestNumber: 55,
+            pullRequestUrl: "https://github.com/lennons301/lemons/pull/55",
+          }),
+        ],
+        failingChecksByRun: { r1: ["Type Check"] },
+      })
+    );
+
+    expect(view.needsYou.map((i) => i.cause)).toEqual(["conflict"]);
   });
 
   it("keeps a repaired-and-mergeable gated PR as an ordinary sign-off", () => {
