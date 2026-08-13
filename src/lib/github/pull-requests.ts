@@ -107,9 +107,175 @@ export async function createDraftPr(options: CreatePrOptions): Promise<PrResult 
 export type MergeableState = "mergeable" | "conflicting" | "unknown";
 
 /**
- * The slice of PR state gate evaluation, run settlement and integration
- * (issue #54) depend on. Null on any API failure — the caller skips the PR
- * this sweep and retries on the next.
+ * The head commit's check rollup (issue #130). Textual mergeability says
+ * nothing about whether the branch compiles: a clean merge that breaks the
+ * build is the normal way a deleted API meets a new caller added on the
+ * default branch, and GitHub reports exactly that as `mergeable` + a red
+ * rollup. Distinguished so the loop can repair red CI instead of parking
+ * forever beside it.
+ *
+ * - `failing` — at least one check has settled on a failure. Actionable now.
+ * - `pending` — nothing has failed yet but something is still running.
+ * - `passing` — every context settled green (skipped/neutral included).
+ * - `none` — the head commit has no checks at all (a repo without CI).
+ * - `unknown` — the rollup could not be read. Like `unknown` mergeability,
+ *   never a verdict: the caller re-polls next sweep.
+ */
+export type CheckRollupState = "passing" | "failing" | "pending" | "none" | "unknown";
+
+/** A failed check, named for the repair prompt and the needs-you card. */
+export interface FailedCheck {
+  name: string;
+  /** Where a human (or the repair pass) reads the failure; null if GitHub
+   * gave no URL for the context. */
+  url: string | null;
+}
+
+export interface PrCheckRollup {
+  state: CheckRollupState;
+  /** Empty unless `state` is `failing`. */
+  failed: FailedCheck[];
+}
+
+/** CheckRun conclusions that are a settled failure. SKIPPED and NEUTRAL are
+ * not failures (the motivating PR had a deliberately skipped Build job);
+ * ACTION_REQUIRED is — it blocks the merge and only a human clears it, so it
+ * belongs on the path that ends in escalation. */
+const FAILING_CONCLUSIONS = new Set([
+  "FAILURE",
+  "TIMED_OUT",
+  "CANCELLED",
+  "STARTUP_FAILURE",
+  "ACTION_REQUIRED",
+]);
+
+/** StatusContext states that are a settled failure — the Vercel deployment
+ * that motivated this ticket reports here, not as a CheckRun. */
+const FAILING_STATUS_STATES = new Set(["FAILURE", "ERROR"]);
+
+interface RollupContext {
+  __typename?: string;
+  /** CheckRun */
+  name?: string;
+  status?: string;
+  conclusion?: string | null;
+  detailsUrl?: string | null;
+  /** StatusContext */
+  context?: string;
+  state?: string;
+  targetUrl?: string | null;
+}
+
+/**
+ * Fold the rollup's contexts into one state plus the failures worth naming.
+ * A settled failure outranks a straggler still running: a failed required
+ * check does not un-fail, so waiting for the rest would only delay the repair.
+ */
+function foldRollup(contexts: RollupContext[]): PrCheckRollup {
+  const failed: FailedCheck[] = [];
+  let pending = false;
+
+  for (const ctx of contexts) {
+    const isStatus = ctx.__typename === "StatusContext" || ctx.context != null;
+    if (isStatus) {
+      const state = ctx.state ?? "";
+      if (FAILING_STATUS_STATES.has(state)) {
+        failed.push({ name: ctx.context ?? "status", url: ctx.targetUrl ?? null });
+      } else if (state !== "SUCCESS") {
+        // PENDING / EXPECTED — a required context that has not reported yet.
+        pending = true;
+      }
+      continue;
+    }
+    // A CheckRun is only judged once it has completed; anything else (queued,
+    // in progress, waiting on a deployment gate) is still pending. A completed
+    // run with no conclusion is unreadable rather than green, so it waits too.
+    if (ctx.status !== "COMPLETED") {
+      pending = true;
+    } else if (ctx.conclusion != null && FAILING_CONCLUSIONS.has(ctx.conclusion)) {
+      failed.push({ name: ctx.name ?? "check", url: ctx.detailsUrl ?? null });
+    } else if (ctx.conclusion == null) {
+      pending = true;
+    }
+  }
+
+  if (failed.length > 0) return { state: "failing", failed };
+  if (pending) return { state: "pending", failed: [] };
+  if (contexts.length === 0) return { state: "none", failed: [] };
+  return { state: "passing", failed: [] };
+}
+
+const ROLLUP_QUERY = `
+  query($owner: String!, $repo: String!, $number: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                contexts(first: 100) {
+                  nodes {
+                    __typename
+                    ... on CheckRun { name status conclusion detailsUrl }
+                    ... on StatusContext { context state targetUrl }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+/**
+ * The head commit's check rollup, in one GraphQL call: `statusCheckRollup`
+ * covers CheckRuns and StatusContexts together, where the REST equivalent
+ * needs two paginated reads. A read failure is `unknown`, never a verdict —
+ * the caller re-polls rather than acting on a rollup it could not see.
+ */
+async function getCheckRollup(
+  owner: string,
+  repo: string,
+  prNumber: number
+): Promise<PrCheckRollup> {
+  try {
+    const octokit = await getOctokit();
+    const data = (await octokit.graphql(ROLLUP_QUERY, {
+      owner,
+      repo,
+      number: prNumber,
+    })) as {
+      repository?: {
+        pullRequest?: {
+          commits?: {
+            nodes?: Array<{
+              commit?: {
+                statusCheckRollup?: { contexts?: { nodes?: RollupContext[] } } | null;
+              };
+            }>;
+          };
+        };
+      };
+    };
+    const rollup =
+      data.repository?.pullRequest?.commits?.nodes?.[0]?.commit?.statusCheckRollup;
+    // No rollup at all: the head commit has no checks (a repo without CI).
+    if (!rollup) return { state: "none", failed: [] };
+    return foldRollup(rollup.contexts?.nodes ?? []);
+  } catch (err) {
+    console.error(`[github] Failed to read the check rollup of PR #${prNumber}:`, err);
+    return { state: "unknown", failed: [] };
+  }
+}
+
+/**
+ * The slice of PR state gate evaluation, run settlement, integration
+ * (issue #54) and CI repair (issue #130) depend on. Null on any API failure —
+ * the caller skips the PR this sweep and retries on the next. The head SHA is
+ * returned alongside the rollup so callers can tell one head's checks from
+ * another's (a new push starts its own observation).
  */
 export async function getPrState(
   owner: string,
@@ -120,6 +286,9 @@ export async function getPrState(
   merged: boolean;
   autoMergeArmed: boolean;
   mergeable: MergeableState;
+  /** The PR's head commit — the SHA the rollup below belongs to */
+  headSha: string;
+  checks: PrCheckRollup;
 } | null> {
   if (!isGitHubConfigured()) return null;
 
@@ -144,6 +313,8 @@ export async function getPrState(
       merged: pr.merged === true,
       autoMergeArmed: pr.auto_merge != null,
       mergeable,
+      headSha: pr.head.sha,
+      checks: await getCheckRollup(owner, repo, prNumber),
     };
   } catch (err) {
     console.error(`[github] Failed to read PR #${prNumber} state:`, err);
