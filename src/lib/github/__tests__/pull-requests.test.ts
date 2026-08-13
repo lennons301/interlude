@@ -27,21 +27,6 @@ const {
   getAuthenticated: vi.fn(),
 }));
 
-// The reviewer identity is a separate client built from REVIEWER_GH_TOKEN at
-// call time — the PAT never enters a container, and never the App's client.
-vi.mock("octokit", () => ({
-  Octokit: class {
-    rest = {
-      pulls: { listReviews, dismissReview },
-      users: { getAuthenticated },
-    };
-    paginate = async (fn: unknown, params: unknown) =>
-      (fn as (p: unknown) => Promise<unknown[]>)(params);
-  },
-}));
-vi.mock("@/lib/config", () => ({
-  getConfig: () => ({ reviewerGithubToken: "ghp_reviewer" }),
-}));
 
 vi.mock("@/lib/github/client", () => ({
   isGitHubConfigured: () => true,
@@ -52,6 +37,14 @@ vi.mock("@/lib/github/client", () => ({
     },
     graphql,
   }),
+  // The reviewer identity: a separate client built from REVIEWER_GH_TOKEN, so
+  // the PAT never travels with the App's client (and never into a container).
+  reviewerOctokit: () => ({
+    rest: { pulls: { listReviews, dismissReview } },
+    paginate: async (fn: unknown, params: unknown) =>
+      (fn as (p: unknown) => Promise<unknown[]>)(params),
+  }),
+  reviewerLogin: async () => getAuthenticated(),
 }));
 
 beforeEach(() => {
@@ -281,7 +274,7 @@ describe("dismissStaleReviewsAsReviewer (issue #131)", () => {
   const MOVED = "c327f5e19a8b7c6d5e4f302918273645abcdef01";
 
   beforeEach(() => {
-    getAuthenticated.mockResolvedValue({ data: { login: "lennons301-reviewer" } });
+    getAuthenticated.mockResolvedValue("lennons301-reviewer");
     dismissReview.mockResolvedValue({ data: {} });
   });
 
@@ -306,6 +299,7 @@ describe("dismissStaleReviewsAsReviewer (issue #131)", () => {
         pull_number: 180,
         review_id: 1,
         message: "the reviewed commit moved",
+        event: "DISMISS",
       })
     );
   });
@@ -329,6 +323,19 @@ describe("dismissStaleReviewsAsReviewer (issue #131)", () => {
     );
 
     expect(dismissed).toBe(0);
+    expect(dismissReview).not.toHaveBeenCalled();
+  });
+
+  it("reports failure when the reviewer identity cannot be resolved", async () => {
+    // No REVIEWER_GH_TOKEN (or a token GitHub won't identify): the loop can
+    // neither recognise its own reviews nor withdraw them, so it must not
+    // report a clean PR.
+    getAuthenticated.mockResolvedValue(null);
+    listReviews.mockResolvedValue([]);
+
+    expect(
+      await dismissStaleReviewsAsReviewer("lennons301", "interlude", 180, MOVED, "moved")
+    ).toBeNull();
     expect(dismissReview).not.toHaveBeenCalled();
   });
 

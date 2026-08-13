@@ -1,6 +1,4 @@
-import { Octokit } from "octokit";
-import { getOctokit, isGitHubConfigured } from "./client";
-import { getConfig } from "../config";
+import { getOctokit, isGitHubConfigured, reviewerLogin, reviewerOctokit } from "./client";
 
 interface CreatePrOptions {
   owner: string;
@@ -474,8 +472,8 @@ export async function postReviewAsReviewer(
   event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
   body: string
 ): Promise<boolean> {
-  const token = getConfig().reviewerGithubToken;
-  if (!token) {
+  const reviewer = reviewerOctokit();
+  if (!reviewer) {
     console.error(
       `[github] REVIEWER_GH_TOKEN not configured — cannot post ${event} review on PR #${prNumber}`
     );
@@ -483,7 +481,6 @@ export async function postReviewAsReviewer(
   }
 
   try {
-    const reviewer = new Octokit({ auth: token });
     await reviewer.rest.pulls.createReview({
       owner,
       repo,
@@ -525,17 +522,16 @@ export async function dismissStaleReviewsAsReviewer(
   headSha: string,
   reason: string
 ): Promise<number | null> {
-  const token = getConfig().reviewerGithubToken;
-  if (!token) {
+  const reviewer = reviewerOctokit();
+  const login = await reviewerLogin();
+  if (!reviewer || !login) {
     console.error(
-      `[github] REVIEWER_GH_TOKEN not configured — cannot dismiss stale reviews on PR #${prNumber}`
+      `[github] Reviewer identity unavailable — cannot dismiss stale reviews on PR #${prNumber}`
     );
     return null;
   }
 
   try {
-    const reviewer = new Octokit({ auth: token });
-    const { data: me } = await reviewer.rest.users.getAuthenticated();
     const reviews = await reviewer.paginate(reviewer.rest.pulls.listReviews, {
       owner,
       repo,
@@ -545,7 +541,7 @@ export async function dismissStaleReviewsAsReviewer(
 
     const stale = reviews.filter(
       (review) =>
-        review.user?.login === me.login &&
+        review.user?.login === login &&
         (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED") &&
         review.commit_id !== headSha
     );
