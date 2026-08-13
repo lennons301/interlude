@@ -474,6 +474,48 @@ export async function notifyIntegrationEscalation(
 }
 
 /**
+ * A parked PR whose checks are still failing after its automated CI repairs are
+ * spent (issue #130): a human must make the branch green. Pushed once per stall,
+ * like the conflict escalation above — after that the dashboard's failing-checks
+ * needs-you card carries it. Red CI is never left visible only on GitHub.
+ */
+export async function notifyChecksEscalation(
+  channelId: string | null,
+  payload: {
+    issueRef: string;
+    prNumber: number;
+    ciRepairsMade: number;
+    /** Names of the checks still failing */
+    failedChecks: string[];
+  }
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await botClient.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) return;
+
+    const repairs =
+      payload.ciRepairsMade === 1
+        ? "an automated repair"
+        : `${payload.ciRepairsMade} automated repairs`;
+    const embed = new EmbedBuilder()
+      .setTitle(`Failing checks need you — nothing merged`)
+      .setDescription(
+        `${payload.issueRef} (PR #${payload.prNumber}) still fails its checks ` +
+          `after ${repairs}: ${payload.failedChecks.join(", ")}.\n\n` +
+          `Auto-merge is disarmed — make the branch green and merge.`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel as TextChannel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send checks-escalation notification:`, err);
+  }
+}
+
+/**
  * Post an "agent finished a turn — your move" idle notification.
  * Returns the Discord message ID so it can become the task's current
  * interactive message (for ✅-to-complete and reply-to-continue).
