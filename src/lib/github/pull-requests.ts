@@ -497,6 +497,71 @@ export async function postReviewAsReviewer(
 }
 
 /**
+ * Withdraw the reviewer machine account's own standing reviews on a PR whose
+ * head has moved past the commit they were written about (issue #131).
+ *
+ * An approval is the artefact a human reads before merging, and GitHub keeps
+ * counting it for branch protection until it is dismissed — so a review left
+ * standing over a commit it never saw both misinforms the human and lets the
+ * loop's own re-arm auto-merge an unreviewed head. Only reviews authored by the
+ * reviewer identity are touched: a human's approval is theirs to withdraw.
+ * Only APPROVED and CHANGES_REQUESTED carry merge weight (and are the only
+ * states GitHub will dismiss), and only those naming a commit other than the
+ * current head are stale.
+ *
+ * Returns how many were dismissed (0 when there was nothing to withdraw), or
+ * null when the dismissal could not be completed — the caller fails closed on
+ * null rather than treating an approval it could not remove as gone.
+ */
+export async function dismissStaleReviewsAsReviewer(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  headSha: string,
+  reason: string
+): Promise<number | null> {
+  const token = getConfig().reviewerGithubToken;
+  if (!token) {
+    console.error(
+      `[github] REVIEWER_GH_TOKEN not configured — cannot dismiss stale reviews on PR #${prNumber}`
+    );
+    return null;
+  }
+
+  try {
+    const reviewer = new Octokit({ auth: token });
+    const { data: me } = await reviewer.rest.users.getAuthenticated();
+    const reviews = await reviewer.paginate(reviewer.rest.pulls.listReviews, {
+      owner,
+      repo,
+      pull_number: prNumber,
+      per_page: 100,
+    });
+
+    const stale = reviews.filter(
+      (review) =>
+        review.user?.login === me.login &&
+        (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED") &&
+        review.commit_id !== headSha
+    );
+
+    for (const review of stale) {
+      await reviewer.rest.pulls.dismissReview({
+        owner,
+        repo,
+        pull_number: prNumber,
+        review_id: review.id,
+        message: reason,
+      });
+    }
+    return stale.length;
+  } catch (err) {
+    console.error(`[github] Failed to dismiss stale reviews on PR #${prNumber}:`, err);
+    return null;
+  }
+}
+
+/**
  * Mark a draft PR as ready for review.
  */
 export async function markPrReady(
