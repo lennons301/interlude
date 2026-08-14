@@ -9,6 +9,7 @@ import { ACTIVE_RUN_STATUSES, startAutonomySweeps } from "./autonomy/sweep";
 import { startPreflightRefresh } from "./autonomy/preflight";
 import { startDailyDigest } from "./digest-schedule";
 import { getConfig } from "../config";
+import { isGlobalAutonomyPaused } from "../settings";
 import { isGitHubConfigured } from "../github/client";
 import { isDiscordConfigured, startDiscordBot } from "../discord/client";
 
@@ -296,6 +297,14 @@ export async function initOrchestrator(): Promise<void> {
     // is only latency on top of this — the sweep is the backbone.
     if (getConfig().autonomyEnabled && isGitHubConfigured()) {
       startAutonomySweeps();
+      // The runtime kill switch is a DB row, so an engaged one survives the
+      // restart. Say so at boot: otherwise a deliberately held fleet reads as a
+      // broken one in the logs (sweeps running, nothing ever claimed).
+      if (isGlobalAutonomyPaused()) {
+        console.log(
+          "[autonomy] Global kill switch engaged -- sweeps run, but nothing new is claimed until it is lifted"
+        );
+      }
     } else {
       console.log(
         "[autonomy] Autonomous pickup disabled" +
@@ -303,8 +312,8 @@ export async function initOrchestrator(): Promise<void> {
       );
     }
 
-    // Keep preflight fresh for autonomy-enabled projects independently of the
-    // global kill switch, so the dashboard names what's missing while pilots
+    // Keep preflight fresh for autonomy-enabled projects independently of
+    // autonomy being armed at all, so the dashboard names what's missing while pilots
     // are being set up (and catches drift like branch protection being removed).
     if (isGitHubConfigured()) {
       startPreflightRefresh();

@@ -10,6 +10,7 @@ import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { newId } from "../../ulid";
 import { getConfig, PLATFORM_REPO_URL } from "../../config";
+import { isGlobalAutonomyPaused } from "../../settings";
 import { getOctokit, isGitHubConfigured } from "../../github/client";
 import { fetchFileFromDefaultBranch } from "../../github/contents";
 import {
@@ -605,6 +606,10 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
   return {
     now,
     autonomyEnabledGlobal: config.autonomyEnabled,
+    // Read fresh on every tick, never cached or captured at boot: that is what
+    // makes the kill switch (issue #118) take effect at the next sweep rather
+    // than at the next restart.
+    globalPaused: isGlobalAutonomyPaused(),
     // MAX_BUDGET_USD is the per-attempt default since Phase 5 (a ticket's
     // budget: directive may raise a single attempt to the $75 ceiling)
     attemptBudgetUsd: config.maxBudgetUsd,

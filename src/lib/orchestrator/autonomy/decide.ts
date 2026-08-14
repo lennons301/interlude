@@ -295,6 +295,13 @@ export interface StaleReview {
 export interface AutonomySnapshot {
   now: Date;
   autonomyEnabledGlobal: boolean;
+  /** The operator's global kill switch (issue #118), read fresh from the
+   * settings row each sweep tick: engaged, no new autonomous pickup is decided
+   * — no claim, no triage pass — while everything already in flight is decided
+   * exactly as it would be otherwise. Distinct from `autonomyEnabledGlobal`,
+   * which is the env boot master: false there and sweeps never start at all,
+   * so nothing reaches this reducer to pause. */
+  globalPaused: boolean;
   attemptBudgetUsd: number;
   maxAttempts: number;
   /** Interruptions (orchestrator restarts) tolerated per ticket before it is
@@ -384,6 +391,9 @@ export interface AutonomySnapshot {
 
 export type PauseReason =
   | "autonomy-off-global"
+  /** The durable global kill switch is engaged (issue #118) — a deliberate
+   * runtime hold on pickup, lifted by a human, not by a new day or a free slot */
+  | "kill-switch"
   | "autonomy-off-project"
   | "preflight-failing"
   | "no-slots"
@@ -665,6 +675,9 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
   return {
     now,
     autonomyEnabledGlobal: true,
+    // The kill switch holds new pickup, never a turn that already ran: a pass
+    // finishing while the fleet is paused is still parked-or-proceeded here.
+    globalPaused: false,
     attemptBudgetUsd: 0,
     maxAttempts: 0,
     maxInterruptions: 0,
@@ -1190,12 +1203,14 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // implement work — but after everything in flight; the queue starts the
   // task under the ordinary capacity check, so emitting here reserves
   // intent, not a slot. Skipped wholesale once the daily cap is reached:
-  // triage spend is autonomous spend. Registered is the only project gate —
-  // triage writes no code and pushes nothing, so pickup preflight does not
-  // apply — and the author allow-list bounds whose issues can spend triage
-  // money.
+  // triage spend is autonomous spend. Skipped for the same reason while the
+  // global kill switch is engaged (issue #118) — a triage pass is autonomous
+  // pickup that takes a container and spends money, so "stop the fleet" stops
+  // it too. Registered is the only project gate — triage writes no code and
+  // pushes nothing, so pickup preflight does not apply — and the author
+  // allow-list bounds whose issues can spend triage money.
   let triagesQueuedThisSweep = 0;
-  if (snapshot.todayAutonomousSpendUsd < snapshot.dailyCapUsd) {
+  if (!snapshot.globalPaused && snapshot.todayAutonomousSpendUsd < snapshot.dailyCapUsd) {
     for (const candidate of snapshot.triageCandidates) {
       if (candidate.hasTriageTask) continue;
       const project = snapshot.projects.find((p) => p.repo === candidate.repo);
@@ -1309,6 +1324,19 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       });
     }
     actions.push({ type: "pausePickup", reason: "daily-cap" });
+    return actions;
+  }
+
+  // The operator's global kill switch (issue #118), read from the settings row
+  // each tick. It sits beside the env master far above — that one stops sweeps
+  // from ever starting, this one stops what a running sweep would claim, at the
+  // next tick and with no restart. Placed here, at the cap's own gate, so the
+  // two paused fleets behave identically: everything in flight was already
+  // decided above (verdicts, gate decisions, repairs, review passes), a burnt
+  // ticket still routes back to a human, a running turn is left to finish, and
+  // only new claims stop. Triage pickup is held by the same flag further up.
+  if (snapshot.globalPaused) {
+    actions.push({ type: "pausePickup", reason: "kill-switch" });
     return actions;
   }
 
