@@ -31,6 +31,30 @@ export function isGenerationSession(task: {
   return task.kind === "interactive" && task.sessionSkill !== null;
 }
 
+/** The one row id in `settings` — the estate runs a single fleet, so fleet-wide
+ * operator state is one durable row, not a table of them. */
+export const SETTINGS_ROW_ID = "fleet";
+
+/**
+ * Fleet-wide operator settings (issue #118): durable state a human flips while
+ * the orchestrator runs, as opposed to env config (`src/lib/config.ts`), which
+ * is fixed at boot. Exactly one row — id = SETTINGS_ROW_ID — written on demand,
+ * so a fresh install and an upgraded one read the same defaults.
+ */
+export const settings = sqliteTable("settings", {
+  id: text("id").primaryKey(),
+  // The global autonomy kill switch: while engaged no sweep claims new work —
+  // no implement pickup, no triage pass. It is the *runtime* pause layered on
+  // top of the AUTONOMY_ENABLED boot master (false there and sweeps never start
+  // at all), so it takes effect at the next sweep tick with no restart.
+  // In-flight runs, gating and review are deliberately unaffected, exactly as
+  // with the daily spend cap's pause.
+  globalAutonomyPaused: int("global_autonomy_paused", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  updatedAt: int("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
