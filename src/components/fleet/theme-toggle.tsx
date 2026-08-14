@@ -1,17 +1,18 @@
 "use client";
 
-import { useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import {
+  applyTheme,
   FLEET_THEME_KEY,
   nextTheme,
-  parseStoredTheme,
+  readStoredTheme,
   type FleetTheme,
 } from "@/lib/fleet-theme";
 import { FOCUS_RING } from "./fleet-bits";
 
 /** The stored override, shared by every mounted toggle so the shell and any
- * future theme control stay in step. Writing it mirrors the choice onto <html>,
- * exactly as the pre-paint script does on load. */
+ * future theme control stay in step. Persistence is best-effort — a browser that
+ * refuses localStorage still gets a working toggle for the session. */
 let listeners: Array<() => void> = [];
 const themeStore = {
   subscribe(listener: () => void) {
@@ -20,17 +21,15 @@ const themeStore = {
       listeners = listeners.filter((l) => l !== listener);
     };
   },
-  get(): FleetTheme {
-    return parseStoredTheme(localStorage.getItem(FLEET_THEME_KEY));
-  },
+  get: readStoredTheme,
   set(theme: FleetTheme) {
-    if (theme === "system") {
-      localStorage.removeItem(FLEET_THEME_KEY);
-      document.documentElement.removeAttribute("data-fleet-theme");
-    } else {
-      localStorage.setItem(FLEET_THEME_KEY, theme);
-      document.documentElement.setAttribute("data-fleet-theme", theme);
+    try {
+      if (theme === "system") localStorage.removeItem(FLEET_THEME_KEY);
+      else localStorage.setItem(FLEET_THEME_KEY, theme);
+    } catch {
+      // Private-mode storage; the choice still applies to this page.
     }
+    applyTheme(theme);
     listeners.forEach((l) => l());
   },
 };
@@ -51,6 +50,16 @@ export function ThemeToggle() {
     themeStore.get,
     () => "system" as const
   );
+
+  // On "system" the fleet tokens follow the OS through a media query, but the
+  // shadcn `dark` class can't — so re-resolve it when the OS flips.
+  useEffect(() => {
+    if (theme !== "system") return;
+    const query = window.matchMedia("(prefers-color-scheme: dark)");
+    const resolve = () => applyTheme("system");
+    query.addEventListener("change", resolve);
+    return () => query.removeEventListener("change", resolve);
+  }, [theme]);
 
   return (
     <button

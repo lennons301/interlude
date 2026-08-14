@@ -7,10 +7,8 @@ export default function manifest(): MetadataRoute.Manifest {
     description: "Agent-first development environment",
     start_url: "/",
     display: "standalone",
-    // The fleet's dark ground (--fl-ground), now the app's ground everywhere —
-    // an installed Interlude opens on the same colour it renders (issue #117).
-    background_color: "#100e0c",
-    theme_color: "#100e0c",
+    background_color: "#09090b",
+    theme_color: "#09090b",
     icons: [
       {
         src: "/icon-192.png",

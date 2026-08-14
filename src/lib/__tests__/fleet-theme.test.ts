@@ -7,31 +7,54 @@ import {
   type FleetTheme,
 } from "../fleet-theme";
 
-/** Run the pre-paint script against a fake window, returning the attributes it
- * wrote on <html> — the no-flash contract, exercised as the browser does. */
-function runPrePaint(stored: string | null | { throws: true }) {
-  const written: Record<string, string> = {};
+/**
+ * Run the pre-paint script against a fake window — the no-flash contract,
+ * exercised the way the browser runs it. Returns what it wrote on <html>:
+ * `attr` is the fleet palette override, `dark` whether the shadcn dark class is
+ * on (undefined = untouched, i.e. the server-rendered class stands).
+ */
+function runPrePaint({
+  stored = null,
+  systemDark = false,
+  storageThrows = false,
+}: {
+  stored?: string | null;
+  systemDark?: boolean;
+  storageThrows?: boolean;
+}) {
+  let attr: string | undefined;
+  let dark: boolean | undefined;
   const localStorage = {
     getItem(key: string) {
-      if (key !== FLEET_THEME_KEY) return null;
-      if (stored !== null && typeof stored === "object") {
-        throw new Error("localStorage is blocked in this browsing mode");
-      }
-      return stored;
+      if (storageThrows) throw new Error("storage is blocked in this mode");
+      return key === FLEET_THEME_KEY ? stored : null;
     },
   };
   const document = {
     documentElement: {
       setAttribute(name: string, value: string) {
-        written[name] = value;
+        if (name === "data-fleet-theme") attr = value;
+      },
+      removeAttribute(name: string) {
+        if (name === "data-fleet-theme") attr = undefined;
+      },
+      classList: {
+        toggle(name: string, on: boolean) {
+          if (name === "dark") dark = on;
+        },
       },
     },
   };
-  new Function("localStorage", "document", THEME_PRE_PAINT_SCRIPT)(
-    localStorage,
-    document
-  );
-  return written;
+  const matchMedia = (query: string) => ({
+    matches: query === "(prefers-color-scheme: dark)" && systemDark,
+  });
+  new Function(
+    "localStorage",
+    "document",
+    "matchMedia",
+    THEME_PRE_PAINT_SCRIPT
+  )(localStorage, document, matchMedia);
+  return { attr, dark };
 }
 
 describe("nextTheme", () => {
@@ -66,20 +89,38 @@ describe("parseStoredTheme", () => {
 
 describe("THEME_PRE_PAINT_SCRIPT", () => {
   it.each(["dark", "light"] as const)(
-    "pins the %s palette before first paint",
+    "pins the %s palette before first paint, whatever the OS prefers",
     (stored) => {
-      expect(runPrePaint(stored)).toEqual({ "data-fleet-theme": stored });
+      expect(runPrePaint({ stored, systemDark: false })).toEqual({
+        attr: stored,
+        dark: stored === "dark",
+      });
+      expect(runPrePaint({ stored, systemDark: true })).toEqual({
+        attr: stored,
+        dark: stored === "dark",
+      });
     }
   );
 
   it.each([null, "system", "sepia"])(
-    "leaves the system palette alone for %s",
+    "follows the OS for %s, leaving the fleet palette to its media query",
     (stored) => {
-      expect(runPrePaint(stored)).toEqual({});
+      expect(runPrePaint({ stored, systemDark: true })).toEqual({
+        attr: undefined,
+        dark: true,
+      });
+      expect(runPrePaint({ stored, systemDark: false })).toEqual({
+        attr: undefined,
+        dark: false,
+      });
     }
   );
 
-  it("survives a browser that refuses localStorage", () => {
-    expect(() => runPrePaint({ throws: true })).not.toThrow();
+  it("leaves the server-rendered ground alone when storage is refused", () => {
+    expect(() => runPrePaint({ storageThrows: true })).not.toThrow();
+    expect(runPrePaint({ storageThrows: true })).toEqual({
+      attr: undefined,
+      dark: undefined,
+    });
   });
 });

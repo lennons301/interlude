@@ -9,10 +9,11 @@ import { ThemeToggle } from "@/components/fleet/theme-toggle";
  * grown into. The fleet fonts, `.fleet` token scope and pre-paint theme script
  * live in the root layout, so a shell is only chrome + layout, never theming.
  *
- * Server components by design: the only interactive part is the theme toggle,
- * which is its own client island. A page states its own section rather than the
- * shell sniffing the pathname — no client-side routing dependency, and a new
- * route can't silently inherit the wrong marker.
+ * No `"use client"` here: a shell holds no state of its own, and the one
+ * interactive part — the theme toggle — is its own client island. A page states
+ * its own section rather than the shell sniffing the pathname, so there is no
+ * client-side routing dependency and a new route can't silently inherit the
+ * wrong marker.
  */
 
 export type Section = "fleet" | "new" | "tasks" | "settings";
@@ -48,13 +49,13 @@ export function AppShell({
   return (
     <div className={`mx-auto w-full px-4 pb-10 ${WIDTHS[width]}`}>
       <header className="flex h-14 items-center justify-between gap-3">
-        <span className="flex min-w-0 items-center gap-2.5">
+        <div className="flex min-w-0 items-center gap-2.5">
           <span className="font-plex-mono text-[13px] font-medium lowercase">
             interlude <span className="text-fl-ink-3">/ {section}</span>
           </span>
           {accessory}
-        </span>
-        <span className="flex shrink-0 items-center gap-3">
+        </div>
+        <div className="flex shrink-0 items-center gap-3">
           <nav
             aria-label="Sections"
             className="flex items-center gap-3 font-plex-mono text-[11px] lowercase"
@@ -75,7 +76,7 @@ export function AppShell({
             ))}
           </nav>
           <ThemeToggle />
-        </span>
+        </div>
       </header>
       <main>{children}</main>
     </div>
