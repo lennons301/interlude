@@ -216,7 +216,11 @@ export function stopAutonomySweeps(): void {
  */
 export async function runAutonomySweep(): Promise<void> {
   const config = getConfig();
-  if (!config.autonomyEnabled) return; // global kill switch
+  // The env boot master — off means no sweep runs at all, webhook-triggered or
+  // interval. The runtime kill switch (issue #118) is decided inside the
+  // reducer instead, so a paused fleet still gathers and still drives
+  // everything already in flight.
+  if (!config.autonomyEnabled) return;
   if (!isGitHubConfigured()) return;
   if (sweeping) return;
   sweeping = true;
