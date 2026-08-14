@@ -2,14 +2,27 @@
 
 import Link from "next/link";
 import { useEffect, useState, useSyncExternalStore } from "react";
-import type { FleetView } from "@/lib/fleet/fleet-view";
-import { LiveDot } from "./fleet-bits";
+import type { FleetView, PickupPause } from "@/lib/fleet/fleet-view";
+import { LiveDot, TONES, type LiveDotState } from "./fleet-bits";
 import { PulseStrip } from "./pulse-strip";
 import { NeedsYou } from "./needs-you";
 import { RunningList } from "./running-list";
 import { RecentLedger } from "./recent-ledger";
 
 type FleetTheme = "system" | "dark" | "light";
+
+// How a fleet-wide hold on pickup reads (issue #118). A deliberate operator
+// hold is amber and says "held"; a breached spend ceiling is red and says
+// "paused" — the estate's severity vocabulary, and not the same news.
+const PAUSE_DOT: Record<PickupPause["reason"], LiveDotState> = {
+  "kill-switch": "held",
+  "daily-cap": "paused",
+};
+
+const PAUSE_TONE: Record<PickupPause["reason"], keyof typeof TONES> = {
+  "kill-switch": "amber",
+  "daily-cap": "red",
+};
 
 function useFleetStream() {
   const [view, setView] = useState<FleetView | null>(null);
@@ -80,12 +93,17 @@ export function FleetDashboard() {
     return () => clearInterval(timer);
   }, []);
 
-  // The dot is the liveness signal: offline whenever the stream is down,
-  // even if a stale view is still on screen. Paused means no new autonomous
-  // pickup — the kill switch (issue #118) or the daily cap; the banner below
-  // names which, since they are lifted in completely different ways.
+  // The dot is the liveness signal: offline whenever the stream is down, even
+  // if a stale view is still on screen. Otherwise it carries whether new
+  // autonomous pickup is happening — held by the operator's kill switch (issue
+  // #118) or paused by the breached daily cap, each in its own tone, with the
+  // banner below naming it. The two are lifted in completely different ways.
   const pickupPaused = view?.pickupPaused ?? null;
-  const dotState = !connected ? "offline" : pickupPaused ? "paused" : "live";
+  const dotState: LiveDotState = !connected
+    ? "offline"
+    : pickupPaused
+      ? PAUSE_DOT[pickupPaused.reason]
+      : "live";
 
   return (
     <div className="mx-auto min-h-dvh w-full max-w-md px-4 pb-10 min-[900px]:max-w-4xl">
@@ -110,16 +128,9 @@ export function FleetDashboard() {
       </header>
 
       {pickupPaused && (
-        // Amber for the switch, red for the cap — the estate's severity
-        // vocabulary: a deliberate operator hold is not the same news as a
-        // breached spend ceiling.
         <div
           role="status"
-          className={`mb-4 rounded-[4px] border px-3 py-2 text-sm ${
-            pickupPaused.reason === "kill-switch"
-              ? "border-fl-amber/45 bg-fl-amber/13 text-fl-amber"
-              : "border-fl-red/45 bg-fl-red/13 text-fl-red"
-          }`}
+          className={`mb-4 rounded-[4px] border px-3 py-2 text-sm ${TONES[PAUSE_TONE[pickupPaused.reason]]}`}
         >
           {pickupPaused.body}
         </div>

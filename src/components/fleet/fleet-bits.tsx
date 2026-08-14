@@ -52,7 +52,10 @@ export function AttemptPips({ current, max }: { current: number; max: number }) 
   );
 }
 
-const CHIP_TONES = {
+/** The one tone→classes map in the design system: border, wash, ink. Exported
+ * because chips are not the only thing tinted by tone — the dashboard's pause
+ * banner reads it too, rather than restating the class strings. */
+export const TONES = {
   green: "border-fl-green/45 bg-fl-green/13 text-fl-green",
   cool: "border-fl-cool/45 bg-fl-cool/13 text-fl-cool",
   amber: "border-fl-amber/45 bg-fl-amber/13 text-fl-amber",
@@ -64,31 +67,38 @@ export function Chip({
   tone,
   children,
 }: {
-  tone: keyof typeof CHIP_TONES;
+  tone: keyof typeof TONES;
   children: React.ReactNode;
 }) {
   return (
     <span
-      className={`inline-flex items-center rounded-[4px] border px-1.5 py-px font-plex-mono text-[11px] lowercase ${CHIP_TONES[tone]}`}
+      className={`inline-flex items-center rounded-[4px] border px-1.5 py-px font-plex-mono text-[11px] lowercase ${TONES[tone]}`}
     >
       {children}
     </span>
   );
 }
 
-/** The one ambient animation on the page. */
-export function LiveDot({ state }: { state: "live" | "paused" | "offline" }) {
-  const color =
-    state === "live" ? "bg-fl-green" : state === "paused" ? "bg-fl-red" : "bg-fl-ink-3";
+/** The one ambient animation on the page. `held` is a deliberate operator hold
+ * on pickup — the kill switch (issue #118) — so it reads amber like the banner
+ * beside it, where `paused` (the breached daily cap) reads red. */
+export type LiveDotState = "live" | "held" | "paused" | "offline";
+
+const DOT_COLOR: Record<LiveDotState, string> = {
+  live: "bg-fl-green",
+  held: "bg-fl-amber",
+  paused: "bg-fl-red",
+  offline: "bg-fl-ink-3",
+};
+
+export function LiveDot({ state }: { state: LiveDotState }) {
   return (
     <span className="inline-flex items-center gap-1.5">
       <span
-        className={`h-1.5 w-1.5 rounded-full ${color} ${state === "live" ? "fleet-dot-live" : ""}`}
+        className={`h-1.5 w-1.5 rounded-full ${DOT_COLOR[state]} ${state === "live" ? "fleet-dot-live" : ""}`}
       />
       {state !== "live" && (
-        <span className="font-plex-mono text-[11px] text-fl-ink-3">
-          {state === "paused" ? "paused" : "offline"}
-        </span>
+        <span className="font-plex-mono text-[11px] text-fl-ink-3">{state}</span>
       )}
     </span>
   );

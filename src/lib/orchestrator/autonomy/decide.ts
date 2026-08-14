@@ -1335,6 +1335,9 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // decided above (verdicts, gate decisions, repairs, review passes), a burnt
   // ticket still routes back to a human, a running turn is left to finish, and
   // only new claims stop. Triage pickup is held by the same flag further up.
+  // When both holds apply the cap returns first, so the cap is what the sweep
+  // logs and announces (that announcement must not be swallowed by a switch);
+  // the dashboard names the switch instead, being the hold a human can lift.
   if (snapshot.globalPaused) {
     actions.push({ type: "pausePickup", reason: "kill-switch" });
     return actions;

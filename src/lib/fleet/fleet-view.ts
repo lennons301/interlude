@@ -182,6 +182,11 @@ export interface NeedsYouItem {
  * deliberate operator hold lifted by a human; the daily cap is a breached
  * ceiling that lifts itself at local midnight — different things to be told, so
  * each carries its own reason and copy.
+ *
+ * Deliberately its own union rather than the reducer's `PauseReason` (which also
+ * covers per-project and no-slots holds, neither of them fleet-wide) — the same
+ * decoupling this file states for SessionSkill: the read model answers to what
+ * the dashboard renders, not to another module's enum.
  */
 export interface PickupPause {
   reason: "kill-switch" | "daily-cap";
