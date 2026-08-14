@@ -21,6 +21,10 @@ export interface FleetRows {
   slots: number;
   /** Daily estate-wide autonomous spend cap in USD */
   dailyCapUsd: number;
+  /** The global kill switch (issue #118), from the durable settings row: while
+   * engaged the sweep claims nothing new, so the dashboard has to say so — a
+   * held fleet and an idle one look identical otherwise */
+  globalAutonomyPaused: boolean;
   /** Discord guild for deep links into project channels; null = no Discord */
   discordGuildId: string | null;
   projects: FleetProjectRow[];
@@ -173,6 +177,18 @@ export interface NeedsYouItem {
   action: { label: string; href: string } | null;
 }
 
+/**
+ * A fleet-wide hold on new autonomous pickup (issue #118). The kill switch is a
+ * deliberate operator hold lifted by a human; the daily cap is a breached
+ * ceiling that lifts itself at local midnight — different things to be told, so
+ * each carries its own reason and copy.
+ */
+export interface PickupPause {
+  reason: "kill-switch" | "daily-cap";
+  /** One-line banner copy */
+  body: string;
+}
+
 export type PhaseState = "done" | "current" | "todo";
 
 export interface RunningCard {
@@ -232,6 +248,12 @@ export interface FleetView {
     capUsd: number;
     capPaused: boolean;
   };
+  /** Why no new autonomous work is being picked up, or null while pickup runs
+   * (issue #118) — the live dot and the banner read this, so a paused fleet is
+   * never mistaken for an idle one. Both causes can hold at once; the operator's
+   * own kill switch is named first because it is the one they can lift. The
+   * cap's own `spend.capPaused` is untouched — the gauge and digest read that. */
+  pickupPaused: PickupPause | null;
   needsYou: NeedsYouItem[];
   running: RunningCard[];
   recent: { windowDays: number; totalUsd: number; items: RecentItem[] };
@@ -351,6 +373,21 @@ export function buildFleetView(rows: FleetRows): FleetView {
     )
     .reduce((sum, r) => sum + r.totalCostUsd, 0);
   const capPaused = todayUsd >= rows.dailyCapUsd;
+
+  // What the live dot and the banner say (issue #118). The kill switch outranks
+  // the cap: both can hold, but the switch is the one a human engaged and the
+  // one they can lift, so it is what they need to read first.
+  const pickupPaused: PickupPause | null = rows.globalAutonomyPaused
+    ? {
+        reason: "kill-switch",
+        body: "Kill switch engaged — no new autonomous pickup; runs already in flight continue",
+      }
+    : capPaused
+      ? {
+          reason: "daily-cap",
+          body: "Daily cap reached — autonomous pickup paused until midnight",
+        }
+      : null;
 
   const tasksOfRun = (runId: string) =>
     rows.tasks.filter((t) => t.runId === runId);
@@ -783,6 +820,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
       segments,
     },
     spend: { todayUsd, capUsd: rows.dailyCapUsd, capPaused },
+    pickupPaused,
     needsYou,
     running,
     recent: {

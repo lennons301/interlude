@@ -81,9 +81,11 @@ export function FleetDashboard() {
   }, []);
 
   // The dot is the liveness signal: offline whenever the stream is down,
-  // even if a stale view is still on screen.
-  const paused = view?.spend.capPaused ?? false;
-  const dotState = !connected ? "offline" : paused ? "paused" : "live";
+  // even if a stale view is still on screen. Paused means no new autonomous
+  // pickup — the kill switch (issue #118) or the daily cap; the banner below
+  // names which, since they are lifted in completely different ways.
+  const pickupPaused = view?.pickupPaused ?? null;
+  const dotState = !connected ? "offline" : pickupPaused ? "paused" : "live";
 
   return (
     <div className="mx-auto min-h-dvh w-full max-w-md px-4 pb-10 min-[900px]:max-w-4xl">
@@ -107,9 +109,19 @@ export function FleetDashboard() {
         </nav>
       </header>
 
-      {paused && (
-        <div className="mb-4 rounded-[4px] border border-fl-red/45 bg-fl-red/13 px-3 py-2 text-sm text-fl-red">
-          Daily cap reached — autonomous pickup paused until midnight.
+      {pickupPaused && (
+        // Amber for the switch, red for the cap — the estate's severity
+        // vocabulary: a deliberate operator hold is not the same news as a
+        // breached spend ceiling.
+        <div
+          role="status"
+          className={`mb-4 rounded-[4px] border px-3 py-2 text-sm ${
+            pickupPaused.reason === "kill-switch"
+              ? "border-fl-amber/45 bg-fl-amber/13 text-fl-amber"
+              : "border-fl-red/45 bg-fl-red/13 text-fl-red"
+          }`}
+        >
+          {pickupPaused.body}
         </div>
       )}
 
