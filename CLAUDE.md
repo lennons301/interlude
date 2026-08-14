@@ -206,12 +206,48 @@ generation time.
   restarts by interrupting and re-claiming)
 - (Container resource limits moved into Phase 5 — a prerequisite for unattended
   parallelism, not hardening)
+- **Sandbox hardening (security, not just ops).** The autonomous loop is where
+  untrusted input first reaches an unattended agent (triage on `issues.opened`,
+  webhook-delivered ticket/PR text), so "hardening" here means security too.
+  Agent containers today run on Docker defaults — non-root uid 1000 and no
+  mounted docker socket are the only real controls; no dropped caps, no egress
+  limits, `--dangerously-skip-permissions` always on, live secrets in scope.
+  - Cheap wins on the existing local Docker path: `--cap-drop=ALL`,
+    `--security-opt=no-new-privileges`, `--pids-limit`; exec-scope `DOPPLER_TOKEN`
+    like the git token so it isn't sitting in PID 1's environ all run
+  - Egress control: flip the agent network to `internal: true` + an allowlist
+    proxy (Doppler / GitHub / Anthropic) — the highest-leverage single change
+    against exfiltration and agent-to-agent reachability
+  - Deferred out of Phase 5 deliberately: Phase 5 ships/tests in place with the
+    current posture (single-tenant, self-authored tickets), which the threat
+    model tolerates
 
 ### Phase 7: On-Demand Remote Compute
 - Cloud provider API for machine provisioning
 - Orchestrator decides local vs remote — plugs into Phase 5's capacity-provider
   seam
 - Auto-teardown after task completion
+- **Kernel / tenant isolation rides this seam.** A real kernel boundary
+  (gVisor `runsc`, or microVMs à la Firecracker / Kata) belongs here, not
+  retrofitted onto the local Docker path: ephemeral per-task remote machines
+  with auto-teardown give strong isolation nearly for free, whereas hardening
+  the local runtime is pure cost the remote path then obsoletes
+- Forcing function: **multi-tenancy** (someone else's tickets on the box) would
+  pull this tier forward from Phase 7 into a blocker. Not on the roadmap today,
+  so the phasing holds — but it's the one event that reorders everything
+- **Shape and economics settled 2026-08-05** (after the OOM incidents proved
+  2 concurrent agents + orchestrator UI don't fit on a 4GB box): the design is
+  **hybrid overflow**, not all-remote. The local box keeps 1 serial slot
+  (`CAPACITY_SLOTS=1`, `AGENT_MEMORY_MB=2048` in Doppler `interlude/prd`) and
+  hosts all interactive sessions + live preview (preview rides the local
+  Docker network); overflow slots provision per-task/per-burst cloud VMs via
+  provider API, driven over remote Docker (`dockerode` ssh://), image from a
+  registry, auto-torn-down when idle. Remote slots are autonomous
+  implement/review only — explicitly preview-less. Economics: agent work is
+  bursty (10–60 min attempts, a few hours/day), so hourly-billed overflow at
+  ~3–6p/container-hour ≈ £2–8/mo beats a permanent resize (+£32/mo standing at
+  2026 pricing, rejected on cost) by ~5× while scaling elastically. A resize
+  only wins if zero-engineering parallelism is needed immediately.
 
 ### Separate initiative: general UI upgrade
 Navigation, task-detail polish, project management screens, mobile ergonomics.
