@@ -1,6 +1,4 @@
-import { Octokit } from "octokit";
-import { getOctokit, isGitHubConfigured } from "./client";
-import { getConfig } from "../config";
+import { getOctokit, isGitHubConfigured, reviewerLogin, reviewerOctokit } from "./client";
 
 interface CreatePrOptions {
   owner: string;
@@ -460,10 +458,12 @@ export async function disarmAutoMerge(
 }
 
 /**
- * Post a PR review as the reviewer machine account. This is the one place
- * the reviewer identity is exercised, and it runs in the orchestrator with
- * a token read from config at call time — the PAT never enters a container,
- * so no agent process ever holds the identity that can approve agent work.
+ * Post a PR review as the reviewer machine account. The reviewer identity is
+ * exercised here and in `dismissStaleReviewsAsReviewer` below (issue #131) —
+ * posting a verdict and withdrawing one it no longer stands behind are the two
+ * halves of the same job — and in both cases from the orchestrator, with a
+ * token read from config at call time. The PAT never enters a container, so no
+ * agent process ever holds the identity that can approve agent work.
  */
 export async function postReviewAsReviewer(
   owner: string,
@@ -472,8 +472,8 @@ export async function postReviewAsReviewer(
   event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
   body: string
 ): Promise<boolean> {
-  const token = getConfig().reviewerGithubToken;
-  if (!token) {
+  const reviewer = reviewerOctokit();
+  if (!reviewer) {
     console.error(
       `[github] REVIEWER_GH_TOKEN not configured — cannot post ${event} review on PR #${prNumber}`
     );
@@ -481,7 +481,6 @@ export async function postReviewAsReviewer(
   }
 
   try {
-    const reviewer = new Octokit({ auth: token });
     await reviewer.rest.pulls.createReview({
       owner,
       repo,
@@ -493,6 +492,74 @@ export async function postReviewAsReviewer(
   } catch (err) {
     console.error(`[github] Failed to post ${event} review on PR #${prNumber}:`, err);
     return false;
+  }
+}
+
+/**
+ * Withdraw the reviewer machine account's own standing reviews on a PR whose
+ * head has moved past the commit they were written about (issue #131).
+ *
+ * An approval is the artefact a human reads before merging, and GitHub keeps
+ * counting it for branch protection until it is dismissed — so a review left
+ * standing over a commit it never saw both misinforms the human and lets the
+ * loop's own re-arm auto-merge an unreviewed head. Only reviews authored by the
+ * reviewer identity are touched: a human's approval is theirs to withdraw.
+ * Only APPROVED and CHANGES_REQUESTED carry merge weight (and are the only
+ * states GitHub will dismiss), and only those naming a commit other than the
+ * current head are stale.
+ *
+ * Returns how many were dismissed (0 when there was nothing to withdraw), or
+ * null when the dismissal could not be completed — the caller fails closed on
+ * null rather than treating an approval it could not remove as gone. Null is a
+ * real possibility, not just an API hiccup: GitHub requires an administrator or
+ * a place on the branch's dismissal allow-list to dismiss a review on a
+ * protected branch, and the reviewer machine account is only a collaborator.
+ */
+export async function dismissStaleReviewsAsReviewer(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  headSha: string,
+  reason: string
+): Promise<number | null> {
+  const reviewer = reviewerOctokit();
+  const login = await reviewerLogin();
+  if (!reviewer || !login) {
+    console.error(
+      `[github] Reviewer identity unavailable — cannot dismiss stale reviews on PR #${prNumber}`
+    );
+    return null;
+  }
+
+  try {
+    const reviews = await reviewer.paginate(reviewer.rest.pulls.listReviews, {
+      owner,
+      repo,
+      pull_number: prNumber,
+      per_page: 100,
+    });
+
+    const stale = reviews.filter(
+      (review) =>
+        review.user?.login === login &&
+        (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED") &&
+        review.commit_id !== headSha
+    );
+
+    for (const review of stale) {
+      await reviewer.rest.pulls.dismissReview({
+        owner,
+        repo,
+        pull_number: prNumber,
+        review_id: review.id,
+        message: reason,
+        event: "DISMISS",
+      });
+    }
+    return stale.length;
+  } catch (err) {
+    console.error(`[github] Failed to dismiss stale reviews on PR #${prNumber}:`, err);
+    return null;
   }
 }
 

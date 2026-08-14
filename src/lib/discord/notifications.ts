@@ -474,6 +474,57 @@ export async function notifyIntegrationEscalation(
 }
 
 /**
+ * A reviewed PR whose head moved past the commit its verdict was written about,
+ * with no review cycle left to spend on re-reviewing it (issue #131): a human
+ * owns the merge decision now. Pushed at the moment the loop stops, because
+ * nothing else will happen on this PR until someone looks — the alternative is
+ * a reviewed-looking PR quietly sitting on an unreviewed head.
+ */
+export async function notifyStaleReviewEscalation(
+  channelId: string | null,
+  payload: {
+    issueRef: string;
+    prNumber: number;
+    /** Short SHA the review was written about */
+    reviewedHeadSha: string;
+    /** Short SHA the PR carries now */
+    headSha: string;
+    /** Why the loop stopped re-reviewing */
+    detail: string;
+    /** Whether the stale review was actually withdrawn — it may still be
+     * standing (GitHub refused, or the account lacks the right on a protected
+     * branch), and an operator about to merge needs to know which */
+    reviewWithdrawn: boolean;
+  }
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await botClient.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Reviewed commit moved — nothing merged`)
+      .setDescription(
+        `${payload.issueRef} (PR #${payload.prNumber}) was reviewed at ` +
+          `\`${payload.reviewedHeadSha}\` and its head is now \`${payload.headSha}\` — ` +
+          `${payload.detail}.\n\n` +
+          `Auto-merge is disarmed and ` +
+          (payload.reviewWithdrawn
+            ? `the stale review is withdrawn`
+            : `**the stale review is still standing** — read the issue for why`) +
+          ` — review the current head and merge.`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel as TextChannel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send stale-review notification:`, err);
+  }
+}
+
+/**
  * A parked PR whose checks are still failing after its automated CI repairs are
  * spent (issue #130): a human must make the branch green. Pushed once per stall,
  * like the conflict escalation above — after that the dashboard's failing-checks

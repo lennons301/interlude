@@ -1,14 +1,32 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createDraftPr, findOpenPrForHead, getPrState } from "../pull-requests";
+import {
+  createDraftPr,
+  dismissStaleReviewsAsReviewer,
+  findOpenPrForHead,
+  getPrState,
+} from "../pull-requests";
 
 // Mock the GitHub client so we can drive create/list behaviour per test.
-const { reposGet, pullsCreate, pullsList, pullsGet, graphql } = vi.hoisted(() => ({
+const {
+  reposGet,
+  pullsCreate,
+  pullsList,
+  pullsGet,
+  graphql,
+  listReviews,
+  dismissReview,
+  getAuthenticated,
+} = vi.hoisted(() => ({
   reposGet: vi.fn(),
   pullsCreate: vi.fn(),
   pullsList: vi.fn(),
   pullsGet: vi.fn(),
   graphql: vi.fn(),
+  listReviews: vi.fn(),
+  dismissReview: vi.fn(),
+  getAuthenticated: vi.fn(),
 }));
+
 
 vi.mock("@/lib/github/client", () => ({
   isGitHubConfigured: () => true,
@@ -19,6 +37,14 @@ vi.mock("@/lib/github/client", () => ({
     },
     graphql,
   }),
+  // The reviewer identity: a separate client built from REVIEWER_GH_TOKEN, so
+  // the PAT never travels with the App's client (and never into a container).
+  reviewerOctokit: () => ({
+    rest: { pulls: { listReviews, dismissReview } },
+    paginate: async (fn: unknown, params: unknown) =>
+      (fn as (p: unknown) => Promise<unknown[]>)(params),
+  }),
+  reviewerLogin: async () => getAuthenticated(),
 }));
 
 beforeEach(() => {
@@ -27,6 +53,9 @@ beforeEach(() => {
   pullsList.mockReset();
   pullsGet.mockReset();
   graphql.mockReset();
+  listReviews.mockReset();
+  dismissReview.mockReset();
+  getAuthenticated.mockReset();
   reposGet.mockResolvedValue({ data: { default_branch: "main" } });
 });
 
@@ -237,5 +266,91 @@ describe("findOpenPrForHead", () => {
     pullsList.mockResolvedValue({ data: [] });
 
     expect(await findOpenPrForHead("lennons301", "interlude", "agent/issue-8")).toBeNull();
+  });
+});
+
+describe("dismissStaleReviewsAsReviewer (issue #131)", () => {
+  const REVIEWED = "d9d06fc1a2b3c4d5e6f708192a3b4c5d6e7f8091";
+  const MOVED = "c327f5e19a8b7c6d5e4f302918273645abcdef01";
+
+  beforeEach(() => {
+    getAuthenticated.mockResolvedValue("lennons301-reviewer");
+    dismissReview.mockResolvedValue({ data: {} });
+  });
+
+  it("dismisses the reviewer's own approval left behind by the moved head", async () => {
+    listReviews.mockResolvedValue([
+      { id: 1, state: "APPROVED", commit_id: REVIEWED, user: { login: "lennons301-reviewer" } },
+    ]);
+
+    const dismissed = await dismissStaleReviewsAsReviewer(
+      "lennons301",
+      "interlude",
+      180,
+      MOVED,
+      "the reviewed commit moved"
+    );
+
+    expect(dismissed).toBe(1);
+    expect(dismissReview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        owner: "lennons301",
+        repo: "interlude",
+        pull_number: 180,
+        review_id: 1,
+        message: "the reviewed commit moved",
+        event: "DISMISS",
+      })
+    );
+  });
+
+  it("never touches a human's review, or its own review of the current head", async () => {
+    listReviews.mockResolvedValue([
+      // A human's approval is theirs to withdraw, whatever commit it names.
+      { id: 1, state: "APPROVED", commit_id: REVIEWED, user: { login: "lennons301" } },
+      // Its own, but about the head that exists now — not stale.
+      { id: 2, state: "APPROVED", commit_id: MOVED, user: { login: "lennons301-reviewer" } },
+      // Comment-only reviews carry no merge weight and cannot be dismissed.
+      { id: 3, state: "COMMENTED", commit_id: REVIEWED, user: { login: "lennons301-reviewer" } },
+    ]);
+
+    const dismissed = await dismissStaleReviewsAsReviewer(
+      "lennons301",
+      "interlude",
+      180,
+      MOVED,
+      "the reviewed commit moved"
+    );
+
+    expect(dismissed).toBe(0);
+    expect(dismissReview).not.toHaveBeenCalled();
+  });
+
+  it("reports failure when the reviewer identity cannot be resolved", async () => {
+    // No REVIEWER_GH_TOKEN (or a token GitHub won't identify): the loop can
+    // neither recognise its own reviews nor withdraw them, so it must not
+    // report a clean PR.
+    getAuthenticated.mockResolvedValue(null);
+    listReviews.mockResolvedValue([]);
+
+    expect(
+      await dismissStaleReviewsAsReviewer("lennons301", "interlude", 180, MOVED, "moved")
+    ).toBeNull();
+    expect(dismissReview).not.toHaveBeenCalled();
+  });
+
+  it("reports failure rather than a false clean when GitHub rejects the dismissal", async () => {
+    // The caller fails closed on null: a standing approval it could not remove
+    // must never be re-armed over.
+    listReviews.mockResolvedValue([
+      { id: 1, state: "APPROVED", commit_id: REVIEWED, user: { login: "lennons301-reviewer" } },
+    ]);
+    dismissReview.mockRejectedValue(
+      Object.assign(new Error("Forbidden"), { status: 403 })
+    );
+
+    expect(
+      await dismissStaleReviewsAsReviewer("lennons301", "interlude", 180, MOVED, "moved")
+    ).toBeNull();
   });
 });

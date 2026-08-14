@@ -216,6 +216,31 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   the dashboard, resets at local midnight). Interactive work is exempt by
   construction (it has no run).
 
+### Pushing to a PR the loop has already reviewed
+
+If you click *Update branch*, push a commit, or merge `main` into an agent PR
+after its review was posted, the loop notices the head moved past the commit it
+reviewed and treats the verdict as void:
+
+- auto-merge is disarmed first, so nothing lands on a head nobody read;
+- the reviewer account's own approval is **dismissed** (a standing approval keeps
+  counting for branch protection, and it is the artefact you read before merging);
+- gate evaluation and one fresh review pass re-run against the new head, and the
+  issue records the old and new SHAs.
+
+That costs one of the attempt's review cycles. If none are left, the PR is
+labelled `human-signoff` and pinged to Discord instead: review and merge it
+yourself. A red rollup on the new head is repaired first, so the re-review never
+runs against a branch that doesn't build.
+
+**If the dismissal is refused**, the loop stops there and hands the PR over
+rather than re-arming over a review GitHub still counts — the issue comment says
+so. GitHub only lets an administrator, or an account on the branch's dismissal
+allow-list, dismiss a review on a protected branch, so the reviewer account needs
+one of those. The alternative is to turn on *Dismiss stale pull request approvals
+when new commits are pushed* on the protected branch: GitHub then withdraws the
+approval itself on every push, and the loop finds nothing left to dismiss.
+
 ### Supervised runs (`checkpoint:`)
 
 A `checkpoint: <text>` directive in a ticket's Workflow section runs the implement

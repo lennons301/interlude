@@ -115,6 +115,14 @@ export const runs = sqliteTable("runs", {
     | { kind: "approve" | "request-changes" | "escalate"; body: string }
     | { kind: "unparseable"; reason: string }
   >(),
+  // The PR head the last posted verdict was written about (issue #131). Set
+  // alongside reviewVerdict when the orchestrator posts a review, and cleared
+  // wherever the verdict is. Without it there was no record of *which* commit
+  // was reviewed, so a push by anyone but the loop's own repair path left the
+  // approval standing over code nobody read — and an armed run auto-merged it.
+  // A parked run whose PR head has moved past this SHA is re-gated and
+  // re-reviewed (or, once its cycles are spent, handed to a human).
+  reviewedHeadSha: text("reviewed_head_sha"),
   reviewCycleCount: int("review_cycle_count").notNull().default(0),
   // Times a review pass produced an unparseable verdict this attempt (issue
   // #89). A pure format slip — a substantively fine review whose final message

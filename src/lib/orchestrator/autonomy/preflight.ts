@@ -22,9 +22,12 @@
 import { db } from "@/db";
 import { projects } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { Octokit } from "octokit";
-import { getConfig } from "../../config";
-import { getInstallationPermissions, getOctokit, isGitHubConfigured } from "../../github/client";
+import {
+  getInstallationPermissions,
+  getOctokit,
+  isGitHubConfigured,
+  reviewerLogin,
+} from "../../github/client";
 import { HUMAN_SIGNOFF_LABEL } from "./gates";
 
 /**
@@ -183,20 +186,6 @@ async function probeBranchProtection(
     if (isNotFound(err)) return "unprotected";
     console.error(`[preflight] getBranchProtection ${owner}/${repo} failed:`, err);
     return "unprotected";
-  }
-}
-
-/** Resolve the reviewer machine account's login from REVIEWER_GH_TOKEN. */
-async function reviewerLogin(): Promise<string | null> {
-  const token = getConfig().reviewerGithubToken;
-  if (!token) return null;
-  try {
-    const reviewer = new Octokit({ auth: token });
-    const { data } = await reviewer.rest.users.getAuthenticated();
-    return data.login;
-  } catch (err) {
-    console.error("[preflight] Could not resolve reviewer login from REVIEWER_GH_TOKEN:", err);
-    return null;
   }
 }
 

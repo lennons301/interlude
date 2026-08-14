@@ -35,6 +35,7 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
     expect(run.totalCostUsd).toBe(0);
     expect(run.gateCategories).toEqual([]);
     expect(run.reviewVerdict).toBeNull();
+    expect(run.reviewedHeadSha).toBeNull();
     expect(run.reviewCycleCount).toBe(0);
     expect(run.interruptionCount).toBe(0);
     expect(run.blockedQuestion).toBeNull();
@@ -63,6 +64,7 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
         pullRequestUrl: "https://github.com/owner/repo/pull/99",
         gateCategories: ["migrations", "auth"],
         reviewVerdict: "request-changes",
+        reviewedHeadSha: "d9d06fc1a2b3c4d5e6f708192a3b4c5d6e7f8091",
         reviewCycleCount: 2,
         interruptionCount: 1,
         blockedQuestion: "Which auth provider should this target?",
@@ -80,6 +82,7 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
     expect(run.totalCostUsd).toBe(13.37);
     expect(run.gateCategories).toEqual(["migrations", "auth"]);
     expect(run.reviewVerdict).toBe("request-changes");
+    expect(run.reviewedHeadSha).toBe("d9d06fc1a2b3c4d5e6f708192a3b4c5d6e7f8091");
     expect(run.model).toBe("claude-opus-4-8");
     expect(run.claimedAt).toEqual(claimedAt);
     expect(run.startedAt).toEqual(startedAt);

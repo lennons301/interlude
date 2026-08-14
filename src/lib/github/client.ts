@@ -68,6 +68,31 @@ export async function getInstallationToken(): Promise<string> {
   return cachedToken;
 }
 
+/**
+ * The reviewer machine account's own client, built from REVIEWER_GH_TOKEN at
+ * call time. Separate from the App's client on purpose: this is the identity
+ * that approves and dismisses reviews, and it never enters a container.
+ */
+export function reviewerOctokit(): Octokit | null {
+  const token = getConfig().reviewerGithubToken;
+  return token ? new Octokit({ auth: token }) : null;
+}
+
+/** The reviewer machine account's login, or null when it cannot be resolved —
+ * shared by preflight's collaborator probe and the review helpers, which both
+ * need to recognise the identity's own work. */
+export async function reviewerLogin(): Promise<string | null> {
+  const reviewer = reviewerOctokit();
+  if (!reviewer) return null;
+  try {
+    const { data } = await reviewer.rest.users.getAuthenticated();
+    return data.login;
+  } catch (err) {
+    console.error("[github] Could not resolve reviewer login from REVIEWER_GH_TOKEN:", err);
+    return null;
+  }
+}
+
 export async function getOctokit(): Promise<Octokit> {
   const token = await getInstallationToken();
   return new Octokit({ auth: token });

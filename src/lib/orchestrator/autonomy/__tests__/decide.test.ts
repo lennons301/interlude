@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
 import { observeCheckRollup } from "../checks";
+import { observeReviewedHead } from "../review-head";
 import { ADVISORY_TRIAGE_LABELS, ARMING_LABEL } from "../ticket";
 import { parseTriageExit } from "../triage";
 import {
@@ -17,6 +18,7 @@ import {
   type PendingTriage,
   type PendingVerdict,
   type ProjectSnapshot,
+  type StaleReview,
   type TriageCandidate,
 } from "../decide";
 
@@ -86,6 +88,7 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     resolvedConflicts: [],
     checksFailingPrs: [],
     resolvedCheckFailures: [],
+    staleReviews: [],
     maxCiRepairAttempts: 1,
     minCheckFailureSweeps: 2,
     announcedCheckEscalations: [],
@@ -130,6 +133,22 @@ function makeChecksFailingPr(overrides: Partial<ChecksFailingPr> = {}): ChecksFa
     sweepsFailing: 2,
     ciRepairsMade: 0,
     hasRepairTask: false,
+    ...overrides,
+  };
+}
+
+function makeStaleReview(overrides: Partial<StaleReview> = {}): StaleReview {
+  return {
+    runId: "run-1",
+    issueRef: "acme/widgets#7",
+    prNumber: 41,
+    armed: false,
+    // The LPS #180 shape: approved at d9d06fc, two "Update branch" merge
+    // commits later the head is a commit nobody reviewed.
+    reviewedHeadSha: "d9d06fc",
+    headSha: "c327f5e",
+    reviewCycleCount: 0,
+    dismissalFailed: false,
     ...overrides,
   };
 }
@@ -190,6 +209,9 @@ function makeVerdict(overrides: Partial<PendingVerdict> = {}): PendingVerdict {
     prNumber: 41,
     armed: true,
     result: { kind: "approve", body: "Verified against the ticket." },
+    // The head the pass judged — carried onto the posted verdict so the run
+    // records which commit it approved (issue #131).
+    headSha: "d9d06fc",
     implementTaskId: "task-impl-1",
     reviewCycleCount: 0,
     reviewUnparseableCount: 0,
@@ -1297,6 +1319,7 @@ describe("decideNext — verdict-to-action mapping", () => {
         verdict: "approve",
         body: "Verified against the ticket.",
         armed: true,
+        headSha: "d9d06fc",
       },
     ]);
   });
@@ -1322,6 +1345,7 @@ describe("decideNext — verdict-to-action mapping", () => {
         verdict: "request-changes",
         body: "The sort key is wrong.",
         armed: true,
+        headSha: "d9d06fc",
       },
       {
         type: "deliverFeedback",
@@ -1380,6 +1404,7 @@ describe("decideNext — verdict-to-action mapping", () => {
           "longer available to apply them — a human needs to pick this up.\n\n" +
           "The sort key is wrong.",
         armed: true,
+        headSha: "d9d06fc",
       },
     ]);
   });
@@ -1406,6 +1431,7 @@ describe("decideNext — verdict-to-action mapping", () => {
         verdict: "escalate",
         body: "A human should see this.",
         armed: false,
+        headSha: "d9d06fc",
       },
     ]);
   });
@@ -1530,6 +1556,7 @@ describe("decideNext — verdict-to-action mapping", () => {
         armed: true,
         reason: "review-cycles-exhausted",
         reviewBody: "Still wrong.",
+        headSha: "d9d06fc",
       },
     ]);
   });
@@ -1895,6 +1922,133 @@ describe("decideNext — parked PRs with failing checks (issue #130)", () => {
     expect(actions.some((a) => a.type === "repairChecks")).toBe(true);
     expect(actions.some((a) => a.type === "claimIssue")).toBe(false);
     expect(actions).toContainEqual({ type: "pausePickup", reason: "no-slots" });
+  });
+});
+
+describe("decideNext — a reviewed PR whose head moved (issue #131)", () => {
+  it("disarms, drops the stale verdict and buys one fresh review cycle", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        staleReviews: [makeStaleReview({ armed: true })],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "invalidateReview",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        armed: true,
+        reviewedHeadSha: "d9d06fc",
+        headSha: "c327f5e",
+        cycle: 1,
+      },
+    ]);
+  });
+
+  it("escalates instead of re-reviewing once the attempt's review cycles are spent", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxReviewCycles: 2,
+        // One fix-up cycle already spent this attempt; a re-review would be the
+        // second, so the push goes to a human rather than looping.
+        staleReviews: [makeStaleReview({ armed: true, reviewCycleCount: 1 })],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "escalateStaleReview",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        armed: true,
+        reviewedHeadSha: "d9d06fc",
+        headSha: "c327f5e",
+        reviewCycleCount: 1,
+        reason: "cycles-exhausted",
+      },
+    ]);
+  });
+
+  it("escalates rather than re-arming when the stale review could not be withdrawn", () => {
+    // Fail closed: GitHub keeps counting an approval until it is dismissed, so
+    // a review the loop could not withdraw must not be re-armed over — dismissal
+    // on a protected branch needs rights a plain collaborator may not have.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        staleReviews: [makeStaleReview({ armed: true, dismissalFailed: true })],
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "escalateStaleReview",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        prNumber: 41,
+        armed: true,
+        reviewedHeadSha: "d9d06fc",
+        headSha: "c327f5e",
+        reviewCycleCount: 0,
+        reason: "dismissal-failed",
+      },
+    ]);
+  });
+
+  it("leaves a run whose head is still the reviewed commit in the ordinary pipeline", () => {
+    // No sweep-on-sweep churn. Wired through the fold the sweep uses: an unmoved
+    // head is no observation, so the parked run reaches the reducer through its
+    // normal list and is decided there, not re-reviewed.
+    const moved = observeReviewedHead("d9d06fc", "d9d06fc");
+    expect(moved).toBeNull();
+
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        staleReviews: moved ? [makeStaleReview()] : [],
+        pendingVerdicts: [makeVerdict()],
+      })
+    );
+
+    expect(actions.map((a) => a.type)).toEqual(["postVerdict"]);
+  });
+
+  it("does not double-handle a repair push, which already cleared the verdict", () => {
+    // A repair (issue #54 / #130) clears reviewVerdict *and* the reviewed SHA
+    // when it queues, so its own push moves a head no verdict claims: the fold
+    // reports nothing, and the run is re-gated once — by the repair's own return
+    // to gate evaluation — rather than gated and invalidated twice over.
+    const moved = observeReviewedHead(null, "c327f5e");
+    expect(moved).toBeNull();
+
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        staleReviews: moved ? [makeStaleReview()] : [],
+        pendingGateEvaluations: [makePending()],
+      })
+    );
+
+    expect(actions.map((a) => a.type)).toEqual(["armAutoMerge"]);
+  });
+
+  it("never invalidates or escalates a run that just blocked on a question", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [makePass({ finalMessage: "BLOCKED: which database?" })],
+        staleReviews: [makeStaleReview()],
+      })
+    );
+
+    expect(actions.some((a) => a.type === "invalidateReview")).toBe(false);
+    expect(actions.some((a) => a.type === "escalateStaleReview")).toBe(false);
+    expect(actions.some((a) => a.type === "escalate")).toBe(true);
   });
 });
 
