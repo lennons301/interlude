@@ -4,6 +4,11 @@
  * with a tick at its ceiling. Color is strictly semantic.
  */
 
+/** The system's one focus affordance: a hairline ring in the quietest ink, so
+ * keyboard users get a visible target without a colour that means something. */
+export const FOCUS_RING =
+  "focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-fl-ink-3";
+
 export function Eyebrow({ children }: { children: React.ReactNode }) {
   return (
     <h2 className="font-plex-mono text-[11px] font-medium uppercase tracking-[0.14em] text-fl-ink-3">

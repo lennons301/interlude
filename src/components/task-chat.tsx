@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import { SlimShell } from "@/components/app-shell";
 import { TaskStream } from "./task-stream";
 import { MessageInput } from "./message-input";
 import { PreviewPane } from "./preview-pane";
@@ -90,59 +91,65 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
     taskStatus.status
   );
 
+  // The slim shell carries the task's identity and live status (issue #117);
+  // what's left here is the task's references, restyled by its own ticket.
+  const hasReferences = Boolean(
+    initialTask.branch || githubIssue || pullRequestUrl
+  );
+
   return (
-    <div className="flex flex-col h-[calc(100vh-4rem)]">
-      {/* Header */}
-      <div className="border-b border-zinc-800 px-4 py-3 shrink-0">
-        <div className="flex items-center justify-between">
-          <h1 className="text-lg font-semibold text-zinc-100 truncate">
-            {initialTask.title}
-          </h1>
-          <div className="flex items-center gap-2">
-            {containerLabel && (
-              <span
-                className={`text-xs ${
-                  taskStatus.containerStatus === "running"
-                    ? "text-green-400 animate-pulse"
-                    : "text-zinc-400"
-                }`}
-              >
-                {containerLabel}
-              </span>
-            )}
-            <StatusDot status={taskStatus.status} />
-          </div>
+    <SlimShell
+      title={initialTask.title}
+      accessory={
+        <>
+          {containerLabel && (
+            <span
+              className={`text-xs ${
+                taskStatus.containerStatus === "running"
+                  ? "text-green-400 animate-pulse"
+                  : "text-zinc-400"
+              }`}
+            >
+              {containerLabel}
+            </span>
+          )}
+          <StatusDot status={taskStatus.status} />
+        </>
+      }
+    >
+      {hasReferences && (
+        <div className="border-b border-zinc-800 px-4 py-2 shrink-0">
+          {initialTask.branch && (
+            <p className="text-xs text-zinc-500 font-mono">
+              {initialTask.branch}
+            </p>
+          )}
+          {(githubIssue || pullRequestUrl) && (
+            <div className="flex items-center gap-3 mt-0.5">
+              {githubIssue && (
+                <a
+                  href={`https://github.com/${githubIssue.replace("#", "/issues/")}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-blue-400 hover:text-blue-300 font-mono"
+                >
+                  {githubIssue}
+                </a>
+              )}
+              {pullRequestUrl && (
+                <a
+                  href={pullRequestUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-blue-400 hover:text-blue-300 font-mono"
+                >
+                  PR #{pullRequestNumber}
+                </a>
+              )}
+            </div>
+          )}
         </div>
-        {initialTask.branch && (
-          <p className="text-xs text-zinc-500 mt-0.5 font-mono">
-            {initialTask.branch}
-          </p>
-        )}
-        {(githubIssue || pullRequestUrl) && (
-          <div className="flex items-center gap-3 mt-0.5">
-            {githubIssue && (
-              <a
-                href={`https://github.com/${githubIssue.replace("#", "/issues/")}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-blue-400 hover:text-blue-300 font-mono"
-              >
-                {githubIssue}
-              </a>
-            )}
-            {pullRequestUrl && (
-              <a
-                href={pullRequestUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-blue-400 hover:text-blue-300 font-mono"
-              >
-                PR #{pullRequestNumber}
-              </a>
-            )}
-          </div>
-        )}
-      </div>
+      )}
 
       {/* Mobile tabs — only when preview available */}
       {devPort && (
@@ -220,7 +227,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
           </span>
         </div>
       )}
-    </div>
+    </SlimShell>
   );
 }
 
