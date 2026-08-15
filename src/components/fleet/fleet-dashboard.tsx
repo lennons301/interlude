@@ -1,15 +1,13 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useState } from "react";
 import type { FleetView, PickupPause } from "@/lib/fleet/fleet-view";
+import { AppShell } from "@/components/app-shell";
 import { LiveDot, TONES, type LiveDotState } from "./fleet-bits";
 import { PulseStrip } from "./pulse-strip";
 import { NeedsYou } from "./needs-you";
 import { RunningList } from "./running-list";
 import { RecentLedger } from "./recent-ledger";
-
-type FleetTheme = "system" | "dark" | "light";
 
 // How a fleet-wide hold on pickup reads (issue #118). A deliberate operator
 // hold is amber and says "held"; a breached spend ceiling is red and says
@@ -43,46 +41,8 @@ function useFleetStream() {
   return { view, connected, lastEventAt };
 }
 
-/** App-level theme override on top of prefers-color-scheme, kept in
- * localStorage and mirrored to data-fleet-theme on <html>. */
-let themeListeners: Array<() => void> = [];
-const themeStore = {
-  subscribe(listener: () => void) {
-    themeListeners.push(listener);
-    return () => {
-      themeListeners = themeListeners.filter((l) => l !== listener);
-    };
-  },
-  get(): FleetTheme {
-    const stored = localStorage.getItem("fleet-theme");
-    return stored === "dark" || stored === "light" ? stored : "system";
-  },
-  set(theme: FleetTheme) {
-    if (theme === "system") {
-      localStorage.removeItem("fleet-theme");
-      document.documentElement.removeAttribute("data-fleet-theme");
-    } else {
-      localStorage.setItem("fleet-theme", theme);
-      document.documentElement.setAttribute("data-fleet-theme", theme);
-    }
-    themeListeners.forEach((l) => l());
-  },
-};
-
-function useFleetTheme(): [FleetTheme, () => void] {
-  const theme = useSyncExternalStore(
-    themeStore.subscribe,
-    themeStore.get,
-    () => "system" as const
-  );
-  const cycle = () =>
-    themeStore.set(theme === "system" ? "dark" : theme === "dark" ? "light" : "system");
-  return [theme, cycle];
-}
-
 export function FleetDashboard() {
   const { view, connected, lastEventAt } = useFleetStream();
-  const [theme, cycleTheme] = useFleetTheme();
 
   // Local clock for elapsed times — ticks between SSE pushes. Never rendered
   // until the first fleet event arrives (client-only), so the SSR value is
@@ -106,27 +66,7 @@ export function FleetDashboard() {
       : "live";
 
   return (
-    <div className="mx-auto min-h-dvh w-full max-w-md px-4 pb-10 min-[900px]:max-w-4xl">
-      <header className="flex h-14 items-center justify-between">
-        <span className="flex items-center gap-2.5">
-          <span className="font-plex-mono text-[13px] font-medium lowercase">
-            interlude <span className="text-fl-ink-3">/ fleet</span>
-          </span>
-          <LiveDot state={dotState} />
-        </span>
-        <nav className="flex items-center gap-3 font-plex-mono text-[11px] lowercase">
-          <Link href="/tasks/new" className="text-fl-ink-3 hover:text-fl-ink">
-            new
-          </Link>
-          <Link href="/tasks" className="text-fl-ink-3 hover:text-fl-ink">
-            tasks
-          </Link>
-          <Link href="/settings" className="text-fl-ink-3 hover:text-fl-ink">
-            settings
-          </Link>
-        </nav>
-      </header>
-
+    <AppShell section="fleet" width="wide" accessory={<LiveDot state={dotState} />}>
       {pickupPaused && (
         <div
           role="status"
@@ -153,21 +93,13 @@ export function FleetDashboard() {
         </div>
       )}
 
-      <footer className="mt-12 flex items-center justify-between border-t border-fl-line pt-3 font-plex-mono text-[11px] lowercase text-fl-ink-3">
-        <span>
-          {connected ? "connected" : "disconnected"}
-          {lastEventAt &&
-            ` · last event ${lastEventAt.toLocaleTimeString("en-GB", { hour12: false })}`}
-        </span>
-        <button
-          type="button"
-          onClick={cycleTheme}
-          className="hover:text-fl-ink"
-          title="Cycle theme override"
-        >
-          theme: {theme}
-        </button>
+      {/* The theme control moved to the shared shell (issue #117); the footer
+          keeps the stream's own readout. */}
+      <footer className="mt-12 border-t border-fl-line pt-3 font-plex-mono text-[11px] lowercase text-fl-ink-3">
+        {connected ? "connected" : "disconnected"}
+        {lastEventAt &&
+          ` · last event ${lastEventAt.toLocaleTimeString("en-GB", { hour12: false })}`}
       </footer>
-    </div>
+    </AppShell>
   );
 }

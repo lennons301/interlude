@@ -1,17 +1,9 @@
 import { FleetDashboard } from "@/components/fleet/fleet-dashboard";
-import { plexMono, plexSans } from "@/lib/fleet-fonts";
 
-// Apply a stored theme override before first paint so the dashboard never
-// flashes the wrong ground.
-const themeScript = `try{var t=localStorage.getItem("fleet-theme");if(t==="dark"||t==="light")document.documentElement.setAttribute("data-fleet-theme",t)}catch(e){}`;
-
+// The dashboard wears the shared shell itself (issue #117) — it feeds the SSE
+// liveness dot into the shell's wordmark accessory, which only the client
+// component knows about. Fonts, tokens and the pre-paint theme script are the
+// root layout's job now.
 export default function Home() {
-  return (
-    <div
-      className={`${plexSans.variable} ${plexMono.variable} fleet min-h-dvh bg-fl-ground font-plex text-fl-ink antialiased`}
-    >
-      <script dangerouslySetInnerHTML={{ __html: themeScript }} />
-      <FleetDashboard />
-    </div>
-  );
+  return <FleetDashboard />;
 }
