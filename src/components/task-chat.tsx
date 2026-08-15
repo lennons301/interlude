@@ -103,21 +103,19 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
       title={initialTask.title}
       accessory={
         <>
-          {/* The label states what the container is doing; the dot beside it is
-              what breathes. The fleet's one ambient animation belongs to the
-              dot, so the running label reads green but holds still. */}
+          {/* The label says what the container is doing and the dot beside it
+              carries the liveness, so the label itself stays neutral ink: green
+              at 11px on the bare light ground is 3.8:1, and the places this
+              system does tint text green all sit on a wash or a card. */}
           {containerLabel && (
-            <span
-              className={`font-plex-mono text-[11px] ${
-                taskStatus.containerStatus === "running"
-                  ? "text-fl-green"
-                  : "text-fl-ink-2"
-              }`}
-            >
+            <span className="font-plex-mono text-[11px] text-fl-ink-2">
               {containerLabel}
             </span>
           )}
-          <StatusDot status={taskStatus.status} />
+          <StatusDot
+            status={taskStatus.status}
+            live={taskStatus.containerStatus === "running"}
+          />
         </>
       }
     >
@@ -135,7 +133,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
                   href={`https://github.com/${githubIssue.replace("#", "/issues/")}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className={`font-plex-mono text-[11px] text-fl-cool hover:text-fl-ink ${FOCUS_RING}`}
+                  className={`font-plex-mono text-[11px] text-fl-cool underline decoration-fl-cool/45 underline-offset-2 hover:decoration-fl-cool ${FOCUS_RING}`}
                 >
                   {githubIssue}
                 </a>
@@ -145,7 +143,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
                   href={pullRequestUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className={`font-plex-mono text-[11px] text-fl-cool hover:text-fl-ink ${FOCUS_RING}`}
+                  className={`font-plex-mono text-[11px] text-fl-cool underline decoration-fl-cool/45 underline-offset-2 hover:decoration-fl-cool ${FOCUS_RING}`}
                 >
                   PR #{pullRequestNumber}
                 </a>
@@ -155,10 +153,12 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
         </div>
       )}
 
-      {/* Mobile tabs — only when preview available. The selected tab is marked
-          the way the shell's nav marks the current section: full-strength ink
-          over an ink rule, not a colour. Colour in this system is semantic, and
-          "which pane am I looking at" means nothing about the run. */}
+      {/* Mobile tabs — only when preview available. Selection is marked in ink,
+          not a colour: colour in this system is semantic, and which pane you are
+          looking at says nothing about the run. The rule is heavier than the
+          shell nav's hairline because this is a thumb-sized control on a phone,
+          not a header link. `aria-current` carries the same state the underline
+          does, so it survives without sight of the underline. */}
       {devPort && (
         <div className="flex shrink-0 border-b border-fl-line lg:hidden">
           {(["chat", "preview"] as const).map((tab) => (
@@ -166,7 +166,8 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
               key={tab}
               type="button"
               onClick={() => setActiveTab(tab)}
-              className={`flex-1 border-b-2 py-2 font-plex-mono text-[12px] lowercase ${FOCUS_RING} ${
+              aria-current={activeTab === tab ? "true" : undefined}
+              className={`flex-1 border-b-2 py-2.5 font-plex-mono text-[12px] lowercase ${FOCUS_RING} ${
                 activeTab === tab
                   ? "border-fl-ink text-fl-ink"
                   : "border-transparent text-fl-ink-2 hover:text-fl-ink"
@@ -234,22 +235,30 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
 
 // Same neutral/green/red split as before, in fleet tokens: only failure and a
 // live run earn a colour, and the two quiet neutrals keep their old ordering
-// (queued and completed read louder than a cancelled run). `fleet-dot-live` is
-// the system's one ambient animation, and it honours reduced-motion.
+// (queued and completed read louder than a cancelled run).
 const STATUS_DOT: Record<string, string> = {
   queued: "bg-fl-ink-2",
-  running: "bg-fl-green fleet-dot-live",
+  running: "bg-fl-green",
   completed: "bg-fl-ink-2",
   failed: "bg-fl-red",
   cancelled: "bg-fl-ink-3",
 };
 
-function StatusDot({ status }: { status: string }) {
+/**
+ * `live` is the container working, not the task being open — the two part
+ * company constantly. A task sits at status `running` while its agent is idle
+ * between turns waiting on you, which is precisely the moment the view should
+ * stop moving. Keying the breath to the task's status instead would leave it
+ * running forever on every open task. `fleet-dot-live` is the system's one
+ * ambient animation and it honours reduced-motion, which `animate-pulse` —
+ * what this replaces — did not.
+ */
+function StatusDot({ status, live }: { status: string; live: boolean }) {
   return (
     <span
       className={`inline-block h-1.5 w-1.5 rounded-full ${
         STATUS_DOT[status] ?? "bg-fl-ink-2"
-      }`}
+      } ${live ? "fleet-dot-live" : ""}`}
     />
   );
 }

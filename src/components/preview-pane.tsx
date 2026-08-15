@@ -130,15 +130,23 @@ export function PreviewPane({
         </span>
         <div className="flex-1" />
         <ToolbarButton onClick={reload}>reload</ToolbarButton>
-        <ToolbarButton onClick={() => window.open(previewUrl, "_blank")}>
+        {/* noopener: the preview is agent-authored code, and a bare
+            window.open leaves it holding window.opener on this tab. */}
+        <ToolbarButton
+          onClick={() => window.open(previewUrl, "_blank", "noopener")}
+        >
           open
         </ToolbarButton>
       </div>
 
       {/* iframe */}
       <div className="flex-1 relative">
+        {/* Held at half opacity: this overlay is not rare. Every agent write
+            reloads the iframe 500ms later, so a heavier scrim would blink the
+            preview out on each save rather than tint it. The note carries its
+            own ground, so legibility does not depend on the scrim. */}
         {(status === "loading" || status === "provisioning") && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-fl-ground/80">
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-fl-ground/50">
             <StatusNote>
               {status === "provisioning"
                 ? "Provisioning preview certificate..."
@@ -152,7 +160,7 @@ export function PreviewPane({
             <button
               type="button"
               onClick={reload}
-              className={`rounded-[4px] border border-fl-line-strong px-2.5 py-1 font-plex-mono text-[11px] lowercase text-fl-ink hover:bg-fl-card ${FOCUS_RING}`}
+              className={`flex h-7 items-center rounded-[4px] border border-fl-line-strong px-2.5 font-plex-mono text-[11px] lowercase text-fl-ink hover:bg-fl-card ${FOCUS_RING}`}
             >
               retry
             </button>
@@ -178,7 +186,10 @@ export function PreviewPane({
 /** The pane's chrome controls speak the fleet's quiet lowercase mono voice, the
  * same one the shell's nav and theme toggle use. They are deliberately not
  * shadcn `Button`s: those are painted from the greyscale shadcn tokens, which
- * are a different palette from the fleet's parchment/ink one. */
+ * are a different palette from the fleet's parchment/ink one.
+ *
+ * `h-6` is a floor, not decoration — 11px mono leaves a ~18px box on its own,
+ * and these are thumb targets on the mobile preview tab. */
 function ToolbarButton({
   onClick,
   children,
@@ -190,7 +201,7 @@ function ToolbarButton({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-[4px] px-1.5 py-px font-plex-mono text-[11px] lowercase text-fl-ink-2 hover:text-fl-ink ${FOCUS_RING}`}
+      className={`flex h-6 items-center rounded-[4px] px-2 font-plex-mono text-[11px] lowercase text-fl-ink-2 hover:text-fl-ink ${FOCUS_RING}`}
     >
       {children}
     </button>
