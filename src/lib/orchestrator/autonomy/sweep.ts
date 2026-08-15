@@ -10,6 +10,7 @@ import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { newId } from "../../ulid";
 import { getConfig, PLATFORM_REPO_URL } from "../../config";
+import { isGlobalAutonomyPaused } from "../../settings";
 import { getOctokit, isGitHubConfigured } from "../../github/client";
 import { fetchFileFromDefaultBranch } from "../../github/contents";
 import {
@@ -215,7 +216,11 @@ export function stopAutonomySweeps(): void {
  */
 export async function runAutonomySweep(): Promise<void> {
   const config = getConfig();
-  if (!config.autonomyEnabled) return; // global kill switch
+  // The env boot master — off means no sweep runs at all, webhook-triggered or
+  // interval. The runtime kill switch (issue #118) is decided inside the
+  // reducer instead, so a paused fleet still gathers and still drives
+  // everything already in flight.
+  if (!config.autonomyEnabled) return;
   if (!isGitHubConfigured()) return;
   if (sweeping) return;
   sweeping = true;
@@ -605,6 +610,10 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
   return {
     now,
     autonomyEnabledGlobal: config.autonomyEnabled,
+    // Read fresh on every tick, never cached or captured at boot: that is what
+    // makes the kill switch (issue #118) take effect at the next sweep rather
+    // than at the next restart.
+    globalPaused: isGlobalAutonomyPaused(),
     // MAX_BUDGET_USD is the per-attempt default since Phase 5 (a ticket's
     // budget: directive may raise a single attempt to the $75 ceiling)
     attemptBudgetUsd: config.maxBudgetUsd,

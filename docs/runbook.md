@@ -82,6 +82,11 @@ orchestrator (config is read once at boot). On boot you'll see
 `[autonomy] Reconciliation sweep every 30s`; if it's off you'll see
 `Autonomous pickup disabled (AUTONOMY_ENABLED != true)`.
 
+That is the boot master. Check the runtime kill switch is lifted too — it is
+durable, so one engaged before a restart is still engaged after it, and boot
+says so: `Global kill switch engaged -- sweeps run, but nothing new is claimed`.
+See *Pause pickup* below for how to lift it.
+
 ### Pilot repos and the first workload
 
 The pilots are **interlude**, **lemons** and **last-person-standing**. Verify
@@ -140,8 +145,28 @@ the dashboard answers "what's happening".
 Pausing only stops autonomous **pickup**. In-flight runs finish, and interactive
 chat/preview is never affected.
 
-- **Globally (kill switch):** set `AUTONOMY_ENABLED=false` in Doppler
-  `interlude/prd` and restart. The sweep stops; no new claims anywhere.
+- **Globally, right now (kill switch):** flip the durable runtime switch — no
+  restart, effective at the next sweep tick (≤30s).
+
+  ```bash
+  # Engage: nothing new is claimed anywhere (implement or triage)
+  curl -s -X PATCH http://localhost:3000/api/settings/autonomy \
+    -H 'content-type: application/json' -d '{"paused": true}'
+
+  # Lift it again
+  curl -s -X PATCH http://localhost:3000/api/settings/autonomy \
+    -H 'content-type: application/json' -d '{"paused": false}'
+
+  # Current state (plus `envMaster`, the AUTONOMY_ENABLED boot master)
+  curl -s http://localhost:3000/api/settings/autonomy
+  ```
+
+  The flag lives in the `settings` table, so an engaged switch survives a
+  restart — the dashboard's live dot goes amber-paused with a *Kill switch
+  engaged* banner, and the sweep logs `Pickup paused (kill-switch)`.
+- **Globally, hard off (boot master):** set `AUTONOMY_ENABLED=false` in Doppler
+  `interlude/prd` and restart. Sweeps never start at all. Use this to stand the
+  fleet down for a while; use the kill switch to stop it now.
 - **Per project:** disable the toggle —
 
   ```bash
@@ -286,7 +311,7 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 
 | Var | Meaning |
 | --- | --- |
-| `AUTONOMY_ENABLED` | Global kill switch. Must equal `true`. Read once at boot — restart to change. |
+| `AUTONOMY_ENABLED` | Boot master for autonomy. Must equal `true` or sweeps never start. Read once at boot — restart to change. The runtime kill switch (`PATCH /api/settings/autonomy`) pauses pickup on top of it, with no restart. |
 | `AUTONOMY_ALLOWED_AUTHORS` | Extra logins (comma-separated) allowed to author claimable issues. The repo owner is always allowed. |
 | `REVIEWER_GH_TOKEN` | Reviewer machine account PAT. Orchestrator-only — **never** enters a container. Canonical home is `platform/prd`, mirrored into `interlude/prd`; rotation updates both. |
 | `DISCORD_FLEET_CHANNEL_ID` | Channel for fleet events + fallback for blocked questions when a project has no linked channel. |

@@ -29,6 +29,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     now: VIEW_AT,
     slots: 2,
     dailyCapUsd: 500,
+    globalAutonomyPaused: false,
     discordGuildId: null,
     projects: [],
     runs: [],

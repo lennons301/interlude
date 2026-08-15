@@ -16,6 +16,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     now: NOW,
     slots: 2,
     dailyCapUsd: 500,
+    globalAutonomyPaused: false,
     discordGuildId: null,
     projects: [],
     runs: [],
@@ -327,6 +328,48 @@ describe("buildFleetView — spend", () => {
     );
 
     expect(view.spend.capPaused).toBe(true);
+  });
+});
+
+// The live dot + banner surface (issue #118): a paused fleet must never read as
+// an idle one, and the two ways it can be paused are lifted differently.
+describe("buildFleetView — why pickup is paused", () => {
+  it("reports nothing while pickup runs", () => {
+    expect(buildFleetView(baseRows()).pickupPaused).toBeNull();
+  });
+
+  it("names the kill switch when it is engaged", () => {
+    const view = buildFleetView(baseRows({ globalAutonomyPaused: true }));
+
+    expect(view.pickupPaused?.reason).toBe("kill-switch");
+    expect(view.pickupPaused?.body).toMatch(/kill switch/i);
+    // The switch spends nothing, so the cap's own gauge is untouched
+    expect(view.spend.capPaused).toBe(false);
+  });
+
+  it("names the daily cap when the cap is what stopped pickup", () => {
+    const view = buildFleetView(
+      baseRows({ runs: [makeRun({ id: "r1", totalCostUsd: 500 })] })
+    );
+
+    expect(view.pickupPaused?.reason).toBe("daily-cap");
+    expect(view.pickupPaused?.body).toMatch(/midnight/i);
+  });
+
+  it("names the kill switch ahead of the cap when both hold", () => {
+    // Midnight lifts the cap; only a human lifts the switch, so the switch is
+    // the thing the owner needs to read.
+    const view = buildFleetView(
+      baseRows({
+        globalAutonomyPaused: true,
+        runs: [makeRun({ id: "r1", totalCostUsd: 512 })],
+      })
+    );
+
+    expect(view.pickupPaused?.reason).toBe("kill-switch");
+    expect(view.spend.capPaused).toBe(true);
+    // The cap still raises its own needs-you card — the switch hides nothing
+    expect(view.needsYou.map((i) => i.cause)).toContain("cap");
   });
 });
 

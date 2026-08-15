@@ -8,6 +8,7 @@ import { db } from "@/db";
 import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, eq, gte, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { getConfig } from "../config";
+import { isGlobalAutonomyPaused } from "../settings";
 import { getCapacity } from "../orchestrator/capacity";
 import { getBacklogByProject } from "./backlog";
 import { getNeedsHumanByProject } from "./needs-human";
@@ -85,6 +86,9 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     now,
     slots,
     dailyCapUsd: DAILY_AUTONOMOUS_CAP_USD,
+    // Read on every view build, exactly as the sweep reads it each tick — the
+    // dashboard reflects a flip on its next SSE push, with no restart.
+    globalAutonomyPaused: isGlobalAutonomyPaused(),
     discordGuildId: getConfig().discordGuildId,
     projects: projectRows.map((p) => ({
       id: p.id,

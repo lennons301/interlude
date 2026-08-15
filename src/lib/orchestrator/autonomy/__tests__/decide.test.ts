@@ -59,6 +59,7 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
   return {
     now: NOW,
     autonomyEnabledGlobal: true,
+    globalPaused: false,
     attemptBudgetUsd: 20,
     maxAttempts: 3,
     maxInterruptions: 5,
@@ -715,7 +716,7 @@ describe("decideNext — pause reasons", () => {
     return actions.filter((a) => a.type === "pausePickup");
   }
 
-  it("pauses with 'autonomy-off-global' when the kill switch is off", () => {
+  it("pauses with 'autonomy-off-global' when the env boot master is off", () => {
     const actions = decideNext(makeSnapshot({ autonomyEnabledGlobal: false }));
 
     expect(actions).toEqual([
@@ -938,6 +939,106 @@ describe("decideNext — pause reasons", () => {
       "postVerdict",
       "exhaust",
       "pausePickup",
+    ]);
+  });
+
+  // The global kill switch (issue #118) — the daily cap's pause is the model:
+  // new pickup stops, everything already in flight is decided as usual.
+  it("pauses with 'kill-switch' and claims nothing while the switch is engaged", () => {
+    const actions = decideNext(makeSnapshot({ globalPaused: true }));
+
+    expect(actions).toEqual([{ type: "pausePickup", reason: "kill-switch" }]);
+  });
+
+  it("starts no triage pass while the switch is engaged", () => {
+    // Triage is autonomous pickup too: its own container, its own spend.
+    const actions = decideNext(
+      makeSnapshot({
+        globalPaused: true,
+        candidates: [],
+        triageCandidates: [makeTriageCandidate()],
+      })
+    );
+
+    expect(actions).toEqual([]);
+  });
+
+  it("claims again as soon as the switch is lifted — no restart in between", () => {
+    const engaged = makeSnapshot({ globalPaused: true });
+
+    expect(claims(decideNext(engaged))).toEqual([]);
+    expect(claims(decideNext({ ...engaged, globalPaused: false }))).toHaveLength(1);
+  });
+
+  it("does not pause with 'kill-switch' when there is nothing eligible to claim", () => {
+    const actions = decideNext(
+      makeSnapshot({ globalPaused: true, candidates: [] })
+    );
+
+    expect(pauses(actions)).toEqual([]);
+  });
+
+  it("keeps driving in-flight work while the switch pauses pickup", () => {
+    // A paused fleet still finishes what it started: a stored verdict posts, a
+    // finished implement pass is gated or armed, and a burnt ticket is routed
+    // back to a human. Only new claims stop.
+    const actions = decideNext(
+      makeSnapshot({
+        globalPaused: true,
+        pendingVerdicts: [makeVerdict()],
+        pendingGateEvaluations: [makePending()],
+        awaitingReview: [makeAwaitingReview({ runId: "run-9" })],
+        candidates: [
+          makeCandidate(),
+          makeCandidate({
+            issueRef: "acme/widgets#9",
+            number: 9,
+            attemptsMade: 3,
+          }),
+        ],
+      })
+    );
+
+    expect(actions.map((a) => a.type)).toEqual([
+      "postVerdict",
+      "startReview",
+      "armAutoMerge",
+      "exhaust",
+      "pausePickup",
+    ]);
+  });
+
+  it("still announces the daily cap while the switch is engaged", () => {
+    // The switch's gate sits at the cap's, just after it, so a paused fleet
+    // that also spent its cap today is told about the cap exactly once —
+    // the switch never swallows that announcement.
+    const actions = decideNext(
+      makeSnapshot({
+        globalPaused: true,
+        todayAutonomousSpendUsd: 500,
+        dailyCapUsd: 500,
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "notify",
+        event: "daily-cap-reached",
+        payload: { spentUsd: 500, capUsd: 500 },
+      },
+      { type: "pausePickup", reason: "daily-cap" },
+    ]);
+  });
+
+  it("reports the env boot master ahead of the switch when both hold", () => {
+    // With AUTONOMY_ENABLED off no sweep runs at all, so that is the reason
+    // worth naming — the switch is not what is holding this fleet.
+    const actions = decideNext(
+      makeSnapshot({ autonomyEnabledGlobal: false, globalPaused: true })
+    );
+
+    expect(actions).toEqual([
+      { type: "pausePickup", reason: "autonomy-off-global" },
     ]);
   });
 });

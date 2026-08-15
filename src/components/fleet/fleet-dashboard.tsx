@@ -1,13 +1,26 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { FleetView } from "@/lib/fleet/fleet-view";
+import type { FleetView, PickupPause } from "@/lib/fleet/fleet-view";
 import { AppShell } from "@/components/app-shell";
-import { LiveDot } from "./fleet-bits";
+import { LiveDot, TONES, type LiveDotState } from "./fleet-bits";
 import { PulseStrip } from "./pulse-strip";
 import { NeedsYou } from "./needs-you";
 import { RunningList } from "./running-list";
 import { RecentLedger } from "./recent-ledger";
+
+// How a fleet-wide hold on pickup reads (issue #118). A deliberate operator
+// hold is amber and says "held"; a breached spend ceiling is red and says
+// "paused" — the estate's severity vocabulary, and not the same news.
+const PAUSE_DOT: Record<PickupPause["reason"], LiveDotState> = {
+  "kill-switch": "held",
+  "daily-cap": "paused",
+};
+
+const PAUSE_TONE: Record<PickupPause["reason"], keyof typeof TONES> = {
+  "kill-switch": "amber",
+  "daily-cap": "red",
+};
 
 function useFleetStream() {
   const [view, setView] = useState<FleetView | null>(null);
@@ -40,16 +53,26 @@ export function FleetDashboard() {
     return () => clearInterval(timer);
   }, []);
 
-  // The dot is the liveness signal: offline whenever the stream is down,
-  // even if a stale view is still on screen.
-  const paused = view?.spend.capPaused ?? false;
-  const dotState = !connected ? "offline" : paused ? "paused" : "live";
+  // The dot is the liveness signal: offline whenever the stream is down, even
+  // if a stale view is still on screen. Otherwise it carries whether new
+  // autonomous pickup is happening — held by the operator's kill switch (issue
+  // #118) or paused by the breached daily cap, each in its own tone, with the
+  // banner below naming it. The two are lifted in completely different ways.
+  const pickupPaused = view?.pickupPaused ?? null;
+  const dotState: LiveDotState = !connected
+    ? "offline"
+    : pickupPaused
+      ? PAUSE_DOT[pickupPaused.reason]
+      : "live";
 
   return (
     <AppShell section="fleet" width="wide" accessory={<LiveDot state={dotState} />}>
-      {paused && (
-        <div className="mb-4 rounded-[4px] border border-fl-red/45 bg-fl-red/13 px-3 py-2 text-sm text-fl-red">
-          Daily cap reached — autonomous pickup paused until midnight.
+      {pickupPaused && (
+        <div
+          role="status"
+          className={`mb-4 rounded-[4px] border px-3 py-2 text-sm ${TONES[PAUSE_TONE[pickupPaused.reason]]}`}
+        >
+          {pickupPaused.body}
         </div>
       )}
 
