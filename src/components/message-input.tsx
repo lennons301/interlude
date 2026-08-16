@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { FOCUS_RING } from "@/components/fleet/fleet-bits";
 import { composerState, resolvePrimary } from "@/lib/chat/composer";
 import { applySlashCommand, slashMenu, type SlashCommand } from "@/lib/chat/slash";
@@ -101,12 +108,22 @@ export function MessageInput({
   // Grow to fit the draft, shrink back when it is sent. Height is measured from
   // zero rather than from the current height, or the field could only ever get
   // taller; the cap is CSS, so the field scrolls once it reaches it.
-  useIsomorphicLayoutEffect(() => {
+  const resize = useCallback(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "0px";
     el.style.height = `${el.scrollHeight}px`;
-  }, [draft]);
+  }, []);
+
+  useIsomorphicLayoutEffect(resize, [draft, resize]);
+
+  // How the draft wraps is what decides that height, so a width change has to
+  // re-measure it — rotating a phone, or the preview pane opening beside the
+  // chat, otherwise leaves the field the wrong size until the next keystroke.
+  useEffect(() => {
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, [resize]);
 
   async function submit(text: string) {
     if (!canSubmit) return;
