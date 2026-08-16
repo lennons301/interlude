@@ -165,8 +165,8 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
             money in tabular mono over the hairline gauge, tick at the ceiling.
             It reads red once the ceiling is reached — the point at which a run
             stops, so it is the one thing here that earns a colour. */}
-        <div className="w-24 shrink-0 space-y-1">
-          <p className="text-right font-plex-mono text-[11px] tabular-nums text-fl-ink-2">
+        <div className="w-28 shrink-0 space-y-1">
+          <p className="text-right font-plex-mono text-[11px] whitespace-nowrap tabular-nums text-fl-ink-2">
             <Money usd={taskStatus.totalCostUsd} />
             <span className="text-fl-ink-3">
               {" "}
