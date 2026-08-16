@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { SessionSkill } from "@/db/schema";
 import type { OpenIssue } from "@/lib/github/issues";
-import { Eyebrow } from "@/components/fleet/fleet-bits";
+import { Eyebrow, FIELD, PRIMARY_BUTTON } from "@/components/fleet/fleet-bits";
 // The blurbs the live composer's slash menu offers too (issue #122), so the
 // two surfaces describe a session the same way.
 import { SESSION_BLURBS, SESSION_ORDER } from "@/lib/sessions/skills";
@@ -12,10 +12,6 @@ import { SESSION_BLURBS, SESSION_ORDER } from "@/lib/sessions/skills";
 // A new task is either a plain chat task (the default, unchanged) or a
 // generation session running one of the estate's generation skills (issue #64).
 type TaskType = "chat" | SessionSkill;
-
-const FIELD =
-  "w-full rounded-[4px] border border-fl-line bg-fl-card px-3 py-2 text-sm text-fl-ink " +
-  "placeholder:text-fl-ink-3 focus:border-fl-line-strong focus:outline-none";
 
 export function NewTaskForm() {
   const router = useRouter();
@@ -234,7 +230,7 @@ export function NewTaskForm() {
       <button
         type="submit"
         disabled={submitting || !title.trim() || !projectId}
-        className="w-full rounded-[4px] bg-fl-cool px-4 py-2.5 text-sm font-medium text-fl-ground transition-opacity hover:opacity-90 disabled:opacity-40"
+        className={`w-full ${PRIMARY_BUTTON}`}
       >
         {submitting
           ? isSession

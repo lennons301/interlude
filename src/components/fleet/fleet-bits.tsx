@@ -9,6 +9,21 @@
 export const FOCUS_RING =
   "focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-fl-ink-3";
 
+/** The one text-input skin in the system — a fleet card behind a hairline, Plex
+ * on top. Shared by every form the app has so a field can't drift between
+ * screens. */
+export const FIELD =
+  "w-full rounded-[4px] border border-fl-line bg-fl-card px-3 py-2 text-sm text-fl-ink " +
+  "placeholder:text-fl-ink-3 focus:border-fl-line-strong focus:outline-none";
+
+/** The geometry every panel and card in the system shares. Left untinted so a
+ * caller can compose it with a `TONES` entry when the panel carries a state the
+ * owner must not miss — a held fleet, a confirmation waiting on a press. */
+export const PANEL = "space-y-2.5 rounded-[4px] border px-3 py-2.5";
+
+/** A panel in its ordinary clothes: hairline over the card ground. */
+export const PANEL_PLAIN = `${PANEL} border-fl-line bg-fl-card`;
+
 export function Eyebrow({ children }: { children: React.ReactNode }) {
   return (
     <h2 className="font-plex-mono text-[11px] font-medium uppercase tracking-[0.14em] text-fl-ink-3">
@@ -81,6 +96,68 @@ export function Chip({
     >
       {children}
     </span>
+  );
+}
+
+/** A control in the instrument-panel voice: a chip you can press. Tone carries
+ * the same meaning it carries everywhere — `cool` is the owner acting, `amber`
+ * a deliberate hold or an override, `quiet` everything reversible — so a button
+ * never invents a colour of its own. */
+const BUTTON_TONES = {
+  quiet: "border-fl-line text-fl-ink-2 hover:border-fl-line-strong hover:text-fl-ink",
+  cool: `${TONES.cool} hover:opacity-90`,
+  amber: `${TONES.amber} hover:opacity-90`,
+} as const;
+
+export function ControlButton({
+  tone = "quiet",
+  onClick,
+  disabled,
+  children,
+  ...rest
+}: {
+  tone?: keyof typeof BUTTON_TONES;
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+} & Pick<React.ButtonHTMLAttributes<HTMLButtonElement>, "aria-expanded" | "aria-label">) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`rounded-[4px] border px-2 py-0.5 font-plex-mono text-[11px] lowercase transition-opacity disabled:opacity-40 ${BUTTON_TONES[tone]} ${FOCUS_RING}`}
+      {...rest}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** The system's one filled control, for the single primary action on a form —
+ * cool, because everything started from a form is the owner acting. */
+export const PRIMARY_BUTTON =
+  "rounded-[4px] bg-fl-cool px-4 py-2.5 text-sm font-medium text-fl-ground " +
+  `transition-opacity hover:opacity-90 disabled:opacity-40 ${FOCUS_RING}`;
+
+/** A resource that wouldn't load, said once for the whole app: what was being
+ * read, why it failed, and the way back. */
+export function LoadFailure({
+  what,
+  error,
+  onRetry,
+}: {
+  what: string;
+  error: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <p role="alert" className="text-[13px] text-fl-red">
+        Couldn&apos;t load {what} — {error}.
+      </p>
+      <ControlButton onClick={onRetry}>retry</ControlButton>
+    </div>
   );
 }
 

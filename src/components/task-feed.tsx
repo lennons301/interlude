@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { Eyebrow, FOCUS_RING } from "@/components/fleet/fleet-bits";
+import { ControlButton, Eyebrow, FOCUS_RING } from "@/components/fleet/fleet-bits";
 import { TaskCard } from "./task-card";
 import {
   organizeTasks,
@@ -260,13 +260,5 @@ function FilterOption({
 }
 
 function RetryButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`rounded-[4px] border border-fl-line px-2 py-0.5 font-plex-mono text-[11px] lowercase text-fl-ink-2 hover:border-fl-line-strong hover:text-fl-ink ${FOCUS_RING}`}
-    >
-      retry
-    </button>
-  );
+  return <ControlButton onClick={onClick}>retry</ControlButton>;
 }
