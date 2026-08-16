@@ -2,6 +2,7 @@
 
 import { useCallback, useState } from "react";
 import { SlimShell } from "@/components/app-shell";
+import { FOCUS_RING } from "@/components/fleet/fleet-bits";
 import { TaskStream } from "./task-stream";
 import { MessageInput } from "./message-input";
 import { PreviewPane } from "./preview-pane";
@@ -102,36 +103,37 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
       title={initialTask.title}
       accessory={
         <>
+          {/* The label says what the container is doing and the dot beside it
+              carries the liveness, so the label itself stays neutral ink: green
+              at 11px on the bare light ground is 3.8:1, and the places this
+              system does tint text green all sit on a wash or a card. */}
           {containerLabel && (
-            <span
-              className={`text-xs ${
-                taskStatus.containerStatus === "running"
-                  ? "text-green-400 animate-pulse"
-                  : "text-zinc-400"
-              }`}
-            >
+            <span className="font-plex-mono text-[11px] text-fl-ink-2">
               {containerLabel}
             </span>
           )}
-          <StatusDot status={taskStatus.status} />
+          <StatusDot
+            status={taskStatus.status}
+            live={taskStatus.containerStatus === "running"}
+          />
         </>
       }
     >
       {hasReferences && (
-        <div className="border-b border-zinc-800 px-4 py-2 shrink-0">
+        <div className="shrink-0 border-b border-fl-line px-4 py-2">
           {initialTask.branch && (
-            <p className="text-xs text-zinc-500 font-mono">
+            <p className="font-plex-mono text-[11px] text-fl-ink-2">
               {initialTask.branch}
             </p>
           )}
           {(githubIssue || pullRequestUrl) && (
-            <div className="flex items-center gap-3 mt-0.5">
+            <div className="mt-0.5 flex items-center gap-3">
               {githubIssue && (
                 <a
                   href={`https://github.com/${githubIssue.replace("#", "/issues/")}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs text-blue-400 hover:text-blue-300 font-mono"
+                  className={`font-plex-mono text-[11px] text-fl-cool underline decoration-fl-cool/45 underline-offset-2 hover:decoration-fl-cool ${FOCUS_RING}`}
                 >
                   {githubIssue}
                 </a>
@@ -141,7 +143,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
                   href={pullRequestUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs text-blue-400 hover:text-blue-300 font-mono"
+                  className={`font-plex-mono text-[11px] text-fl-cool underline decoration-fl-cool/45 underline-offset-2 hover:decoration-fl-cool ${FOCUS_RING}`}
                 >
                   PR #{pullRequestNumber}
                 </a>
@@ -151,29 +153,29 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
         </div>
       )}
 
-      {/* Mobile tabs — only when preview available */}
+      {/* Mobile tabs — only when preview available. Selection is marked in ink,
+          not a colour: colour in this system is semantic, and which pane you are
+          looking at says nothing about the run. The rule is heavier than the
+          shell nav's hairline because this is a thumb-sized control on a phone,
+          not a header link. `aria-current` carries the same state the underline
+          does, so it survives without sight of the underline. */}
       {devPort && (
-        <div className="flex border-b border-zinc-800 lg:hidden shrink-0">
-          <button
-            onClick={() => setActiveTab("chat")}
-            className={`flex-1 py-2 text-sm font-medium ${
-              activeTab === "chat"
-                ? "text-zinc-100 border-b-2 border-purple-500"
-                : "text-zinc-500"
-            }`}
-          >
-            Chat
-          </button>
-          <button
-            onClick={() => setActiveTab("preview")}
-            className={`flex-1 py-2 text-sm font-medium ${
-              activeTab === "preview"
-                ? "text-zinc-100 border-b-2 border-purple-500"
-                : "text-zinc-500"
-            }`}
-          >
-            Preview
-          </button>
+        <div className="flex shrink-0 border-b border-fl-line lg:hidden">
+          {(["chat", "preview"] as const).map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              onClick={() => setActiveTab(tab)}
+              aria-current={activeTab === tab ? "true" : undefined}
+              className={`flex-1 border-b-2 py-2.5 font-plex-mono text-[12px] lowercase ${FOCUS_RING} ${
+                activeTab === tab
+                  ? "border-fl-ink text-fl-ink"
+                  : "border-transparent text-fl-ink-2 hover:text-fl-ink"
+              }`}
+            >
+              {tab}
+            </button>
+          ))}
         </div>
       )}
 
@@ -183,7 +185,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
         <div
           className={`flex-1 flex flex-col min-h-0 ${
             devPort && activeTab !== "chat" ? "hidden lg:flex" : ""
-          } ${devPort ? "lg:w-2/5 lg:border-r lg:border-zinc-800" : ""}`}
+          } ${devPort ? "lg:w-2/5 lg:border-r lg:border-fl-line" : ""}`}
         >
           <TaskStream
             taskId={initialTask.id}
@@ -219,8 +221,8 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
 
       {/* Terminal state footer */}
       {isTerminal && (
-        <div className="border-t border-zinc-800 px-4 py-3 text-center shrink-0">
-          <span className="text-xs text-zinc-500">
+        <div className="shrink-0 border-t border-fl-line px-4 py-3 text-center">
+          <span className="font-plex-mono text-[11px] tabular-nums text-fl-ink-2">
             Task {taskStatus.status}
             {taskStatus.totalCostUsd > 0 &&
               ` · $${taskStatus.totalCostUsd.toFixed(4)}`}
@@ -231,20 +233,32 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
   );
 }
 
-function StatusDot({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    queued: "bg-zinc-400",
-    running: "bg-green-400",
-    completed: "bg-zinc-400",
-    failed: "bg-red-400",
-    cancelled: "bg-zinc-600",
-  };
+// Same neutral/green/red split as before, in fleet tokens: only failure and a
+// live run earn a colour, and the two quiet neutrals keep their old ordering
+// (queued and completed read louder than a cancelled run).
+const STATUS_DOT: Record<string, string> = {
+  queued: "bg-fl-ink-2",
+  running: "bg-fl-green",
+  completed: "bg-fl-ink-2",
+  failed: "bg-fl-red",
+  cancelled: "bg-fl-ink-3",
+};
 
+/**
+ * `live` is the container working, not the task being open — the two part
+ * company constantly. A task sits at status `running` while its agent is idle
+ * between turns waiting on you, which is precisely the moment the view should
+ * stop moving. Keying the breath to the task's status instead would leave it
+ * running forever on every open task. `fleet-dot-live` is the system's one
+ * ambient animation and it honours reduced-motion, which `animate-pulse` —
+ * what this replaces — did not.
+ */
+function StatusDot({ status, live }: { status: string; live: boolean }) {
   return (
     <span
-      className={`inline-block h-2 w-2 rounded-full ${
-        colors[status] ?? "bg-zinc-400"
-      }`}
+      className={`inline-block h-1.5 w-1.5 rounded-full ${
+        STATUS_DOT[status] ?? "bg-fl-ink-2"
+      } ${live ? "fleet-dot-live" : ""}`}
     />
   );
 }

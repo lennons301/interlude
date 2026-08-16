@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
+import { FOCUS_RING } from "@/components/fleet/fleet-bits";
 
 interface PreviewPaneProps {
   taskId: string;
@@ -113,7 +113,7 @@ export function PreviewPane({
 
   if (!devPort) {
     return (
-      <div className="flex items-center justify-center h-full text-zinc-500 text-sm">
+      <div className="flex h-full items-center justify-center bg-fl-ground font-plex-mono text-[11px] text-fl-ink-2">
         {status === "stopped"
           ? "Dev server stopped"
           : "No dev server running"}
@@ -122,48 +122,48 @@ export function PreviewPane({
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex h-full flex-col bg-fl-ground">
       {/* Toolbar */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800 shrink-0">
-        <span className="text-xs text-zinc-500 font-mono">:{devPort}</span>
+      <div className="flex shrink-0 items-center gap-2 border-b border-fl-line bg-fl-surface px-3 py-2">
+        <span className="font-plex-mono text-[11px] tabular-nums text-fl-ink-2">
+          :{devPort}
+        </span>
         <div className="flex-1" />
-        <Button
-          onClick={reload}
-          size="sm"
-          variant="ghost"
-          className="h-6 px-2 text-xs text-zinc-400"
+        <ToolbarButton onClick={reload}>reload</ToolbarButton>
+        {/* noopener: the preview is agent-authored code, and a bare
+            window.open leaves it holding window.opener on this tab. */}
+        <ToolbarButton
+          onClick={() => window.open(previewUrl, "_blank", "noopener")}
         >
-          Reload
-        </Button>
-        <Button
-          onClick={() => window.open(previewUrl, "_blank")}
-          size="sm"
-          variant="ghost"
-          className="h-6 px-2 text-xs text-zinc-400"
-        >
-          Open
-        </Button>
+          open
+        </ToolbarButton>
       </div>
 
       {/* iframe */}
       <div className="flex-1 relative">
+        {/* Held at half opacity: this overlay is not rare. Every agent write
+            reloads the iframe 500ms later, so a heavier scrim would blink the
+            preview out on each save rather than tint it. The note carries its
+            own ground, so legibility does not depend on the scrim. */}
         {(status === "loading" || status === "provisioning") && (
-          <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/50 z-10">
-            <span className="text-zinc-500 text-sm">
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-fl-ground/50">
+            <StatusNote>
               {status === "provisioning"
                 ? "Provisioning preview certificate..."
                 : "Connecting to dev server..."}
-            </span>
+            </StatusNote>
           </div>
         )}
         {status === "error" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 z-10">
-            <span className="text-zinc-500 text-sm">
-              Could not connect to dev server
-            </span>
-            <Button onClick={reload} size="sm" variant="outline" className="text-xs">
-              Retry
-            </Button>
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2.5 bg-fl-ground">
+            <StatusNote>Could not connect to dev server</StatusNote>
+            <button
+              type="button"
+              onClick={reload}
+              className={`flex h-7 items-center rounded-[4px] border border-fl-line-strong px-2.5 font-plex-mono text-[11px] lowercase text-fl-ink hover:bg-fl-card ${FOCUS_RING}`}
+            >
+              retry
+            </button>
           </div>
         )}
         <iframe
@@ -180,5 +180,41 @@ export function PreviewPane({
         />
       </div>
     </div>
+  );
+}
+
+/** The pane's chrome controls speak the fleet's quiet lowercase mono voice, the
+ * same one the shell's nav and theme toggle use. They are deliberately not
+ * shadcn `Button`s: those are painted from the greyscale shadcn tokens, which
+ * are a different palette from the fleet's parchment/ink one.
+ *
+ * `h-6` is a floor, not decoration — 11px mono leaves a ~18px box on its own,
+ * and these are thumb targets on the mobile preview tab. */
+function ToolbarButton({
+  onClick,
+  children,
+}: {
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex h-6 items-center rounded-[4px] px-2 font-plex-mono text-[11px] lowercase text-fl-ink-2 hover:text-fl-ink ${FOCUS_RING}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** A message shown over the iframe carries its own opaque ground: what the dev
+ * server has painted underneath is not a background this palette controls, so
+ * ink-on-scrim alone can't be relied on to stay legible. */
+function StatusNote({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="rounded-[4px] border border-fl-line bg-fl-card px-2.5 py-1 font-plex-mono text-[11px] text-fl-ink-2">
+      {children}
+    </span>
   );
 }
