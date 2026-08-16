@@ -99,15 +99,14 @@ describe("armBlocker", () => {
 });
 
 describe("preflightVerdict", () => {
-  it("reads a passing preflight as green with nothing more to say", () => {
+  it("reads a passing preflight with nothing more to say", () => {
     expect(preflightVerdict(makeProject({ preflightStatus: "passing" }))).toEqual({
       state: "passing",
-      tone: "green",
       detail: null,
     });
   });
 
-  it("reads a failing preflight as amber, carrying the reason", () => {
+  it("reads a failing preflight, carrying the reason", () => {
     expect(
       preflightVerdict(
         makeProject({
@@ -117,16 +116,14 @@ describe("preflightVerdict", () => {
       )
     ).toEqual({
       state: "failing",
-      tone: "amber",
       detail: "the App cannot reach lennons301/lemons",
     });
   });
 
-  it("reads a never-run preflight as quiet, saying arming will run it", () => {
+  it("reads a never-run preflight as unchecked, saying arming will run it", () => {
     const verdict = preflightVerdict(makeProject({ preflightStatus: null }));
 
     expect(verdict.state).toBe("unchecked");
-    expect(verdict.tone).toBe("quiet");
     expect(verdict.detail).toContain("never run");
   });
 });

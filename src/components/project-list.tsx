@@ -1,16 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   Chip,
   ControlButton,
   FIELD,
+  LoadFailure,
+  PANEL_PLAIN,
+  PRIMARY_BUTTON,
   TONES,
 } from "@/components/fleet/fleet-bits";
+import { ConfirmStrip } from "@/components/confirm-strip";
+import { useLoad } from "@/lib/use-load";
 import {
   armBlocker,
   canArm,
   preflightVerdict,
+  type PreflightState,
   type ProjectAutonomy,
 } from "@/lib/projects/autonomy";
 import {
@@ -40,71 +46,57 @@ interface Project extends ProjectAutonomy {
   discordChannelId: string | null;
 }
 
+/** The chip's tint per verdict. A failing preflight is something to fix, not an
+ * incident, so it reads amber — the tone the dashboard gives it too. */
+const VERDICT_TONE: Record<PreflightState, "green" | "amber" | "quiet"> = {
+  passing: "green",
+  failing: "amber",
+  unchecked: "quiet",
+};
+
 export function ProjectList() {
-  // null = never loaded, so a failed load can't masquerade as "no projects" —
-  // the same distinction the archive draws.
-  const [projects, setProjects] = useState<Project[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
-
-  const reload = useCallback(() => setReloadKey((key) => key + 1), []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    let stopped = false;
-
-    (async () => {
-      try {
-        const res = await fetch("/api/projects", { signal: controller.signal });
-        if (!res.ok) throw new Error(`the server answered ${res.status}`);
-        const data: Project[] = await res.json();
-        if (stopped) return;
-        setProjects(data);
-        setError(null);
-      } catch (err) {
-        if (stopped || controller.signal.aborted) return;
-        setError(err instanceof Error ? err.message : "the request failed");
-      }
-    })();
-
-    return () => {
-      stopped = true;
-      controller.abort();
-    };
-  }, [reloadKey]);
+  const { data: projects, error, reload, setData } = useLoad<Project[]>("/api/projects");
 
   /** A PATCH answers with the whole updated row — including the preflight the
    * server just re-ran — so the changed card is replaced from the response
    * rather than re-fetching the list and hoping it agrees. */
-  const replace = useCallback((updated: Project) => {
-    setProjects((current) =>
-      current === null
-        ? current
-        : current.map((p) => (p.id === updated.id ? updated : p))
+  const replace = useCallback(
+    (updated: Project) => {
+      setData((current) =>
+        current === null
+          ? current
+          : current.map((p) => (p.id === updated.id ? updated : p))
+      );
+    },
+    [setData]
+  );
+
+  if (projects === null) {
+    return error === null ? (
+      <p className="font-plex-mono text-[11px] text-fl-ink-3">loading…</p>
+    ) : (
+      <LoadFailure what="your projects" error={error} onRetry={reload} />
     );
-  }, []);
+  }
 
   return (
     <div className="space-y-4">
       <NewProjectForm onCreated={reload} />
 
-      {error !== null && projects === null ? (
-        <div className="space-y-2">
-          <p role="alert" className="text-[13px] text-fl-red">
-            Couldn&apos;t load your projects — {error}.
-          </p>
-          <ControlButton
-            onClick={() => {
-              setError(null);
-              reload();
-            }}
-          >
-            retry
-          </ControlButton>
-        </div>
-      ) : projects === null ? (
-        <p className="font-plex-mono text-[11px] text-fl-ink-3">loading…</p>
-      ) : projects.length === 0 ? (
+      {/* Something is on screen, so a failed reload is a staleness warning
+          rather than a wipe — including the reload a create fires, which is
+          how a new project can otherwise go missing without a word. */}
+      {error !== null && (
+        <p
+          role="alert"
+          className={`flex flex-wrap items-center gap-2 rounded-[4px] border px-3 py-2 text-[13px] ${TONES.amber}`}
+        >
+          <span>Not refreshing — {error}.</span>
+          <ControlButton onClick={reload}>retry</ControlButton>
+        </p>
+      )}
+
+      {projects.length === 0 ? (
         <p className="text-[13px] text-fl-ink-3">
           No projects yet — add one above to give the fleet something to work on.
         </p>
@@ -112,11 +104,7 @@ export function ProjectList() {
         <ul className="space-y-2">
           {projects.map((project) => (
             <li key={project.id}>
-              <ProjectCard
-                project={project}
-                onUpdated={replace}
-                onSaved={reload}
-              />
+              <ProjectCard project={project} onUpdated={replace} />
             </li>
           ))}
         </ul>
@@ -128,17 +116,15 @@ export function ProjectList() {
 function ProjectCard({
   project,
   onUpdated,
-  onSaved,
 }: {
   project: Project;
   onUpdated: (updated: Project) => void;
-  onSaved: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const verdict = preflightVerdict(project);
 
   return (
-    <div className="space-y-2.5 rounded-[4px] border border-fl-line bg-fl-card px-3 py-2.5">
+    <div className={PANEL_PLAIN}>
       <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1.5">
         <div className="min-w-0">
           <span className="block truncate text-sm text-fl-ink">
@@ -152,7 +138,9 @@ function ProjectCard({
           <Chip tone={project.autonomyEnabled ? "green" : "quiet"}>
             {project.autonomyEnabled ? "armed" : "disarmed"}
           </Chip>
-          <Chip tone={verdict.tone}>preflight {verdict.state}</Chip>
+          <Chip tone={VERDICT_TONE[verdict.state]}>
+            preflight {verdict.state}
+          </Chip>
         </div>
       </div>
 
@@ -179,7 +167,7 @@ function ProjectCard({
         </ControlButton>
       </div>
 
-      {editing && <ProjectEditForm project={project} onSaved={onSaved} />}
+      {editing && <ProjectEditForm project={project} onUpdated={onUpdated} />}
     </div>
   );
 }
@@ -216,7 +204,11 @@ function AutonomyControl({
       onUpdated(await res.json());
       setIntent(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "the request failed");
+      setError(
+        `Couldn't ${enabled ? "arm" : "disarm"} this project — ${
+          err instanceof Error ? err.message : "the request failed"
+        }.`
+      );
     }
     setBusy(false);
   }
@@ -227,7 +219,7 @@ function AutonomyControl({
         <ControlButton disabled={busy} onClick={() => setAutonomy(false)}>
           {busy ? "disarming…" : "disarm"}
         </ControlButton>
-        <Failure error={error} verb="disarm" />
+        <Failure error={error} />
       </>
     );
   }
@@ -242,7 +234,7 @@ function AutonomyControl({
         <ControlButton tone="amber" onClick={() => setIntent("override")}>
           arm anyway…
         </ControlButton>
-        <Failure error={error} verb="arm" />
+        <Failure error={error} />
       </>
     );
   }
@@ -250,14 +242,16 @@ function AutonomyControl({
   // The copy follows the state, not the press that opened the strip: if the
   // block cleared underneath it, this stopped being an override.
   const overriding = intent === "override" && blocker !== null;
-  const tone = overriding ? "amber" : "cool";
   return (
-    <div
-      role="group"
-      aria-label={`Confirm arming ${project.name}`}
-      // `order-last` keeps the button row where it was and opens the
-      // confirmation beneath it, so the card doesn't jump under the press.
-      className={`order-last w-full space-y-2 rounded-[4px] border px-3 py-2.5 ${TONES[tone]}`}
+    <ConfirmStrip
+      label={`Confirm arming ${project.name}`}
+      tone={overriding ? "amber" : "cool"}
+      confirm="confirm arm"
+      busyLabel="arming…"
+      busy={busy}
+      error={error}
+      onConfirm={() => setAutonomy(true)}
+      onCancel={() => setIntent(null)}
     >
       <p className="text-[13px]">
         Arm {project.name} for unattended work? The loop will claim its
@@ -271,24 +265,17 @@ function AutonomyControl({
           loop still claims nothing until that is fixed.
         </p>
       )}
-      <div className="flex flex-wrap gap-2">
-        <ControlButton tone={tone} disabled={busy} onClick={() => setAutonomy(true)}>
-          {busy ? "arming…" : "confirm arm"}
-        </ControlButton>
-        <ControlButton disabled={busy} onClick={() => setIntent(null)}>
-          cancel
-        </ControlButton>
-      </div>
-      <Failure error={error} verb="arm" />
-    </div>
+    </ConfirmStrip>
   );
 }
 
-function Failure({ error, verb }: { error: string | null; verb: string }) {
+/** A press that didn't take, reported where the press was. Full width so it
+ * lands on its own line in the button row rather than squeezing it. */
+function Failure({ error }: { error: string | null }) {
   if (error === null) return null;
   return (
     <p role="alert" className="w-full text-[13px] text-fl-red">
-      Couldn&apos;t {verb} this project — {error}.
+      {error}
     </p>
   );
 }
@@ -344,7 +331,7 @@ function NewProjectForm({ onCreated }: { onCreated: () => void }) {
         <button
           type="submit"
           disabled={creating || !name.trim()}
-          className="shrink-0 rounded-[4px] bg-fl-cool px-4 py-2 text-sm font-medium text-fl-ground transition-opacity hover:opacity-90 disabled:opacity-40"
+          className={`shrink-0 ${PRIMARY_BUTTON}`}
         >
           {creating ? "Adding…" : "Add"}
         </button>
@@ -360,10 +347,10 @@ function NewProjectForm({ onCreated }: { onCreated: () => void }) {
 
 function ProjectEditForm({
   project,
-  onSaved,
+  onUpdated,
 }: {
   project: Project;
-  onSaved: () => void;
+  onUpdated: (updated: Project) => void;
 }) {
   const [name, setName] = useState(project.name);
   const [gitUrl, setGitUrl] = useState(project.gitUrl ?? "");
@@ -375,18 +362,20 @@ function ProjectEditForm({
 
   const hasDoppler = project.dopplerToken !== null;
 
+  /** Only what the owner actually changed is sent: a PATCH that restates the
+   * current values would be indistinguishable from an edit in the log, and
+   * `dopplerToken` in particular must never be echoed back as a write. */
+  const updates: Record<string, string | null> = {};
+  if (name.trim() !== project.name) updates.name = name.trim();
+  if (gitUrl.trim() !== (project.gitUrl ?? ""))
+    updates.gitUrl = gitUrl.trim() || null;
+  if (githubRepo.trim() !== (project.githubRepo ?? ""))
+    updates.githubRepo = githubRepo.trim() || null;
+  if (dopplerToken.trim()) updates.dopplerToken = dopplerToken.trim();
+  const dirty = Object.keys(updates).length > 0;
+
   async function save() {
-    if (saving) return;
-
-    const updates: Record<string, string | null> = {};
-    if (name.trim() !== project.name) updates.name = name.trim();
-    if (gitUrl.trim() !== (project.gitUrl ?? ""))
-      updates.gitUrl = gitUrl.trim() || null;
-    if (githubRepo.trim() !== (project.githubRepo ?? ""))
-      updates.githubRepo = githubRepo.trim() || null;
-    if (dopplerToken.trim()) updates.dopplerToken = dopplerToken.trim();
-
-    if (Object.keys(updates).length === 0) return;
+    if (saving || !dirty) return;
 
     setSaving(true);
     setError(null);
@@ -397,8 +386,8 @@ function ProjectEditForm({
         body: JSON.stringify(updates),
       });
       if (!res.ok) throw new Error(`the server answered ${res.status}`);
+      onUpdated(await res.json());
       setDopplerToken("");
-      onSaved();
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
@@ -461,7 +450,9 @@ function ProjectEditForm({
         )}
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <ControlButton tone="cool" disabled={saving} onClick={save}>
+        {/* Disabled until something differs, so "save" never looks like it was
+            ignored when there was nothing to do. */}
+        <ControlButton tone="cool" disabled={saving || !dirty} onClick={save}>
           {saving ? "saving…" : "save"}
         </ControlButton>
         {saved && (

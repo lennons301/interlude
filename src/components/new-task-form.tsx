@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { SessionSkill } from "@/db/schema";
 import type { OpenIssue } from "@/lib/github/issues";
-import { Eyebrow, FIELD } from "@/components/fleet/fleet-bits";
+import { Eyebrow, FIELD, PRIMARY_BUTTON } from "@/components/fleet/fleet-bits";
 
 // A new task is either a plain chat task (the default, unchanged) or a
 // generation session running one of the estate's generation skills (issue #64).
@@ -243,7 +243,7 @@ export function NewTaskForm() {
       <button
         type="submit"
         disabled={submitting || !title.trim() || !projectId}
-        className="w-full rounded-[4px] bg-fl-cool px-4 py-2.5 text-sm font-medium text-fl-ground transition-opacity hover:opacity-90 disabled:opacity-40"
+        className={`w-full ${PRIMARY_BUTTON}`}
       >
         {submitting
           ? isSession

@@ -49,16 +49,14 @@ export function canArm(project: ProjectAutonomy): boolean {
   return armBlocker(project) === null;
 }
 
-/** Three states, because "failing" and "nobody has looked" are different news
- * and want different tones. */
+/** Three states, because "failing" and "nobody has looked" are different news.
+ * How each one is *tinted* is the card's business, not this module's — the same
+ * split the dashboard makes, where the read model names a cause and
+ * `needs-you.tsx` holds the tone map. */
 export type PreflightState = "passing" | "failing" | "unchecked";
 
 export interface PreflightVerdict {
   state: PreflightState;
-  /** Fleet tone for the chip: green passing, amber failing, quiet unchecked —
-   * a failing preflight is something to fix, not an incident (the dashboard's
-   * `needs you` bucket tones it amber for the same reason). */
-  tone: "green" | "amber" | "quiet";
   /** The line under the chip: what is missing, or what the state means. Null
    * when passing, where the chip already says everything. */
   detail: string | null;
@@ -66,14 +64,13 @@ export interface PreflightVerdict {
 
 export function preflightVerdict(project: ProjectAutonomy): PreflightVerdict {
   if (project.preflightStatus === "passing") {
-    return { state: "passing", tone: "green", detail: null };
+    return { state: "passing", detail: null };
   }
   if (project.preflightStatus === "failing") {
-    return { state: "failing", tone: "amber", detail: armBlocker(project) };
+    return { state: "failing", detail: armBlocker(project) };
   }
   return {
     state: "unchecked",
-    tone: "quiet",
     detail:
       "Preflight has never run — arming runs it, once the GitHub App is configured.",
   };

@@ -1,7 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { ControlButton, TONES } from "@/components/fleet/fleet-bits";
+import { useState } from "react";
+import {
+  ControlButton,
+  LoadFailure,
+  PANEL,
+  PANEL_PLAIN,
+  TONES,
+} from "@/components/fleet/fleet-bits";
+import { ConfirmStrip } from "@/components/confirm-strip";
+import { useLoad } from "@/lib/use-load";
 
 /**
  * The global autonomy kill switch, in the room where the owner arms things
@@ -29,41 +37,19 @@ interface AutonomySettings {
 }
 
 export function KillSwitch() {
-  const [state, setState] = useState<AutonomySettings | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    data: state,
+    error: loadError,
+    reload,
+    setData,
+  } = useLoad<AutonomySettings>("/api/settings/autonomy");
   const [busy, setBusy] = useState(false);
   const [confirmingLift, setConfirmingLift] = useState(false);
-  const [reloadKey, setReloadKey] = useState(0);
+  const [moveError, setMoveError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    let stopped = false;
-
-    (async () => {
-      try {
-        const res = await fetch("/api/settings/autonomy", {
-          signal: controller.signal,
-        });
-        if (!res.ok) throw new Error(`the server answered ${res.status}`);
-        const data: AutonomySettings = await res.json();
-        if (stopped) return;
-        setState(data);
-        setError(null);
-      } catch (err) {
-        if (stopped || controller.signal.aborted) return;
-        setError(err instanceof Error ? err.message : "the request failed");
-      }
-    })();
-
-    return () => {
-      stopped = true;
-      controller.abort();
-    };
-  }, [reloadKey]);
-
-  const set = useCallback(async (paused: boolean) => {
+  async function setPaused(paused: boolean) {
     setBusy(true);
-    setError(null);
+    setMoveError(null);
     try {
       const res = await fetch("/api/settings/autonomy", {
         method: "PATCH",
@@ -73,42 +59,32 @@ export function KillSwitch() {
       if (!res.ok) throw new Error(`the server answered ${res.status}`);
       // The endpoint answers with the whole state, so the panel shows what was
       // actually stored rather than what was asked for.
-      setState(await res.json());
+      setData(await res.json());
       setConfirmingLift(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "the request failed");
+      setMoveError(
+        `The switch didn't move — ${err instanceof Error ? err.message : "the request failed"}.`
+      );
     }
     setBusy(false);
-  }, []);
+  }
 
   if (state === null) {
     return (
-      <Panel tone="quiet">
-        {error === null ? (
+      <div className={PANEL_PLAIN}>
+        {loadError === null ? (
           <p className="font-plex-mono text-[11px] text-fl-ink-3">checking…</p>
         ) : (
-          <>
-            <p role="alert" className="text-[13px] text-fl-red">
-              Couldn&apos;t read the kill switch — {error}.
-            </p>
-            <ControlButton
-              onClick={() => {
-                setError(null);
-                setReloadKey((key) => key + 1);
-              }}
-            >
-              retry
-            </ControlButton>
-          </>
+          <LoadFailure what="the kill switch" error={loadError} onRetry={reload} />
         )}
-      </Panel>
+      </div>
     );
   }
 
   const held = state.globalAutonomyPaused;
 
   return (
-    <Panel tone={held ? "amber" : "quiet"}>
+    <div className={held ? `${PANEL} ${TONES.amber}` : PANEL_PLAIN}>
       <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
         <div className="min-w-0 space-y-1">
           <p className={`text-sm ${held ? "" : "text-fl-ink"}`}>
@@ -139,7 +115,7 @@ export function KillSwitch() {
           <ControlButton
             tone={held ? "cool" : "amber"}
             disabled={busy}
-            onClick={() => (held ? setConfirmingLift(true) : set(true))}
+            onClick={() => (held ? setConfirmingLift(true) : setPaused(true))}
           >
             {busy ? "…" : held ? "lift…" : "stop the fleet"}
           </ControlButton>
@@ -147,32 +123,31 @@ export function KillSwitch() {
       </div>
 
       {confirmingLift && (
-        <div
-          role="group"
-          aria-label="Confirm lifting the kill switch"
-          className={`space-y-2 rounded-[4px] border px-3 py-2.5 ${TONES.cool}`}
+        <ConfirmStrip
+          label="Confirm lifting the kill switch"
+          tone="cool"
+          confirm="confirm lift"
+          busyLabel="lifting…"
+          busy={busy}
+          error={moveError}
+          onConfirm={() => setPaused(false)}
+          onCancel={() => setConfirmingLift(false)}
         >
           <p className="text-[13px]">
             Lift the kill switch? Every armed project resumes claiming tickets
             unattended from the next sweep tick.
           </p>
-          <div className="flex flex-wrap gap-2">
-            <ControlButton tone="cool" disabled={busy} onClick={() => set(false)}>
-              {busy ? "lifting…" : "confirm lift"}
-            </ControlButton>
-            <ControlButton disabled={busy} onClick={() => setConfirmingLift(false)}>
-              cancel
-            </ControlButton>
-          </div>
-        </div>
+        </ConfirmStrip>
       )}
 
-      {error !== null && (
+      {/* Engaging has no strip of its own to fail inside, so its failure is
+          reported here. */}
+      {!confirmingLift && moveError !== null && (
         <p role="alert" className="text-[13px] text-fl-red">
-          The switch didn&apos;t move — {error}.
+          {moveError}
         </p>
       )}
-    </Panel>
+    </div>
   );
 }
 
@@ -183,22 +158,4 @@ function formatChanged(iso: string): string {
   return Number.isNaN(at.getTime())
     ? iso
     : at.toLocaleString("en-GB", { hour12: false });
-}
-
-function Panel({
-  tone,
-  children,
-}: {
-  tone: keyof typeof TONES;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      className={`space-y-2.5 rounded-[4px] border px-3 py-2.5 ${
-        tone === "quiet" ? "border-fl-line bg-fl-card" : TONES[tone]
-      }`}
-    >
-      {children}
-    </div>
-  );
 }
