@@ -122,6 +122,108 @@ describe("previousLocalDay", () => {
   });
 });
 
+describe("renderDailyDigest — autonomous pickup", () => {
+  it("leads with the kill-switch hold, in its own wording, with a way to lift it", () => {
+    const content = render({ globalAutonomyPaused: true });
+
+    expect(content.sections[0].heading).toBe("Autonomous pickup");
+    expect(section(content, "Autonomous pickup")).toEqual([
+      "⏸ Held right now — the kill switch is engaged: nothing new is being " +
+        "claimed anywhere, and nothing will be until you lift it. Runs " +
+        "already in flight and interactive work are unaffected. · " +
+        "[Lift it](https://interludes.co.uk/settings)",
+    ]);
+  });
+
+  it("reads differently from an ordinarily quiet day on an armed fleet", () => {
+    // The baseline is a genuinely armed fleet that simply did nothing — the
+    // hardest case to tell apart, and the one the issue is about. Everything
+    // else about the two days is identical: nothing finished, nothing ran,
+    // nothing waits. Only the hold tells them apart.
+    const armed = { projects: [makeProject({ id: "p1", autonomyEnabled: true })] };
+    const held = render({ ...armed, globalAutonomyPaused: true });
+    const quiet = render(armed);
+
+    expect(section(held, "Completed yesterday")).toEqual(
+      section(quiet, "Completed yesterday")
+    );
+    expect(section(held, "In flight")).toEqual(section(quiet, "In flight"));
+    expect(section(held, "Blocked on you")).toEqual(
+      section(quiet, "Blocked on you")
+    );
+    expect(section(held, "Autonomous pickup")).not.toEqual(
+      section(quiet, "Autonomous pickup")
+    );
+    expect(section(held, "Autonomous pickup")[0]).toContain(
+      "the kill switch is engaged"
+    );
+    expect(section(quiet, "Autonomous pickup")[0]).toContain("No fleet-wide hold");
+  });
+
+  it("words the daily-cap pause as the lapsed, self-lifting thing it is", () => {
+    const content = render({
+      dailyCapUsd: 500,
+      runs: [
+        makeRun({
+          id: "r1",
+          totalCostUsd: 512.34,
+          status: "merged",
+          finishedAt: aug(1, 21),
+        }),
+      ],
+      projects: [makeProject({ id: "proj-1" })],
+    });
+
+    expect(section(content, "Autonomous pickup")).toEqual([
+      "⏸ Paused — yesterday's spend reached the $500.00 daily cap, so pickup " +
+        "stopped for the rest of the day; the pause lifted at midnight.",
+    ]);
+  });
+
+  it("names the switch when both holds apply, and still reports the breach", () => {
+    const content = render({
+      globalAutonomyPaused: true,
+      dailyCapUsd: 500,
+      runs: [
+        makeRun({
+          id: "r1",
+          totalCostUsd: 512.34,
+          status: "merged",
+          finishedAt: aug(1, 21),
+        }),
+      ],
+      projects: [makeProject({ id: "proj-1" })],
+    });
+
+    expect(section(content, "Autonomous pickup")[0]).toContain("kill switch");
+    expect(section(content, "Spend")).toEqual([
+      "$512.34 of $500.00 daily cap — cap hit, pickup was paused",
+    ]);
+  });
+
+  it("claims only what the view knows when neither hold applies", () => {
+    const content = render({
+      projects: [makeProject({ id: "p1", autonomyEnabled: true })],
+    });
+
+    // Not "pickup was running" — a boot master left off or a failing preflight
+    // also stops claims, by routes this read model doesn't see.
+    expect(section(content, "Autonomous pickup")).toEqual([
+      "No fleet-wide hold — the kill switch is lifted and the day stayed inside the cap.",
+    ]);
+  });
+
+  it("distinguishes an unheld fleet with no project armed", () => {
+    const content = render({
+      projects: [makeProject({ id: "p1", autonomyEnabled: false })],
+    });
+
+    expect(section(content, "Autonomous pickup")).toEqual([
+      "No project has autonomy enabled — nothing is claimed unattended.",
+    ]);
+  });
+});
+
 describe("renderDailyDigest — completed yesterday", () => {
   it("lists yesterday's finished work with cost and PR link, nothing outside the day", () => {
     const content = render({
