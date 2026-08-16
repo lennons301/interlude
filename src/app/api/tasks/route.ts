@@ -1,24 +1,81 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
-import { SESSION_SKILLS, tasks, type SessionSkill } from "@/db/schema";
+import { projects, SESSION_SKILLS, tasks, type SessionSkill } from "@/db/schema";
 import { newId } from "@/lib/ulid";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 
+const TASK_STATUSES = [
+  "queued",
+  "running",
+  "blocked",
+  "completed",
+  "failed",
+  "cancelled",
+] as const;
+
+type TaskStatus = (typeof TASK_STATUSES)[number];
+
+/** The list is an archive, not an export: it is read newest-first and no
+ * screen paginates it, so it is bounded here rather than growing with the
+ * table forever. `limit` raises it up to MAX_LIMIT for a deliberate caller. */
+const DEFAULT_LIMIT = 200;
+const MAX_LIMIT = 500;
+
+function parseLimit(raw: string | null): number {
+  if (raw === null) return DEFAULT_LIMIT;
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value) || value <= 0) return DEFAULT_LIMIT;
+  return Math.min(value, MAX_LIMIT);
+}
+
+/**
+ * The tasks-list read path (issue #120). It projects only the columns a list
+ * row renders — deliberately *not* `select().from(tasks)`, which shipped every
+ * task's `description` (the full autonomous implement prompt): on prod that was
+ * 1035 KB of a 1219 KB response for 44 KB of rendered fields, unbounded and
+ * growing with every task. The project name is joined in so a card can name its
+ * project without a second round trip per row.
+ */
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const status = searchParams.get("status");
   const projectId = searchParams.get("projectId");
+  const limit = parseLimit(searchParams.get("limit"));
 
-  let query = db.select().from(tasks).orderBy(desc(tasks.updatedAt)).$dynamic();
-
-  if (status) {
-    query = query.where(eq(tasks.status, status as "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled"));
+  if (status !== null && !TASK_STATUSES.includes(status as TaskStatus)) {
+    return NextResponse.json(
+      { error: `status must be one of: ${TASK_STATUSES.join(", ")}` },
+      { status: 400 }
+    );
   }
-  if (projectId) {
-    query = query.where(eq(tasks.projectId, projectId));
-  }
 
-  const rows = await query;
+  // One `where`, not two: drizzle's builder replaces the previous predicate
+  // rather than anding them, so status + projectId silently dropped the status.
+  const filters = [
+    status !== null ? eq(tasks.status, status as TaskStatus) : undefined,
+    projectId !== null ? eq(tasks.projectId, projectId) : undefined,
+  ].filter((f) => f !== undefined);
+
+  const rows = db
+    .select({
+      id: tasks.id,
+      projectId: tasks.projectId,
+      projectName: projects.name,
+      title: tasks.title,
+      status: tasks.status,
+      kind: tasks.kind,
+      sessionSkill: tasks.sessionSkill,
+      runId: tasks.runId,
+      costUsd: tasks.totalCostUsd,
+      updatedAt: tasks.updatedAt,
+    })
+    .from(tasks)
+    .leftJoin(projects, eq(tasks.projectId, projects.id))
+    .where(filters.length > 0 ? and(...filters) : undefined)
+    .orderBy(desc(tasks.updatedAt))
+    .limit(limit)
+    .all();
+
   return NextResponse.json(rows);
 }
 

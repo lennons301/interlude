@@ -13,6 +13,15 @@ vi.mock("@/db", () => ({
 
 import { GET as getProjects, POST as postProject } from "@/app/api/projects/route";
 import { GET as getTasks, POST as postTask } from "@/app/api/tasks/route";
+import { GET as getTask } from "@/app/api/tasks/[id]/route";
+
+/** The list route is a projection for the archive (issue #120); the whole
+ * persisted row is read through the task's own route. */
+function readTask(id: string) {
+  return getTask(new Request(`http://test/api/tasks/${id}`), {
+    params: Promise.resolve({ id }),
+  });
+}
 
 function jsonRequest(url: string, body: unknown): Request {
   return new Request(url, {
@@ -67,7 +76,9 @@ describe("interactive chat flow API against the migrated schema", () => {
     expect(rows[0].status).toBe("queued");
     // An ordinary chat task is not a generation session (issue #61).
     expect(rows[0].sessionSkill).toBeNull();
-    expect(rows[0].sessionIssue).toBeNull();
+
+    const task = await (await readTask(rows[0].id)).json();
+    expect(task.sessionIssue).toBeNull();
   });
 
   it("records a generation session's skill and issue anchor, kind still interactive (#61)", async () => {
@@ -92,7 +103,8 @@ describe("interactive chat flow API against the migrated schema", () => {
     const res = await getTasks(
       new Request(`http://test/api/tasks?projectId=${projectId}`)
     );
-    const [task] = await res.json();
+    const [listed] = await res.json();
+    const task = await (await readTask(listed.id)).json();
     expect(task.sessionSkill).toBe("grill-me");
     expect(task.sessionIssue).toBe("lennons301/interlude#61");
     expect(task.kind).toBe("interactive");
@@ -119,6 +131,101 @@ describe("interactive chat flow API against the migrated schema", () => {
   it("still validates input", async () => {
     const res = await postTask(
       jsonRequest("http://test/api/tasks", { title: "  " })
+    );
+    expect(res.status).toBe(400);
+  });
+});
+
+// The archive's read path (issue #120). On prod the list shipped every column
+// of every row — 1035 KB of `description` (the full implement prompt) in a
+// 1219 KB response for 44 KB of rendered fields — unbounded and growing with
+// every task, which is what made the screen unusable over a slow connection.
+describe("the tasks list is a bounded projection", () => {
+  beforeEach(() => {
+    testDb = createTestDb().db;
+  });
+
+  async function seedProject(name: string): Promise<string> {
+    const res = await postProject(
+      jsonRequest("http://test/api/projects", { name })
+    );
+    const { id } = await res.json();
+    return id;
+  }
+
+  async function seedTask(projectId: string, title: string, description = "") {
+    await postTask(
+      jsonRequest("http://test/api/tasks", { title, projectId, description })
+    );
+  }
+
+  it("carries what a card renders — and not the description", async () => {
+    const projectId = await seedProject("lemons");
+    await seedTask(projectId, "Chat task", "x".repeat(30_000));
+
+    const [row] = await (
+      await getTasks(new Request("http://test/api/tasks"))
+    ).json();
+
+    expect(Object.keys(row).sort()).toEqual([
+      "costUsd",
+      "id",
+      "kind",
+      "projectId",
+      "projectName",
+      "runId",
+      "sessionSkill",
+      "status",
+      "title",
+      "updatedAt",
+    ]);
+    // The project's name comes joined in, so a card names its project without
+    // a round trip per row.
+    expect(row.projectName).toBe("lemons");
+  });
+
+  it("bounds the list, capping an over-large or unparseable limit", async () => {
+    const projectId = await seedProject("lemons");
+    for (let i = 0; i < 5; i++) await seedTask(projectId, `Task ${i}`);
+
+    const bounded = await (
+      await getTasks(new Request("http://test/api/tasks?limit=2"))
+    ).json();
+    expect(bounded).toHaveLength(2);
+
+    const capped = await (
+      await getTasks(new Request("http://test/api/tasks?limit=99999"))
+    ).json();
+    expect(capped).toHaveLength(5);
+
+    const nonsense = await (
+      await getTasks(new Request("http://test/api/tasks?limit=nope"))
+    ).json();
+    expect(nonsense).toHaveLength(5);
+  });
+
+  it("applies status and projectId together rather than one replacing the other", async () => {
+    const lemons = await seedProject("lemons");
+    const moontide = await seedProject("moontide");
+    await seedTask(lemons, "Lemons task");
+    await seedTask(moontide, "Moontide task");
+
+    const rows = await (
+      await getTasks(
+        new Request(
+          `http://test/api/tasks?status=queued&projectId=${moontide}`
+        )
+      )
+    ).json();
+
+    expect(rows.map((r: { title: string }) => r.title)).toEqual([
+      "Moontide task",
+    ]);
+  });
+
+  it("rejects a status outside the enum instead of silently listing nothing", async () => {
+    const res = await getTasks(
+      new Request("http://test/api/tasks?status=not-a-status")
     );
     expect(res.status).toBe(400);
   });
