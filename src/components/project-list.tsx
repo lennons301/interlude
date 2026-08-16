@@ -252,7 +252,9 @@ function AutonomyControl({
     <div
       role="group"
       aria-label={`Confirm arming ${project.name}`}
-      className={`w-full space-y-2 rounded-[4px] border px-3 py-2.5 ${TONES[tone]}`}
+      // `order-last` keeps the button row where it was and opens the
+      // confirmation beneath it, so the card doesn't jump under the press.
+      className={`order-last w-full space-y-2 rounded-[4px] border px-3 py-2.5 ${TONES[tone]}`}
     >
       <p className="text-[13px]">
         Arm {project.name} for unattended work? The loop will claim its

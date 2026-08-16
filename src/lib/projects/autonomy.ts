@@ -34,7 +34,9 @@ export interface ProjectAutonomy {
  *
  * A never-checked project is *not* blocked: enabling autonomy runs preflight
  * there and then (`PATCH /api/projects/[id]`, fail-closed), so the unknown
- * resolves into a verdict on the card as a direct result of the arming.
+ * resolves into a verdict on the card as a direct result of the arming — on an
+ * install with no GitHub App there is nothing to check against, and the project
+ * stays unchecked, which is also the honest answer.
  */
 export function armBlocker(project: ProjectAutonomy): string | null {
   if (project.preflightStatus !== "failing") return null;
@@ -72,6 +74,7 @@ export function preflightVerdict(project: ProjectAutonomy): PreflightVerdict {
   return {
     state: "unchecked",
     tone: "quiet",
-    detail: "Preflight has never run — arming runs it.",
+    detail:
+      "Preflight has never run — arming runs it, once the GitHub App is configured.",
   };
 }
