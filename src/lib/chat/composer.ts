@@ -43,6 +43,14 @@ export interface ComposerState {
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
+/** A task that has stopped for good. Shared with the live view, which gates the
+ * whole composer on it — so the `closed` phase below is what the state machine
+ * says about a task the view will not in fact show a composer for, and the two
+ * cannot drift into disagreeing. */
+export function isTerminalTaskStatus(status: string): boolean {
+  return TERMINAL.has(status);
+}
+
 /** A message row's queue-relevant shape — its own `deliveredAt` is the only
  * record of whether the agent has seen it. */
 export interface QueueableRow {

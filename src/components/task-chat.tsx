@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import type { SessionSkill } from "@/db/schema";
 import { SlimShell } from "@/components/app-shell";
 import { FOCUS_RING, Gauge, Money } from "@/components/fleet/fleet-bits";
 import { toChatView, type ChatMessageRow } from "@/lib/chat/chat-view";
+import { isTerminalTaskStatus } from "@/lib/chat/composer";
 import { TaskStream } from "./task-stream";
 import { MessageInput } from "./message-input";
 import { PreviewPane } from "./preview-pane";
@@ -23,7 +25,7 @@ interface TaskData {
   pullRequestUrl: string | null;
   /** Non-null on a generation session — the composer offers its slash menu
    * only where the orchestrator re-frames a typed skill slash (issue #63). */
-  sessionSkill: string | null;
+  sessionSkill: SessionSkill | null;
 }
 
 type TaskStatusUpdate = {
@@ -95,9 +97,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
       taskStatus.containerStatus
     : null;
 
-  const isTerminal = ["completed", "failed", "cancelled"].includes(
-    taskStatus.status
-  );
+  const isTerminal = isTerminalTaskStatus(taskStatus.status);
 
   // The slim shell carries the task's identity and live status (issue #117);
   // the row below it carries where the work lives and what it has cost.

@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { SessionSkill } from "@/db/schema";
 import { FOCUS_RING } from "@/components/fleet/fleet-bits";
 import { composerState, resolvePrimary } from "@/lib/chat/composer";
 import { applySlashCommand, slashMenu, type SlashCommand } from "@/lib/chat/slash";
@@ -34,7 +35,7 @@ interface MessageInputProps {
    * leading skill slash (issue #63) — the only place the menu means anything.
    * A plain chat task gets no menu, because the framing it advertises (and the
    * `gh` token a publishing skill needs) is not there. */
-  sessionSkill: string | null;
+  sessionSkill: SessionSkill | null;
 }
 
 /** The autosize measurement has to happen before paint or the field visibly
@@ -76,9 +77,10 @@ export function MessageInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const state = composerState({ taskStatus, containerStatus, queued });
+  // What the button would send *is* whether there is anything to send: an empty
+  // text means the draft is blank and no bare continue is on offer.
   const primary = resolvePrimary(draft, state.allowsContinue);
-  const canSubmit =
-    state.accepting && !sending && (draft.trim() !== "" || state.allowsContinue);
+  const canSubmit = state.accepting && !sending && primary.text !== "";
 
   const menu = useMemo(
     () => (sessionSkill && dismissed !== draft ? slashMenu(draft) : null),
@@ -118,11 +120,21 @@ export function MessageInput({
   useIsomorphicLayoutEffect(resize, [draft, resize]);
 
   // How the draft wraps is what decides that height, so a width change has to
-  // re-measure it — rotating a phone, or the preview pane opening beside the
-  // chat, otherwise leaves the field the wrong size until the next keystroke.
+  // re-measure it: rotating a phone, but also the preview pane appearing beside
+  // the chat mid-session, which narrows this column without the window moving
+  // at all. Width only — the element's *height* is what `resize` just set, and
+  // reacting to that would be a loop.
   useEffect(() => {
-    window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
+    const el = textareaRef.current;
+    if (!el) return;
+    let lastWidth = el.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth === lastWidth) return;
+      lastWidth = el.clientWidth;
+      resize();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
   }, [resize]);
 
   async function submit(text: string) {
@@ -152,6 +164,11 @@ export function MessageInput({
   }
 
   async function handleComplete() {
+    // Re-checked, not just disabled at the point the question was asked: the
+    // agent can start a turn while the confirmation sits open, and the API
+    // completes a running, idle task only.
+    if (!state.canComplete || completing) return;
+
     setCompleting(true);
     setError(null);
     try {
@@ -175,6 +192,15 @@ export function MessageInput({
     textareaRef.current?.focus();
   }
 
+  /** Move the highlight, wrapping at both ends. Clamped first, because a
+   * narrowing query can leave the stored index past the end of the list. */
+  function stepActive(delta: number) {
+    setActive(
+      (i) =>
+        (Math.min(i, matches.length - 1) + delta + matches.length) % matches.length
+    );
+  }
+
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     // Mid-composition (IME) Enter commits the candidate word; it is never a send.
     const composing = e.nativeEvent.isComposing;
@@ -182,14 +208,12 @@ export function MessageInput({
     if (menuOpen && !composing) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setActive((i) => (Math.min(i, matches.length - 1) + 1) % matches.length);
+        stepActive(1);
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setActive(
-          (i) => (Math.min(i, matches.length - 1) - 1 + matches.length) % matches.length
-        );
+        stepActive(-1);
         return;
       }
       if (e.key === "Escape") {
@@ -319,13 +343,20 @@ export function MessageInput({
         </button>
       </div>
 
+      {/* One line under the field, and it carries the id the textarea is
+          described by either way — a failed send must not leave
+          `aria-describedby` pointing at nothing. Wrapping, not truncating: on a
+          phone the whole line is the point, and an ellipsis would eat the half
+          that says how to type a newline. */}
       {error ? (
-        <p role="alert" className="mt-1 font-plex-mono text-[11px] text-fl-red">
+        <p
+          id={HINT_ID}
+          role="alert"
+          className="mt-1 font-plex-mono text-[11px] leading-snug text-fl-red"
+        >
           {error}
         </p>
       ) : (
-        // Wrapping, not truncating: on a phone the whole line is the point,
-        // and an ellipsis would eat the half that says how to type a newline.
         <p
           id={HINT_ID}
           className="mt-1 font-plex-mono text-[11px] leading-snug text-fl-ink-3"
@@ -338,11 +369,13 @@ export function MessageInput({
 }
 
 /**
- * The session skills, offered above the field. Buttons rather than listbox
- * options: they are reachable by Tab as well as by the arrow keys the textarea
- * handles, which is the accessible behaviour that costs nothing here. The
- * highlighted row is marked `aria-current`, so what Enter will accept is not
- * carried by the tint alone.
+ * The session skills, offered above the field. Ordinary buttons rather than
+ * listbox options: from the field the arrow keys move the highlight and
+ * Enter/Tab accepts it, and because the menu sits before the field in the DOM,
+ * Shift+Tab still walks into the rows themselves — so the menu is operable
+ * without inventing combobox semantics for a textarea whose day job is prose.
+ * The highlighted row is marked `aria-current`, so what Enter will accept is
+ * not carried by the tint alone.
  */
 function SlashCommandMenu({
   matches,
@@ -354,7 +387,9 @@ function SlashCommandMenu({
   onPick: (command: SlashCommand) => void;
 }) {
   return (
+    // `group`, because a label on a role-less div is not announced at all.
     <div
+      role="group"
       aria-label="Session commands"
       className="mb-2 max-h-52 overflow-y-auto rounded-[4px] border border-fl-line bg-fl-card"
     >

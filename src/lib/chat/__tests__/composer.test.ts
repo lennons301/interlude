@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   composerState,
+  isTerminalTaskStatus,
   queuedCount,
   resolvePrimary,
   type ComposerPhase,
@@ -91,6 +92,16 @@ describe("composerState — queue feedback", () => {
     // message still in hand is a real, brief state — and the honest thing to
     // show is that the message has not landed yet.
     expect(state("running", "idle", 1).queuedNote).toBe("1 queued");
+  });
+});
+
+describe("isTerminalTaskStatus", () => {
+  it("agrees with the phase the state machine reports", () => {
+    // The live view gates the whole composer on this predicate, so the two must
+    // not drift: everything terminal is `closed`, and nothing else is.
+    for (const status of ["queued", "running", "blocked", "completed", "failed", "cancelled"]) {
+      expect(state(status, "idle").phase === "closed").toBe(isTerminalTaskStatus(status));
+    }
   });
 });
 
