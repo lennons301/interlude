@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { SessionSkill } from "@/db/schema";
 import type { OpenIssue } from "@/lib/github/issues";
-import { Eyebrow } from "@/components/fleet/fleet-bits";
+import { Eyebrow, FIELD, PRIMARY_BUTTON } from "@/components/fleet/fleet-bits";
 
 // A new task is either a plain chat task (the default, unchanged) or a
 // generation session running one of the estate's generation skills (issue #64).
@@ -25,10 +25,6 @@ const SESSION_BLURBS: Record<SessionSkill, string> = {
   wayfinder: "Chart a new map of the territory",
 };
 const SESSION_ORDER = Object.keys(SESSION_BLURBS) as SessionSkill[];
-
-const FIELD =
-  "w-full rounded-[4px] border border-fl-line bg-fl-card px-3 py-2 text-sm text-fl-ink " +
-  "placeholder:text-fl-ink-3 focus:border-fl-line-strong focus:outline-none";
 
 export function NewTaskForm() {
   const router = useRouter();
@@ -247,7 +243,7 @@ export function NewTaskForm() {
       <button
         type="submit"
         disabled={submitting || !title.trim() || !projectId}
-        className="w-full rounded-[4px] bg-fl-cool px-4 py-2.5 text-sm font-medium text-fl-ground transition-opacity hover:opacity-90 disabled:opacity-40"
+        className={`w-full ${PRIMARY_BUTTON}`}
       >
         {submitting
           ? isSession

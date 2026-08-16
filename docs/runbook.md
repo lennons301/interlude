@@ -28,11 +28,14 @@ or on the `AUTONOMY_ALLOWED_AUTHORS` allow-list. Priority is expressed purely by
 
 Autonomy is off by default at two levels, and **both** must be on for pickup:
 
-1. **Global kill switch** — `AUTONOMY_ENABLED` (env, from Doppler `interlude/prd`).
+1. **Boot master** — `AUTONOMY_ENABLED` (env, from Doppler `interlude/prd`).
+   False and no sweep ever starts; read once, so changing it means a restart.
 2. **Per-project toggle** — `projects.autonomyEnabled` (off by default; enabled
-   deliberately, per project, never in bulk).
+   deliberately, per project, never in bulk). Arm and disarm it on `/settings`,
+   where each project also shows its preflight verdict.
 
-A project is only claimable when both are on **and** its preflight passes.
+A project is only claimable when both are on, the runtime kill switch is lifted
+(*Pause pickup* below), **and** its preflight passes.
 
 ### Preflight: is a repo safe to run unattended?
 
@@ -145,8 +148,9 @@ the dashboard answers "what's happening".
 Pausing only stops autonomous **pickup**. In-flight runs finish, and interactive
 chat/preview is never affected.
 
-- **Globally, right now (kill switch):** flip the durable runtime switch — no
-  restart, effective at the next sweep tick (≤30s).
+- **Globally, right now (kill switch):** press **stop the fleet** on `/settings`,
+  or flip the durable runtime switch by hand — either way no restart, effective
+  at the next sweep tick (≤30s).
 
   ```bash
   # Engage: nothing new is claimed anywhere (implement or triage)
@@ -167,7 +171,8 @@ chat/preview is never affected.
 - **Globally, hard off (boot master):** set `AUTONOMY_ENABLED=false` in Doppler
   `interlude/prd` and restart. Sweeps never start at all. Use this to stand the
   fleet down for a while; use the kill switch to stop it now.
-- **Per project:** disable the toggle —
+- **Per project:** press **disarm** on the project's card in `/settings`, or
+  disable the toggle by hand —
 
   ```bash
   curl -s -X PATCH http://localhost:3000/api/projects/<id> \

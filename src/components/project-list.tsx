@@ -1,113 +1,356 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Card, CardHeader } from "@/components/ui/card";
+import { useCallback, useState } from "react";
+import {
+  Chip,
+  ControlButton,
+  FIELD,
+  LoadFailure,
+  PANEL_PLAIN,
+  PRIMARY_BUTTON,
+  TONES,
+} from "@/components/fleet/fleet-bits";
+import { ConfirmStrip } from "@/components/confirm-strip";
+import { useLoad } from "@/lib/use-load";
+import {
+  armBlocker,
+  canArm,
+  preflightVerdict,
+  type PreflightState,
+  type ProjectAutonomy,
+} from "@/lib/projects/autonomy";
+import {
+  DEFAULT_ATTEMPT_BUDGET_USD,
+  MAX_ATTEMPTS,
+} from "@/lib/orchestrator/autonomy/budgets";
 
-type Project = {
+/**
+ * The project half of the control room (issue #119). Each card says what the
+ * fleet will do with the project unattended — armed or not, and whether its
+ * preflight passes — and is where the owner arms it.
+ *
+ * Arming is the one control here that starts unattended spend, so it is the one
+ * control that asks twice: `canArm` (pure, tested) decides whether the ordinary
+ * affordance is offered at all, and a failing preflight replaces it with an
+ * explicit override beside its reason. Disarming and every other edit are
+ * single-press — reversible things shouldn't be made to feel dangerous.
+ */
+
+interface Project extends ProjectAutonomy {
   id: string;
   name: string;
   githubRepo: string | null;
   gitUrl: string | null;
+  /** Presence only — the screen never renders the token itself. */
   dopplerToken: string | null;
   discordChannelId: string | null;
-  createdAt: string;
+}
+
+/** The chip's tint per verdict. A failing preflight is something to fix, not an
+ * incident, so it reads amber — the tone the dashboard gives it too. */
+const VERDICT_TONE: Record<PreflightState, "green" | "amber" | "quiet"> = {
+  passing: "green",
+  failing: "amber",
+  unchecked: "quiet",
 };
 
 export function ProjectList() {
-  const [projects, setProjects] = useState<Project[]>([]);
+  const { data: projects, error, reload, setData } = useLoad<Project[]>("/api/projects");
+
+  /** A PATCH answers with the whole updated row — including the preflight the
+   * server just re-ran — so the changed card is replaced from the response
+   * rather than re-fetching the list and hoping it agrees. */
+  const replace = useCallback(
+    (updated: Project) => {
+      setData((current) =>
+        current === null
+          ? current
+          : current.map((p) => (p.id === updated.id ? updated : p))
+      );
+    },
+    [setData]
+  );
+
+  if (projects === null) {
+    return error === null ? (
+      <p className="font-plex-mono text-[11px] text-fl-ink-3">loading…</p>
+    ) : (
+      <LoadFailure what="your projects" error={error} onRetry={reload} />
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <NewProjectForm onCreated={reload} />
+
+      {/* Something is on screen, so a failed reload is a staleness warning
+          rather than a wipe — including the reload a create fires, which is
+          how a new project can otherwise go missing without a word. */}
+      {error !== null && (
+        <p
+          role="alert"
+          className={`flex flex-wrap items-center gap-2 rounded-[4px] border px-3 py-2 text-[13px] ${TONES.amber}`}
+        >
+          <span>Not refreshing — {error}.</span>
+          <ControlButton onClick={reload}>retry</ControlButton>
+        </p>
+      )}
+
+      {projects.length === 0 ? (
+        <p className="text-[13px] text-fl-ink-3">
+          No projects yet — add one above to give the fleet something to work on.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {projects.map((project) => (
+            <li key={project.id}>
+              <ProjectCard project={project} onUpdated={replace} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function ProjectCard({
+  project,
+  onUpdated,
+}: {
+  project: Project;
+  onUpdated: (updated: Project) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const verdict = preflightVerdict(project);
+
+  return (
+    <div className={PANEL_PLAIN}>
+      <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1.5">
+        <div className="min-w-0">
+          <span className="block truncate text-sm text-fl-ink">
+            {project.name}
+          </span>
+          <span className="block truncate font-plex-mono text-[11px] text-fl-ink-3">
+            {project.githubRepo ?? project.gitUrl ?? "no repo configured"}
+          </span>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Chip tone={project.autonomyEnabled ? "green" : "quiet"}>
+            {project.autonomyEnabled ? "armed" : "disarmed"}
+          </Chip>
+          <Chip tone={VERDICT_TONE[verdict.state]}>
+            preflight {verdict.state}
+          </Chip>
+        </div>
+      </div>
+
+      {verdict.detail !== null && (
+        <p className="text-[13px] text-fl-ink-3">{verdict.detail}</p>
+      )}
+
+      {/* The loop fails closed on any preflight that isn't passing, so an armed
+          project sitting on one is armed and idle — which looks identical to
+          armed and quiet unless the card says so. */}
+      {project.autonomyEnabled && verdict.state !== "passing" && (
+        <p className="text-[13px] text-fl-amber">
+          Armed, but nothing is claimed until preflight passes.
+        </p>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <AutonomyControl project={project} onUpdated={onUpdated} />
+        <ControlButton
+          aria-expanded={editing}
+          onClick={() => setEditing((open) => !open)}
+        >
+          {editing ? "close" : "edit"}
+        </ControlButton>
+      </div>
+
+      {editing && <ProjectEditForm project={project} onUpdated={onUpdated} />}
+    </div>
+  );
+}
+
+/** Arm / disarm, and the confirmation that stands between the owner and
+ * unattended spend. `intent` is what the owner has asked for but not yet
+ * confirmed: `arm` from the ordinary affordance, `override` from the one a
+ * failing preflight leaves in its place. */
+function AutonomyControl({
+  project,
+  onUpdated,
+}: {
+  project: Project;
+  onUpdated: (updated: Project) => void;
+}) {
+  const [intent, setIntent] = useState<null | "arm" | "override">(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const blocker = armBlocker(project);
+
+  async function setAutonomy(enabled: boolean) {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/projects/${project.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        // An explicit boolean: the endpoint refuses anything else, and this is
+        // not a field to be clever about.
+        body: JSON.stringify({ autonomyEnabled: enabled }),
+      });
+      if (!res.ok) throw new Error(`the server answered ${res.status}`);
+      onUpdated(await res.json());
+      setIntent(null);
+    } catch (err) {
+      setError(
+        `Couldn't ${enabled ? "arm" : "disarm"} this project — ${
+          err instanceof Error ? err.message : "the request failed"
+        }.`
+      );
+    }
+    setBusy(false);
+  }
+
+  if (project.autonomyEnabled) {
+    return (
+      <>
+        <ControlButton disabled={busy} onClick={() => setAutonomy(false)}>
+          {busy ? "disarming…" : "disarm"}
+        </ControlButton>
+        <Failure error={error} />
+      </>
+    );
+  }
+
+  if (intent === null) {
+    return canArm(project) ? (
+      <ControlButton tone="cool" onClick={() => setIntent("arm")}>
+        arm…
+      </ControlButton>
+    ) : (
+      <>
+        <ControlButton tone="amber" onClick={() => setIntent("override")}>
+          arm anyway…
+        </ControlButton>
+        <Failure error={error} />
+      </>
+    );
+  }
+
+  // The copy follows the state, not the press that opened the strip: if the
+  // block cleared underneath it, this stopped being an override.
+  const overriding = intent === "override" && blocker !== null;
+  return (
+    <ConfirmStrip
+      label={`Confirm arming ${project.name}`}
+      tone={overriding ? "amber" : "cool"}
+      confirm="confirm arm"
+      busyLabel="arming…"
+      busy={busy}
+      error={error}
+      onConfirm={() => setAutonomy(true)}
+      onCancel={() => setIntent(null)}
+    >
+      <p className="text-[13px]">
+        Arm {project.name} for unattended work? The loop will claim its
+        ready-for-agent tickets on its own, spending up to $
+        {DEFAULT_ATTEMPT_BUDGET_USD} an attempt and {MAX_ATTEMPTS} attempts a
+        ticket.
+      </p>
+      {overriding && (
+        <p className="text-[13px]">
+          Preflight is failing ({blocker}). Arming records your intent, but the
+          loop still claims nothing until that is fixed.
+        </p>
+      )}
+    </ConfirmStrip>
+  );
+}
+
+/** A press that didn't take, reported where the press was. Full width so it
+ * lands on its own line in the button row rather than squeezing it. */
+function Failure({ error }: { error: string | null }) {
+  if (error === null) return null;
+  return (
+    <p role="alert" className="w-full text-[13px] text-fl-red">
+      {error}
+    </p>
+  );
+}
+
+function NewProjectForm({ onCreated }: { onCreated: () => void }) {
   const [name, setName] = useState("");
   const [gitUrl, setGitUrl] = useState("");
   const [creating, setCreating] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-
-  const [refreshKey, setRefreshKey] = useState(0);
-
-  useEffect(() => {
-    fetch("/api/projects").then(async (res) => {
-      if (res.ok) setProjects(await res.json());
-    });
-  }, [refreshKey]);
+  const [error, setError] = useState<string | null>(null);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     if (!name.trim() || creating) return;
 
     setCreating(true);
-    await fetch("/api/projects", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: name.trim(), gitUrl: gitUrl.trim() || undefined }),
-    });
-    setName("");
-    setGitUrl("");
+    setError(null);
+    try {
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name.trim(),
+          gitUrl: gitUrl.trim() || undefined,
+        }),
+      });
+      if (!res.ok) throw new Error(`the server answered ${res.status}`);
+      setName("");
+      setGitUrl("");
+      onCreated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "the request failed");
+    }
     setCreating(false);
-    setRefreshKey((k) => k + 1);
   }
 
   return (
-    <div className="space-y-4">
-      <form onSubmit={handleCreate} className="flex gap-2">
-        <Input
+    <form onSubmit={handleCreate} className="space-y-2">
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <input
+          className={FIELD}
+          aria-label="Project name"
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="Project name"
-          className="flex-1"
         />
-        <Input
+        <input
+          className={FIELD}
+          aria-label="Git URL"
           value={gitUrl}
           onChange={(e) => setGitUrl(e.target.value)}
           placeholder="https://github.com/user/repo.git"
-          className="flex-1"
         />
-        <Button type="submit" disabled={creating || !name.trim()}>
-          Add
-        </Button>
-      </form>
-
-      {projects.length === 0 ? (
-        <p className="text-muted-foreground">No projects yet.</p>
-      ) : (
-        <div className="space-y-2">
-          {projects.map((p) => (
-            <Card key={p.id}>
-              <CardHeader className="py-3">
-                <div
-                  className="flex items-center justify-between cursor-pointer"
-                  onClick={() => setEditingId(editingId === p.id ? null : p.id)}
-                >
-                  <div>
-                    <span className="font-medium">{p.name}</span>
-                    {p.gitUrl && (
-                      <span className="text-sm text-muted-foreground ml-2">{p.gitUrl}</span>
-                    )}
-                  </div>
-                  <span className="text-xs text-muted-foreground">
-                    {editingId === p.id ? "collapse" : "edit"}
-                  </span>
-                </div>
-                {editingId === p.id && (
-                  <ProjectEditForm
-                    project={p}
-                    onSaved={() => setRefreshKey((k) => k + 1)}
-                  />
-                )}
-              </CardHeader>
-            </Card>
-          ))}
-        </div>
+        <button
+          type="submit"
+          disabled={creating || !name.trim()}
+          className={`shrink-0 ${PRIMARY_BUTTON}`}
+        >
+          {creating ? "Adding…" : "Add"}
+        </button>
+      </div>
+      {error !== null && (
+        <p role="alert" className="text-[13px] text-fl-red">
+          Couldn&apos;t add the project — {error}.
+        </p>
       )}
-    </div>
+    </form>
   );
 }
 
 function ProjectEditForm({
   project,
-  onSaved,
+  onUpdated,
 }: {
   project: Project;
-  onSaved: () => void;
+  onUpdated: (updated: Project) => void;
 }) {
   const [name, setName] = useState(project.name);
   const [gitUrl, setGitUrl] = useState(project.gitUrl ?? "");
@@ -115,86 +358,129 @@ function ProjectEditForm({
   const [dopplerToken, setDopplerToken] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const hasDoppler = project.dopplerToken !== null;
 
-  async function handleSave(e: React.FormEvent) {
-    e.preventDefault();
+  /** Only what the owner actually changed is sent: a PATCH that restates the
+   * current values would be indistinguishable from an edit in the log, and
+   * `dopplerToken` in particular must never be echoed back as a write. */
+  const updates: Record<string, string | null> = {};
+  if (name.trim() !== project.name) updates.name = name.trim();
+  if (gitUrl.trim() !== (project.gitUrl ?? ""))
+    updates.gitUrl = gitUrl.trim() || null;
+  if (githubRepo.trim() !== (project.githubRepo ?? ""))
+    updates.githubRepo = githubRepo.trim() || null;
+  if (dopplerToken.trim()) updates.dopplerToken = dopplerToken.trim();
+  const dirty = Object.keys(updates).length > 0;
+
+  async function save() {
+    if (saving || !dirty) return;
+
     setSaving(true);
-
-    const updates: Record<string, string | null> = {};
-    if (name.trim() !== project.name) updates.name = name.trim();
-    if (gitUrl.trim() !== (project.gitUrl ?? "")) updates.gitUrl = gitUrl.trim() || null;
-    if (githubRepo.trim() !== (project.githubRepo ?? "")) updates.githubRepo = githubRepo.trim() || null;
-    if (dopplerToken.trim()) updates.dopplerToken = dopplerToken.trim();
-
-    if (Object.keys(updates).length > 0) {
-      await fetch(`/api/projects/${project.id}`, {
+    setError(null);
+    try {
+      const res = await fetch(`/api/projects/${project.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updates),
       });
-      onSaved();
+      if (!res.ok) throw new Error(`the server answered ${res.status}`);
+      onUpdated(await res.json());
+      setDopplerToken("");
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "the request failed");
     }
-
     setSaving(false);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
   }
 
   return (
-    <form onSubmit={handleSave} className="mt-3 space-y-2">
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-        <div>
-          <label className="text-xs text-muted-foreground">Name</label>
-          <Input value={name} onChange={(e) => setName(e.target.value)} />
-        </div>
-        <div>
-          <label className="text-xs text-muted-foreground">Git URL</label>
-          <Input
+    <form
+      // Enter in any field saves, exactly as pressing the button does — both
+      // routes go through the one `save`.
+      onSubmit={(e) => {
+        e.preventDefault();
+        save();
+      }}
+      className="space-y-2 border-t border-fl-line pt-2.5"
+    >
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <Field label="name">
+          <input
+            className={FIELD}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+        </Field>
+        <Field label="git url">
+          <input
+            className={FIELD}
             value={gitUrl}
             onChange={(e) => setGitUrl(e.target.value)}
             placeholder="https://github.com/user/repo.git"
           />
-        </div>
-        <div>
-          <label className="text-xs text-muted-foreground">GitHub Repo</label>
-          <Input
+        </Field>
+        <Field label="github repo">
+          <input
+            className={FIELD}
             value={githubRepo}
             onChange={(e) => setGithubRepo(e.target.value)}
             placeholder="owner/repo"
           />
-        </div>
-        <div>
-          <label className="text-xs text-muted-foreground">
-            Doppler Token {hasDoppler && <span className="text-green-400">(set)</span>}
-          </label>
-          <Input
+        </Field>
+        <Field label={hasDoppler ? "doppler token · set" : "doppler token"}>
+          <input
+            className={FIELD}
+            type="password"
             value={dopplerToken}
             onChange={(e) => setDopplerToken(e.target.value)}
-            placeholder={hasDoppler ? "Leave blank to keep current" : "dp.st.stg.xxxxx"}
-            type="password"
+            placeholder={hasDoppler ? "Leave blank to keep current" : "dp.st.dev.xxxxx"}
           />
-        </div>
-        {project.discordChannelId && (
-          <div>
-            <label className="text-xs text-muted-foreground">
-              Discord Channel <span className="text-green-400">(linked)</span>
-            </label>
-            <Input
+        </Field>
+        {project.discordChannelId !== null && (
+          <Field label="discord channel · linked">
+            <input
+              className={`${FIELD} font-plex-mono text-xs opacity-60`}
               value={project.discordChannelId}
               disabled
-              className="font-mono text-xs opacity-60"
             />
-          </div>
+          </Field>
         )}
       </div>
-      <div className="flex items-center gap-2">
-        <Button type="submit" size="sm" disabled={saving}>
-          {saving ? "Saving..." : "Save"}
-        </Button>
-        {saved && <span className="text-xs text-green-400">Saved</span>}
+      <div className="flex flex-wrap items-center gap-2">
+        {/* Disabled until something differs, so "save" never looks like it was
+            ignored when there was nothing to do. */}
+        <ControlButton tone="cool" disabled={saving || !dirty} onClick={save}>
+          {saving ? "saving…" : "save"}
+        </ControlButton>
+        {saved && (
+          <span className="font-plex-mono text-[11px] text-fl-green">saved</span>
+        )}
+        {error !== null && (
+          <span role="alert" className="text-[13px] text-fl-red">
+            Couldn&apos;t save — {error}.
+          </span>
+        )}
       </div>
     </form>
+  );
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="block space-y-1">
+      <span className="block font-plex-mono text-[11px] lowercase text-fl-ink-3">
+        {label}
+      </span>
+      {children}
+    </label>
   );
 }
