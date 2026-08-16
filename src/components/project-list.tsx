@@ -247,7 +247,10 @@ function AutonomyControl({
     );
   }
 
-  const tone = intent === "override" ? "amber" : "cool";
+  // The copy follows the state, not the press that opened the strip: if the
+  // block cleared underneath it, this stopped being an override.
+  const overriding = intent === "override" && blocker !== null;
+  const tone = overriding ? "amber" : "cool";
   return (
     <div
       role="group"
@@ -262,7 +265,7 @@ function AutonomyControl({
         {DEFAULT_ATTEMPT_BUDGET_USD} an attempt and {MAX_ATTEMPTS} attempts a
         ticket.
       </p>
-      {intent === "override" && (
+      {overriding && (
         <p className="text-[13px]">
           Preflight is failing ({blocker}). Arming records your intent, but the
           loop still claims nothing until that is fixed.
