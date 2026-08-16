@@ -166,8 +166,19 @@ chat/preview is never affected.
   ```
 
   The flag lives in the `settings` table, so an engaged switch survives a
-  restart — the dashboard's live dot goes amber-paused with a *Kill switch
-  engaged* banner, and the sweep logs `Pickup paused (kill-switch)`.
+  restart.
+
+  **Confirm it took** from the row itself, not from the log: the dashboard's
+  live dot turns amber and reads `held` (`paused` is the daily cap — a
+  deliberately different word for a deliberately different state), with a *Kill
+  switch engaged* banner above the panels, and `GET /api/settings/autonomy`
+  answers the same row headless. The sweep's `Pickup paused (kill-switch)` line
+  is **not** the confirmation: the hold is evaluated only on a tick that found
+  an eligible ticket it would otherwise have claimed, so engaging the switch
+  over an empty queue logs nothing at all. (Logging it every tick regardless
+  would mean a line every 30s for as long as the fleet is held.) The next
+  morning's Discord digest leads with the hold too, so a fleet you held and
+  forgot never reads there as a quiet day.
 - **Globally, hard off (boot master):** set `AUTONOMY_ENABLED=false` in Doppler
   `interlude/prd` and restart. Sweeps never start at all. Use this to stand the
   fleet down for a while; use the kill switch to stop it now.
