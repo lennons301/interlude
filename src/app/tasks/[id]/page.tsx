@@ -36,6 +36,7 @@ export default async function TaskDetailPage({
         githubIssue: task.githubIssue ?? null,
         pullRequestNumber: task.pullRequestNumber ?? null,
         pullRequestUrl: task.pullRequestUrl ?? null,
+        sessionSkill: task.sessionSkill ?? null,
       }}
       domain={process.env.DOMAIN ?? null}
     />

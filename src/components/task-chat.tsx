@@ -21,6 +21,9 @@ interface TaskData {
   githubIssue: string | null;
   pullRequestNumber: number | null;
   pullRequestUrl: string | null;
+  /** Non-null on a generation session — the composer offers its slash menu
+   * only where the orchestrator re-frames a typed skill slash (issue #63). */
+  sessionSkill: string | null;
 }
 
 type TaskStatusUpdate = {
@@ -58,6 +61,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
   const [branch, setBranch] = useState<string | null>(initialTask.branch);
   const [activeTab, setActiveTab] = useState<"chat" | "preview">("chat");
   const [lastActivity, setLastActivity] = useState<number>(0);
+  const [queued, setQueued] = useState(0);
 
   const handleStatusChange = useCallback(
     (status: TaskStatusUpdate) => {
@@ -213,12 +217,15 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
             containerStatus={taskStatus.containerStatus}
             onStatusChange={handleStatusChange}
             onMessage={handleMessage}
+            onQueuedChange={setQueued}
           />
           {!isTerminal && (
             <MessageInput
               taskId={initialTask.id}
               containerStatus={taskStatus.containerStatus}
               taskStatus={taskStatus.status}
+              queued={queued}
+              sessionSkill={initialTask.sessionSkill}
             />
           )}
         </div>
