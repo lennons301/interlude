@@ -12,8 +12,16 @@ vi.mock("@/db", () => ({
 }));
 
 import { GET as getProjects, POST as postProject } from "@/app/api/projects/route";
-import { GET as getTasks, POST as postTask } from "@/app/api/tasks/route";
-import { GET as getTask } from "@/app/api/tasks/[id]/route";
+import {
+  GET as getTasks,
+  POST as postTask,
+  parseLimit,
+} from "@/app/api/tasks/route";
+import {
+  GET as getTask,
+  PATCH as patchTaskRoute,
+} from "@/app/api/tasks/[id]/route";
+import { TASK_LIST_LIMIT } from "@/lib/tasks/organize-tasks";
 
 /** The list route is a projection for the archive (issue #120); the whole
  * persisted row is read through the task's own route. */
@@ -21,6 +29,13 @@ function readTask(id: string) {
   return getTask(new Request(`http://test/api/tasks/${id}`), {
     params: Promise.resolve({ id }),
   });
+}
+
+function patchTask(id: string, status: string) {
+  return patchTaskRoute(
+    jsonRequest(`http://test/api/tasks/${id}`, { status }),
+    { params: Promise.resolve({ id }) }
+  );
 }
 
 function jsonRequest(url: string, body: unknown): Request {
@@ -169,11 +184,13 @@ describe("the tasks list is a bounded projection", () => {
 
     expect(Object.keys(row).sort()).toEqual([
       "costUsd",
+      "githubIssue",
       "id",
       "kind",
       "projectId",
       "projectName",
       "runId",
+      "sessionIssue",
       "sessionSkill",
       "status",
       "title",
@@ -184,31 +201,47 @@ describe("the tasks list is a bounded projection", () => {
     expect(row.projectName).toBe("lemons");
   });
 
-  it("bounds the list, capping an over-large or unparseable limit", async () => {
+  it("bounds the list", async () => {
     const projectId = await seedProject("lemons");
     for (let i = 0; i < 5; i++) await seedTask(projectId, `Task ${i}`);
 
     const bounded = await (
       await getTasks(new Request("http://test/api/tasks?limit=2"))
     ).json();
+
     expect(bounded).toHaveLength(2);
+  });
 
-    const capped = await (
-      await getTasks(new Request("http://test/api/tasks?limit=99999"))
-    ).json();
-    expect(capped).toHaveLength(5);
-
-    const nonsense = await (
-      await getTasks(new Request("http://test/api/tasks?limit=nope"))
-    ).json();
-    expect(nonsense).toHaveLength(5);
+  // The bound itself is asserted here rather than by seeding 500 rows through
+  // the API: `parseLimit` is the whole of it, so this is where a deleted clamp
+  // or a lifted default actually fails.
+  it("caps, floors and falls back on the requested limit", () => {
+    expect(parseLimit(null)).toBe(TASK_LIST_LIMIT);
+    expect(parseLimit("")).toBe(TASK_LIST_LIMIT);
+    expect(parseLimit("nope")).toBe(TASK_LIST_LIMIT);
+    expect(parseLimit("0")).toBe(TASK_LIST_LIMIT);
+    expect(parseLimit("-5")).toBe(TASK_LIST_LIMIT);
+    expect(parseLimit("25")).toBe(25);
+    expect(parseLimit("99999")).toBe(500);
   });
 
   it("applies status and projectId together rather than one replacing the other", async () => {
     const lemons = await seedProject("lemons");
     const moontide = await seedProject("moontide");
     await seedTask(lemons, "Lemons task");
-    await seedTask(moontide, "Moontide task");
+    await seedTask(moontide, "Moontide queued task");
+    await seedTask(moontide, "Moontide finished task");
+
+    // The finished task shares the project, so only a status filter that
+    // survives alongside projectId can exclude it — the shape the old
+    // two-`where` builder silently dropped.
+    const listed = await (
+      await getTasks(new Request(`http://test/api/tasks?projectId=${moontide}`))
+    ).json();
+    const finished = listed.find(
+      (r: { title: string }) => r.title === "Moontide finished task"
+    );
+    await patchTask(finished.id, "completed");
 
     const rows = await (
       await getTasks(
@@ -219,8 +252,20 @@ describe("the tasks list is a bounded projection", () => {
     ).json();
 
     expect(rows.map((r: { title: string }) => r.title)).toEqual([
-      "Moontide task",
+      "Moontide queued task",
     ]);
+  });
+
+  it("treats an empty filter parameter as no filter, as it always has", async () => {
+    const projectId = await seedProject("lemons");
+    await seedTask(projectId, "Chat task");
+
+    const res = await getTasks(
+      new Request("http://test/api/tasks?status=&projectId=")
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toHaveLength(1);
   });
 
   it("rejects a status outside the enum instead of silently listing nothing", async () => {

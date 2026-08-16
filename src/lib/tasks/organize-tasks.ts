@@ -3,36 +3,27 @@
  * pure — every input is passed in, nothing is read from the outside — so the
  * session/run split, the kind filter and the chip vocabulary are table-testable
  * and the React components stay dumb renderers. Same contract as the fleet's
- * `buildFleetView`, and the same deliberate decoupling: the row and enum types
- * are restated here rather than imported from `@/db/schema`, so importing this
- * module from a client component never drags drizzle into the browser bundle.
- * The DB column enums remain the runtime source of truth; the `Record` maps
- * below are exhaustive, so a kind or skill added there fails the type check
- * here until it is given a chip.
+ * `buildFleetView`.
+ *
+ * The status/kind/skill unions are derived from the schema through a *type-only*
+ * import, which TypeScript erases: the column enums stay the one source of truth
+ * and the `Record` maps below are genuinely exhaustive — a kind or skill added
+ * to the schema fails the type check here until it is given a chip — while no
+ * drizzle runtime reaches the browser bundle that imports this module.
  */
 
-export type TaskStatus =
-  | "queued"
-  | "running"
-  | "blocked"
-  | "completed"
-  | "failed"
-  | "cancelled";
+import type { tasks } from "@/db/schema";
 
-export type TaskKind =
-  | "interactive"
-  | "implement"
-  | "review"
-  | "triage"
-  | "repair";
+type TaskRow = typeof tasks.$inferSelect;
 
-export type SessionSkill =
-  | "grill-me"
-  | "grill-with-docs"
-  | "triage"
-  | "to-spec"
-  | "to-tickets"
-  | "wayfinder";
+export type TaskStatus = TaskRow["status"];
+export type TaskKind = TaskRow["kind"];
+export type SessionSkill = NonNullable<TaskRow["sessionSkill"]>;
+
+/** The archive is read newest-first and nothing paginates it, so the read path
+ * is bounded rather than growing with the table forever. Shared by the route
+ * that applies it and the list that says when it is showing a capped view. */
+export const TASK_LIST_LIMIT = 200;
 
 /** One row of the list, exactly as `GET /api/tasks` projects it — deliberately
  * not the whole task: the list never renders `description` (the full implement
@@ -47,9 +38,23 @@ export interface TaskListRow {
   kind: TaskKind;
   sessionSkill: SessionSkill | null;
   runId: string | null;
+  /** The ticket a run is working (owner/repo#n); null for unanchored work. */
+  githubIssue: string | null;
+  /** The issue a generation session was anchored to (owner/repo#n). */
+  sessionIssue: string | null;
   costUsd: number;
   /** ISO-8601, as JSON carries it. */
   updatedAt: string;
+}
+
+/** The ticket a card names, as the dashboard's running cards do — the run's
+ * ticket, or the issue a session was anchored to. Rendered bare (`#34`): the
+ * project is already on the card, so the owner/repo prefix is noise. */
+export function taskTicket(row: TaskListRow): string | null {
+  const ref = row.githubIssue ?? row.sessionIssue;
+  if (ref === null) return null;
+  const hash = ref.lastIndexOf("#");
+  return hash === -1 ? ref : ref.slice(hash);
 }
 
 /**

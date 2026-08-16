@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Eyebrow, FOCUS_RING } from "@/components/fleet/fleet-bits";
 import { TaskCard } from "./task-card";
 import {
   organizeTasks,
+  TASK_LIST_LIMIT,
   type TaskFilter,
   type TaskListRow,
 } from "@/lib/tasks/organize-tasks";
@@ -15,18 +16,20 @@ import {
  * pure `organizeTasks` selector's output; this component owns only the read
  * path and the filter state.
  *
- * The read path is deliberate about three things that made this screen lie in
- * production: a poll is scheduled only once the previous one has settled (never
- * overlapping, and aborted on unmount), a failed load renders as a failure with
- * a retry rather than as an empty archive, and the empty state is shown only
- * for a confirmed empty result.
+ * The read path is deliberate about the three things that made this screen lie
+ * in production: a poll is scheduled only once the previous one has settled
+ * (never overlapping, and aborted on unmount), a failed load renders as a
+ * failure with a retry rather than as an empty archive, and the empty state is
+ * reached only from a confirmed empty result that nothing has failed since.
  */
 
-const POLL_MS = 3000;
+/** An archive, not a live surface — the dashboard is where seconds matter, so
+ * this refreshes at a rate a phone on mobile data can afford. */
+const POLL_MS = 10_000;
 
-/** Matches the API's default bound; stated here so the list can say when it is
- * showing a capped view rather than everything. */
-const LIST_LIMIT = 200;
+/** While the load is failing, back off rather than hammering a server that is
+ * already unwell; `retry` is what shortcuts back to the fast cadence. */
+const MAX_BACKOFF_MS = 60_000;
 
 export function TaskFeed() {
   // null = never loaded. Distinguishing "no answer yet" from "answered, empty"
@@ -40,10 +43,11 @@ export function TaskFeed() {
     const controller = new AbortController();
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
 
     const poll = async () => {
       try {
-        const res = await fetch(`/api/tasks?limit=${LIST_LIMIT}`, {
+        const res = await fetch(`/api/tasks?limit=${TASK_LIST_LIMIT}`, {
           signal: controller.signal,
         });
         if (!res.ok) throw new Error(`the server answered ${res.status}`);
@@ -51,13 +55,20 @@ export function TaskFeed() {
         if (stopped) return;
         setRows(data);
         setError(null);
+        failures = 0;
       } catch (err) {
         if (stopped || controller.signal.aborted) return;
         setError(err instanceof Error ? err.message : "the request failed");
+        failures += 1;
       }
       // Scheduled only after a request has settled, so a slow connection can
       // never pile polls on top of each other.
-      if (!stopped) timer = setTimeout(poll, POLL_MS);
+      if (!stopped) {
+        timer = setTimeout(
+          poll,
+          Math.min(POLL_MS * 2 ** failures, MAX_BACKOFF_MS)
+        );
+      }
     };
 
     poll();
@@ -82,18 +93,32 @@ export function TaskFeed() {
     setReloadKey((key) => key + 1);
   };
 
-  if (rows === null) {
-    return error === null ? (
-      <p className="py-12 text-center font-plex-mono text-[11px] text-fl-ink-3">
-        loading…
-      </p>
-    ) : (
+  // Memoised so the 30s clock tick — which exists only to age the relative
+  // times — doesn't re-derive the whole list behind it.
+  const organized = useMemo(
+    () => organizeTasks(rows ?? [], filter),
+    [rows, filter]
+  );
+
+  // A failure with nothing to show is a failure, whether or not an earlier poll
+  // happened to answer "empty": an unconfirmed empty archive is exactly the lie
+  // this screen used to tell, so the empty state is never reached from here.
+  if (error !== null && (rows === null || rows.length === 0)) {
+    return (
       <div className="space-y-3 py-12 text-center">
         <p role="alert" className="text-sm text-fl-red">
           Couldn&apos;t load your tasks — {error}.
         </p>
         <RetryButton onClick={retry} />
       </div>
+    );
+  }
+
+  if (rows === null) {
+    return (
+      <p className="py-12 text-center font-plex-mono text-[11px] text-fl-ink-3">
+        loading…
+      </p>
     );
   }
 
@@ -112,7 +137,6 @@ export function TaskFeed() {
     );
   }
 
-  const organized = organizeTasks(rows, filter);
   // The filter offers only kinds that exist — plus the active one if the data
   // has moved on beneath it, so a narrowed-to-nothing list is never a dead end.
   const options =
@@ -170,9 +194,9 @@ export function TaskFeed() {
         now={now}
       />
 
-      {rows.length >= LIST_LIMIT && (
+      {rows.length >= TASK_LIST_LIMIT && (
         <p className="font-plex-mono text-[11px] text-fl-ink-3">
-          showing the {LIST_LIMIT} most recent
+          showing the {TASK_LIST_LIMIT} most recently active tasks
         </p>
       )}
     </div>

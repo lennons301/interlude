@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   organizeTasks,
   taskChip,
+  taskTicket,
   TASK_CHIPS,
   type TaskListRow,
 } from "../organize-tasks";
@@ -21,11 +22,35 @@ function makeRow(overrides: Partial<TaskListRow> = {}): TaskListRow {
     kind: "interactive",
     sessionSkill: null,
     runId: null,
+    githubIssue: null,
+    sessionIssue: null,
     costUsd: 0,
     updatedAt: T(0),
     ...overrides,
   };
 }
+
+describe("taskTicket", () => {
+  it("names a run's ticket without the owner/repo prefix", () => {
+    expect(
+      taskTicket(makeRow({ githubIssue: "lennons301/lemons#34" }))
+    ).toBe("#34");
+  });
+
+  it("falls back to a session's anchor", () => {
+    expect(
+      taskTicket(makeRow({ sessionIssue: "lennons301/interlude#61" }))
+    ).toBe("#61");
+  });
+
+  it("is null for unanchored work", () => {
+    expect(taskTicket(makeRow())).toBeNull();
+  });
+
+  it("passes through a ref it cannot parse rather than dropping it", () => {
+    expect(taskTicket(makeRow({ githubIssue: "lemons-34" }))).toBe("lemons-34");
+  });
+});
 
 describe("taskChip", () => {
   it("names an ordinary chat task", () => {

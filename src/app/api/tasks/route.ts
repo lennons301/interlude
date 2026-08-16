@@ -2,29 +2,24 @@ import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { projects, SESSION_SKILLS, tasks, type SessionSkill } from "@/db/schema";
 import { newId } from "@/lib/ulid";
+import { TASK_LIST_LIMIT } from "@/lib/tasks/organize-tasks";
 import { and, desc, eq } from "drizzle-orm";
 
-const TASK_STATUSES = [
-  "queued",
-  "running",
-  "blocked",
-  "completed",
-  "failed",
-  "cancelled",
-] as const;
+/** The column's own enum, so a status added to the schema is accepted here
+ * without a second list to remember. */
+const TASK_STATUSES = tasks.status.enumValues;
 
 type TaskStatus = (typeof TASK_STATUSES)[number];
 
-/** The list is an archive, not an export: it is read newest-first and no
- * screen paginates it, so it is bounded here rather than growing with the
- * table forever. `limit` raises it up to MAX_LIMIT for a deliberate caller. */
-const DEFAULT_LIMIT = 200;
+/** `limit` raises the archive's default bound, up to MAX_LIMIT, for a
+ * deliberate caller. Anything absent, unparseable or non-positive falls back
+ * to the default rather than lifting the bound. */
 const MAX_LIMIT = 500;
 
-function parseLimit(raw: string | null): number {
-  if (raw === null) return DEFAULT_LIMIT;
+export function parseLimit(raw: string | null): number {
+  if (raw === null || raw === "") return TASK_LIST_LIMIT;
   const value = Number.parseInt(raw, 10);
-  if (!Number.isFinite(value) || value <= 0) return DEFAULT_LIMIT;
+  if (!Number.isFinite(value) || value <= 0) return TASK_LIST_LIMIT;
   return Math.min(value, MAX_LIMIT);
 }
 
@@ -38,8 +33,10 @@ function parseLimit(raw: string | null): number {
  */
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const status = searchParams.get("status");
-  const projectId = searchParams.get("projectId");
+  // An empty parameter means "not filtering", as it always has — a caller
+  // building `?projectId=${selected ?? ""}` must not be answered with nothing.
+  const status = searchParams.get("status") || null;
+  const projectId = searchParams.get("projectId") || null;
   const limit = parseLimit(searchParams.get("limit"));
 
   if (status !== null && !TASK_STATUSES.includes(status as TaskStatus)) {
@@ -66,6 +63,8 @@ export async function GET(request: Request) {
       kind: tasks.kind,
       sessionSkill: tasks.sessionSkill,
       runId: tasks.runId,
+      githubIssue: tasks.githubIssue,
+      sessionIssue: tasks.sessionIssue,
       costUsd: tasks.totalCostUsd,
       updatedAt: tasks.updatedAt,
     })

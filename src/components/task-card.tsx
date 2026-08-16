@@ -1,6 +1,11 @@
 import Link from "next/link";
 import { Chip, FOCUS_RING, Money, formatElapsed } from "@/components/fleet/fleet-bits";
-import { taskChip, type TaskChip, type TaskListRow } from "@/lib/tasks/organize-tasks";
+import {
+  taskChip,
+  taskTicket,
+  type TaskChip,
+  type TaskListRow,
+} from "@/lib/tasks/organize-tasks";
 
 /**
  * One row of the archive, in the fleet's card language (issue #120) — the same
@@ -38,6 +43,7 @@ const STATUS_INK: Record<TaskListRow["status"], string> = {
 
 export function TaskCard({ row, now }: { row: TaskListRow; now: number }) {
   const chip = taskChip(row);
+  const ticket = taskTicket(row);
 
   return (
     <Link href={`/tasks/${row.id}`} className={`block ${FOCUS_RING}`}>
@@ -49,6 +55,7 @@ export function TaskCard({ row, now }: { row: TaskListRow; now: number }) {
         <div className="flex items-center justify-between gap-2">
           <span className="truncate font-plex-mono text-[12px] text-fl-ink-2">
             {row.projectName ?? "—"}
+            {ticket && <span className="text-fl-ink"> {ticket}</span>}
           </span>
           <Chip tone={CHIP_TONE[chip]}>{chip}</Chip>
         </div>
