@@ -116,6 +116,8 @@ describe("fleet palette", () => {
     "src/components/tool-card.tsx",
     "src/components/task-stream.tsx",
     "src/components/task-chat.tsx",
+    // The composer was the last dark island on the light ground (issue #122).
+    "src/components/message-input.tsx",
   ];
 
   const OFF_PALETTE =
