@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { FOCUS_RING } from "@/components/fleet/fleet-bits";
 import { composerState, resolvePrimary } from "@/lib/chat/composer";
 import { applySlashCommand, slashMenu, type SlashCommand } from "@/lib/chat/slash";
@@ -44,6 +44,11 @@ const DOT_TONE = {
 
 const QUIET_BUTTON = `font-plex-mono text-[11px] lowercase text-fl-ink-3 hover:text-fl-ink disabled:cursor-default disabled:text-fl-ink-3/50 disabled:hover:text-fl-ink-3/50 ${FOCUS_RING}`;
 
+/** A fixed id, not `useId`: there is exactly one composer on a page, and the
+ * generated id came out different on the server and the client here, which is
+ * a hydration mismatch for an attribute that only has to point at a sibling. */
+const HINT_ID = "composer-hint";
+
 export function MessageInput({
   taskId,
   containerStatus,
@@ -62,11 +67,9 @@ export function MessageInput({
   const [dismissed, setDismissed] = useState<string | null>(null);
   const [active, setActive] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const hintId = useId();
-  const menuId = useId();
 
   const state = composerState({ taskStatus, containerStatus, queued });
-  const primary = resolvePrimary(draft);
+  const primary = resolvePrimary(draft, state.allowsContinue);
   const canSubmit =
     state.accepting && !sending && (draft.trim() !== "" || state.allowsContinue);
 
@@ -204,12 +207,7 @@ export function MessageInput({
   return (
     <div className="shrink-0 border-t border-fl-line bg-fl-surface px-3 py-2.5">
       {menuOpen && (
-        <SlashCommandMenu
-          id={menuId}
-          matches={matches}
-          activeIndex={activeIndex}
-          onPick={pick}
-        />
+        <SlashCommandMenu matches={matches} activeIndex={activeIndex} onPick={pick} />
       )}
 
       <div className="mb-1.5 flex items-center justify-between gap-3">
@@ -225,9 +223,15 @@ export function MessageInput({
               state.phase === "working" ? "fleet-pulse" : ""
             }`}
           />
-          <span className="truncate">{state.label}</span>
-          {state.queuedNote && (
-            <span className="shrink-0 text-fl-ink-3">· {state.queuedNote}</span>
+          {/* The confirmation takes the row: on a phone there is not width for
+              both, and for the second it is up, the question is the status. */}
+          {!confirmingComplete && (
+            <>
+              <span className="truncate">{state.label}</span>
+              {state.queuedNote && (
+                <span className="shrink-0 text-fl-ink-3">· {state.queuedNote}</span>
+              )}
+            </>
           )}
         </p>
 
@@ -285,7 +289,7 @@ export function MessageInput({
           rows={1}
           disabled={!state.accepting}
           aria-label="Message the agent"
-          aria-describedby={hintId}
+          aria-describedby={HINT_ID}
           className="max-h-40 min-w-0 flex-1 resize-none bg-transparent py-1 text-sm text-fl-ink outline-none placeholder:text-fl-ink-3 disabled:cursor-not-allowed"
         />
         <button
@@ -303,7 +307,12 @@ export function MessageInput({
           {error}
         </p>
       ) : (
-        <p id={hintId} className="mt-1 truncate font-plex-mono text-[11px] text-fl-ink-3">
+        // Wrapping, not truncating: on a phone the whole line is the point,
+        // and an ellipsis would eat the half that says how to type a newline.
+        <p
+          id={HINT_ID}
+          className="mt-1 font-plex-mono text-[11px] leading-snug text-fl-ink-3"
+        >
           {hint}
         </p>
       )}
@@ -319,21 +328,18 @@ export function MessageInput({
  * carried by the tint alone.
  */
 function SlashCommandMenu({
-  id,
   matches,
   activeIndex,
   onPick,
 }: {
-  id: string;
   matches: readonly SlashCommand[];
   activeIndex: number;
   onPick: (command: SlashCommand) => void;
 }) {
   return (
     <div
-      id={id}
       aria-label="Session commands"
-      className="mb-2 overflow-hidden rounded-[4px] border border-fl-line bg-fl-card"
+      className="mb-2 max-h-52 overflow-y-auto rounded-[4px] border border-fl-line bg-fl-card"
     >
       {matches.map((command, i) => (
         <button
@@ -344,8 +350,11 @@ function SlashCommandMenu({
           // would close the menu before the click lands.
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => onPick(command)}
+          // Cool marks the highlighted row, the same hue the session-entry
+          // form marks a picked session with: colour here means the owner is
+          // choosing, not that anything is live or wrong.
           className={`flex w-full items-baseline gap-2 px-3 py-1.5 text-left ${FOCUS_RING} ${
-            i === activeIndex ? "bg-fl-surface" : "hover:bg-fl-surface"
+            i === activeIndex ? "bg-fl-cool/13" : "hover:bg-fl-surface"
           }`}
         >
           <span className="shrink-0 font-plex-mono text-[12px] text-fl-ink">

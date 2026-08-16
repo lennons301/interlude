@@ -121,11 +121,20 @@ describe("queuedCount", () => {
 
 describe("resolvePrimary", () => {
   it("sends the draft, trimmed", () => {
-    expect(resolvePrimary("  colder  ")).toEqual({ label: "send", text: "colder" });
+    expect(resolvePrimary("  colder  ", true)).toEqual({ label: "send", text: "colder" });
   });
 
-  it("turns an empty draft into an explicit continue", () => {
-    expect(resolvePrimary("")).toEqual({ label: "continue", text: "continue" });
-    expect(resolvePrimary("   \n ")).toEqual({ label: "continue", text: "continue" });
+  it("turns an empty draft into an explicit continue where that is offered", () => {
+    expect(resolvePrimary("", true)).toEqual({ label: "continue", text: "continue" });
+    expect(resolvePrimary("   \n ", true)).toEqual({
+      label: "continue",
+      text: "continue",
+    });
+  });
+
+  it("stays a send when continuing is not on offer", () => {
+    // Mid-turn the button is disabled anyway; labelling it "continue" would
+    // name something the composer will not do.
+    expect(resolvePrimary("", false)).toEqual({ label: "send", text: "" });
   });
 });

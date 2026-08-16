@@ -148,9 +148,16 @@ export function composerState(input: {
  * What the primary button does. An empty draft on an idle agent means "carry
  * on" — the same move as replying in Discord to an idle notification — so the
  * button says `continue` and sends that word rather than sitting disabled with
- * nothing to explain itself. The label always names what will happen.
+ * nothing to explain itself. Where continuing is not on offer it stays the send
+ * it will become: the label always names what will happen, never what won't.
  */
-export function resolvePrimary(draft: string): { label: string; text: string } {
+export function resolvePrimary(
+  draft: string,
+  allowsContinue: boolean
+): { label: string; text: string } {
   const trimmed = draft.trim();
-  return trimmed ? { label: "send", text: trimmed } : { label: "continue", text: "continue" };
+  if (trimmed) return { label: "send", text: trimmed };
+  return allowsContinue
+    ? { label: "continue", text: "continue" }
+    : { label: "send", text: "" };
 }

@@ -109,8 +109,9 @@ describe("composer — controls", () => {
     expect(html).toContain("blocked on a question");
     expect(tag(html, /<textarea[^>]*>/)).not.toMatch(DISABLED);
     // Nothing to continue — the agent asked something, so the primary control
-    // waits for an answer to send.
-    expect(tag(html, /<button[^>]*>continue<\/button>/)).toMatch(DISABLED);
+    // waits, as a send, for an answer to send.
+    expect(html).not.toContain(">continue</button>");
+    expect(tag(html, /<button[^>]*>send<\/button>/)).toMatch(DISABLED);
   });
 });
 
