@@ -1,20 +1,22 @@
 import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
+import { FOCUS_RING } from "@/components/fleet/fleet-bits";
 import { TaskFeed } from "@/components/task-feed";
 
-// The list itself is reskinned by its own ticket; here it just moves inside the
-// shared shell (issue #117).
+// The archive of every session and run, in the fleet system (issue #120). The
+// heading matches /tasks/new's; the shell already carries the nav, so the entry
+// point here is a quiet mono link rather than a second primary button.
 export default function TasksPage() {
   return (
     <AppShell section="tasks">
-      <div className="space-y-6 py-2">
-        <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-bold">Tasks</h1>
+      <div className="space-y-6">
+        <div className="mb-6 mt-2 flex items-baseline justify-between gap-3">
+          <h1 className="text-lg text-fl-ink">Tasks</h1>
           <Link
             href="/tasks/new"
-            className="inline-flex h-8 items-center justify-center rounded-lg bg-primary px-2.5 text-sm font-medium text-primary-foreground transition-all hover:bg-primary/80"
+            className={`font-plex-mono text-[11px] lowercase text-fl-cool hover:underline ${FOCUS_RING}`}
           >
-            New Task
+            + new task
           </Link>
         </div>
         <TaskFeed />
