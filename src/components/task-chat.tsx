@@ -2,7 +2,8 @@
 
 import { useCallback, useState } from "react";
 import { SlimShell } from "@/components/app-shell";
-import { FOCUS_RING } from "@/components/fleet/fleet-bits";
+import { FOCUS_RING, Gauge, Money } from "@/components/fleet/fleet-bits";
+import { toChatView, type ChatMessageRow } from "@/lib/chat/chat-view";
 import { TaskStream } from "./task-stream";
 import { MessageInput } from "./message-input";
 import { PreviewPane } from "./preview-pane";
@@ -14,6 +15,9 @@ interface TaskData {
   branch: string | null;
   containerStatus: string | null;
   totalCostUsd: number;
+  /** What this task is allowed to spend — its run's budget, or the
+   * per-attempt default for an interactive session. */
+  budgetUsd: number;
   githubIssue: string | null;
   pullRequestNumber: number | null;
   pullRequestUrl: string | null;
@@ -28,7 +32,10 @@ type TaskStatusUpdate = {
   githubIssue?: string | null;
   pullRequestNumber?: number | null;
   pullRequestUrl?: string | null;
+  branch?: string | null;
 };
+
+const PREVIEW_MOVING_TOOLS = new Set(["Write", "Edit", "MultiEdit", "Bash"]);
 
 const CONTAINER_STATUS_LABELS: Record<string, string> = {
   setup: "Setting up workspace...",
@@ -48,6 +55,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
   const [githubIssue, setGithubIssue] = useState<string | null>(initialTask.githubIssue);
   const [pullRequestUrl, setPullRequestUrl] = useState<string | null>(initialTask.pullRequestUrl);
   const [pullRequestNumber, setPullRequestNumber] = useState<number | null>(initialTask.pullRequestNumber);
+  const [branch, setBranch] = useState<string | null>(initialTask.branch);
   const [activeTab, setActiveTab] = useState<"chat" | "preview">("chat");
   const [lastActivity, setLastActivity] = useState<number>(0);
 
@@ -63,25 +71,20 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
       if (status.githubIssue !== undefined) setGithubIssue(status.githubIssue);
       if (status.pullRequestUrl !== undefined) setPullRequestUrl(status.pullRequestUrl);
       if (status.pullRequestNumber !== undefined) setPullRequestNumber(status.pullRequestNumber);
+      if (status.branch !== undefined) setBranch(status.branch);
     },
     []
   );
 
-  const handleMessage = useCallback(
-    (msg: { type: string; content: string }) => {
-      if (msg.type === "tool_use") {
-        try {
-          const parsed = JSON.parse(msg.content);
-          if (["Write", "Edit", "Bash"].includes(parsed.tool)) {
-            setLastActivity(Date.now());
-          }
-        } catch {
-          // ignore parse errors
-        }
-      }
-    },
-    []
-  );
+  // What might have changed what the preview is showing: a write, or a command
+  // that could have restarted the dev server. Deliberately not the mapper's
+  // edit-tool set — a `Bash` call moves the preview without writing a file.
+  const handleMessage = useCallback((msg: ChatMessageRow) => {
+    const [item] = toChatView([msg]);
+    if (item?.kind === "tool-event" && PREVIEW_MOVING_TOOLS.has(item.verb)) {
+      setLastActivity(Date.now());
+    }
+  }, []);
 
   const containerLabel = taskStatus.containerStatus
     ? CONTAINER_STATUS_LABELS[taskStatus.containerStatus] ??
@@ -93,11 +96,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
   );
 
   // The slim shell carries the task's identity and live status (issue #117);
-  // what's left here is the task's references, restyled by its own ticket.
-  const hasReferences = Boolean(
-    initialTask.branch || githubIssue || pullRequestUrl
-  );
-
+  // the row below it carries where the work lives and what it has cost.
   return (
     <SlimShell
       title={initialTask.title}
@@ -119,13 +118,13 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
         </>
       }
     >
-      {hasReferences && (
-        <div className="shrink-0 border-b border-fl-line px-4 py-2">
-          {initialTask.branch && (
-            <p className="font-plex-mono text-[11px] text-fl-ink-2">
-              {initialTask.branch}
-            </p>
-          )}
+      <div className="flex shrink-0 items-end justify-between gap-4 border-b border-fl-line px-4 py-2">
+        <div className="min-w-0">
+          {/* The branch is where the work actually lives, so its absence is
+              worth saying rather than leaving a gap. */}
+          <p className="truncate font-plex-mono text-[11px] text-fl-ink-2">
+            {branch ?? <span className="text-fl-ink-3">no branch yet</span>}
+          </p>
           {(githubIssue || pullRequestUrl) && (
             <div className="mt-0.5 flex items-center gap-3">
               {githubIssue && (
@@ -151,7 +150,29 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
             </div>
           )}
         </div>
-      )}
+
+        {/* Spend against this task's ceiling, in the dashboard's metering
+            language rather than a second vocabulary invented for this screen:
+            money in tabular mono over the hairline gauge, tick at the ceiling.
+            It reads red once the ceiling is reached — the point at which a run
+            stops, so it is the one thing here that earns a colour. */}
+        <div className="w-28 shrink-0 space-y-1">
+          <p className="text-right font-plex-mono text-[11px] whitespace-nowrap tabular-nums text-fl-ink-2">
+            <Money usd={taskStatus.totalCostUsd} />
+            <span className="text-fl-ink-3">
+              {" "}
+              / <Money usd={initialTask.budgetUsd} />
+            </span>
+          </p>
+          <Gauge
+            value={taskStatus.totalCostUsd}
+            max={initialTask.budgetUsd}
+            tone={
+              taskStatus.totalCostUsd >= initialTask.budgetUsd ? "red" : "green"
+            }
+          />
+        </div>
+      </div>
 
       {/* Mobile tabs — only when preview available. Selection is marked in ink,
           not a colour: colour in this system is semantic, and which pane you are
@@ -189,6 +210,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
         >
           <TaskStream
             taskId={initialTask.id}
+            containerStatus={taskStatus.containerStatus}
             onStatusChange={handleStatusChange}
             onMessage={handleMessage}
           />
@@ -219,13 +241,12 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
         )}
       </div>
 
-      {/* Terminal state footer */}
+      {/* Terminal state footer. Cost is not repeated here: it lives in the
+          header, against its ceiling, where it means something. */}
       {isTerminal && (
         <div className="shrink-0 border-t border-fl-line px-4 py-3 text-center">
-          <span className="font-plex-mono text-[11px] tabular-nums text-fl-ink-2">
-            Task {taskStatus.status}
-            {taskStatus.totalCostUsd > 0 &&
-              ` · $${taskStatus.totalCostUsd.toFixed(4)}`}
+          <span className="font-plex-mono text-[11px] lowercase text-fl-ink-2">
+            task {taskStatus.status}
           </span>
         </div>
       )}

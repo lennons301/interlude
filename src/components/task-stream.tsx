@@ -1,13 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toChatView, type ChatMessageRow } from "@/lib/chat/chat-view";
 import { ChatMessage } from "./chat-message";
 
-type Message = {
-  id: string;
-  role: string;
-  type: string;
-  content: string;
+type Message = ChatMessageRow & {
   createdAt: string;
 };
 
@@ -20,15 +17,38 @@ type TaskStatus = {
 
 interface TaskStreamProps {
   taskId: string;
+  /** The container's live state, so the transcript can show a working pulse
+   * of its own rather than making you read the shell's status line. */
+  containerStatus: string | null;
   onStatusChange?: (status: TaskStatus) => void;
   onMessage?: (msg: Message) => void;
 }
 
-export function TaskStream({ taskId, onStatusChange, onMessage }: TaskStreamProps) {
+export function TaskStream({
+  taskId,
+  containerStatus,
+  onStatusChange,
+  onMessage,
+}: TaskStreamProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const userScrolledUp = useRef(false);
+
+  const items = useMemo(() => toChatView(messages), [messages]);
+
+  /**
+   * The pulse marks the gap between asking and the first output — the one
+   * stretch where nothing moves and the view otherwise looks broken. Once the
+   * agent has said or done something the transcript itself carries the
+   * liveness, and a permanent breathing dot at its foot would just be noise
+   * beside the shell's status line.
+   */
+  const last = items.at(-1)?.kind;
+  const working =
+    (containerStatus === "running" || containerStatus === "setup") &&
+    last !== "agent-markdown" &&
+    last !== "tool-event";
 
   const scrollToBottom = useCallback(() => {
     if (!userScrolledUp.current) {
@@ -88,25 +108,35 @@ export function TaskStream({ taskId, onStatusChange, onMessage }: TaskStreamProp
   }, [messages, scrollToBottom]);
 
   return (
-    <div
-      ref={containerRef}
-      className="flex-1 overflow-y-auto px-4 py-3 space-y-1"
-    >
-      {messages.length === 0 && (
-        <div className="flex items-center justify-center h-full">
-          <p className="text-zinc-500 text-sm">Waiting for agent output...</p>
+    <div ref={containerRef} className="flex-1 overflow-y-auto px-4 py-3">
+      {items.length === 0 && !working && (
+        <div className="flex h-full items-center justify-center">
+          <p className="font-plex-mono text-[11px] text-fl-ink-3">
+            waiting for agent output
+          </p>
         </div>
       )}
-      {messages.map((msg) => (
-        <ChatMessage
-          key={msg.id}
-          id={msg.id}
-          role={msg.role}
-          type={msg.type ?? "text"}
-          content={msg.content}
-        />
+
+      {items.map((item) => (
+        <ChatMessage key={item.id} item={item} />
       ))}
+
+      {working && <WorkingPulse />}
+
       <div ref={bottomRef} />
+    </div>
+  );
+}
+
+/** The transcript's one animation, and the only green on the screen while it
+ * runs: the agent is thinking and has not spoken yet. */
+function WorkingPulse() {
+  return (
+    <div className="flex items-center gap-2 py-2" aria-live="polite">
+      <span className="fleet-pulse h-1.5 w-1.5 rounded-full bg-fl-green" />
+      <span className="font-plex-mono text-[11px] lowercase text-fl-ink-3">
+        working
+      </span>
     </div>
   );
 }

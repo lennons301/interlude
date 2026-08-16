@@ -1,66 +1,67 @@
+"use client";
+
+import { useMemo } from "react";
+import type { ChatViewItem } from "@/lib/chat/chat-view";
+import { renderMarkdown } from "@/lib/chat/markdown";
 import { ToolCard } from "./tool-card";
 
-interface MessageProps {
-  id: string;
-  role: string;
-  type: string;
-  content: string;
-}
-
-function parseContent(content: string): Record<string, unknown> {
-  try {
-    return JSON.parse(content);
-  } catch {
-    // Legacy plain-text content from Phase 2a
-    return { text: content };
+/**
+ * The transcript's renderers (issue #121) — dumb by design: every decision
+ * about what a stored row *is* was made by `toChatView`, so this file only
+ * knows how each kind looks.
+ *
+ * The hybrid asymmetry is deliberate and signed off: an owner turn is a short
+ * instruction and renders as a compact right-aligned chip; an agent turn is a
+ * document and renders full-width. They are not peers in a chat app.
+ */
+export function ChatMessage({ item }: { item: ChatViewItem }) {
+  switch (item.kind) {
+    case "user-chip":
+      return <UserChip text={item.text} />;
+    case "agent-markdown":
+      return <AgentMarkdown markdown={item.markdown} />;
+    case "tool-event":
+      return <ToolCard event={item} />;
+    case "system-note":
+      return <SystemNote text={item.text} />;
   }
 }
 
-export function ChatMessage({ role, type, content }: MessageProps) {
-  const parsed = parseContent(content);
-
-  // System messages — centered muted text
-  if (role === "system" || type === "system") {
-    return (
-      <div className="flex justify-center py-1">
-        <span className="text-xs text-zinc-500">
-          {(parsed.text as string) ?? content}
-        </span>
-      </div>
-    );
-  }
-
-  // User messages — right-aligned purple bubble
-  if (role === "user") {
-    return (
-      <div className="flex justify-end py-1">
-        <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-purple-600/80 px-4 py-2 text-sm text-white">
-          {(parsed.text as string) ?? content}
-        </div>
-      </div>
-    );
-  }
-
-  // Agent tool_use — render as tool card
-  if (type === "tool_use") {
-    return (
-      <div className="py-1 max-w-[90%]">
-        <ToolCard
-          tool={(parsed.tool as string) ?? "tool"}
-          filePath={parsed.file_path as string | undefined}
-          input={(parsed.input as Record<string, unknown>) ?? {}}
-          output={parsed.output as string | undefined}
-        />
-      </div>
-    );
-  }
-
-  // Agent text — left-aligned dark bubble
+function UserChip({ text }: { text: string }) {
   return (
-    <div className="flex justify-start py-1">
-      <div className="max-w-[80%] rounded-2xl rounded-bl-sm bg-zinc-800 px-4 py-2 text-sm text-zinc-100">
-        {(parsed.text as string) ?? content}
+    <div className="flex justify-end py-1.5">
+      <div className="max-w-[80%] rounded-[4px] border border-fl-line-strong bg-fl-card px-3 py-1.5 text-[13px] whitespace-pre-wrap text-fl-ink">
+        {text}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The HTML is produced by the pipeline in `src/lib/chat/markdown.ts`, which
+ * escapes raw HTML to text and then runs it through rehype-sanitize's
+ * allowlist — so what lands here is markup this app generated, and injecting
+ * it is what lets the document be styled as one (`.fleet-md` in globals.css).
+ * Read that module before changing this: the safety argument lives there.
+ *
+ * Memoized on the source, because the transcript re-renders on every streamed
+ * message and re-parsing every earlier turn each time would not scale.
+ */
+function AgentMarkdown({ markdown }: { markdown: string }) {
+  const html = useMemo(() => renderMarkdown(markdown), [markdown]);
+
+  return (
+    <div
+      className="fleet-md py-1.5"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+}
+
+function SystemNote({ text }: { text: string }) {
+  return (
+    <div className="flex justify-center py-1.5">
+      <span className="font-plex-mono text-[11px] text-fl-ink-3">{text}</span>
     </div>
   );
 }
