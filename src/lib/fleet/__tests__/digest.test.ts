@@ -128,28 +128,36 @@ describe("renderDailyDigest — autonomous pickup", () => {
 
     expect(content.sections[0].heading).toBe("Autonomous pickup");
     expect(section(content, "Autonomous pickup")).toEqual([
-      "⏸ Held — the kill switch is engaged: nothing new is being claimed " +
-        "anywhere, and nothing will be until you lift it. Runs already in " +
-        "flight and interactive work are unaffected. · " +
+      "⏸ Held right now — the kill switch is engaged: nothing new is being " +
+        "claimed anywhere, and nothing will be until you lift it. Runs " +
+        "already in flight and interactive work are unaffected. · " +
         "[Lift it](https://interludes.co.uk/settings)",
     ]);
   });
 
-  it("reads differently from an ordinarily quiet day, on an equally empty day", () => {
-    const held = render({ globalAutonomyPaused: true });
-    const quiet = render();
+  it("reads differently from an ordinarily quiet day on an armed fleet", () => {
+    // The baseline is a genuinely armed fleet that simply did nothing — the
+    // hardest case to tell apart, and the one the issue is about. Everything
+    // else about the two days is identical: nothing finished, nothing ran,
+    // nothing waits. Only the hold tells them apart.
+    const armed = { projects: [makeProject({ id: "p1", autonomyEnabled: true })] };
+    const held = render({ ...armed, globalAutonomyPaused: true });
+    const quiet = render(armed);
 
-    // Everything else about the two days is identical — nothing finished,
-    // nothing ran, nothing waits. Only the hold tells them apart, which is the
-    // whole point: a held fleet must never arrive looking merely quiet.
     expect(section(held, "Completed yesterday")).toEqual(
       section(quiet, "Completed yesterday")
     );
     expect(section(held, "In flight")).toEqual(section(quiet, "In flight"));
+    expect(section(held, "Blocked on you")).toEqual(
+      section(quiet, "Blocked on you")
+    );
     expect(section(held, "Autonomous pickup")).not.toEqual(
       section(quiet, "Autonomous pickup")
     );
-    expect(section(held, "Autonomous pickup")[0]).toContain("kill switch");
+    expect(section(held, "Autonomous pickup")[0]).toContain(
+      "the kill switch is engaged"
+    );
+    expect(section(quiet, "Autonomous pickup")[0]).toContain("No fleet-wide hold");
   });
 
   it("words the daily-cap pause as the lapsed, self-lifting thing it is", () => {
@@ -167,8 +175,8 @@ describe("renderDailyDigest — autonomous pickup", () => {
     });
 
     expect(section(content, "Autonomous pickup")).toEqual([
-      "⏸ Paused — the $500.00 daily cap was reached, so pickup stopped for " +
-        "the rest of the day; it lifted at midnight.",
+      "⏸ Paused — yesterday's spend reached the $500.00 daily cap, so pickup " +
+        "stopped for the rest of the day; the pause lifted at midnight.",
     ]);
   });
 
@@ -193,13 +201,15 @@ describe("renderDailyDigest — autonomous pickup", () => {
     ]);
   });
 
-  it("says pickup is running when nothing holds it", () => {
+  it("claims only what the view knows when neither hold applies", () => {
     const content = render({
       projects: [makeProject({ id: "p1", autonomyEnabled: true })],
     });
 
+    // Not "pickup was running" — a boot master left off or a failing preflight
+    // also stops claims, by routes this read model doesn't see.
     expect(section(content, "Autonomous pickup")).toEqual([
-      "Running — no fleet-wide hold.",
+      "No fleet-wide hold — the kill switch is lifted and the day stayed inside the cap.",
     ]);
   });
 

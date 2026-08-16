@@ -9,6 +9,7 @@ import {
   startOfLocalDay,
   type FleetView,
   type NeedsYouItem,
+  type PickupPause,
   type RecentItem,
   type RunningCard,
 } from "./fleet-view";
@@ -133,38 +134,56 @@ function needsYouLine(item: NeedsYouItem, appBaseUrl: string): string {
 /**
  * What is holding autonomous pickup — said first, and every morning (issue
  * #143). The dashboard is pull and the digest is the one push surface, so a
- * fleet held all day must not arrive here reading like an ordinarily quiet one:
- * the hold leads the digest rather than hiding in a footnote to Spend.
+ * held fleet must not arrive here reading like an ordinarily quiet one: the
+ * hold leads the digest rather than hiding in a footnote to Spend.
  *
  * The two reasons carry their own copy *and their own tense*, because they are
- * not the same news. The daily cap was breached inside the covered day and
- * lifted itself at local midnight — past news, and the Spend section reports
- * the breach either way. The kill switch has no history to read: the flag comes
- * off the live settings row, so an engaged switch is engaged as the digest is
- * written, and a human is the only thing that lifts it. When both hold, the
- * switch leads (the view's own precedence — it is the one you can lift) and
- * Spend still names the breach, so neither fact is lost.
+ * not the same news and are not even about the same moment. The daily cap was
+ * breached inside the covered day and lifted itself at local midnight — past
+ * news, and the Spend section reports the breach either way. The kill switch
+ * has no history to read: `loadFleetRows` takes the flag off the live settings
+ * row, so it says whether the fleet is held *as the digest is written*, which
+ * is why its line says so out loud rather than implying anything about
+ * yesterday. When both hold, the switch leads (the view's own precedence — it
+ * is the one a human can lift) and Spend still names the breach, so neither
+ * fact is lost.
+ *
+ * The unheld line claims only what the read model actually knows: that neither
+ * fleet-wide hold applies. It deliberately does not promise pickup was running
+ * — a boot master left off (`AUTONOMY_ENABLED`) or a project whose preflight is
+ * failing stops claims by routes this view doesn't model, and a reassurance
+ * that can be false is the failure this section exists to remove.
  */
 function pickupLines(view: FleetView, appBaseUrl: string): string[] {
-  switch (view.pickupPaused?.reason) {
+  const reason: PickupPause["reason"] | null = view.pickupPaused?.reason ?? null;
+  switch (reason) {
     case "kill-switch":
       return [
-        "⏸ Held — the kill switch is engaged: nothing new is being claimed " +
-          "anywhere, and nothing will be until you lift it. Runs already in " +
-          "flight and interactive work are unaffected. · " +
+        "⏸ Held right now — the kill switch is engaged: nothing new is being " +
+          "claimed anywhere, and nothing will be until you lift it. Runs " +
+          "already in flight and interactive work are unaffected. · " +
           `[Lift it](${appBaseUrl}/settings)`,
       ];
     case "daily-cap":
       return [
-        `⏸ Paused — the ${usd(view.spend.capUsd)} daily cap was reached, so ` +
-          "pickup stopped for the rest of the day; it lifted at midnight.",
+        `⏸ Paused — yesterday's spend reached the ${usd(view.spend.capUsd)} ` +
+          "daily cap, so pickup stopped for the rest of the day; the pause " +
+          "lifted at midnight.",
       ];
-    default:
+    case null:
       return [
         view.autonomyOn
-          ? "Running — no fleet-wide hold."
+          ? "No fleet-wide hold — the kill switch is lifted and the day stayed inside the cap."
           : "No project has autonomy enabled — nothing is claimed unattended.",
       ];
+    default: {
+      // A hold this renderer hasn't been taught is still a hold. The `never`
+      // fails the build when PickupPause grows a third reason — the dashboard's
+      // own Record<PickupPause["reason"], …> maps already do — and until
+      // someone teaches it, the line says held rather than quietly reassuring.
+      const unhandled: never = reason;
+      return [`⏸ Held — autonomous pickup is paused (${String(unhandled)}).`];
+    }
   }
 }
 

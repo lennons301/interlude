@@ -175,8 +175,10 @@ chat/preview is never affected.
   answers the same row headless. The sweep's `Pickup paused (kill-switch)` line
   is **not** the confirmation: the hold is evaluated only on a tick that found
   an eligible ticket it would otherwise have claimed, so engaging the switch
-  over an empty queue logs nothing at all. (Logging it every tick regardless
-  would mean a line every 30s for as long as the fleet is held.) The next
+  over an empty queue logs nothing at all — and if the daily cap is breached
+  too, that gate returns first and logs `Pickup paused (daily-cap)` instead.
+  (Logging it every tick regardless would mean a line every 30s for as long as
+  the fleet is held.) The next
   morning's Discord digest leads with the hold too, so a fleet you held and
   forgot never reads there as a quiet day.
 - **Globally, hard off (boot master):** set `AUTONOMY_ENABLED=false` in Doppler
