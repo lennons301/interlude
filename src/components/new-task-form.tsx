@@ -5,26 +5,13 @@ import { useRouter } from "next/navigation";
 import type { SessionSkill } from "@/db/schema";
 import type { OpenIssue } from "@/lib/github/issues";
 import { Eyebrow } from "@/components/fleet/fleet-bits";
+// The blurbs the live composer's slash menu offers too (issue #122), so the
+// two surfaces describe a session the same way.
+import { SESSION_BLURBS, SESSION_ORDER } from "@/lib/sessions/skills";
 
 // A new task is either a plain chat task (the default, unchanged) or a
 // generation session running one of the estate's generation skills (issue #64).
 type TaskType = "chat" | SessionSkill;
-
-// One-line blurbs so the choice is legible one-handed on a phone. Keyed by
-// SessionSkill, so a skill added to the schema fails the type check here until
-// it gets a blurb — the selector can never silently drop one. Insertion order
-// is the display order (grills first, then the spec→tickets pipeline, then the
-// standalone passes); SESSION_SKILLS in the schema stays the runtime source of
-// truth.
-const SESSION_BLURBS: Record<SessionSkill, string> = {
-  "grill-me": "Stress-test an idea until its decisions resolve",
-  "grill-with-docs": "Grill an idea with the project's docs in context",
-  "to-spec": "Turn resolved decisions into a spec",
-  "to-tickets": "Decompose a spec into executable tickets",
-  triage: "Move an issue through the label lifecycle",
-  wayfinder: "Chart a new map of the territory",
-};
-const SESSION_ORDER = Object.keys(SESSION_BLURBS) as SessionSkill[];
 
 const FIELD =
   "w-full rounded-[4px] border border-fl-line bg-fl-card px-3 py-2 text-sm text-fl-ink " +
