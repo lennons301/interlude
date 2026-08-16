@@ -43,6 +43,7 @@
     "@tailwindcss/postcss": "^4",
     "@types/better-sqlite3": "^7.6.13",
     "@types/dockerode": "^4.0.1",
+    "@types/hast": "^3.0.5",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/mdast": "^4.0.4",
     "@types/node": "^20",

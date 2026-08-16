@@ -96,7 +96,7 @@ describe("toChatView", () => {
       },
     },
     {
-      name: "tool_use Edit counts lines changed and carries the diff",
+      name: "tool_use Edit counts only the lines that changed",
       row: row({
         type: "tool_use",
         content: json({
@@ -104,8 +104,8 @@ describe("toChatView", () => {
           file_path: "src/app/page.tsx",
           input: {
             file_path: "src/app/page.tsx",
-            old_string: "const a = 1",
-            new_string: "const a = 1\nconst b = 2",
+            old_string: "const a = 1\nconst b = 1\nexport {}",
+            new_string: "const a = 1\nconst b = 2\nexport {}",
           },
           output: "Applied",
         }),
@@ -114,9 +114,48 @@ describe("toChatView", () => {
         kind: "tool-event",
         verb: "Edit",
         argument: "src/app/page.tsx",
-        metric: "+2 −1",
+        // Not +3 −3: the matched context the agent had to quote is not a change.
+        metric: "+1 −1",
         detail: null,
-        diff: { removed: ["const a = 1"], added: ["const a = 1", "const b = 2"] },
+        diff: { removed: ["const b = 1"], added: ["const b = 2"] },
+      },
+    },
+    {
+      name: "an insertion has nothing removed",
+      row: row({
+        type: "tool_use",
+        content: json({
+          tool: "Edit",
+          input: { file_path: "a.ts", old_string: "", new_string: "one\ntwo" },
+        }),
+      }),
+      expected: {
+        kind: "tool-event",
+        metric: "+2 −0",
+        diff: { removed: [], added: ["one", "two"] },
+      },
+    },
+    {
+      name: "tool_use MultiEdit sums its edits into one diff",
+      row: row({
+        type: "tool_use",
+        content: json({
+          tool: "MultiEdit",
+          file_path: "a.ts",
+          input: {
+            file_path: "a.ts",
+            edits: [
+              { old_string: "one", new_string: "ONE" },
+              { old_string: "two\nkeep", new_string: "TWO\nkeep" },
+            ],
+          },
+        }),
+      }),
+      expected: {
+        kind: "tool-event",
+        verb: "MultiEdit",
+        metric: "+2 −2",
+        diff: { removed: ["one", "two"], added: ["ONE", "TWO"] },
       },
     },
     {

@@ -44,10 +44,11 @@ export function TaskStream({
    * liveness, and a permanent breathing dot at its foot would just be noise
    * beside the shell's status line.
    */
+  const last = items.at(-1)?.kind;
   const working =
     (containerStatus === "running" || containerStatus === "setup") &&
-    items[items.length - 1]?.kind !== "agent-markdown" &&
-    items[items.length - 1]?.kind !== "tool-event";
+    last !== "agent-markdown" &&
+    last !== "tool-event";
 
   const scrollToBottom = useCallback(() => {
     if (!userScrolledUp.current) {

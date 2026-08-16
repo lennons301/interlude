@@ -82,6 +82,56 @@ function remarkLiteralHtml() {
   };
 }
 
+/**
+ * The transcript's one structural device is a rule marking a *recommendation*,
+ * and the sign-off is explicit that nothing else earns one — "if everything is
+ * marked, nothing reads as different". Markdown has no recommendation node, so
+ * the marker is the label the agent already writes: a blockquote whose leading
+ * heading or bold lead-in says so. Every other blockquote stays unruled.
+ *
+ * Runs after sanitizing, in the same trusted slot as the highlighter, so the
+ * class it adds is not stripped and cannot be spoofed by an attribute in the
+ * source — nothing in agent text reaches this element's `className`.
+ */
+function rehypeRecommendation() {
+  return (tree: import("hast").Root) => {
+    visit(tree, "element", (node: import("hast").Element) => {
+      if (node.tagName !== "blockquote") return;
+      if (/recommend/i.test(leadingLabel(node))) {
+        node.properties = { ...node.properties, className: ["fleet-recommendation"] };
+      }
+    });
+  };
+}
+
+/**
+ * The quote's label and nothing else: a leading heading, or a bold lead-in
+ * opening its first paragraph. Reading the whole body instead would mark a
+ * caveat that merely mentions recommending — the label is the agent saying
+ * what the block *is*, which is what the device marks.
+ */
+function leadingLabel(quote: import("hast").Element): string {
+  const lead = quote.children.find(
+    (child): child is import("hast").Element => child.type === "element"
+  );
+  if (!lead) return "";
+  if (/^h[1-6]$/.test(lead.tagName)) return textOf(lead);
+
+  if (lead.tagName === "p") {
+    const first = lead.children.find(
+      (child) => child.type !== "text" || child.value.trim() !== ""
+    );
+    if (first?.type === "element" && first.tagName === "strong") return textOf(first);
+  }
+  return "";
+}
+
+function textOf(node: import("hast").ElementContent): string {
+  if (node.type === "text") return node.value;
+  if (node.type === "element") return node.children.map(textOf).join("");
+  return "";
+}
+
 /** Built once — a unified processor is reusable, and rebuilding it per
  * message would re-register every grammar on every streamed chunk. */
 const processor = unified()
@@ -91,6 +141,7 @@ const processor = unified()
   .use(remarkRehype)
   .use(rehypeSanitize)
   .use(rehypeHighlight, { languages: LANGUAGES, detect: false })
+  .use(rehypeRecommendation)
   .use(rehypeStringify);
 
 /** Render one agent turn to sanitized HTML. Synchronous: the transcript

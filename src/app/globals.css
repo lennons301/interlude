@@ -348,13 +348,19 @@ html[data-fleet-theme="light"] .fleet {
   margin-block: 1.2em;
 }
 
-/* The one structural device: a recommendation. A heading inside it is the
- * mono eyebrow the label rule asks for. */
+/* An ordinary quote is indented and quieter — no rule, no card, no tint.
+ * Only a recommendation is marked, and the marking is the one device. */
 .fleet-md blockquote {
-  border-left: 2px solid var(--fl-amber);
+  color: var(--fl-ink-2);
   padding-left: 0.85em;
 }
 
+.fleet-md blockquote.fleet-recommendation {
+  border-left: 2px solid var(--fl-amber);
+  color: var(--fl-ink);
+}
+
+/* A heading inside the quote is the mono eyebrow the label rule asks for. */
 .fleet-md blockquote h1,
 .fleet-md blockquote h2,
 .fleet-md blockquote h3,

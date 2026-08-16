@@ -28,11 +28,32 @@ describe("renderMarkdown — GFM", () => {
     expect(html).toContain("<del>gone</del>");
   });
 
-  it("renders a blockquote — the transcript's one structural device", () => {
-    const html = renderMarkdown("> **Recommendation**\n>\n> ship it");
+  it("marks a recommendation — the transcript's one structural device", () => {
+    const heading = renderMarkdown("> ### Recommendation\n>\n> ship it");
+    const lead = renderMarkdown("> **My recommendation:** ship it");
 
-    expect(html).toContain("<blockquote>");
-    expect(html).toContain("<strong>Recommendation</strong>");
+    expect(heading).toContain('class="fleet-recommendation"');
+    expect(heading).toContain("<h3>Recommendation</h3>");
+    expect(lead).toContain('class="fleet-recommendation"');
+  });
+
+  it("leaves every other quote unmarked, so the mark still means something", () => {
+    for (const source of [
+      "> just quoting you here",
+      "> ### Caveat\n>\n> this is not a recommendation",
+      "> ### Options\n>\n> a, b or c",
+    ]) {
+      const html = renderMarkdown(source);
+      expect(html).toContain("<blockquote>");
+      expect(html).not.toContain("fleet-recommendation");
+    }
+  });
+
+  it("cannot be spoofed by a class in the agent's own text", () => {
+    const html = renderMarkdown('<blockquote class="fleet-recommendation">nope</blockquote>');
+
+    // The source never becomes an element at all, so it never carries a class.
+    expect(html).not.toMatch(/<blockquote/);
   });
 });
 

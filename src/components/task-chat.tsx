@@ -3,6 +3,7 @@
 import { useCallback, useState } from "react";
 import { SlimShell } from "@/components/app-shell";
 import { FOCUS_RING, Gauge, Money } from "@/components/fleet/fleet-bits";
+import { toChatView, type ChatMessageRow } from "@/lib/chat/chat-view";
 import { TaskStream } from "./task-stream";
 import { MessageInput } from "./message-input";
 import { PreviewPane } from "./preview-pane";
@@ -31,7 +32,10 @@ type TaskStatusUpdate = {
   githubIssue?: string | null;
   pullRequestNumber?: number | null;
   pullRequestUrl?: string | null;
+  branch?: string | null;
 };
+
+const PREVIEW_MOVING_TOOLS = new Set(["Write", "Edit", "MultiEdit", "Bash"]);
 
 const CONTAINER_STATUS_LABELS: Record<string, string> = {
   setup: "Setting up workspace...",
@@ -51,6 +55,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
   const [githubIssue, setGithubIssue] = useState<string | null>(initialTask.githubIssue);
   const [pullRequestUrl, setPullRequestUrl] = useState<string | null>(initialTask.pullRequestUrl);
   const [pullRequestNumber, setPullRequestNumber] = useState<number | null>(initialTask.pullRequestNumber);
+  const [branch, setBranch] = useState<string | null>(initialTask.branch);
   const [activeTab, setActiveTab] = useState<"chat" | "preview">("chat");
   const [lastActivity, setLastActivity] = useState<number>(0);
 
@@ -66,25 +71,20 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
       if (status.githubIssue !== undefined) setGithubIssue(status.githubIssue);
       if (status.pullRequestUrl !== undefined) setPullRequestUrl(status.pullRequestUrl);
       if (status.pullRequestNumber !== undefined) setPullRequestNumber(status.pullRequestNumber);
+      if (status.branch !== undefined) setBranch(status.branch);
     },
     []
   );
 
-  const handleMessage = useCallback(
-    (msg: { type: string; content: string }) => {
-      if (msg.type === "tool_use") {
-        try {
-          const parsed = JSON.parse(msg.content);
-          if (["Write", "Edit", "Bash"].includes(parsed.tool)) {
-            setLastActivity(Date.now());
-          }
-        } catch {
-          // ignore parse errors
-        }
-      }
-    },
-    []
-  );
+  // What might have changed what the preview is showing: a write, or a command
+  // that could have restarted the dev server. Deliberately not the mapper's
+  // edit-tool set — a `Bash` call moves the preview without writing a file.
+  const handleMessage = useCallback((msg: ChatMessageRow) => {
+    const [item] = toChatView([msg]);
+    if (item?.kind === "tool-event" && PREVIEW_MOVING_TOOLS.has(item.verb)) {
+      setLastActivity(Date.now());
+    }
+  }, []);
 
   const containerLabel = taskStatus.containerStatus
     ? CONTAINER_STATUS_LABELS[taskStatus.containerStatus] ??
@@ -97,10 +97,6 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
 
   // The slim shell carries the task's identity and live status (issue #117);
   // the row below it carries where the work lives and what it has cost.
-  const hasReferences = Boolean(
-    initialTask.branch || githubIssue || pullRequestUrl
-  );
-
   return (
     <SlimShell
       title={initialTask.title}
@@ -124,13 +120,13 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
     >
       <div className="flex shrink-0 items-end justify-between gap-4 border-b border-fl-line px-4 py-2">
         <div className="min-w-0">
-          {initialTask.branch && (
-            <p className="truncate font-plex-mono text-[11px] text-fl-ink-2">
-              {initialTask.branch}
-            </p>
-          )}
+          {/* The branch is where the work actually lives, so its absence is
+              worth saying rather than leaving a gap. */}
+          <p className="truncate font-plex-mono text-[11px] text-fl-ink-2">
+            {branch ?? <span className="text-fl-ink-3">no branch yet</span>}
+          </p>
           {(githubIssue || pullRequestUrl) && (
-            <div className={`flex items-center gap-3 ${initialTask.branch ? "mt-0.5" : ""}`}>
+            <div className="mt-0.5 flex items-center gap-3">
               {githubIssue && (
                 <a
                   href={`https://github.com/${githubIssue.replace("#", "/issues/")}`}
@@ -152,11 +148,6 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
                 </a>
               )}
             </div>
-          )}
-          {!hasReferences && (
-            <p className="font-plex-mono text-[11px] text-fl-ink-3">
-              no branch yet
-            </p>
           )}
         </div>
 

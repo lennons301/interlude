@@ -102,6 +102,9 @@ importers:
       '@types/dockerode':
         specifier: ^4.0.1
         version: 4.0.1
+      '@types/hast':
+        specifier: ^3.0.5
+        version: 3.0.5
       '@types/jsonwebtoken':
         specifier: ^9.0.10
         version: 9.0.10

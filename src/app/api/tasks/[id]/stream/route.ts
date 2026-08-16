@@ -22,6 +22,9 @@ export async function GET(
     let lastGithubIssue: string | null = null;
     let lastPrNumber: number | null = null;
     let lastPrUrl: string | null = null;
+    // The branch appears on first push, mid-session — without it here the view
+    // header would say "no branch yet" until the page was reloaded.
+    let lastBranch: string | null = null;
     let lastPollTime = new Date();
 
     const poll = setInterval(() => {
@@ -77,7 +80,8 @@ export async function GET(
         const gi = task.githubIssue ?? null;
         const prn = task.pullRequestNumber ?? null;
         const pru = task.pullRequestUrl ?? null;
-        if (cs !== lastContainerStatus || ts !== lastTaskStatus || dp !== lastDevPort || ps !== lastPreviewSubdomain || gi !== lastGithubIssue || prn !== lastPrNumber || pru !== lastPrUrl) {
+        const br = task.branch ?? null;
+        if (cs !== lastContainerStatus || ts !== lastTaskStatus || dp !== lastDevPort || ps !== lastPreviewSubdomain || gi !== lastGithubIssue || prn !== lastPrNumber || pru !== lastPrUrl || br !== lastBranch) {
           lastContainerStatus = cs;
           lastTaskStatus = ts;
           lastDevPort = dp;
@@ -85,6 +89,7 @@ export async function GET(
           lastGithubIssue = gi;
           lastPrNumber = prn;
           lastPrUrl = pru;
+          lastBranch = br;
           send(
             {
               containerStatus: cs,
@@ -95,6 +100,7 @@ export async function GET(
               githubIssue: gi,
               pullRequestNumber: prn,
               pullRequestUrl: pru,
+              branch: br,
             },
             "taskStatus"
           );

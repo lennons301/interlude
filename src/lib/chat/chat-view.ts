@@ -102,18 +102,17 @@ function text(parsed: Record<string, unknown>, fallback: string): string {
   return typeof parsed.text === "string" ? parsed.text : fallback;
 }
 
-function lineCount(value: string): number {
-  if (value.length === 0) return 0;
-  const lines = value.split("\n");
-  // A trailing newline ends the last line rather than starting a new one.
-  if (lines[lines.length - 1] === "") lines.pop();
-  return lines.length;
-}
-
+/** A trailing newline ends the last line rather than starting a new one, and
+ * an empty string is no lines at all — not one blank one. */
 function splitLines(value: string): string[] {
+  if (value === "") return [];
   const lines = value.split("\n");
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
   return lines;
+}
+
+function lineCount(value: string): number {
+  return splitLines(value).length;
 }
 
 /** The argument is the one thing the row names: a path, a command, a pattern.
@@ -134,19 +133,62 @@ function toolArgument(
   );
 }
 
+/**
+ * Only the lines that actually changed. An edit's strings carry whatever
+ * context the agent needed to match on, so counting them whole would report a
+ * one-character fix as `+3 −3` — not what `+n −m` means to anyone who has read
+ * a git diff. Trimming the common head and tail leaves the real change, and
+ * the expanded row then shows exactly what the metric counted.
+ */
+function changedLines(oldString: string, newString: string): ToolDiff {
+  const removed = splitLines(oldString);
+  const added = splitLines(newString);
+
+  let head = 0;
+  while (head < removed.length && head < added.length && removed[head] === added[head]) {
+    head++;
+  }
+
+  let tail = 0;
+  while (
+    tail < removed.length - head &&
+    tail < added.length - head &&
+    removed[removed.length - 1 - tail] === added[added.length - 1 - tail]
+  ) {
+    tail++;
+  }
+
+  return {
+    removed: removed.slice(head, removed.length - tail),
+    added: added.slice(head, added.length - tail),
+  };
+}
+
 function toolDiff(
   verb: string,
   input: Record<string, unknown>
 ): ToolDiff | null {
   if (!EDIT_TOOLS.has(verb)) return null;
 
+  // MultiEdit applies several edits to one file in one call, so its row
+  // reports their sum rather than nothing at all.
+  const edits = Array.isArray(input.edits) ? input.edits : null;
+  if (edits) {
+    const diffs = edits
+      .filter((edit): edit is Record<string, unknown> => !!edit && typeof edit === "object")
+      .map((edit) =>
+        changedLines(asString(edit.old_string) ?? "", asString(edit.new_string) ?? "")
+      );
+    return {
+      removed: diffs.flatMap((d) => d.removed),
+      added: diffs.flatMap((d) => d.added),
+    };
+  }
+
   const oldString = asString(input.old_string);
   const newString = asString(input.new_string);
   if (oldString !== null || newString !== null) {
-    return {
-      removed: oldString === null ? [] : splitLines(oldString),
-      added: newString === null ? [] : splitLines(newString),
-    };
+    return changedLines(oldString ?? "", newString ?? "");
   }
 
   // Write: the whole file is the addition.
@@ -157,7 +199,11 @@ function toolDiff(
 }
 
 /** One metric, right-aligned: a write counts lines changed, everything else
- * counts what came back. Null while a call is still in flight. */
+ * counts what came back. Null while a call is still in flight.
+ *
+ * The typographic minus is deliberate — this is a stat, set in the same
+ * tabular mono as the header's money, not the ASCII `-` gutter of the diff
+ * the row expands to. */
 function toolMetric(diff: ToolDiff | null, output: string | null): string | null {
   if (diff) return `+${diff.added.length} −${diff.removed.length}`;
   if (output === null) return null;
@@ -169,7 +215,6 @@ function toolMetric(diff: ToolDiff | null, output: string | null): string | null
  * command reads as a command; anything else is shown as its raw input, which
  * beats inventing a per-tool layout for tools we have never seen. */
 function toolDetail(
-  verb: string,
   argument: string | null,
   diff: ToolDiff | null,
   input: Record<string, unknown>
@@ -178,9 +223,11 @@ function toolDetail(
   if (command !== null) return `$ ${command}`;
   if (diff) return null;
 
+  // Whatever the row already says is not worth repeating in its expansion.
   const rest = Object.fromEntries(
     Object.entries(input).filter(
-      ([key, value]) => value !== undefined && String(value) !== argument && key !== "file_path"
+      ([key, value]) =>
+        value !== undefined && key !== "file_path" && value !== argument
     )
   );
   if (Object.keys(rest).length === 0) return null;
@@ -206,7 +253,7 @@ function toToolEvent(id: string, parsed: Record<string, unknown>): ToolEventItem
     verb,
     argument,
     metric: toolMetric(diff, rawOutput),
-    detail: toolDetail(verb, argument, diff, input),
+    detail: toolDetail(argument, diff, input),
     diff,
     output: truncated ? rawOutput.slice(0, MAX_OUTPUT_CHARS) : rawOutput,
     outputTruncated: truncated,
