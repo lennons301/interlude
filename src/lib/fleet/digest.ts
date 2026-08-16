@@ -130,6 +130,44 @@ function needsYouLine(item: NeedsYouItem, appBaseUrl: string): string {
   return line;
 }
 
+/**
+ * What is holding autonomous pickup — said first, and every morning (issue
+ * #143). The dashboard is pull and the digest is the one push surface, so a
+ * fleet held all day must not arrive here reading like an ordinarily quiet one:
+ * the hold leads the digest rather than hiding in a footnote to Spend.
+ *
+ * The two reasons carry their own copy *and their own tense*, because they are
+ * not the same news. The daily cap was breached inside the covered day and
+ * lifted itself at local midnight — past news, and the Spend section reports
+ * the breach either way. The kill switch has no history to read: the flag comes
+ * off the live settings row, so an engaged switch is engaged as the digest is
+ * written, and a human is the only thing that lifts it. When both hold, the
+ * switch leads (the view's own precedence — it is the one you can lift) and
+ * Spend still names the breach, so neither fact is lost.
+ */
+function pickupLines(view: FleetView, appBaseUrl: string): string[] {
+  switch (view.pickupPaused?.reason) {
+    case "kill-switch":
+      return [
+        "⏸ Held — the kill switch is engaged: nothing new is being claimed " +
+          "anywhere, and nothing will be until you lift it. Runs already in " +
+          "flight and interactive work are unaffected. · " +
+          `[Lift it](${appBaseUrl}/settings)`,
+      ];
+    case "daily-cap":
+      return [
+        `⏸ Paused — the ${usd(view.spend.capUsd)} daily cap was reached, so ` +
+          "pickup stopped for the rest of the day; it lifted at midnight.",
+      ];
+    default:
+      return [
+        view.autonomyOn
+          ? "Running — no fleet-wide hold."
+          : "No project has autonomy enabled — nothing is claimed unattended.",
+      ];
+  }
+}
+
 function completedLine(item: RecentItem): string {
   const parts = [
     `${OUTCOME_ICON[item.outcome]} ${item.title} — ${item.projectName}`,
@@ -166,6 +204,12 @@ export function renderDailyDigest(
   return {
     title: `${DIGEST_TITLE_PREFIX} — ${shortDate(window.start)}`,
     sections: [
+      {
+        // First, always: whether the fleet was allowed to pick anything up is
+        // the frame every other section is read through (issue #143).
+        heading: "Autonomous pickup",
+        lines: pickupLines(view, opts.appBaseUrl),
+      },
       {
         heading: "Completed yesterday",
         lines: linesOr(finishedYesterday.map(completedLine), "Nothing finished."),

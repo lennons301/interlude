@@ -122,6 +122,98 @@ describe("previousLocalDay", () => {
   });
 });
 
+describe("renderDailyDigest — autonomous pickup", () => {
+  it("leads with the kill-switch hold, in its own wording, with a way to lift it", () => {
+    const content = render({ globalAutonomyPaused: true });
+
+    expect(content.sections[0].heading).toBe("Autonomous pickup");
+    expect(section(content, "Autonomous pickup")).toEqual([
+      "⏸ Held — the kill switch is engaged: nothing new is being claimed " +
+        "anywhere, and nothing will be until you lift it. Runs already in " +
+        "flight and interactive work are unaffected. · " +
+        "[Lift it](https://interludes.co.uk/settings)",
+    ]);
+  });
+
+  it("reads differently from an ordinarily quiet day, on an equally empty day", () => {
+    const held = render({ globalAutonomyPaused: true });
+    const quiet = render();
+
+    // Everything else about the two days is identical — nothing finished,
+    // nothing ran, nothing waits. Only the hold tells them apart, which is the
+    // whole point: a held fleet must never arrive looking merely quiet.
+    expect(section(held, "Completed yesterday")).toEqual(
+      section(quiet, "Completed yesterday")
+    );
+    expect(section(held, "In flight")).toEqual(section(quiet, "In flight"));
+    expect(section(held, "Autonomous pickup")).not.toEqual(
+      section(quiet, "Autonomous pickup")
+    );
+    expect(section(held, "Autonomous pickup")[0]).toContain("kill switch");
+  });
+
+  it("words the daily-cap pause as the lapsed, self-lifting thing it is", () => {
+    const content = render({
+      dailyCapUsd: 500,
+      runs: [
+        makeRun({
+          id: "r1",
+          totalCostUsd: 512.34,
+          status: "merged",
+          finishedAt: aug(1, 21),
+        }),
+      ],
+      projects: [makeProject({ id: "proj-1" })],
+    });
+
+    expect(section(content, "Autonomous pickup")).toEqual([
+      "⏸ Paused — the $500.00 daily cap was reached, so pickup stopped for " +
+        "the rest of the day; it lifted at midnight.",
+    ]);
+  });
+
+  it("names the switch when both holds apply, and still reports the breach", () => {
+    const content = render({
+      globalAutonomyPaused: true,
+      dailyCapUsd: 500,
+      runs: [
+        makeRun({
+          id: "r1",
+          totalCostUsd: 512.34,
+          status: "merged",
+          finishedAt: aug(1, 21),
+        }),
+      ],
+      projects: [makeProject({ id: "proj-1" })],
+    });
+
+    expect(section(content, "Autonomous pickup")[0]).toContain("kill switch");
+    expect(section(content, "Spend")).toEqual([
+      "$512.34 of $500.00 daily cap — cap hit, pickup was paused",
+    ]);
+  });
+
+  it("says pickup is running when nothing holds it", () => {
+    const content = render({
+      projects: [makeProject({ id: "p1", autonomyEnabled: true })],
+    });
+
+    expect(section(content, "Autonomous pickup")).toEqual([
+      "Running — no fleet-wide hold.",
+    ]);
+  });
+
+  it("distinguishes an unheld fleet with no project armed", () => {
+    const content = render({
+      projects: [makeProject({ id: "p1", autonomyEnabled: false })],
+    });
+
+    expect(section(content, "Autonomous pickup")).toEqual([
+      "No project has autonomy enabled — nothing is claimed unattended.",
+    ]);
+  });
+});
+
 describe("renderDailyDigest — completed yesterday", () => {
   it("lists yesterday's finished work with cost and PR link, nothing outside the day", () => {
     const content = render({
