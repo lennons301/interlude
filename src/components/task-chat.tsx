@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from "react";
 import { SlimShell } from "@/components/app-shell";
-import { FOCUS_RING } from "@/components/fleet/fleet-bits";
+import { FOCUS_RING, Gauge, Money } from "@/components/fleet/fleet-bits";
 import { TaskStream } from "./task-stream";
 import { MessageInput } from "./message-input";
 import { PreviewPane } from "./preview-pane";
@@ -14,6 +14,9 @@ interface TaskData {
   branch: string | null;
   containerStatus: string | null;
   totalCostUsd: number;
+  /** What this task is allowed to spend — its run's budget, or the
+   * per-attempt default for an interactive session. */
+  budgetUsd: number;
   githubIssue: string | null;
   pullRequestNumber: number | null;
   pullRequestUrl: string | null;
@@ -93,7 +96,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
   );
 
   // The slim shell carries the task's identity and live status (issue #117);
-  // what's left here is the task's references, restyled by its own ticket.
+  // the row below it carries where the work lives and what it has cost.
   const hasReferences = Boolean(
     initialTask.branch || githubIssue || pullRequestUrl
   );
@@ -119,15 +122,15 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
         </>
       }
     >
-      {hasReferences && (
-        <div className="shrink-0 border-b border-fl-line px-4 py-2">
+      <div className="flex shrink-0 items-end justify-between gap-4 border-b border-fl-line px-4 py-2">
+        <div className="min-w-0">
           {initialTask.branch && (
-            <p className="font-plex-mono text-[11px] text-fl-ink-2">
+            <p className="truncate font-plex-mono text-[11px] text-fl-ink-2">
               {initialTask.branch}
             </p>
           )}
           {(githubIssue || pullRequestUrl) && (
-            <div className="mt-0.5 flex items-center gap-3">
+            <div className={`flex items-center gap-3 ${initialTask.branch ? "mt-0.5" : ""}`}>
               {githubIssue && (
                 <a
                   href={`https://github.com/${githubIssue.replace("#", "/issues/")}`}
@@ -150,8 +153,35 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
               )}
             </div>
           )}
+          {!hasReferences && (
+            <p className="font-plex-mono text-[11px] text-fl-ink-3">
+              no branch yet
+            </p>
+          )}
         </div>
-      )}
+
+        {/* Spend against this task's ceiling, in the dashboard's metering
+            language rather than a second vocabulary invented for this screen:
+            money in tabular mono over the hairline gauge, tick at the ceiling.
+            It reads red once the ceiling is reached — the point at which a run
+            stops, so it is the one thing here that earns a colour. */}
+        <div className="w-24 shrink-0 space-y-1">
+          <p className="text-right font-plex-mono text-[11px] tabular-nums text-fl-ink-2">
+            <Money usd={taskStatus.totalCostUsd} />
+            <span className="text-fl-ink-3">
+              {" "}
+              / <Money usd={initialTask.budgetUsd} />
+            </span>
+          </p>
+          <Gauge
+            value={taskStatus.totalCostUsd}
+            max={initialTask.budgetUsd}
+            tone={
+              taskStatus.totalCostUsd >= initialTask.budgetUsd ? "red" : "green"
+            }
+          />
+        </div>
+      </div>
 
       {/* Mobile tabs — only when preview available. Selection is marked in ink,
           not a colour: colour in this system is semantic, and which pane you are
@@ -189,6 +219,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
         >
           <TaskStream
             taskId={initialTask.id}
+            containerStatus={taskStatus.containerStatus}
             onStatusChange={handleStatusChange}
             onMessage={handleMessage}
           />
@@ -219,13 +250,12 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
         )}
       </div>
 
-      {/* Terminal state footer */}
+      {/* Terminal state footer. Cost is not repeated here: it lives in the
+          header, against its ceiling, where it means something. */}
       {isTerminal && (
         <div className="shrink-0 border-t border-fl-line px-4 py-3 text-center">
-          <span className="font-plex-mono text-[11px] tabular-nums text-fl-ink-2">
-            Task {taskStatus.status}
-            {taskStatus.totalCostUsd > 0 &&
-              ` · $${taskStatus.totalCostUsd.toFixed(4)}`}
+          <span className="font-plex-mono text-[11px] lowercase text-fl-ink-2">
+            task {taskStatus.status}
           </span>
         </div>
       )}

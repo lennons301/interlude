@@ -230,3 +230,238 @@ html[data-fleet-theme="light"] .fleet {
     animation: none;
   }
 }
+
+/* The transcript's working pulse (issue #121): faster than the fleet's SSE
+ * breath because it marks one agent thinking, not the fleet being alive. */
+.fleet-pulse {
+  animation: fleet-breathe 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fleet-pulse {
+    animation: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Transcript typography (issue #121). An agent turn is a document, so it is
+ * rendered as sanitized markdown HTML and styled here — element selectors, not
+ * utility classes, because the markup comes from the pipeline in
+ * src/lib/chat/markdown.ts and carries no classes of its own.
+ *
+ * One structural device only: a blockquote's amber left rule, which is how a
+ * recommendation is marked. Nothing else gets a rule, a card or a tint — if
+ * everything is marked, nothing reads as different.
+ * ------------------------------------------------------------------------ */
+
+.fleet-md {
+  color: var(--fl-ink);
+  font-size: 0.875rem;
+  line-height: 1.65;
+}
+
+.fleet-md > * + * {
+  margin-top: 0.75em;
+}
+
+.fleet-md h1,
+.fleet-md h2,
+.fleet-md h3,
+.fleet-md h4,
+.fleet-md h5,
+.fleet-md h6 {
+  font-weight: 600;
+  line-height: 1.3;
+  margin-top: 1.4em;
+}
+
+.fleet-md > :first-child {
+  margin-top: 0;
+}
+
+.fleet-md h1 {
+  font-size: 1.05rem;
+}
+.fleet-md h2 {
+  font-size: 0.97rem;
+}
+.fleet-md h3,
+.fleet-md h4,
+.fleet-md h5,
+.fleet-md h6 {
+  font-size: 0.9rem;
+}
+
+.fleet-md ul,
+.fleet-md ol {
+  padding-left: 1.4em;
+}
+
+.fleet-md ul {
+  list-style: disc;
+}
+.fleet-md ol {
+  list-style: decimal;
+}
+.fleet-md ul ul {
+  list-style: circle;
+}
+
+.fleet-md li + li,
+.fleet-md li > ul,
+.fleet-md li > ol {
+  margin-top: 0.25em;
+}
+
+.fleet-md li::marker {
+  color: var(--fl-ink-3);
+}
+
+.fleet-md ul:has(> li > input[type="checkbox"]) {
+  list-style: none;
+  padding-left: 0.2em;
+}
+
+.fleet-md input[type="checkbox"] {
+  accent-color: var(--fl-ink-2);
+  margin-right: 0.45em;
+}
+
+.fleet-md a {
+  color: var(--fl-cool);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--fl-cool) 45%, transparent);
+  text-underline-offset: 2px;
+}
+
+.fleet-md a:hover {
+  text-decoration-color: var(--fl-cool);
+}
+
+.fleet-md strong {
+  font-weight: 600;
+}
+
+.fleet-md hr {
+  border: 0;
+  border-top: 1px solid var(--fl-line);
+  margin-block: 1.2em;
+}
+
+/* The one structural device: a recommendation. A heading inside it is the
+ * mono eyebrow the label rule asks for. */
+.fleet-md blockquote {
+  border-left: 2px solid var(--fl-amber);
+  padding-left: 0.85em;
+}
+
+.fleet-md blockquote h1,
+.fleet-md blockquote h2,
+.fleet-md blockquote h3,
+.fleet-md blockquote h4,
+.fleet-md blockquote h5,
+.fleet-md blockquote h6 {
+  font-family: var(--font-plex-mono), ui-monospace, monospace;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fl-ink-3);
+  margin-top: 0;
+}
+
+.fleet-md code {
+  font-family: var(--font-plex-mono), ui-monospace, monospace;
+  font-size: 0.8125rem;
+}
+
+.fleet-md :not(pre) > code {
+  background: color-mix(in srgb, var(--fl-ink) 8%, transparent);
+  border-radius: 3px;
+  padding: 0.1em 0.32em;
+}
+
+/* Long lines scroll inside the block instead of widening the transcript. */
+.fleet-md pre {
+  background: var(--fl-card);
+  border: 1px solid var(--fl-line);
+  border-radius: 4px;
+  overflow-x: auto;
+  padding: 0.7em 0.85em;
+}
+
+.fleet-md pre code {
+  background: none;
+  padding: 0;
+  white-space: pre;
+}
+
+.fleet-md table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  width: max-content;
+  max-width: 100%;
+}
+
+.fleet-md th,
+.fleet-md td {
+  border: 1px solid var(--fl-line);
+  padding: 0.3em 0.6em;
+  text-align: left;
+  vertical-align: top;
+}
+
+.fleet-md th {
+  font-family: var(--font-plex-mono), ui-monospace, monospace;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fl-ink-2);
+}
+
+/* Syntax highlighting in the fleet palette — four hues and nothing else, so
+ * the transcript reads as one system with the dashboard. A deliberate trade:
+ * code looks flatter here than in an editor. Anything unlisted is plain ink.
+ * highlight.js emits these class names; no highlighter theme is imported. */
+.fleet-md .hljs-keyword,
+.fleet-md .hljs-built_in,
+.fleet-md .hljs-literal,
+.fleet-md .hljs-type,
+.fleet-md .hljs-selector-tag,
+.fleet-md .hljs-name,
+.fleet-md .hljs-tag,
+.fleet-md .hljs-section,
+.fleet-md .hljs-title,
+.fleet-md .hljs-meta,
+.fleet-md .hljs-doctag,
+.fleet-md .hljs-variable.language_ {
+  color: var(--fl-cool);
+}
+
+.fleet-md .hljs-string,
+.fleet-md .hljs-regexp,
+.fleet-md .hljs-char.escape_,
+.fleet-md .hljs-addition {
+  color: var(--fl-green);
+}
+
+.fleet-md .hljs-number,
+.fleet-md .hljs-symbol,
+.fleet-md .hljs-attr,
+.fleet-md .hljs-attribute {
+  color: var(--fl-amber);
+}
+
+.fleet-md .hljs-comment,
+.fleet-md .hljs-quote {
+  color: color-mix(in srgb, var(--fl-ink) 52%, transparent);
+}
+
+/* A deletion inside a fenced diff earns red for the same reason a tool row's
+ * removed lines do — it is the system's one "this went away" colour, not a
+ * fifth syntax hue. */
+.fleet-md .hljs-deletion {
+  color: var(--fl-red);
+}
