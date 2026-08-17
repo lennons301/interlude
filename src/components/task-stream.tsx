@@ -2,10 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toChatView, type ChatMessageRow } from "@/lib/chat/chat-view";
+import { queuedCount } from "@/lib/chat/composer";
 import { ChatMessage } from "./chat-message";
 
 type Message = ChatMessageRow & {
   createdAt: string;
+  /** Null until the turn manager hands the message to the agent — which is how
+   * the composer knows a message of yours is still queued (issue #122). */
+  deliveredAt: string | null;
 };
 
 type TaskStatus = {
@@ -22,6 +26,10 @@ interface TaskStreamProps {
   containerStatus: string | null;
   onStatusChange?: (status: TaskStatus) => void;
   onMessage?: (msg: Message) => void;
+  /** The transcript holds every message row, so it is also the one place that
+   * knows how many of the owner's are still undelivered — the composer's
+   * "queued" feedback is derived from here rather than polled separately. */
+  onQueuedChange?: (queued: number) => void;
 }
 
 export function TaskStream({
@@ -29,6 +37,7 @@ export function TaskStream({
   containerStatus,
   onStatusChange,
   onMessage,
+  onQueuedChange,
 }: TaskStreamProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -36,6 +45,11 @@ export function TaskStream({
   const userScrolledUp = useRef(false);
 
   const items = useMemo(() => toChatView(messages), [messages]);
+  const queued = queuedCount(messages);
+
+  useEffect(() => {
+    onQueuedChange?.(queued);
+  }, [queued, onQueuedChange]);
 
   /**
    * The pulse marks the gap between asking and the first output — the one
