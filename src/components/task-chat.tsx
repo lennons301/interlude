@@ -3,7 +3,7 @@
 import { useCallback, useState } from "react";
 import type { SessionSkill } from "@/db/schema";
 import { SlimShell } from "@/components/app-shell";
-import { FOCUS_RING, Gauge, Money } from "@/components/fleet/fleet-bits";
+import { ActionLink, FOCUS_RING, Gauge, Money } from "@/components/fleet/fleet-bits";
 import { toChatView, type ChatMessageRow } from "@/lib/chat/chat-view";
 import { isTerminalTaskStatus } from "@/lib/chat/composer";
 import { TaskStream } from "./task-stream";
@@ -132,24 +132,17 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
           {(githubIssue || pullRequestUrl) && (
             <div className="mt-0.5 flex items-center gap-3">
               {githubIssue && (
-                <a
+                <ActionLink
+                  size="sm"
                   href={`https://github.com/${githubIssue.replace("#", "/issues/")}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className={`font-plex-mono text-[11px] text-fl-cool underline decoration-fl-cool/45 underline-offset-2 hover:decoration-fl-cool ${FOCUS_RING}`}
                 >
                   {githubIssue}
-                </a>
+                </ActionLink>
               )}
               {pullRequestUrl && (
-                <a
-                  href={pullRequestUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className={`font-plex-mono text-[11px] text-fl-cool underline decoration-fl-cool/45 underline-offset-2 hover:decoration-fl-cool ${FOCUS_RING}`}
-                >
+                <ActionLink size="sm" href={pullRequestUrl}>
                   PR #{pullRequestNumber}
-                </a>
+                </ActionLink>
               )}
             </div>
           )}
@@ -263,13 +256,15 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
 
 // Same neutral/green/red split as before, in fleet tokens: only failure and a
 // live run earn a colour, and the two quiet neutrals keep their old ordering
-// (queued and completed read louder than a cancelled run).
+// (queued and completed read louder than a cancelled run). A dot is not text,
+// so the quietest of them is `--fl-mark` — the neutral that clears the 3:1
+// non-text floor — rather than `--fl-ink-3`, which does not (issue #142).
 const STATUS_DOT: Record<string, string> = {
   queued: "bg-fl-ink-2",
   running: "bg-fl-green",
   completed: "bg-fl-ink-2",
   failed: "bg-fl-red",
-  cancelled: "bg-fl-ink-3",
+  cancelled: "bg-fl-mark",
 };
 
 /**

@@ -10,6 +10,7 @@ import {
 } from "@/components/fleet/fleet-bits";
 import { ConfirmStrip } from "@/components/confirm-strip";
 import { useLoad } from "@/lib/use-load";
+import { useReturnFocus } from "@/lib/use-return-focus";
 
 /**
  * The global autonomy kill switch, in the room where the owner arms things
@@ -46,6 +47,9 @@ export function KillSwitch() {
   const [busy, setBusy] = useState(false);
   const [confirmingLift, setConfirmingLift] = useState(false);
   const [moveError, setMoveError] = useState<string | null>(null);
+  // The button is replaced by the strip and then by its opposite, so focus is
+  // handed to whichever control mounts in its place (issue #142).
+  const triggerRef = useReturnFocus<HTMLButtonElement>(confirmingLift);
 
   async function setPaused(paused: boolean) {
     setBusy(true);
@@ -60,6 +64,8 @@ export function KillSwitch() {
       // The endpoint answers with the whole state, so the panel shows what was
       // actually stored rather than what was asked for.
       setData(await res.json());
+      // Closing the strip is what hands focus on, so a confirmed lift needs no
+      // more than this: the control that replaces it is "stop the fleet".
       setConfirmingLift(false);
     } catch (err) {
       setMoveError(
@@ -113,6 +119,7 @@ export function KillSwitch() {
 
         {!confirmingLift && (
           <ControlButton
+            ref={triggerRef}
             tone={held ? "cool" : "amber"}
             disabled={busy}
             onClick={() => (held ? setConfirmingLift(true) : setPaused(true))}

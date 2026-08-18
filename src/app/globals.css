@@ -136,6 +136,15 @@
  * wider UI refresh. Dark-first; light is re-tuned per ground, never inverted.
  * Theme follows system preference, overridable via data-fleet-theme on <html>.
  * Components reference tokens only.
+ *
+ * `--fl-mark` is the quiet neutral for things that are *not text* — the focus
+ * ring and a status dot. It exists because those carry WCAG's 3:1 floor for
+ * non-text contrast while `--fl-ink-3`, the quietest ink, does not clear it:
+ * on the light ground ink-3 is 2.44:1, so a focus ring drawn in it was a
+ * keyboard affordance you could miss (issue #142). Both values below are
+ * checked against ground, surface and card in
+ * src/components/__tests__/fleet-tokens.test.ts, so retuning either theme
+ * cannot silently drop back under the floor. Text keeps ink-3.
  * ------------------------------------------------------------------------ */
 
 .fleet,
@@ -148,6 +157,7 @@ html[data-fleet-theme="dark"] .fleet {
   --fl-ink: #ede6dc;
   --fl-ink-2: #a89e90;
   --fl-ink-3: #71685c;
+  --fl-mark: #786e61;
   --fl-amber: #e8a33d;
   --fl-on-amber: #16120a;
   --fl-green: #8fb573;
@@ -165,6 +175,7 @@ html[data-fleet-theme="dark"] .fleet {
     --fl-ink: #262019;
     --fl-ink-2: #6e6457;
     --fl-ink-3: #9c9285;
+    --fl-mark: #877d6f;
     --fl-amber: #a2690f;
     --fl-on-amber: #fff9ee;
     --fl-green: #567e3d;
@@ -184,6 +195,7 @@ html[data-fleet-theme="light"] .fleet {
   --fl-ink: #262019;
   --fl-ink-2: #6e6457;
   --fl-ink-3: #9c9285;
+  --fl-mark: #877d6f;
   --fl-amber: #a2690f;
   --fl-on-amber: #fff9ee;
   --fl-green: #567e3d;
@@ -200,6 +212,7 @@ html[data-fleet-theme="light"] .fleet {
   --color-fl-ink: var(--fl-ink);
   --color-fl-ink-2: var(--fl-ink-2);
   --color-fl-ink-3: var(--fl-ink-3);
+  --color-fl-mark: var(--fl-mark);
   --color-fl-amber: var(--fl-amber);
   --color-fl-on-amber: var(--fl-on-amber);
   --color-fl-green: var(--fl-green);

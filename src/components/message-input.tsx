@@ -47,7 +47,8 @@ const useIsomorphicLayoutEffect =
 const DOT_TONE = {
   green: "bg-fl-green",
   amber: "bg-fl-amber",
-  quiet: "bg-fl-ink-3",
+  // The mark, not ink-3: a dot is not text (issue #142).
+  quiet: "bg-fl-mark",
 } as const;
 
 const QUIET_BUTTON = `font-plex-mono text-[11px] lowercase text-fl-ink-3 hover:text-fl-ink disabled:cursor-default disabled:text-fl-ink-3/50 disabled:hover:text-fl-ink-3/50 ${FOCUS_RING}`;
