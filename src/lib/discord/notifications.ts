@@ -152,7 +152,10 @@ export async function hasDigestPostedSince(
 ): Promise<boolean> {
   const channel = await fetchTextChannel(channelId);
 
-  const recent = await channel.messages.fetch({ limit: 100 });
+  const recent = await bounded(
+    `message history of channel ${channelId}`,
+    channel.messages.fetch({ limit: 100 })
+  );
   return recent.some(
     (msg) =>
       msg.author.id === channel.client.user?.id &&
