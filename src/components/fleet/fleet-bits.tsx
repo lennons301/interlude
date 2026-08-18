@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 /**
  * Shared atoms of the fleet's metering language: everything countable is
  * discrete segments or pips, everything continuous is a 3px hairline gauge
@@ -6,10 +8,14 @@
 
 import type { PickupPause } from "@/lib/fleet/fleet-view";
 
-/** The system's one focus affordance: a hairline ring in the quietest ink, so
- * keyboard users get a visible target without a colour that means something. */
+/** The system's one focus affordance: a hairline ring in the quiet neutral, so
+ * keyboard users get a visible target without a colour that means something.
+ * Drawn in `--fl-mark` rather than `--fl-ink-3` because a ring is not text and
+ * so owes WCAG's 3:1 non-text floor, which ink-3 misses on the light ground
+ * (issue #142). This string is in nearly every file in the app, which is why
+ * the fix belongs here and not at any of them. */
 export const FOCUS_RING =
-  "focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-fl-ink-3";
+  "focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-fl-mark";
 
 /** The one text-input skin in the system — a fleet card behind a hairline, Plex
  * on top. Shared by every form the app has so a field can't drift between
@@ -116,16 +122,22 @@ export function ControlButton({
   onClick,
   disabled,
   children,
+  // A plain prop in React 19. It is here so a caller can send focus back to a
+  // control that unmounted while a confirmation stood in its place — see
+  // `useReturnFocus`.
+  ref,
   ...rest
 }: {
   tone?: keyof typeof BUTTON_TONES;
   onClick: () => void;
   disabled?: boolean;
   children: React.ReactNode;
+  ref?: React.Ref<HTMLButtonElement>;
 } & Pick<React.ButtonHTMLAttributes<HTMLButtonElement>, "aria-expanded" | "aria-label">) {
   return (
     <button
       type="button"
+      ref={ref}
       onClick={onClick}
       disabled={disabled}
       className={`rounded-[4px] border px-2 py-0.5 font-plex-mono text-[11px] lowercase transition-opacity disabled:opacity-40 ${BUTTON_TONES[tone]} ${FOCUS_RING}`}
@@ -133,6 +145,40 @@ export function ControlButton({
     >
       {children}
     </button>
+  );
+}
+
+/** The standing-underline text link: cool ink under a hairline that firms up on
+ * hover, for a reference you are meant to see is a reference (a ticket, a PR, a
+ * "needs you" action). The atom owns where the link goes as well as how it reads
+ * — an internal href routes through `Link`, anything else opens in a new tab —
+ * so its callers can't ship an external link without `rel` or one without a
+ * focus ring, which is how the three hand-written copies of this string
+ * differed. `size` is the only variant: 12px on the dashboard's cards, 11px in
+ * the denser chat header. The words are the caller's, arrow and all.
+ *
+ * Not the app's only link idiom: quiet navigation (`+ new task`, the ledger's
+ * rows) underlines on hover instead, and stays as it is. */
+export function ActionLink({
+  href,
+  size = "md",
+  children,
+}: {
+  href: string;
+  size?: "sm" | "md";
+  children: React.ReactNode;
+}) {
+  const className =
+    `font-plex-mono ${size === "sm" ? "text-[11px]" : "text-[12px]"} ` +
+    `text-fl-cool underline decoration-fl-cool/45 underline-offset-2 hover:decoration-fl-cool ${FOCUS_RING}`;
+  return href.startsWith("/") ? (
+    <Link href={href} className={className}>
+      {children}
+    </Link>
+  ) : (
+    <a href={href} target="_blank" rel="noopener noreferrer" className={className}>
+      {children}
+    </a>
   );
 }
 
@@ -176,7 +222,8 @@ const DOT_COLOR: Record<LiveDotState, string> = {
   off: "bg-fl-amber",
   held: "bg-fl-amber",
   paused: "bg-fl-red",
-  offline: "bg-fl-ink-3",
+  // The mark, not ink-3: a dot is not text (issue #142).
+  offline: "bg-fl-mark",
 };
 
 /**

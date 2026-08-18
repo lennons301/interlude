@@ -5,6 +5,8 @@ import { useEffect, useMemo, useState } from "react";
 import { ControlButton, Eyebrow, FOCUS_RING } from "@/components/fleet/fleet-bits";
 import { TaskCard } from "./task-card";
 import {
+  filterOptions,
+  listState,
   organizeTasks,
   TASK_LIST_LIMIT,
   type TaskFilter,
@@ -12,15 +14,20 @@ import {
 } from "@/lib/tasks/organize-tasks";
 
 /**
- * The archive of every session and run (issue #120). The list itself is the
- * pure `organizeTasks` selector's output; this component owns only the read
- * path and the filter state.
+ * The archive of every session and run (issue #120). The list, the screen's
+ * state and the filter row's options are all pure selectors' output; this
+ * component owns only the read path and the filter state.
  *
  * The read path is deliberate about the three things that made this screen lie
  * in production: a poll is scheduled only once the previous one has settled
  * (never overlapping, and aborted on unmount), a failed load renders as a
  * failure with a retry rather than as an empty archive, and the empty state is
- * reached only from a confirmed empty result that nothing has failed since.
+ * reached only from a confirmed empty result that nothing has failed since —
+ * now `listState`, out where it can be tested.
+ *
+ * The filter goes to the server (issue #142). It has to: the archive is bounded
+ * to the most recent rows, so narrowing after the bound could only ever narrow
+ * the window, and the sessions worth revisiting had already fallen out of it.
  */
 
 /** An archive, not a live surface — the dashboard is where seconds matter, so
@@ -31,12 +38,24 @@ const POLL_MS = 10_000;
  * already unwell; `retry` is what shortcuts back to the fast cadence. */
 const MAX_BACKOFF_MS = 60_000;
 
+/** An answer, with the filter it was an answer *to*. The two travel together
+ * because they are read together: between pressing a chip and its rows arriving,
+ * the filter has moved on and these rows haven't, and every decision below needs
+ * to know which one it is looking at. */
+interface Loaded {
+  rows: TaskListRow[];
+  filter: TaskFilter;
+}
+
 export function TaskFeed() {
   // null = never loaded. Distinguishing "no answer yet" from "answered, empty"
   // is the whole reason a failed fetch can't masquerade as an empty archive.
-  const [rows, setRows] = useState<TaskListRow[] | null>(null);
+  const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<TaskFilter>("all");
+  // The last *unfiltered* answer, kept because the filter row can't be read off
+  // a narrowed one — see `filterOptions`.
+  const [unfiltered, setUnfiltered] = useState<TaskListRow[] | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
@@ -47,13 +66,20 @@ export function TaskFeed() {
 
     const poll = async () => {
       try {
-        const res = await fetch(`/api/tasks?limit=${TASK_LIST_LIMIT}`, {
-          signal: controller.signal,
-        });
+        // The route's `kind` vocabulary is this component's own filter type, so
+        // the active filter goes over as it stands — `all` included.
+        const res = await fetch(
+          `/api/tasks?kind=${filter}&limit=${TASK_LIST_LIMIT}`,
+          { signal: controller.signal }
+        );
         if (!res.ok) throw new Error(`the server answered ${res.status}`);
         const data: TaskListRow[] = await res.json();
         if (stopped) return;
-        setRows(data);
+        setLoaded({ rows: data, filter });
+        // Only an unfiltered answer describes the whole archive, so only one
+        // refreshes the filter row; a narrowed answer would otherwise leave the
+        // active chip as the only way out of itself.
+        if (filter === "all") setUnfiltered(data);
         setError(null);
         failures = 0;
       } catch (err) {
@@ -78,7 +104,7 @@ export function TaskFeed() {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [reloadKey]);
+  }, [reloadKey, filter]);
 
   // Local clock for the relative times, ticking between polls. Only ever read
   // once rows have arrived (client-side), so the SSR pass renders no time.
@@ -93,28 +119,47 @@ export function TaskFeed() {
     setReloadKey((key) => key + 1);
   };
 
+  /** Pressing a chip is a fresh request, so a previous failure stops being
+   * reported: the effect below re-runs on `filter` and will say so again if the
+   * narrowed load fails too. */
+  const select = (next: TaskFilter) => {
+    setError(null);
+    setFilter(next);
+  };
+
   // Memoised so the 30s clock tick — which exists only to age the relative
-  // times — doesn't re-derive the whole list behind it.
+  // times — doesn't re-derive the whole list behind it. The filter is applied
+  // here as well as in SQL: between pressing a chip and its answer arriving,
+  // these are still the previous query's rows, and narrowing them is what makes
+  // the list correct in the meantime instead of briefly wrong.
   const organized = useMemo(
-    () => organizeTasks(rows ?? [], filter),
-    [rows, filter]
+    () => organizeTasks(loaded?.rows ?? [], filter),
+    [loaded, filter]
   );
 
-  // A failure with nothing to show is a failure, whether or not an earlier poll
-  // happened to answer "empty": an unconfirmed empty archive is exactly the lie
-  // this screen used to tell, so the empty state is never reached from here.
-  if (error !== null && (rows === null || rows.length === 0)) {
+  /** The whole archive's shape, for the filter row. One derivation, from the
+   * last unfiltered rows — or from whatever has arrived, before any have. */
+  const seen = useMemo(
+    () => organizeTasks(unfiltered ?? loaded?.rows ?? [], "all"),
+    [unfiltered, loaded]
+  );
+
+  // The filter the rows in hand were loaded under, not the one now selected:
+  // only that can say whether "nothing" means an empty archive.
+  const view = listState(loaded?.rows ?? null, error, loaded?.filter ?? "all");
+
+  if (view.state === "failed") {
     return (
       <div className="space-y-3 py-12 text-center">
         <p role="alert" className="text-sm text-fl-red">
-          Couldn&apos;t load your tasks — {error}.
+          Couldn&apos;t load your tasks — {view.error}.
         </p>
         <RetryButton onClick={retry} />
       </div>
     );
   }
 
-  if (rows === null) {
+  if (view.state === "loading") {
     return (
       <p className="py-12 text-center font-plex-mono text-[11px] text-fl-ink-3">
         loading…
@@ -122,7 +167,7 @@ export function TaskFeed() {
     );
   }
 
-  if (rows.length === 0) {
+  if (view.state === "empty") {
     return (
       <div className="space-y-3 py-12 text-center">
         <p className="text-sm text-fl-ink-2">No tasks yet.</p>
@@ -137,24 +182,20 @@ export function TaskFeed() {
     );
   }
 
-  // The filter offers only kinds that exist — plus the active one if the data
-  // has moved on beneath it, so a narrowed-to-nothing list is never a dead end.
-  const options =
-    filter === "all" || organized.chips.some((c) => c.chip === filter)
-      ? organized.chips
-      : [...organized.chips, { chip: filter, count: 0 }];
+  const options = filterOptions(seen.chips, organized.chips, filter);
   const emptyNote = filter === "all" ? "none yet" : "none of this kind";
+  const bounded = (loaded?.rows.length ?? 0) >= TASK_LIST_LIMIT;
 
   return (
     <div className="space-y-6">
       {/* A refresh that failed while rows are already on screen is a staleness
           warning, not a wipe — the list stays, and says so. */}
-      {error !== null && (
+      {view.stale !== null && (
         <p
           role="alert"
           className="flex flex-wrap items-center gap-2 rounded-[4px] border border-fl-amber/45 bg-fl-amber/13 px-3 py-2 text-[13px] text-fl-amber"
         >
-          <span>Not refreshing — {error}.</span>
+          <span>Not refreshing — {view.stale}.</span>
           <RetryButton onClick={retry} />
         </p>
       )}
@@ -166,9 +207,9 @@ export function TaskFeed() {
       >
         <FilterOption
           label="all"
-          count={organized.total}
+          count={seen.total}
           active={filter === "all"}
-          onSelect={() => setFilter("all")}
+          onSelect={() => select("all")}
         />
         {options.map(({ chip, count }) => (
           <FilterOption
@@ -176,7 +217,7 @@ export function TaskFeed() {
             label={chip}
             count={count}
             active={filter === chip}
-            onSelect={() => setFilter(chip)}
+            onSelect={() => select(chip)}
           />
         ))}
       </div>
@@ -194,9 +235,10 @@ export function TaskFeed() {
         now={now}
       />
 
-      {rows.length >= TASK_LIST_LIMIT && (
+      {bounded && (
         <p className="font-plex-mono text-[11px] text-fl-ink-3">
-          showing the {TASK_LIST_LIMIT} most recently active tasks
+          showing the {TASK_LIST_LIMIT} most recently active{" "}
+          {filter === "all" ? "tasks" : `${filter} tasks`}
         </p>
       )}
     </div>

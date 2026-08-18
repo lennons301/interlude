@@ -1,6 +1,5 @@
-import Link from "next/link";
 import type { FleetView, NeedsYouItem } from "@/lib/fleet/fleet-view";
-import { Chip, Eyebrow, PAUSE_DOT } from "./fleet-bits";
+import { ActionLink, Chip, Eyebrow, PAUSE_DOT } from "./fleet-bits";
 
 const CAUSE_LABEL: Record<NeedsYouItem["cause"], string> = {
   blocked: "blocked question",
@@ -100,7 +99,9 @@ export function NeedsYou({ view }: { view: FleetView }) {
                 </div>
                 <p className="text-sm leading-snug text-fl-ink">{item.body}</p>
                 {item.action && (
-                  <ActionLink href={item.action.href} label={item.action.label} />
+                  <ActionLink href={item.action.href}>
+                    {item.action.label} →
+                  </ActionLink>
                 )}
               </div>
             </li>
@@ -108,19 +109,5 @@ export function NeedsYou({ view }: { view: FleetView }) {
         </ul>
       )}
     </section>
-  );
-}
-
-function ActionLink({ href, label }: { href: string; label: string }) {
-  const className =
-    "font-plex-mono text-[12px] text-fl-cool underline decoration-fl-cool/45 underline-offset-2 hover:decoration-fl-cool";
-  return href.startsWith("/") ? (
-    <Link href={href} className={className}>
-      {label} →
-    </Link>
-  ) : (
-    <a href={href} target="_blank" rel="noreferrer" className={className}>
-      {label} →
-    </a>
   );
 }

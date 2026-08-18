@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+  chipColumns,
+  filterOptions,
+  listState,
   organizeTasks,
   taskChip,
   taskTicket,
@@ -234,5 +237,190 @@ describe("organizeTasks — the filter", () => {
     expect(organizeTasks(rows, "implement").chips).toEqual(
       organizeTasks(rows, "all").chips
     );
+  });
+});
+
+/**
+ * The screen's state, as a table (issue #142). Every row here is a shape `/tasks`
+ * actually reached in production, including the one it got wrong: a failed load
+ * rendering as an empty archive.
+ */
+describe("listState", () => {
+  const rows = [makeRow()];
+
+  it("is loading before the first answer", () => {
+    expect(listState(null, null)).toEqual({ state: "loading" });
+  });
+
+  it("is failed when the first load broke — never an empty archive", () => {
+    expect(listState(null, "the server answered 500")).toEqual({
+      state: "failed",
+      error: "the server answered 500",
+    });
+  });
+
+  it("is failed when a later load broke and there is nothing on screen", () => {
+    // The lie this replaces: 222 tasks, a failed poll, "No tasks yet".
+    expect(listState([], "the request failed")).toEqual({
+      state: "failed",
+      error: "the request failed",
+    });
+  });
+
+  it("is empty only from a load that succeeded", () => {
+    expect(listState([], null)).toEqual({ state: "empty" });
+  });
+
+  it("never claims an empty archive from a narrowed load", () => {
+    // Nothing of this kind is not nothing at all, so the filter row must stay.
+    expect(listState([], null, "grill")).toEqual({ state: "ready", stale: null });
+  });
+
+  it("is ready when there are rows", () => {
+    expect(listState(rows, null)).toEqual({ state: "ready", stale: null });
+  });
+
+  it("keeps the list and reports staleness when a refresh fails over rows", () => {
+    expect(listState(rows, "the request failed")).toEqual({
+      state: "ready",
+      stale: "the request failed",
+    });
+  });
+});
+
+describe("filterOptions", () => {
+  const seen = [
+    { chip: "chat" as const, count: 4 },
+    { chip: "grill" as const, count: 3 },
+    { chip: "implement" as const, count: 40 },
+  ];
+
+  it("offers the unfiltered vocabulary under `all`, unchanged", () => {
+    expect(filterOptions(seen, seen, "all")).toEqual(seen);
+  });
+
+  it("keeps every other option on offer while one is active", () => {
+    const options = filterOptions(seen, [{ chip: "grill", count: 12 }], "grill");
+
+    expect(options.map((o) => o.chip)).toEqual(["chat", "grill", "implement"]);
+  });
+
+  it("states the active chip's real count, even above what the window showed", () => {
+    // 12 grillings exist; the recency-bounded window only ever held 3 of them.
+    const options = filterOptions(seen, [{ chip: "grill", count: 12 }], "grill");
+
+    expect(options).toContainEqual({ chip: "grill", count: 12 });
+    expect(options).toContainEqual({ chip: "implement", count: 40 });
+  });
+
+  it("offers the active chip even when the window never held one", () => {
+    const options = filterOptions(seen, [{ chip: "review", count: 7 }], "review");
+
+    expect(options).toContainEqual({ chip: "review", count: 7 });
+  });
+
+  it("shows the active chip as zero rather than dropping the way out of it", () => {
+    expect(filterOptions(seen, [], "review")).toContainEqual({
+      chip: "review",
+      count: 0,
+    });
+  });
+
+  it("leaves out a chip nothing carries", () => {
+    expect(filterOptions(seen, seen, "all").map((o) => o.chip)).not.toContain(
+      "triage"
+    );
+  });
+
+  it("keeps the published vocabulary's order", () => {
+    const scrambled = [
+      { chip: "review" as const, count: 1 },
+      { chip: "chat" as const, count: 1 },
+    ];
+
+    expect(filterOptions(scrambled, scrambled, "all").map((o) => o.chip)).toEqual([
+      "chat",
+      "review",
+    ]);
+  });
+});
+
+/**
+ * `chipColumns` is `taskChip` read backwards, for the route to put in a `where`
+ * (issue #142). The route's own tests run the generated SQL over every row the
+ * schema allows; this is the same agreement one layer up, where a mismatch names
+ * the chip rather than a missing row.
+ */
+describe("chipColumns", () => {
+  /** Does `chip`'s column description admit this (kind, skill) pair? */
+  const admits = (
+    chip: Parameters<typeof chipColumns>[0],
+    row: TaskListRow
+  ): boolean =>
+    chipColumns(chip).some(
+      ({ kind, sessionSkills }) =>
+        kind === row.kind &&
+        (sessionSkills === null || sessionSkills.includes(row.sessionSkill))
+    );
+
+  const KINDS: TaskListRow["kind"][] = [
+    "interactive",
+    "implement",
+    "review",
+    "triage",
+    "repair",
+  ];
+  const SKILLS: TaskListRow["sessionSkill"][] = [
+    null,
+    "grill-me",
+    "grill-with-docs",
+    "to-spec",
+    "to-tickets",
+    "wayfinder",
+    "triage",
+  ];
+
+  it("admits exactly the rows taskChip gives that chip, over the whole space", () => {
+    for (const kind of KINDS) {
+      for (const sessionSkill of SKILLS) {
+        const row = makeRow({ kind, sessionSkill });
+        for (const chip of TASK_CHIPS) {
+          expect(admits(chip, row), `${chip} vs ${kind}/${sessionSkill}`).toBe(
+            taskChip(row) === chip
+          );
+        }
+      }
+    }
+  });
+
+  it("describes every chip in the vocabulary, so none is unfilterable", () => {
+    for (const chip of TASK_CHIPS) {
+      expect(chipColumns(chip).length, chip).toBeGreaterThan(0);
+    }
+  });
+
+  it("names a chat task by the absence of a skill, not by a skill", () => {
+    expect(chipColumns("chat")).toEqual([
+      { kind: "interactive", sessionSkills: [null] },
+    ]);
+  });
+
+  it("folds both grilling skills into one interactive shape", () => {
+    expect(chipColumns("grill")).toEqual([
+      { kind: "interactive", sessionSkills: ["grill-me", "grill-with-docs"] },
+    ]);
+  });
+
+  it("gives triage both of its shapes — the pass and the session", () => {
+    expect(chipColumns("triage")).toEqual([
+      { kind: "interactive", sessionSkills: ["triage"] },
+      { kind: "triage", sessionSkills: null },
+    ]);
+  });
+
+  it("ignores the skill column for an unattended pass", () => {
+    expect(chipColumns("implement")).toEqual([
+      { kind: "implement", sessionSkills: null },
+    ]);
   });
 });

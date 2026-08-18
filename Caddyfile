@@ -4,7 +4,23 @@
     }
 }
 
+# Response compression (issue #142). `GET /api/tasks` was 1219 KB on prod before
+# its projection was bounded (issue #120) and was still served uncompressed,
+# which is what a phone on mobile data actually pays for. Caddy's default
+# encode matches text and JSON content types and picks the best encoding the
+# client offers.
+#
+# Safe for the app's own streaming, which is the thing to check before
+# compressing a reverse proxy: caddy's encoder writes the header immediately for
+# a `text/event-stream` response (caddy #6293), so the SSE transcript is never
+# held back, and it only compresses once a body write exceeds `minimum_length`
+# (512 bytes, never buffering to reach it).
+#
+# Only this block. The wildcard below proxies agent containers' dev servers —
+# HMR, websockets, whatever the agent happens to be running — and compressing
+# that was not asked for and buys nothing the owner is waiting on.
 {$DOMAIN:localhost} {
+    encode zstd gzip
     reverse_proxy app:3000
 }
 
