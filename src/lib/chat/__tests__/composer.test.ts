@@ -96,42 +96,49 @@ describe("composerState — queue feedback", () => {
   });
 });
 
-describe("completionRefusal — completing while the session moves on", () => {
-  it("refuses, and says why, when the agent starts a turn under an open confirmation", () => {
-    // The race this exists for: the owner presses complete on an idle agent,
-    // and in the seconds the confirmation sits open a queued message is
-    // delivered and the next turn starts.
-    const asked = state("running", "idle");
-    expect(completionRefusal(asked)).toBeNull();
+describe("completionRefusal — why ending the session isn't on offer", () => {
+  // The reason is what the composer shows when a confirmation is refused under
+  // the owner (issue #149) and what the disabled complete button's tooltip
+  // says the rest of the time, so each one is pinned to the state it explains
+  // — a table of six near-identical sentences is exactly where two would drift
+  // into being swapped.
+  const cases: Array<[string, string | null, string | null]> = [
+    ["running", "idle", null],
+    [
+      "running",
+      "running",
+      "The agent started a turn. You can end the session once it's idle again.",
+    ],
+    [
+      "running",
+      "setup",
+      "The agent is still starting up. You can end the session once it's idle.",
+    ],
+    ["queued", null, "The agent hasn't started yet — there's nothing to end."],
+    [
+      "blocked",
+      "idle",
+      "The agent is waiting on your answer — send it, then end the session.",
+    ],
+    ["running", "completing", "This session is already wrapping up."],
+    ["completed", "idle", "This session has already ended."],
+  ];
 
-    const confirmed = state("running", "running");
-    expect(completionRefusal(confirmed)).toBe(
-      "The agent started a turn. You can end the session once it's idle again."
-    );
-  });
+  for (const [taskStatus, containerStatus, expected] of cases) {
+    const what = expected === null ? "offers completion" : "refuses";
+    it(`${what} on ${taskStatus}/${containerStatus ?? "no container"}`, () => {
+      expect(completionRefusal(state(taskStatus, containerStatus))).toBe(expected);
+    });
+  }
 
-  it("gives a reason for every state that refuses, so none can dead-end silently", () => {
-    const everyPhase: Array<[string, string | null]> = [
-      ["queued", null],
-      ["running", null],
-      ["running", "setup"],
-      ["running", "running"],
-      ["running", "idle"],
-      ["running", "completing"],
-      ["blocked", null],
-      ["completed", "idle"],
-      ["failed", null],
-      ["cancelled", null],
-    ];
-
-    for (const [taskStatus, containerStatus] of everyPhase) {
+  it("has words for every refusal the button can make", () => {
+    // The table above is keyed over every phase but `idle`, so this is the type
+    // system's promise restated at the boundary the composer relies on: a
+    // reason exists exactly when completion is off the table, and the composer
+    // gates the POST on that reason rather than on `canComplete` separately.
+    for (const [taskStatus, containerStatus] of cases) {
       const s = state(taskStatus, containerStatus);
-      const refusal = completionRefusal(s);
-
-      // A reason exists exactly when the button would refuse — no phase can be
-      // added that refuses without being able to say why.
-      expect(refusal === null).toBe(s.canComplete);
-      if (refusal !== null) expect(refusal.length).toBeGreaterThan(0);
+      expect(completionRefusal(s) === null).toBe(s.canComplete);
     }
   });
 });

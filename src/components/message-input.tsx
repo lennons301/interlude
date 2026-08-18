@@ -53,15 +53,23 @@ const DOT_TONE = {
 /**
  * The line under the field, when it isn't the keyboard hint. A request that
  * failed is an error; a completion the session refused is not — nothing went
- * wrong, the agent simply moved on under you — so the two are toned apart
- * rather than both arriving in red.
+ * wrong, the agent simply moved on under you — so a notice is full-strength
+ * ink rather than red: read it, nothing to fix. Colour is not what separates
+ * them, because 11px amber does not clear contrast on the light surface — the
+ * same reason the status line's own colour lives in its dot.
  */
 type Note = { text: string; tone: "error" | "notice" };
 
 const NOTE_TONE = {
   error: "text-fl-red",
-  notice: "text-fl-amber",
+  notice: "text-fl-ink",
 } as const;
+
+/** How long a notice keeps the hint line. Long enough to read a sentence,
+ * short enough that the keyboard contract is back before you next type — a
+ * turn can run for ten minutes and the status line says so throughout, so the
+ * notice does not have to. */
+const NOTICE_MS = 8000;
 
 const QUIET_BUTTON = `font-plex-mono text-[11px] lowercase text-fl-ink-3 hover:text-fl-ink disabled:cursor-default disabled:text-fl-ink-3/50 disabled:hover:text-fl-ink-3/50 ${FOCUS_RING}`;
 
@@ -88,6 +96,7 @@ export function MessageInput({
   const [dismissed, setDismissed] = useState<string | null>(null);
   const [active, setActive] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const confirmRowRef = useRef<HTMLSpanElement>(null);
 
   const state = composerState({ taskStatus, containerStatus, queued });
   // What the button would send *is* whether there is anything to send: an empty
@@ -156,19 +165,33 @@ export function MessageInput({
    * The confirmation row takes the status line's place while it is open, so a
    * row left open once the agent starts a turn is a question whose answer would
    * now do nothing, sitting on top of the one line that would explain why
-   * (issue #149). Close it the moment completion stops being on offer and name
-   * what changed — and take the note back down once it is on offer again, so a
-   * stale "wait for idle" can't outlive the turn it was about.
+   * (issue #149). Close it the moment completion stops being on offer, and say
+   * what changed.
+   *
+   * Before paint, not after: a frame of a live confirmation that has quietly
+   * stopped meaning anything is the bug in miniature, and a tap landing in it
+   * would be answering a question that is already gone. Closing the row also
+   * unmounts whatever the owner was tabbed onto, and focus dropped to the
+   * document is its own dead end — so it goes back to the field, which is where
+   * the next move was going to be made anyway.
    */
-  useEffect(() => {
-    if (refusal === null) {
-      setNote((n) => (n?.tone === "notice" ? null : n));
-      return;
-    }
-    if (!confirmingComplete || completing) return;
+  useIsomorphicLayoutEffect(() => {
+    if (!confirmingComplete || refusal === null) return;
+    const hadFocus = confirmRowRef.current?.contains(document.activeElement) ?? false;
     setConfirmingComplete(false);
     setNote({ text: refusal, tone: "notice" });
-  }, [refusal, confirmingComplete, completing]);
+    if (hadFocus) textareaRef.current?.focus();
+  }, [confirmingComplete, refusal]);
+
+  // A notice is an announcement, not a state — the status line it explains is
+  // back on screen and keeps saying it — so it hands the line back to the
+  // keyboard hint after a few seconds. An error stays: it is about a request
+  // that can be retried, and nothing else on screen records it.
+  useEffect(() => {
+    if (note?.tone !== "notice") return;
+    const timer = setTimeout(() => setNote(null), NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [note]);
 
   async function submit(text: string) {
     if (!canSubmit) return;
@@ -199,10 +222,10 @@ export function MessageInput({
   async function handleComplete() {
     if (completing) return;
 
-    // Re-checked here as well as in the effect above, because a click can land
-    // in the same render as the change that refuses it. The question is
-    // answered either way, so the row closes first — and if the answer is no,
-    // it says so where the hint line goes rather than returning silently.
+    // Re-checked here as well as in the layout effect above, because a click
+    // can land in the same render as the change that refuses it. The question
+    // is answered either way, so the row closes first — and if the answer is
+    // no, it says so where the hint line goes rather than returning silently.
     setConfirmingComplete(false);
     if (refusal !== null) {
       setNote({ text: refusal, tone: "notice" });
@@ -316,7 +339,10 @@ export function MessageInput({
         </p>
 
         {confirmingComplete ? (
-          <span className="flex shrink-0 items-center gap-2.5 font-plex-mono text-[11px] lowercase">
+          <span
+            ref={confirmRowRef}
+            className="flex shrink-0 items-center gap-2.5 font-plex-mono text-[11px] lowercase"
+          >
             <span className="text-fl-ink-2">end this session?</span>
             <button
               type="button"
@@ -337,12 +363,10 @@ export function MessageInput({
           <button
             type="button"
             onClick={() => setConfirmingComplete(true)}
-            disabled={!state.canComplete || completing}
-            title={
-              state.canComplete
-                ? "End this session and mark its PR ready"
-                : "Available between turns, once the agent is idle"
-            }
+            disabled={refusal !== null || completing}
+            // The same sentence the refused confirmation would have said, so the
+            // disabled button and the note can't drift into two explanations.
+            title={refusal ?? "End this session and mark its PR ready"}
             className={`shrink-0 ${QUIET_BUTTON}`}
           >
             {completing ? "completing…" : "complete"}
@@ -382,27 +406,25 @@ export function MessageInput({
         </button>
       </div>
 
-      {/* One line under the field, and it carries the id the textarea is
-          described by either way — a failed send, or a refused completion, must
-          not leave `aria-describedby` pointing at nothing. Wrapping, not
-          truncating: on a phone the whole line is the point, and an ellipsis
-          would eat the half that says how to type a newline. */}
-      {note ? (
-        <p
-          id={HINT_ID}
-          role={note.tone === "error" ? "alert" : "status"}
-          className={`mt-1 font-plex-mono text-[11px] leading-snug ${NOTE_TONE[note.tone]}`}
-        >
-          {note.text}
-        </p>
-      ) : (
-        <p
-          id={HINT_ID}
-          className="mt-1 font-plex-mono text-[11px] leading-snug text-fl-ink-3"
-        >
-          {hint}
-        </p>
-      )}
+      {/* One line under the field, and one element: the hint, or whatever the
+          composer has to say instead. It is a live region from first paint
+          rather than one that appears with its message — a region that arrives
+          already full is commonly not announced at all, which for a refused
+          completion would be the very dead end this is here to close (issue
+          #149). It also always carries the id the textarea is described by, so
+          neither a note nor a hint leaves `aria-describedby` pointing at
+          nothing. Wrapping, not truncating: on a phone the whole line is the
+          point, and an ellipsis would eat the half that says how to type a
+          newline. */}
+      <p
+        id={HINT_ID}
+        role="status"
+        className={`mt-1 font-plex-mono text-[11px] leading-snug ${
+          note ? NOTE_TONE[note.tone] : "text-fl-ink-3"
+        }`}
+      >
+        {note?.text ?? hint}
+      </p>
     </div>
   );
 }

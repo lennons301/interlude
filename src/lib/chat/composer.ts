@@ -152,20 +152,21 @@ export function composerState(input: {
   };
 }
 
-/** Why ending the session is not on offer, by what the agent is doing. None of
- * these is a failure — each one is the session having moved on. */
-const REFUSALS: Record<ComposerPhase, string | null> = {
+/** Why ending the session is not on offer, by what the agent is doing. Keyed
+ * over every phase but `idle` — the one phase completion *is* offered in — so a
+ * refusal without words cannot be written. None of these is a failure; each one
+ * is the session having moved on. */
+const REFUSALS: Record<Exclude<ComposerPhase, "idle">, string> = {
   waiting: "The agent hasn't started yet — there's nothing to end.",
   starting: "The agent is still starting up. You can end the session once it's idle.",
   working: "The agent started a turn. You can end the session once it's idle again.",
-  idle: null,
   blocked: "The agent is waiting on your answer — send it, then end the session.",
   closing: "This session is already wrapping up.",
   closed: "This session has already ended.",
 };
 
 /**
- * Why completion was refused, or null while it is on offer (issue #149).
+ * Why completion is not on offer, or null while it is (issue #149).
  *
  * The composer asks this again at the moment the owner confirms, rather than
  * trusting that the button was enabled when they pressed it: a turn can start
@@ -173,11 +174,12 @@ const REFUSALS: Record<ComposerPhase, string | null> = {
  * as the agent picks the next turn up is not a rare coincidence — it is the
  * normal end of one. Refusing then is right, and nothing bad happens. Refusing
  * *silently* is what leaves the owner pressing a control that does nothing, so
- * the reason is a value the composer can say out loud rather than a bare early
- * return.
+ * the reason is a value the composer can say out loud — under the field when a
+ * confirmation is refused, and on the disabled button the rest of the time —
+ * rather than a bare early return.
  */
 export function completionRefusal(state: ComposerState): string | null {
-  return state.canComplete ? null : REFUSALS[state.phase];
+  return state.phase === "idle" ? null : REFUSALS[state.phase];
 }
 
 /**
