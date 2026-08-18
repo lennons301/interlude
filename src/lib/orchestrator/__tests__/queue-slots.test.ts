@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { createTestDb } from "@/test/create-test-db";
 import * as schema from "@/db/schema";
 import { newId } from "@/lib/ulid";
+import { createOctokit } from "@/lib/github/client";
 
 /**
  * Slot accounting through the queue's own seam (issue #151): the 2026-08-18
@@ -11,10 +12,12 @@ import { newId } from "@/lib/ulid";
  * until a restart.
  *
  * The turn manager is stubbed at the two promises the queue drives (`startTask`
- * and `processQueuedMessages`) so a *hung* one can be simulated exactly as it
- * happened: the promise never settles, which is what the `.finally()` release
- * depended on. `isParked` and the local capacity provider stay real — they are
- * the other half of the count under test.
+ * and `processQueuedMessages`) because the hang has to be reproduced, and only
+ * a stub can hang on demand. The delivery stub hangs on a *real* GitHub request
+ * through the repo's own client — the post-turn `createDraftPr` that never
+ * returned — with the request bound set beyond the test's horizon, so what is
+ * under test is the slot, not the bound. `isParked` and the local capacity
+ * provider stay real: they are the other half of the count.
  */
 
 let testDb: ReturnType<typeof createTestDb>["db"];
@@ -45,7 +48,7 @@ vi.mock("../turn-manager", async (importOriginal) => {
     },
     processQueuedMessages: (taskId: string) => {
       turns.delivered.push(taskId);
-      return turns.hang ? new Promise<void>(() => {}) : Promise.resolve();
+      return turns.hang ? hungPostTurnGitHubCall() : Promise.resolve();
     },
     scanForDevServer: () => Promise.resolve(),
   };
@@ -67,6 +70,22 @@ vi.mock("../capacity", async (importOriginal) => {
 });
 
 type Queue = typeof import("../queue");
+
+/**
+ * What `runPostTurnCommitAndPush` does after a turn — open the task's draft PR —
+ * against a GitHub that never answers. A real client, so the promise that hangs
+ * is a real outbound call rather than a stand-in; the bound is set past the
+ * test's horizon so the call is still outstanding at every assertion.
+ */
+function hungPostTurnGitHubCall(): Promise<void> {
+  return createOctokit("installation-token", 10 * 60_000).rest.pulls.create({
+    owner: "lennons301",
+    repo: "moontide",
+    title: "Draft",
+    head: "agent/01M09TACWZ31M9KQ5KZQER8V6V",
+    base: "main",
+  }) as unknown as Promise<void>;
+}
 
 const POLL_MS = 2000;
 
@@ -129,6 +148,11 @@ describe("queue slot accounting", () => {
 
   beforeEach(async () => {
     testDb = createTestDb().db;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>(() => {}))
+    );
     turns.active.clear();
     turns.dispatched.length = 0;
     turns.delivered.length = 0;
@@ -141,9 +165,11 @@ describe("queue slot accounting", () => {
   afterEach(() => {
     queue.stopQueue();
     vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
-  it("dispatches a queued task after a hung delivery promise's task completes", async () => {
+  it("frees the slot when a hung post-turn GitHub call outlives its task", async () => {
     const projectId = seedProject();
     const chatting = seedTask(projectId, {
       status: "running",
@@ -159,13 +185,15 @@ describe("queue slot accounting", () => {
     queue.startQueue();
     await vi.advanceTimersByTimeAsync(POLL_MS);
 
-    // The follow-up was picked up for delivery, and its promise never settles —
-    // the post-turn `createDraftPr` that hung on 2026-08-18.
+    // The follow-up was picked up for delivery, and the draft-PR call it ends on
+    // never answers — so the promise driving that delivery never settles, and
+    // the bookkeeping it holds is never handed back by `.finally()`.
     expect(turns.delivered).toEqual([chatting]);
+    // One slot occupied, by the live container — not by the delivery.
     expect(queue.occupiedSlots()).toBe(1);
 
-    // The owner completes the session while that turn's promise is still in
-    // flight: the container goes, the task is terminal, the reservation stays.
+    // The owner completes the session while that call is still outstanding: the
+    // container goes and the task is terminal, so the box is genuinely idle.
     completeTask(chatting);
     expect(queue.occupiedSlots()).toBe(0);
 
@@ -198,5 +226,39 @@ describe("queue slot accounting", () => {
     await vi.advanceTimersByTimeAsync(POLL_MS);
 
     expect(turns.dispatched).toEqual([wedged, next]);
+  });
+
+  it("hands the slot from a pickup to the container it registers, and back when that parks", async () => {
+    const projectId = seedProject();
+    const pass = seedTask(projectId, { title: "Implement #151", kind: "implement" });
+
+    queue.startQueue();
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+
+    expect(turns.dispatched).toEqual([pass]);
+    expect(queue.occupiedSlots()).toBe(1);
+
+    // The container comes up: the entry is the occupant from here on, and the
+    // pickup that stood in for it must not be counted a second time — even
+    // though its promise is still running.
+    turns.active.set(pass, { container: {}, state: "setup", kind: "implement" });
+    testDb
+      .update(schema.tasks)
+      .set({ status: "running", containerStatus: "setup" })
+      .where(eq(schema.tasks.id, pass))
+      .run();
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(queue.occupiedSlots()).toBe(1);
+
+    // The pass ends its turn and parks awaiting review (#93): it runs no agent
+    // process, so the slot is free for the next ticket — which is only true if
+    // the pickup let go of its reservation when the container registered.
+    turns.active.set(pass, { container: {}, state: "idle", kind: "implement" });
+    expect(queue.occupiedSlots()).toBe(0);
+
+    const review = seedTask(projectId, { title: "Review PR #157", kind: "review" });
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+
+    expect(turns.dispatched).toEqual([pass, review]);
   });
 });

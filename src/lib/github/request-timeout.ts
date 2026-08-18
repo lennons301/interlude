@@ -16,6 +16,8 @@
  * body too, not just receiving the headers.
  */
 
+import { raceWithTimeout, TIMED_OUT } from "../timeout";
+
 /**
  * How long one GitHub request may take before it is aborted. Generous next to
  * GitHub's own latency (whole seconds are already an anomaly) and small next to
@@ -57,22 +59,19 @@ export function boundedFetch(
       ? AbortSignal.any([init.signal, controller.signal])
       : controller.signal;
 
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        const message = `GitHub request ${target} timed out after ${timeoutMs}ms`;
-        console.error(`[github] ${message} — aborting the request`);
-        controller.abort(new Error(message));
-        reject(new Error(message));
-      }, timeoutMs);
-      // Never a reason to hold the process open on its own.
-      timer.unref?.();
-    });
-
-    try {
-      return await Promise.race([fetchImpl(input, { ...init, signal }), deadline]);
-    } finally {
-      clearTimeout(timer);
+    const result = await raceWithTimeout(
+      fetchImpl(input, { ...init, signal }),
+      timeoutMs
+    );
+    if (result === TIMED_OUT) {
+      const message = `GitHub request ${target} timed out after ${timeoutMs}ms`;
+      console.error(`[github] ${message} — aborting the request`);
+      // Abandoning the request would leave its connection open until the peer
+      // gave up; aborting tears it down and, for a fetch that honours the
+      // signal, rejects the work we just walked away from.
+      controller.abort(new Error(message));
+      throw new Error(message);
     }
+    return result;
   };
 }

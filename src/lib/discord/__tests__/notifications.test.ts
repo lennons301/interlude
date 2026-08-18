@@ -22,14 +22,21 @@ const IDLE_TASK = {
   branch: "agent/01M09V20FC15BBT7JNSDPM9QXS",
 };
 
-/** A bot client whose REST calls never answer. `stalls` says which layer. */
-function stalledClient(stalls: "channel-fetch" | "send"): Client {
+/** A bot client whose REST calls never answer at the given layer — or answer
+ * promptly when nothing stalls. `sends` counts attempts, so the test can see
+ * whether a timed-out send was retried. */
+function stubClient(stalls: "channel-fetch" | "send" | "nothing") {
+  const sends: number[] = [];
   const channel = {
     isTextBased: () => true,
-    send: () =>
-      stalls === "send" ? new Promise(() => {}) : Promise.resolve({ id: "sent" }),
+    send: () => {
+      sends.push(sends.length);
+      return stalls === "send"
+        ? new Promise(() => {})
+        : Promise.resolve({ id: "sent" });
+    },
   };
-  return {
+  const client = {
     channels: {
       fetch: () =>
         stalls === "channel-fetch"
@@ -37,6 +44,7 @@ function stalledClient(stalls: "channel-fetch" | "send"): Client {
           : Promise.resolve(channel),
     },
   } as unknown as Client;
+  return { client, sends };
 }
 
 describe("Discord notifications are bounded", () => {
@@ -52,7 +60,7 @@ describe("Discord notifications are bounded", () => {
   });
 
   it("gives up on a channel lookup that never answers", async () => {
-    setBotClient(stalledClient("channel-fetch"));
+    setBotClient(stubClient("channel-fetch").client);
 
     const pending = notifyTaskIdle("channel-1", IDLE_TASK);
     await vi.advanceTimersByTimeAsync(DISCORD_REST_TIMEOUT_MS);
@@ -60,18 +68,21 @@ describe("Discord notifications are bounded", () => {
     await expect(pending).resolves.toBeNull();
   });
 
-  it("gives up on a send that never answers, retries included", async () => {
-    setBotClient(stalledClient("send"));
+  it("gives up on a send that never answers", async () => {
+    const { client, sends } = stubClient("send");
+    setBotClient(client);
 
     const pending = notifyTaskIdle("channel-1", IDLE_TASK);
-    // Three attempts, each bounded, with backoff between them.
-    await vi.advanceTimersByTimeAsync(DISCORD_REST_TIMEOUT_MS * 3 + 3_000);
+    await vi.advanceTimersByTimeAsync(DISCORD_REST_TIMEOUT_MS);
 
     await expect(pending).resolves.toBeNull();
+    // And does not try again: the abandoned attempt may still be delivered by
+    // the library underneath us, so a retry risks two embeds for one event.
+    expect(sends).toHaveLength(1);
   });
 
   it("leaves a prompt notification alone", async () => {
-    setBotClient(stalledClient("nothing" as "send"));
+    setBotClient(stubClient("nothing").client);
 
     await expect(notifyTaskIdle("channel-1", IDLE_TASK)).resolves.toBe("sent");
   });

@@ -1,5 +1,6 @@
 import { Client, EmbedBuilder, TextChannel, type Message } from "discord.js";
 import { DIGEST_TITLE_PREFIX, type DigestContent } from "../fleet/digest";
+import { raceWithTimeout, TIMED_OUT } from "../timeout";
 import {
   formatDuration,
   type OwedReviewStall,
@@ -31,50 +32,48 @@ export function getBotClient(): Client | null {
  * is one more way to wedge dispatch — the same discipline the Docker admission
  * probe got in #128.
  *
- * @discordjs/rest already aborts a single HTTP attempt after 15s, but nothing
- * above that is bounded: it waits out rate limits, retries, and `sendWithRetry`
- * retries again on top. This ceiling sits deliberately *above* the library's own
- * per-attempt abort, so when it fires the underlying attempt has already been
- * torn down — abandoning it cannot leave a duplicate embed in flight.
+ * A ceiling is needed because nothing above @discordjs/rest's own 15s
+ * per-attempt abort is bounded: it retries that attempt, sleeps out a 429's
+ * `Retry-After`, and `sendWithRetry` retries again on top. It is generous enough
+ * that a healthy send has finished several times over, and no larger, because
+ * the trade-off below gets worse the longer we wait.
  */
 export const DISCORD_REST_TIMEOUT_MS = 30_000;
 
-/** Sentinel the timeout resolves with, distinct from any value a REST call can
- * return, so the race can tell "timed out" from a genuine answer. */
-const REST_TIMED_OUT = Symbol("discord-rest-timeout");
+/**
+ * A REST call abandoned at the ceiling, distinct from a call that failed. The
+ * distinction matters: the abandoned attempt may yet be delivered by the library
+ * underneath us, so this is the one failure we must not retry — a retry is how
+ * one notification becomes two embeds.
+ */
+class DiscordRestTimeout extends Error {}
 
 /**
- * Bound one Discord REST call. Throws when the bound is reached — every caller
- * here either logs and moves on (the notify* helpers) or owns a retry (the
- * digest scheduler), and both are better served by a failure than by waiting
- * forever.
+ * Bound one Discord REST call. Fails closed when the bound is reached — every
+ * caller here either logs and moves on (the notify* helpers) or owns a retry
+ * (the digest scheduler), and both are better served by a failure than by
+ * waiting forever.
  */
 async function bounded<T>(what: string, call: Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  // Keep a losing (timed-out) call's eventual rejection from surfacing as an
-  // unhandled rejection once nothing awaits the race any more.
-  call.catch(() => {});
-  try {
-    const timeout = new Promise<typeof REST_TIMED_OUT>((resolve) => {
-      timer = setTimeout(() => resolve(REST_TIMED_OUT), DISCORD_REST_TIMEOUT_MS);
-    });
-    const result = await Promise.race([call, timeout]);
-    if (result === REST_TIMED_OUT) {
-      throw new Error(
-        `Discord ${what} did not answer within ${DISCORD_REST_TIMEOUT_MS}ms`
-      );
-    }
-    return result;
-  } finally {
-    clearTimeout(timer);
+  const result = await raceWithTimeout(call, DISCORD_REST_TIMEOUT_MS);
+  if (result === TIMED_OUT) {
+    throw new DiscordRestTimeout(
+      `Discord ${what} did not answer within ${DISCORD_REST_TIMEOUT_MS}ms`
+    );
   }
+  return result;
 }
 
 /**
  * Send an embed with a few retries + backoff, so a transient network blip
  * (e.g. flaky connection) doesn't silently drop a notification. Throws if all
  * attempts fail — callers already wrap sends in try/catch (fire-and-forget).
- * Each attempt is bounded, so the loop as a whole is too.
+ *
+ * Each attempt is bounded, and reaching that bound ends the whole send rather
+ * than starting another attempt (issue #151): an attempt abandoned at the
+ * ceiling may still be delivered by the library underneath us, so retrying it
+ * risks two embeds where one was meant. A dropped notification is the better
+ * failure — the dashboard carries everything Discord pushes.
  */
 async function sendWithRetry(
   channel: TextChannel,
@@ -87,6 +86,7 @@ async function sendWithRetry(
       return await bounded("send", channel.send({ embeds: [embed] }));
     } catch (err) {
       lastErr = err;
+      if (err instanceof DiscordRestTimeout) break;
       if (i < attempts - 1) {
         await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
       }

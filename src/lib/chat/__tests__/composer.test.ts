@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { isTerminalTaskStatus } from "@/lib/tasks/status";
 import {
   completionRefusal,
   composerState,
-  isTerminalTaskStatus,
   queuedCount,
   resolvePrimary,
   type ComposerPhase,
@@ -143,7 +143,7 @@ describe("completionRefusal — why ending the session isn't on offer", () => {
   });
 });
 
-describe("isTerminalTaskStatus", () => {
+describe("isTerminalTaskStatus (src/lib/tasks/status.ts)", () => {
   it("agrees with the phase the state machine reports", () => {
     // The live view gates the whole composer on this predicate, so the two must
     // not drift: everything terminal is `closed`, and nothing else is.

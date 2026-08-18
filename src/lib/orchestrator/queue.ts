@@ -3,9 +3,9 @@ import { tasks, messages } from "@/db/schema";
 import { eq, and, isNull, asc, sql } from "drizzle-orm";
 import { startTask } from "./turn-manager";
 import { getActiveTasks, isParked, processQueuedMessages, scanForDevServer } from "./turn-manager";
-// The one predicate for "this task has stopped for good", shared with the live
-// view rather than restated here.
-import { isTerminalTaskStatus } from "../chat/composer";
+// The one predicate for "this task has stopped for good", shared with the
+// composer and the live view rather than restated here.
+import { isTerminalTaskStatus } from "../tasks/status";
 import {
   createLocalCapacityProvider,
   getCapacity,
@@ -219,6 +219,13 @@ export function startQueue(): void {
       for (const [taskId, entry] of activeTasks) {
         if (entry.state !== "idle") continue;
         if (inFlightTasks.has(taskId)) continue;
+        // A task that has stopped is never a delivery target, whatever its
+        // entry still says. Terminal paths delete the entry as they go, but a
+        // status written without one (a reaped review, a boot sweep) would
+        // otherwise leave a stranded entry being drained every poll — which
+        // starts and stops a parked container for a turn that breaks
+        // immediately (issue #151).
+        if (taskIsFinished(taskId)) continue;
 
         // Check for undelivered user messages
         const queued = db

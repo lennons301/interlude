@@ -11,6 +11,7 @@
 
 import { getDocker } from "../docker/client";
 import { getConfig } from "../config";
+import { raceWithTimeout, TIMED_OUT } from "../timeout";
 
 const MiB = 1024 * 1024;
 
@@ -110,10 +111,6 @@ export function wouldOvercommitMemory(input: {
  */
 export const ADMISSION_PROBE_TIMEOUT_MS = 5000;
 
-/** Sentinel the timeout resolves with, distinct from any value the probe can
- * return, so the race can tell "timed out" from a genuine `{ ok }` verdict. */
-const PROBE_TIMED_OUT = Symbol("memory-admission-probe-timeout");
-
 /**
  * Gather the live numbers from the daemon and decide admission. Split out from
  * `checkMemoryAdmission` so the timeout wrapper stays thin and the Docker calls
@@ -167,17 +164,9 @@ export async function checkMemoryAdmission(
   probe: () => Promise<{ ok: boolean; reason?: string }> = probeMemoryAdmission,
   timeoutMs: number = ADMISSION_PROBE_TIMEOUT_MS
 ): Promise<{ ok: boolean; reason?: string }> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const probePromise = probe();
-    // Keep a losing (timed-out) probe's eventual rejection from surfacing as an
-    // unhandled rejection once nothing awaits the race any more.
-    probePromise.catch(() => {});
-    const timeout = new Promise<typeof PROBE_TIMED_OUT>((resolve) => {
-      timer = setTimeout(() => resolve(PROBE_TIMED_OUT), timeoutMs);
-    });
-    const result = await Promise.race([probePromise, timeout]);
-    if (result === PROBE_TIMED_OUT) {
+    const result = await raceWithTimeout(probe(), timeoutMs);
+    if (result === TIMED_OUT) {
       console.error(
         `[capacity] memory-admission probe timed out after ${timeoutMs}ms, allowing start`
       );
@@ -187,8 +176,6 @@ export async function checkMemoryAdmission(
   } catch (err) {
     console.error("[capacity] memory-admission probe failed, allowing start:", err);
     return { ok: true };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
