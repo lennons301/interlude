@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { FleetView, NeedsYouItem } from "@/lib/fleet/fleet-view";
-import { Chip, Eyebrow } from "./fleet-bits";
+import { Chip, Eyebrow, PAUSE_DOT } from "./fleet-bits";
 
 const CAUSE_LABEL: Record<NeedsYouItem["cause"], string> = {
   blocked: "blocked question",
@@ -30,7 +30,15 @@ const CAUSE_TONE: Record<NeedsYouItem["cause"], "amber" | "red"> = {
   "queue-stale": "red",
 };
 
-/** Quiet confirmation sub-line: "No active runs · queue empty · autonomy on" */
+/**
+ * Quiet confirmation sub-line: "No active runs · queue empty · autonomy on".
+ *
+ * Its last part is the one place this panel could contradict the dot above it.
+ * `autonomyOn` is only "some project is armed", so under a fleet-wide hold it
+ * would read "autonomy on" while nothing can be claimed at all — the exact
+ * blindness issue #148 closes. When something holds pickup it says so instead,
+ * in the dot's own word (off / held / paused), off the same map.
+ */
 function quietSubline(view: FleetView): string {
   const parts = [
     view.running.length === 0
@@ -44,7 +52,13 @@ function quietSubline(view: FleetView): string {
         : `${view.queue.readyForAgent} ticket${view.queue.readyForAgent === 1 ? "" : "s"} still ready-for-agent`
     );
   }
-  parts.push(view.autonomyOn ? "autonomy on" : "autonomy off");
+  parts.push(
+    view.pickupPaused
+      ? `pickup ${PAUSE_DOT[view.pickupPaused.reason]}`
+      : view.autonomyOn
+        ? "autonomy on"
+        : "autonomy off"
+  );
   return parts.join(" · ");
 }
 

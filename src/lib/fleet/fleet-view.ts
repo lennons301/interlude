@@ -325,10 +325,23 @@ export function startOfLocalDay(now: Date): Date {
  */
 function projectHold(project: FleetProjectRow): ProjectPickupHold | null {
   if (!project.autonomyEnabled) return "autonomy-off";
-  if (project.preflightStatus === "passing") return null;
-  return project.preflightStatus === "failing"
-    ? "preflight-failing"
-    : "preflight-unchecked";
+  switch (project.preflightStatus) {
+    case "passing":
+      return null;
+    case "failing":
+      return "preflight-failing";
+    case null:
+      return "preflight-unchecked";
+    default: {
+      // Fail closed twice over, as the pause reasons do: the `never` fails the
+      // build when preflightStatus grows a state (the `void` only spends the
+      // binding), and until someone teaches this function, a state it doesn't
+      // know holds pickup rather than quietly clearing it.
+      const unhandled: never = project.preflightStatus;
+      void unhandled;
+      return "preflight-unchecked";
+    }
+  }
 }
 
 /** "owner/repo#34" -> "#34"; null when the ref has no issue number */
@@ -875,12 +888,12 @@ export function buildFleetView(rows: FleetRows): FleetView {
   // since-deleted project counts nowhere.
   const backlog = rows.backlogByProject
     ? Object.entries(rows.backlogByProject)
-        .filter(([projectId]) => projectById.has(projectId))
-        .map(([projectId, count]) => ({
-          projectName: projectName(projectId),
-          count,
-          hold: projectHold(projectById.get(projectId)!),
-        }))
+        .flatMap(([projectId, count]) => {
+          const project = projectById.get(projectId);
+          return project
+            ? [{ projectName: project.name, count, hold: projectHold(project) }]
+            : [];
+        })
         .sort(
           (a, b) =>
             b.count - a.count || a.projectName.localeCompare(b.projectName)

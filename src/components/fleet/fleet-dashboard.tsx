@@ -1,31 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { FleetView, PickupPause } from "@/lib/fleet/fleet-view";
+import type { FleetView } from "@/lib/fleet/fleet-view";
 import { AppShell } from "@/components/app-shell";
-import { LiveDot, TONES, type LiveDotState } from "./fleet-bits";
+import {
+  LiveDot,
+  PAUSE_DOT,
+  PAUSE_TONE,
+  TONES,
+  type LiveDotState,
+} from "./fleet-bits";
 import { PulseStrip } from "./pulse-strip";
 import { NeedsYou } from "./needs-you";
 import { RunningList } from "./running-list";
 import { RecentLedger } from "./recent-ledger";
-
-// How a fleet-wide hold on pickup reads (issues #118, #148). A deliberate
-// operator hold is amber and says "held"; the boot master is amber too but says
-// "off", because it is not the switch and is not lifted like one; a breached
-// spend ceiling is red and says "paused" — the estate's severity vocabulary,
-// and three states that are not the same news. Both maps are keyed by the
-// reason union, so a fourth hold fails the build rather than rendering green.
-const PAUSE_DOT: Record<PickupPause["reason"], LiveDotState> = {
-  "autonomy-off-at-boot": "off",
-  "kill-switch": "held",
-  "daily-cap": "paused",
-};
-
-const PAUSE_TONE: Record<PickupPause["reason"], keyof typeof TONES> = {
-  "autonomy-off-at-boot": "amber",
-  "kill-switch": "amber",
-  "daily-cap": "red",
-};
 
 function useFleetStream() {
   const [view, setView] = useState<FleetView | null>(null);

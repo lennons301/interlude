@@ -55,7 +55,7 @@ passes, so a half-configured repo can never be run against by accident. The
 dashboard and the digest say so **per project**, not fleet-wide (issue #148):
 the repo gets a *needs you* card naming what's missing and stating that none of
 its tickets are being picked up, and if it has armed tickets waiting, its line in
-the digest's Backlog reads `moontide: 3 — not picked up — preflight is failing`.
+the digest's Backlog reads `moontide: 3 — not picked up: preflight is failing`.
 One repo failing preflight is not a held fleet, so it is never reported as one.
 
 Preflight is recomputed (a) immediately when you enable autonomy on a project,
@@ -176,9 +176,9 @@ chat/preview is never affected.
   **Confirm it took** from the row itself, not from the log: the dashboard's
   live dot turns amber and reads `held` (`paused` is the daily cap, `off` the
   boot master — deliberately different words for deliberately different states,
-  because they are lifted in three different ways), with a *Kill
-  switch engaged* banner above the panels, and `GET /api/settings/autonomy`
-  answers the same row headless. The sweep's `Pickup paused (kill-switch)` line
+  because they are lifted in three different ways), with a *Kill switch
+  engaged* banner above the panels, and `GET /api/settings/autonomy` answers
+  the same row headless. The sweep's `Pickup paused (kill-switch)` line
   is **not** the confirmation: the hold is evaluated only on a tick that found
   an eligible ticket it would otherwise have claimed, so engaging the switch
   over an empty queue logs nothing at all — and if the daily cap is breached

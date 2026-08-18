@@ -4,6 +4,8 @@
  * with a tick at its ceiling. Color is strictly semantic.
  */
 
+import type { PickupPause } from "@/lib/fleet/fleet-view";
+
 /** The system's one focus affordance: a hairline ring in the quietest ink, so
  * keyboard users get a visible target without a colour that means something. */
 export const FOCUS_RING =
@@ -175,6 +177,31 @@ const DOT_COLOR: Record<LiveDotState, string> = {
   held: "bg-fl-amber",
   paused: "bg-fl-red",
   offline: "bg-fl-ink-3",
+};
+
+/**
+ * How a fleet-wide hold on pickup reads (issues #118, #148) — one map, here,
+ * because more than one component names the hold and they must not drift: the
+ * dot and banner at the top of the dashboard, and the quiet sub-line under
+ * "Nothing needs you", which would otherwise still report the fleet as armed.
+ *
+ * A deliberate operator hold is amber and says "held"; the boot master is amber
+ * too but says "off", because it is not the switch and is not lifted like one;
+ * a breached spend ceiling is red and says "paused" — the estate's severity
+ * vocabulary, and three states that are not the same news. Both maps are keyed
+ * by the reason union, so a fourth hold fails the build rather than rendering
+ * as though nothing were wrong.
+ */
+export const PAUSE_DOT: Record<PickupPause["reason"], LiveDotState> = {
+  "autonomy-off-at-boot": "off",
+  "kill-switch": "held",
+  "daily-cap": "paused",
+};
+
+export const PAUSE_TONE: Record<PickupPause["reason"], keyof typeof TONES> = {
+  "autonomy-off-at-boot": "amber",
+  "kill-switch": "amber",
+  "daily-cap": "red",
 };
 
 export function LiveDot({ state }: { state: LiveDotState }) {
