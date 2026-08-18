@@ -1,15 +1,26 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
-import { projects, SESSION_SKILLS, tasks, type SessionSkill } from "@/db/schema";
+import { SESSION_SKILLS, tasks, type SessionSkill } from "@/db/schema";
 import { newId } from "@/lib/ulid";
-import { TASK_LIST_LIMIT } from "@/lib/tasks/organize-tasks";
-import { and, desc, eq } from "drizzle-orm";
+import {
+  TASK_CHIPS,
+  TASK_LIST_LIMIT,
+  type TaskChip,
+  type TaskFilter,
+} from "@/lib/tasks/organize-tasks";
+import { readTaskList } from "@/lib/tasks/task-list-query";
 
 /** The column's own enum, so a status added to the schema is accepted here
  * without a second list to remember. */
 const TASK_STATUSES = tasks.status.enumValues;
 
 type TaskStatus = (typeof TASK_STATUSES)[number];
+
+/** The `kind` parameter's vocabulary is the archive's own filter type — a chip,
+ * or `all` for no narrowing — so `/tasks` can hand over whatever it holds in
+ * state without translating it, and an unknown value is a 400 rather than a
+ * silently unfiltered list. */
+const KIND_FILTERS: readonly TaskFilter[] = ["all", ...TASK_CHIPS];
 
 /** `limit` raises the archive's default bound, up to MAX_LIMIT, for a
  * deliberate caller. Anything absent, unparseable or non-positive falls back
@@ -24,12 +35,10 @@ export function parseLimit(raw: string | null): number {
 }
 
 /**
- * The tasks-list read path (issue #120). It projects only the columns a list
- * row renders — deliberately *not* `select().from(tasks)`, which shipped every
- * task's `description` (the full autonomous implement prompt): on prod that was
- * 1035 KB of a 1219 KB response for 44 KB of rendered fields, unbounded and
- * growing with every task. The project name is joined in so a card can name its
- * project without a second round trip per row.
+ * The tasks-list read path (issues #120, #142). The query, the projection it
+ * bounds and the chip filter all live in `readTaskList`; what is left here is
+ * the part that is genuinely HTTP — reading parameters, refusing the ones that
+ * aren't in a published vocabulary, and answering JSON.
  */
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -37,6 +46,7 @@ export async function GET(request: Request) {
   // building `?projectId=${selected ?? ""}` must not be answered with nothing.
   const status = searchParams.get("status") || null;
   const projectId = searchParams.get("projectId") || null;
+  const kind = searchParams.get("kind") || null;
   const limit = parseLimit(searchParams.get("limit"));
 
   if (status !== null && !TASK_STATUSES.includes(status as TaskStatus)) {
@@ -45,37 +55,22 @@ export async function GET(request: Request) {
       { status: 400 }
     );
   }
+  if (kind !== null && !KIND_FILTERS.includes(kind as TaskFilter)) {
+    return NextResponse.json(
+      { error: `kind must be one of: ${KIND_FILTERS.join(", ")}` },
+      { status: 400 }
+    );
+  }
 
-  // One `where`, not two: drizzle's builder replaces the previous predicate
-  // rather than anding them, so status + projectId silently dropped the status.
-  const filters = [
-    status !== null ? eq(tasks.status, status as TaskStatus) : undefined,
-    projectId !== null ? eq(tasks.projectId, projectId) : undefined,
-  ].filter((f) => f !== undefined);
-
-  const rows = db
-    .select({
-      id: tasks.id,
-      projectId: tasks.projectId,
-      projectName: projects.name,
-      title: tasks.title,
-      status: tasks.status,
-      kind: tasks.kind,
-      sessionSkill: tasks.sessionSkill,
-      runId: tasks.runId,
-      githubIssue: tasks.githubIssue,
-      sessionIssue: tasks.sessionIssue,
-      costUsd: tasks.totalCostUsd,
-      updatedAt: tasks.updatedAt,
+  return NextResponse.json(
+    readTaskList({
+      status: status as TaskStatus | null,
+      projectId,
+      // `all` is the vocabulary's word for the whole archive, not a chip.
+      kind: kind === null || kind === "all" ? null : (kind as TaskChip),
+      limit,
     })
-    .from(tasks)
-    .leftJoin(projects, eq(tasks.projectId, projects.id))
-    .where(filters.length > 0 ? and(...filters) : undefined)
-    .orderBy(desc(tasks.updatedAt))
-    .limit(limit)
-    .all();
-
-  return NextResponse.json(rows);
+  );
 }
 
 export async function POST(request: Request) {

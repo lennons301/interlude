@@ -13,6 +13,7 @@
  */
 
 import type { tasks } from "@/db/schema";
+import type { TaskListQueryRow } from "./task-list-query";
 
 type TaskRow = typeof tasks.$inferSelect;
 
@@ -25,27 +26,19 @@ export type SessionSkill = NonNullable<TaskRow["sessionSkill"]>;
  * that applies it and the list that says when it is showing a capped view. */
 export const TASK_LIST_LIMIT = 200;
 
-/** One row of the list, exactly as `GET /api/tasks` projects it — deliberately
- * not the whole task: the list never renders `description` (the full implement
- * prompt), and shipping it made the archive a megabyte of dead weight. */
-export interface TaskListRow {
-  id: string;
-  projectId: string;
-  /** Null only if the project row went missing; the card renders a dash. */
-  projectName: string | null;
-  title: string;
-  status: TaskStatus;
-  kind: TaskKind;
-  sessionSkill: SessionSkill | null;
-  runId: string | null;
-  /** The ticket a run is working (owner/repo#n); null for unanchored work. */
-  githubIssue: string | null;
-  /** The issue a generation session was anchored to (owner/repo#n). */
-  sessionIssue: string | null;
-  costUsd: number;
-  /** ISO-8601, as JSON carries it. */
+/**
+ * One row of the list, *derived* from the projection `GET /api/tasks` selects
+ * (issue #142) rather than restated here — two hand-written column lists that
+ * have to agree is exactly how a rename type-checks on both sides and ships a
+ * card with a blank field. The type-only import keeps the query's drizzle
+ * runtime out of the browser bundle that imports this module.
+ *
+ * `updatedAt` is the one field that legitimately differs from the query: a Date
+ * in SQLite, an ISO-8601 string once JSON has carried it here.
+ */
+export type TaskListRow = Omit<TaskListQueryRow, "updatedAt"> & {
   updatedAt: string;
-}
+};
 
 /** The ticket a card names, as the dashboard's running cards do — the run's
  * ticket, or the issue a session was anchored to. Rendered bare (`#34`): the
@@ -106,6 +99,45 @@ export function taskChip(row: TaskListRow): TaskChip {
   }
   return KIND_CHIP[row.kind];
 }
+
+/** One `(kind, skill)` shape a chip covers. `sessionSkills: null` means the
+ * kind is enough — `taskChip` doesn't read the skill column for an unattended
+ * pass — and a `null` *inside* the list means "no skill", which is what makes an
+ * ordinary chat task distinguishable from a generation session. */
+export interface ChipColumns {
+  kind: TaskKind;
+  sessionSkills: (SessionSkill | null)[] | null;
+}
+
+/**
+ * What each chip means in column terms, so the route can narrow *before* the
+ * row bound (issue #142) and still return exactly the rows `taskChip` would
+ * give that chip. Two entries are the interesting ones: `chat` is the absence of
+ * a skill, and `triage` is genuinely two shapes — an unattended pass and a
+ * human-driven session — because it is one kind of work whichever drove it.
+ *
+ * This is a second statement of `taskChip`, which is a real risk, so the route's
+ * tests (`src/app/api/__tests__/task-list-filter.test.ts`) run the generated SQL
+ * against every `(kind, skill)` pair the schema allows and compare it with
+ * `taskChip` row by row, rather than trusting the reading. `Record<TaskChip, …>` keeps it exhaustive: a chip
+ * added to the vocabulary fails the type check here until it can be queried.
+ */
+export const CHIP_COLUMNS: Record<TaskChip, ChipColumns[]> = {
+  chat: [{ kind: "interactive", sessionSkills: [null] }],
+  grill: [
+    { kind: "interactive", sessionSkills: ["grill-me", "grill-with-docs"] },
+  ],
+  spec: [{ kind: "interactive", sessionSkills: ["to-spec"] }],
+  tickets: [{ kind: "interactive", sessionSkills: ["to-tickets"] }],
+  wayfinder: [{ kind: "interactive", sessionSkills: ["wayfinder"] }],
+  implement: [{ kind: "implement", sessionSkills: null }],
+  review: [{ kind: "review", sessionSkills: null }],
+  repair: [{ kind: "repair", sessionSkills: null }],
+  triage: [
+    { kind: "interactive", sessionSkills: ["triage"] },
+    { kind: "triage", sessionSkills: null },
+  ],
+};
 
 /** The archive's split: a session is the owner at the keyboard — `interactive`
  * and owning no run. Anything a run owns is loop bookkeeping, whatever its
