@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 import { REGISTERED_LANGUAGES, renderMarkdown } from "../markdown";
 
 describe("renderMarkdown — GFM", () => {
@@ -95,7 +96,10 @@ describe("renderMarkdown — code", () => {
     yaml: "a: 1",
   };
 
-  it("covers every grammar the pipeline registers", () => {
+  // The `Record` type above says this too, but nothing that runs typechecks
+  // test files — `pnpm build` does not, and `tsc --noEmit` is already red on
+  // main — so the coverage guard has to be an assertion to be a guard at all.
+  it("has a snippet for every grammar the pipeline registers", () => {
     expect(Object.keys(snippets).sort()).toEqual([...REGISTERED_LANGUAGES].sort());
   });
 
@@ -103,7 +107,9 @@ describe("renderMarkdown — code", () => {
     it(`runs the ${language} grammar`, () => {
       const html = renderMarkdown(`\`\`\`${language}\n${snippets[language]}\n\`\`\``);
 
-      expect(html).toContain(`class="hljs language-${language}"`);
+      expect(html).toMatch(new RegExp(`class="[^"]*language-${language}\\b`));
+      // The load-bearing one: `hljs` is added before the grammar is tried, so
+      // only a token span proves the grammar actually ran.
       expect(html).toMatch(/<span class="hljs-/);
     });
   }
@@ -226,23 +232,28 @@ describe("self-hosted pipeline", () => {
    * a runtime-only failure with no compile-time signal (issue #150), so the
    * invariant is asserted where it is actually recorded — the lockfile.
    */
-  it("resolves exactly one highlight.js core", () => {
-    const lock = readFileSync(
-      path.join(process.cwd(), "pnpm-lock.yaml"),
-      "utf8"
+  it("resolves exactly one highlight.js core, the one lowlight resolves", () => {
+    const lock = parseYaml(
+      readFileSync(path.join(process.cwd(), "pnpm-lock.yaml"), "utf8")
+    ) as {
+      importers: Record<string, { dependencies: Record<string, { version: string }> }>;
+      packages: Record<string, unknown>;
+      snapshots: Record<string, { dependencies?: Record<string, string> }>;
+    };
+
+    const ours = lock.importers["."].dependencies["highlight.js"].version;
+    const lowlight = Object.entries(lock.snapshots).find(([id]) =>
+      id.startsWith("lowlight@")
     );
-    const cores = new Set(
-      [
-        // Package entries: `  highlight.js@11.11.2:`
-        ...lock.matchAll(/^ {2}highlight\.js@([^:\s]+):/gm),
-        // Resolved edges, i.e. lowlight's: `      highlight.js: 11.11.2`
-        ...lock.matchAll(/^\s+highlight\.js: (\S+)$/gm),
-      ].map((match) => match[1])
+    const installed = Object.keys(lock.packages).filter((id) =>
+      id.startsWith("highlight.js@")
     );
 
-    // One entry, so: the lockfile does mention it (a drifted regex fails here)
-    // and every dependant resolves the same core.
-    expect([...cores]).toHaveLength(1);
+    // Asserting both edges *and* the installed set means a lockfile that stopped
+    // recording one of them fails here rather than passing on an empty read.
+    expect(ours).toMatch(/^\d+\./);
+    expect(lowlight?.[1].dependencies?.["highlight.js"]).toBe(ours);
+    expect(installed).toEqual([`highlight.js@${ours}`]);
   });
 
   it("the stylesheet pulls nothing from a CDN", () => {
