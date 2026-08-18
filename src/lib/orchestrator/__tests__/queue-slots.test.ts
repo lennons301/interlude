@@ -174,4 +174,29 @@ describe("queue slot accounting", () => {
 
     expect(turns.dispatched).toEqual([next]);
   });
+
+  it("dispatches a queued task after a hung pickup's task is cancelled", async () => {
+    const projectId = seedProject();
+    const wedged = seedTask(projectId, { title: "The wedged pickup" });
+
+    queue.startQueue();
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+
+    // Picked up, and provisioning hung before the container ever registered —
+    // so this reservation does stand in for a slot while the task is live.
+    expect(turns.dispatched).toEqual([wedged]);
+    expect(queue.occupiedSlots()).toBe(1);
+
+    testDb
+      .update(schema.tasks)
+      .set({ status: "cancelled", containerStatus: null })
+      .where(eq(schema.tasks.id, wedged))
+      .run();
+    expect(queue.occupiedSlots()).toBe(0);
+
+    const next = seedTask(projectId, { title: "The next task" });
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+
+    expect(turns.dispatched).toEqual([wedged, next]);
+  });
 });
