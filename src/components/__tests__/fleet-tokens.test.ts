@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { FOCUS_RING } from "@/components/fleet/fleet-bits";
@@ -16,10 +16,26 @@ import { FOCUS_RING } from "@/components/fleet/fleet-bits";
  * actually agree; the "keep in sync" comment above them is now executable.
  */
 
-const CSS = readFileSync(
-  path.join(process.cwd(), "src/app/globals.css"),
-  "utf8"
-);
+function read(file: string): string {
+  return readFileSync(path.join(process.cwd(), file), "utf8");
+}
+
+const CSS = read("src/app/globals.css");
+
+/** Every component in the app, as `[path, source]`. */
+function componentSources(): [string, string][] {
+  const root = path.join(process.cwd(), "src/components");
+  const walk = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return entry.name === "__tests__" ? [] : walk(full);
+      return entry.name.endsWith(".tsx") ? [full] : [];
+    });
+  return walk(root).map((full) => [
+    path.relative(process.cwd(), full),
+    readFileSync(full, "utf8"),
+  ]);
+}
 
 /** The custom properties declared in the block opened by `selector`. */
 function tokens(selector: string): Record<string, string> {
@@ -90,11 +106,20 @@ describe("fleet palette", () => {
   });
 
   it("draws the cancelled status dot in the mark too", () => {
-    const source = readFileSync(
-      path.join(process.cwd(), "src/components/task-chat.tsx"),
-      "utf8"
+    expect(read("src/components/task-chat.tsx")).toContain(
+      'cancelled: "bg-fl-mark"'
+    );
+  });
+
+  it("paints no background in the quietest ink, anywhere", () => {
+    // A background is never text, so every one of them owes the 3:1 floor —
+    // which makes this the general form of the finding, rather than a list of
+    // the dots that happened to be noticed. `text-fl-ink-3` is untouched: ink-3
+    // is still the quiet *ink*.
+    const offenders = componentSources().filter(([, source]) =>
+      source.includes("bg-fl-ink-3")
     );
 
-    expect(source).toContain('cancelled: "bg-fl-mark"');
+    expect(offenders.map(([file]) => file)).toEqual([]);
   });
 });

@@ -146,13 +146,17 @@ export function ControlButton({
   );
 }
 
-/** The system's one text link: cool ink under a hairline underline that firms up
- * on hover. The atom owns where the link goes as well as how it reads — an
- * internal href routes through `Link`, anything else opens in a new tab — so a
- * caller can't ship an external link without `rel`, or a link without a focus
- * ring, which is how the three hand-written copies of this string differed.
- * `size` is the only variant: 12px on the dashboard's cards, 11px in the denser
- * chat header. The words are the caller's, arrow and all. */
+/** The standing-underline text link: cool ink under a hairline that firms up on
+ * hover, for a reference you are meant to see is a reference (a ticket, a PR, a
+ * "needs you" action). The atom owns where the link goes as well as how it reads
+ * — an internal href routes through `Link`, anything else opens in a new tab —
+ * so its callers can't ship an external link without `rel` or one without a
+ * focus ring, which is how the three hand-written copies of this string
+ * differed. `size` is the only variant: 12px on the dashboard's cards, 11px in
+ * the denser chat header. The words are the caller's, arrow and all.
+ *
+ * Not the app's only link idiom: quiet navigation (`+ new task`, the ledger's
+ * rows) underlines on hover instead, and stays as it is. */
 export function ActionLink({
   href,
   size = "md",
@@ -212,7 +216,8 @@ const DOT_COLOR: Record<LiveDotState, string> = {
   live: "bg-fl-green",
   held: "bg-fl-amber",
   paused: "bg-fl-red",
-  offline: "bg-fl-ink-3",
+  // The mark, not ink-3: a dot is not text (issue #142).
+  offline: "bg-fl-mark",
 };
 
 export function LiveDot({ state }: { state: LiveDotState }) {

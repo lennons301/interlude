@@ -10,12 +10,15 @@
 # encode matches text and JSON content types and picks the best encoding the
 # client offers.
 #
-# Safe for the app's streaming, which is the thing to check before compressing
-# a reverse proxy: caddy's encoder writes the header immediately for a
-# `text/event-stream` response (caddy #6293) so the SSE transcript is never held
-# back, it only ever compresses once a body write exceeds `minimum_length`
-# (512 bytes, never buffering to reach it), and a 101 upgrade — the preview
-# pane's websockets — is passed through untouched.
+# Safe for the app's own streaming, which is the thing to check before
+# compressing a reverse proxy: caddy's encoder writes the header immediately for
+# a `text/event-stream` response (caddy #6293), so the SSE transcript is never
+# held back, and it only compresses once a body write exceeds `minimum_length`
+# (512 bytes, never buffering to reach it).
+#
+# Only this block. The wildcard below proxies agent containers' dev servers —
+# HMR, websockets, whatever the agent happens to be running — and compressing
+# that was not asked for and buys nothing the owner is waiting on.
 {$DOMAIN:localhost} {
     encode zstd gzip
     reverse_proxy app:3000
@@ -25,6 +28,5 @@
     tls {
         on_demand
     }
-    encode zstd gzip
     reverse_proxy app:3000
 }
