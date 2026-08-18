@@ -949,6 +949,7 @@ describe("buildFleetView — needs you", () => {
             },
           ],
           pickupWedged: {
+            cause: "dispatch" as const,
             detail: "1 slot free but pickup is paused (no-slots)",
             wedgedForMs: 4 * 60_000,
             remedy: "Check the orchestrator.",
@@ -1039,6 +1040,7 @@ describe("buildFleetView — fleet health (#126)", () => {
         fleetHealth: {
           owedReviewStalls: [],
           pickupWedged: {
+            cause: "dispatch" as const,
             detail: '1 slot free but "review: o/r#5" has not dispatched',
             wedgedForMs: 5 * 60_000,
             remedy: "Check the orchestrator (a hung Docker daemon).",
@@ -1069,6 +1071,7 @@ describe("buildFleetView — fleet health (#126)", () => {
         fleetHealth: {
           owedReviewStalls: [],
           pickupWedged: {
+            cause: "phantom-slot" as const,
             detail: "occupancy says 1 slot busy but the daemon reports 0 agent containers live",
             wedgedForMs: 12 * 60_000,
             remedy:

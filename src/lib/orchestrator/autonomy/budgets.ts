@@ -136,11 +136,16 @@ export const DEFAULT_PICKUP_WEDGED_MS = 3 * 60_000;
 export const DEFAULT_QUEUE_HEARTBEAT_STALE_MS = 2 * 60_000;
 /**
  * Occupancy uncorroborated by real agent containers for this long is a phantom
- * slot (issue #152). Longer than the pickup debounce on purpose: a task that
- * has reserved its slot but not yet created its container is legitimately
- * uncorroborated for the whole of provisioning — which includes the cold-image
- * build inside `createWorkspaceContainer` — so the window must clear the
- * slowest honest start, not the fastest. Ten minutes does, and still turns the
- * ~1.5h invisible wedge of #151 into a card within minutes.
+ * slot (issue #152). Far longer than the pickup debounce on purpose, and set by
+ * the worst *honest* case rather than the typical one: a task holds its slot
+ * from the moment it is reserved, but its container does not exist until
+ * `createWorkspaceContainer` returns — and that call runs `ensureImage` inside
+ * itself, so the first task after a Dockerfile.agent change waits out a full
+ * agent-image build (apt, gh, a global npm install) on a 2-vCPU box before any
+ * container exists to corroborate it. The cost of being wrong is asymmetric:
+ * this card tells the operator to restart, which would kill exactly that
+ * legitimately-provisioning task. Twenty minutes clears a cold build with room
+ * to spare and still turns the ~1.5h invisible wedge of #151 into a card and a
+ * ping with over an hour left. Warming the image at boot would let this drop.
  */
-export const DEFAULT_OCCUPANCY_DIVERGED_MS = 10 * 60_000;
+export const DEFAULT_OCCUPANCY_DIVERGED_MS = 20 * 60_000;

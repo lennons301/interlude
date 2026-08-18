@@ -47,11 +47,8 @@ import {
 } from "../../discord/notifications";
 import { recordBacklog } from "../../fleet/backlog";
 import { getFailingChecks, recordFailingChecks } from "../../fleet/failing-checks";
-import {
-  isContainerRunning,
-  observeAgentContainers,
-  removeContainerByName,
-} from "../../docker/container-manager";
+import { isContainerRunning, removeContainerByName } from "../../docker/container-manager";
+import { observeAgentContainers } from "../../docker/agent-containers";
 import { recordNeedsHuman } from "../../fleet/needs-human";
 import {
   EMPTY_FLEET_HEALTH_STATE,
@@ -354,12 +351,14 @@ async function gatherFleetHealthInput(
   return {
     nowMs: snapshot.now.getTime(),
     owedReviews,
-    // The counter the other pickup signals trust — and the daemon's answer to
-    // the same question, so a sustained disagreement is itself a signal (#152).
-    // Null when the daemon could not be asked: unknown, never divergence.
+    // `snapshot.slots.occupied` is `occupiedSlots()` — the in-memory counter
+    // every other pickup signal trusts.
     slots: { total: snapshot.slots.total, occupied: snapshot.slots.occupied },
     pickupPausedWithFreeSlot,
     queuedDispatchable,
+    // The daemon's answer to the same question, so a sustained disagreement is
+    // itself a signal (#152). Null when the daemon could not be asked —
+    // unknown, never divergence.
     agentContainers: await observeAgentContainers(),
     queueRunning: isQueueRunning(),
     queueLastProgressMs: getQueueLastProgress()?.getTime() ?? null,

@@ -44,12 +44,11 @@ export interface FleetHealthThresholds {
    * (default 2 min ≈ 60 missed 2s polls). */
   heartbeatStaleMs: number;
   /** Occupancy uncorroborated by real containers for longer than this is a
-   * phantom slot (issue #152, default 10 min). Deliberately longer than
+   * phantom slot (issue #152, default 20 min). Deliberately far longer than
    * `pickupWedgedMs`: a task that has reserved its slot but not yet created its
-   * container is legitimately uncorroborated for as long as provisioning takes,
-   * and provisioning includes the cold-image build inside
-   * `createWorkspaceContainer`. Ten minutes clears that window by a wide margin
-   * while still catching a leak in minutes rather than the ~1.5h #151 ran for. */
+   * container is legitimately uncorroborated for the whole of provisioning,
+   * which includes a cold agent-image build — and this card's remedy is a
+   * restart, which would kill that task. See DEFAULT_OCCUPANCY_DIVERGED_MS. */
   occupancyDivergedMs: number;
 }
 
@@ -124,7 +123,16 @@ export interface OwedReviewStall extends OwedReviewObservation {
   stalledForMs: number;
 }
 
+/** Which way into the pickup-wedged card fired — `dispatch` is a free slot with
+ * work that will not start, `phantom-slot` is a slot count no real container
+ * corroborates (issue #152). They are one card because they mean the same thing
+ * to the fleet, and two causes because they have different remedies: the ping
+ * is deduped on this, so a card that *upgrades* from one to the other tells the
+ * operator once more rather than silently changing its advice. */
+export type PickupWedgeCause = "dispatch" | "phantom-slot";
+
 export interface PickupWedge {
+  cause: PickupWedgeCause;
   /** Human-readable specifics for the card/ping body. */
   detail: string;
   wedgedForMs: number;
@@ -164,14 +172,17 @@ export interface FleetHealthState {
   /** runIds whose stall was already pinged; kept while still stalled, pruned
    * when the run is no longer owed. */
   owedReviewAnnounced: string[];
-  /** First-seen wedged (ms), or null when not wedged. */
+  /** First-seen a free slot with work that will not dispatch (ms), or null. */
   pickupWedgedSinceMs: number | null;
   /** First-seen occupancy-uncorroborated (ms), or null when the counter and the
    * daemon agree (or the daemon could not be asked). Held separately from
    * `pickupWedgedSinceMs` because the two conditions run on different
    * thresholds, even though they raise one card. */
   occupancyDivergedSinceMs: number | null;
-  pickupWedgedAnnounced: boolean;
+  /** Which cause was last pinged, or null when the card is not standing. Keyed
+   * on the cause rather than a bare flag so one occurrence pings once, but a
+   * wedge that changes character — and so changes its remedy — pings again. */
+  pickupWedgedAnnounced: PickupWedgeCause | null;
   queueStaleAnnounced: boolean;
 }
 
@@ -180,7 +191,7 @@ export const EMPTY_FLEET_HEALTH_STATE: FleetHealthState = {
   owedReviewAnnounced: [],
   pickupWedgedSinceMs: null,
   occupancyDivergedSinceMs: null,
-  pickupWedgedAnnounced: false,
+  pickupWedgedAnnounced: null,
   queueStaleAnnounced: false,
 };
 
@@ -188,7 +199,7 @@ export const DEFAULT_FLEET_HEALTH_THRESHOLDS: FleetHealthThresholds = {
   owedReviewStallMs: 30 * 60_000,
   pickupWedgedMs: 3 * 60_000,
   heartbeatStaleMs: 2 * 60_000,
-  occupancyDivergedMs: 10 * 60_000,
+  occupancyDivergedMs: 20 * 60_000,
 };
 
 export interface FleetHealthEvaluation {
@@ -232,49 +243,60 @@ export function evaluateFleetHealth(
     slotFree &&
     (input.pickupPausedWithFreeSlot || input.queuedDispatchable.length > 0);
   const pickupWedgedSinceMs = wedgedNow ? (prev.pickupWedgedSinceMs ?? now) : null;
-  const wedgedForMs = pickupWedgedSinceMs == null ? null : now - pickupWedgedSinceMs;
-  const wedgeFires = wedgedForMs != null && wedgedForMs >= thresholds.pickupWedgedMs;
+  const wedgedForMs = pickupWedgedSinceMs == null ? 0 : now - pickupWedgedSinceMs;
+  const wedgeFires = wedgedNow && wedgedForMs >= thresholds.pickupWedgedMs;
 
   // The counter claims more busy slots than there are agent containers running.
   // Strictly one-directional: *more* containers than counted slots is a parked
   // pass mid-transition or a leaked container — the memory-admission probe's
   // business, never a pickup wedge. A null census is unknown, not divergence.
-  const census = input.agentContainers;
-  const divergedNow = census != null && input.slots.occupied > census.live;
-  const occupancyDivergedSinceMs = divergedNow
-    ? (prev.occupancyDivergedSinceMs ?? now)
-    : null;
+  // Held as the census itself rather than a flag, so the detail below reads the
+  // very numbers the divergence was judged on.
+  const diverged =
+    input.agentContainers != null &&
+    input.slots.occupied > input.agentContainers.live
+      ? input.agentContainers
+      : null;
+  const occupancyDivergedSinceMs =
+    diverged != null ? (prev.occupancyDivergedSinceMs ?? now) : null;
   const divergedForMs =
-    occupancyDivergedSinceMs == null ? null : now - occupancyDivergedSinceMs;
+    occupancyDivergedSinceMs == null ? 0 : now - occupancyDivergedSinceMs;
   const divergenceFires =
-    divergedForMs != null && divergedForMs >= thresholds.occupancyDivergedMs;
+    diverged != null && divergedForMs >= thresholds.occupancyDivergedMs;
 
-  let pickupWedged: PickupWedge | null = null;
-  let pickupWedgedAnnounced = false;
-  let announcePickupWedged: PickupWedge | null = null;
-  if (wedgeFires || divergenceFires) {
-    pickupWedged = {
-      // A phantom slot leads: it explains the wedge, and it is the half with a
-      // different remedy. The starved work is named either way.
-      detail: divergenceFires
-        ? divergedOccupancyDetail(input, census!)
-        : pickupWedgeDetail(input),
-      // How long the fleet has been in this state — the longer-standing of the
-      // two conditions when both hold.
-      wedgedForMs: Math.max(
-        divergenceFires ? divergedForMs! : 0,
-        wedgeFires ? wedgedForMs! : 0
-      ),
-      remedy: divergenceFires ? PHANTOM_SLOT_REMEDY : PICKUP_WEDGE_REMEDY,
-    };
-    pickupWedgedAnnounced = true;
-    if (!prev.pickupWedgedAnnounced) announcePickupWedged = pickupWedged;
-  } else if (wedgedNow || divergedNow) {
-    // Inside a debounce window: carry the (still-false) announced flag.
-    pickupWedgedAnnounced = prev.pickupWedgedAnnounced;
-  }
-  // else: neither condition holds — both timers and the announced flag stay
-  // reset, re-arming the card and the ping for the next occurrence.
+  // A phantom slot leads when both hold: it explains the wedge, and it is the
+  // half with a different remedy. The starved work is named either way.
+  const pickupWedged: PickupWedge | null =
+    divergenceFires && diverged
+      ? {
+          cause: "phantom-slot",
+          detail: divergedOccupancyDetail(input, diverged),
+          // How long the fleet has been in this state — the longer-standing of
+          // the two conditions when both hold.
+          wedgedForMs: Math.max(divergedForMs, wedgeFires ? wedgedForMs : 0),
+          remedy: PHANTOM_SLOT_REMEDY,
+        }
+      : wedgeFires
+        ? {
+            cause: "dispatch",
+            detail: pickupWedgeDetail(input),
+            wedgedForMs,
+            remedy: PICKUP_WEDGE_REMEDY,
+          }
+        : null;
+  // One card, pinged once per occurrence: while it stands the ping is
+  // suppressed, and inside a debounce window the memory is carried rather than
+  // reset, so a condition flickering over threshold doesn't re-ping. Once
+  // neither condition holds at all it clears and the next occurrence pings
+  // afresh — as does a standing card that changes cause, because its remedy
+  // changed with it.
+  const pickupWedgedAnnounced =
+    pickupWedged?.cause ??
+    (wedgedNow || diverged != null ? prev.pickupWedgedAnnounced : null);
+  const announcePickupWedged =
+    pickupWedged != null && prev.pickupWedgedAnnounced !== pickupWedged.cause
+      ? pickupWedged
+      : null;
 
   // --- (c) Stale queue heartbeat -----------------------------------------
   let queueStale: QueueStale | null = null;

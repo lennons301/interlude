@@ -4,13 +4,7 @@ import { getImageName, ensureImage } from "./image-builder";
 import { getConfig, PLATFORM_REPO_URL } from "../config";
 import { getInstallationToken } from "../github/client";
 import { getCapacity } from "../orchestrator/capacity";
-import type { AgentContainerCensus } from "../fleet/health";
-
-/** Every agent container's name starts with this — the one string that says
- * "this container belongs to a task", shared by the census below and the
- * stale-container reaper so the two can never disagree about what they are
- * counting. */
-export const AGENT_CONTAINER_NAME_PREFIX = "interlude-task-";
+import { AGENT_CONTAINER_NAME_PREFIX } from "./agent-containers";
 
 /**
  * How setup gets onto `$GIT_BRANCH`:
@@ -578,68 +572,3 @@ export async function removeContainerByName(name: string): Promise<void> {
   await forceRemove(getDocker().getContainer(name));
 }
 
-/**
- * How long the container census may wait on the daemon before giving up. Same
- * bound and same reasoning as the memory-admission probe
- * (ADMISSION_PROBE_TIMEOUT_MS): a hung daemon connection has no timeout of its
- * own, and this one runs inside the sweep — an unbounded call here would stall
- * the whole decide-and-act loop to observe a health signal.
- */
-export const CONTAINER_CENSUS_TIMEOUT_MS = 5000;
-
-/** Sentinel the timeout resolves with, distinct from any census the probe can
- * return, so the race can tell "timed out" from a real answer. */
-const CENSUS_TIMED_OUT = Symbol("agent-container-census-timeout");
-
-/** Ask the daemon for every agent container and split it by whether it is
- * actually running. One listing, not two, so the two halves can never be read
- * a moment apart and disagree. */
-async function probeAgentContainers(): Promise<AgentContainerCensus> {
-  const containers = await getDocker().listContainers({
-    all: true,
-    filters: { name: [AGENT_CONTAINER_NAME_PREFIX] },
-  });
-  const live = containers.filter((c) => c.State === "running").length;
-  return { live, stopped: containers.length - live };
-}
-
-/**
- * The reality half of the phantom-occupancy signal (issue #152): what the
- * daemon says is really there, to corroborate the in-memory slot count that
- * every other pickup signal trusts.
- *
- * Returns null — *unknown* — on an error or a hang, never a number. The
- * distinction is the whole safety argument: a zero census reads as "the slots
- * are phantom, restart the app", so a daemon that cannot answer must say
- * nothing rather than be misread as saying none. `probe`/`timeoutMs` are
- * injectable for tests; production callers use the defaults.
- */
-export async function observeAgentContainers(
-  probe: () => Promise<AgentContainerCensus> = probeAgentContainers,
-  timeoutMs: number = CONTAINER_CENSUS_TIMEOUT_MS
-): Promise<AgentContainerCensus | null> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const probePromise = probe();
-    // Keep a losing (timed-out) probe's eventual rejection from surfacing as an
-    // unhandled rejection once nothing awaits the race any more.
-    probePromise.catch(() => {});
-    const timeout = new Promise<typeof CENSUS_TIMED_OUT>((resolve) => {
-      timer = setTimeout(() => resolve(CENSUS_TIMED_OUT), timeoutMs);
-    });
-    const result = await Promise.race([probePromise, timeout]);
-    if (result === CENSUS_TIMED_OUT) {
-      console.error(
-        `[docker] agent-container census timed out after ${timeoutMs}ms — ` +
-          `occupancy left uncorroborated this sweep`
-      );
-      return null;
-    }
-    return result;
-  } catch (err) {
-    console.error("[docker] agent-container census failed:", err);
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}

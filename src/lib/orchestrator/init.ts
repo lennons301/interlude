@@ -3,7 +3,7 @@ import { tasks, messages, runs } from "@/db/schema";
 import { and, eq, inArray, or } from "drizzle-orm";
 import { newId } from "../ulid";
 import { getDocker, isDockerAvailable } from "../docker/client";
-import { AGENT_CONTAINER_NAME_PREFIX } from "../docker/container-manager";
+import { AGENT_CONTAINER_NAME_PREFIX } from "../docker/agent-containers";
 import { startQueue } from "./queue";
 import { getCapacity } from "./capacity";
 import { ACTIVE_RUN_STATUSES, startAutonomySweeps } from "./autonomy/sweep";
