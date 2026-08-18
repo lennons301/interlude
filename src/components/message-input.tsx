@@ -10,7 +10,7 @@ import {
 } from "react";
 import type { SessionSkill } from "@/db/schema";
 import { FOCUS_RING } from "@/components/fleet/fleet-bits";
-import { composerState, resolvePrimary } from "@/lib/chat/composer";
+import { completionRefusal, composerState, resolvePrimary } from "@/lib/chat/composer";
 import { applySlashCommand, slashMenu, type SlashCommand } from "@/lib/chat/slash";
 
 /**
@@ -51,6 +51,27 @@ const DOT_TONE = {
   quiet: "bg-fl-mark",
 } as const;
 
+/**
+ * The line under the field, when it isn't the keyboard hint. A request that
+ * failed is an error; a completion the session refused is not — nothing went
+ * wrong, the agent simply moved on under you — so a notice is full-strength
+ * ink rather than red: read it, nothing to fix. Colour is not what separates
+ * them, because 11px amber does not clear contrast on the light surface — the
+ * same reason the status line's own colour lives in its dot.
+ */
+type Note = { text: string; tone: "error" | "notice" };
+
+const NOTE_TONE = {
+  error: "text-fl-red",
+  notice: "text-fl-ink",
+} as const;
+
+/** How long a notice keeps the hint line. Long enough to read a sentence,
+ * short enough that the keyboard contract is back before you next type — a
+ * turn can run for ten minutes and the status line says so throughout, so the
+ * notice does not have to. */
+const NOTICE_MS = 8000;
+
 const QUIET_BUTTON = `font-plex-mono text-[11px] lowercase text-fl-ink-3 hover:text-fl-ink disabled:cursor-default disabled:text-fl-ink-3/50 disabled:hover:text-fl-ink-3/50 ${FOCUS_RING}`;
 
 /** A fixed id, not `useId`: there is exactly one composer on a page, and the
@@ -69,19 +90,22 @@ export function MessageInput({
   const [sending, setSending] = useState(false);
   const [completing, setCompleting] = useState(false);
   const [confirmingComplete, setConfirmingComplete] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<Note | null>(null);
   // The draft the slash menu was dismissed for: Escape closes it until you type
   // something else, which is the only thing "dismissed" can sensibly mean for a
   // menu whose trigger is the draft itself.
   const [dismissed, setDismissed] = useState<string | null>(null);
   const [active, setActive] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const confirmRowRef = useRef<HTMLSpanElement>(null);
 
   const state = composerState({ taskStatus, containerStatus, queued });
   // What the button would send *is* whether there is anything to send: an empty
   // text means the draft is blank and no bare continue is on offer.
   const primary = resolvePrimary(draft, state.allowsContinue);
   const canSubmit = state.accepting && !sending && primary.text !== "";
+  // Non-null exactly when ending the session is off the table, and it says why.
+  const refusal = completionRefusal(state);
 
   const menu = useMemo(
     () => (sessionSkill && dismissed !== draft ? slashMenu(draft) : null),
@@ -138,11 +162,43 @@ export function MessageInput({
     return () => observer.disconnect();
   }, [resize]);
 
+  /**
+   * The confirmation row takes the status line's place while it is open, so a
+   * row left open once the agent starts a turn is a question whose answer would
+   * now do nothing, sitting on top of the one line that would explain why
+   * (issue #149). Close it the moment completion stops being on offer, and say
+   * what changed.
+   *
+   * Before paint, not after: a frame of a live confirmation that has quietly
+   * stopped meaning anything is the bug in miniature, and a tap landing in it
+   * would be answering a question that is already gone. Closing the row also
+   * unmounts whatever the owner was tabbed onto, and focus dropped to the
+   * document is its own dead end — so it goes back to the field, which is where
+   * the next move was going to be made anyway.
+   */
+  useIsomorphicLayoutEffect(() => {
+    if (!confirmingComplete || refusal === null) return;
+    const hadFocus = confirmRowRef.current?.contains(document.activeElement) ?? false;
+    setConfirmingComplete(false);
+    setNote({ text: refusal, tone: "notice" });
+    if (hadFocus) textareaRef.current?.focus();
+  }, [confirmingComplete, refusal]);
+
+  // A notice is an announcement, not a state — the status line it explains is
+  // back on screen and keeps saying it — so it hands the line back to the
+  // keyboard hint after a few seconds. An error stays: it is about a request
+  // that can be retried, and nothing else on screen records it.
+  useEffect(() => {
+    if (note?.tone !== "notice") return;
+    const timer = setTimeout(() => setNote(null), NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [note]);
+
   async function submit(text: string) {
     if (!canSubmit) return;
 
     setSending(true);
-    setError(null);
+    setNote(null);
     try {
       const res = await fetch(`/api/tasks/${taskId}/messages`, {
         method: "POST",
@@ -152,12 +208,12 @@ export function MessageInput({
       if (!res.ok) {
         // The draft is deliberately left in the field — a failed send must not
         // eat what you wrote.
-        setError("Couldn't send that message. Try again.");
+        setNote({ text: "Couldn't send that message. Try again.", tone: "error" });
         return;
       }
       setDraft("");
     } catch {
-      setError("Couldn't reach the server. Try again.");
+      setNote({ text: "Couldn't reach the server. Try again.", tone: "error" });
     } finally {
       setSending(false);
       textareaRef.current?.focus();
@@ -165,26 +221,32 @@ export function MessageInput({
   }
 
   async function handleComplete() {
-    // Re-checked, not just disabled at the point the question was asked: the
-    // agent can start a turn while the confirmation sits open, and the API
-    // completes a running, idle task only.
-    if (!state.canComplete || completing) return;
+    if (completing) return;
+
+    // Re-checked here as well as in the layout effect above, because a click
+    // can land in the same render as the change that refuses it. The question
+    // is answered either way, so the row closes first — and if the answer is
+    // no, it says so where the hint line goes rather than returning silently.
+    setConfirmingComplete(false);
+    if (refusal !== null) {
+      setNote({ text: refusal, tone: "notice" });
+      return;
+    }
 
     setCompleting(true);
-    setError(null);
+    setNote(null);
     try {
       const res = await fetch(`/api/tasks/${taskId}/complete`, { method: "POST" });
       if (!res.ok) {
-        setError("Couldn't complete the task. Try again.");
+        setNote({ text: "Couldn't complete the task. Try again.", tone: "error" });
         setCompleting(false);
       }
       // On success the view flips to its terminal state over SSE, so the button
       // stays in its "completing…" state until it does.
     } catch {
-      setError("Couldn't reach the server. Try again.");
+      setNote({ text: "Couldn't reach the server. Try again.", tone: "error" });
       setCompleting(false);
     }
-    setConfirmingComplete(false);
   }
 
   function pick(command: SlashCommand) {
@@ -278,7 +340,10 @@ export function MessageInput({
         </p>
 
         {confirmingComplete ? (
-          <span className="flex shrink-0 items-center gap-2.5 font-plex-mono text-[11px] lowercase">
+          <span
+            ref={confirmRowRef}
+            className="flex shrink-0 items-center gap-2.5 font-plex-mono text-[11px] lowercase"
+          >
             <span className="text-fl-ink-2">end this session?</span>
             <button
               type="button"
@@ -299,12 +364,10 @@ export function MessageInput({
           <button
             type="button"
             onClick={() => setConfirmingComplete(true)}
-            disabled={!state.canComplete || completing}
-            title={
-              state.canComplete
-                ? "End this session and mark its PR ready"
-                : "Available between turns, once the agent is idle"
-            }
+            disabled={refusal !== null || completing}
+            // The same sentence the refused confirmation would have said, so the
+            // disabled button and the note can't drift into two explanations.
+            title={refusal ?? "End this session and mark its PR ready"}
             className={`shrink-0 ${QUIET_BUTTON}`}
           >
             {completing ? "completing…" : "complete"}
@@ -344,27 +407,25 @@ export function MessageInput({
         </button>
       </div>
 
-      {/* One line under the field, and it carries the id the textarea is
-          described by either way — a failed send must not leave
-          `aria-describedby` pointing at nothing. Wrapping, not truncating: on a
-          phone the whole line is the point, and an ellipsis would eat the half
-          that says how to type a newline. */}
-      {error ? (
-        <p
-          id={HINT_ID}
-          role="alert"
-          className="mt-1 font-plex-mono text-[11px] leading-snug text-fl-red"
-        >
-          {error}
-        </p>
-      ) : (
-        <p
-          id={HINT_ID}
-          className="mt-1 font-plex-mono text-[11px] leading-snug text-fl-ink-3"
-        >
-          {hint}
-        </p>
-      )}
+      {/* One line under the field, and one element: the hint, or whatever the
+          composer has to say instead. It is a live region from first paint
+          rather than one that appears with its message — a region that arrives
+          already full is commonly not announced at all, which for a refused
+          completion would be the very dead end this is here to close (issue
+          #149). It also always carries the id the textarea is described by, so
+          neither a note nor a hint leaves `aria-describedby` pointing at
+          nothing. Wrapping, not truncating: on a phone the whole line is the
+          point, and an ellipsis would eat the half that says how to type a
+          newline. */}
+      <p
+        id={HINT_ID}
+        role="status"
+        className={`mt-1 font-plex-mono text-[11px] leading-snug ${
+          note ? NOTE_TONE[note.tone] : "text-fl-ink-3"
+        }`}
+      >
+        {note?.text ?? hint}
+      </p>
     </div>
   );
 }

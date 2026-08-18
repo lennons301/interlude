@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  completionRefusal,
   composerState,
   isTerminalTaskStatus,
   queuedCount,
@@ -92,6 +93,53 @@ describe("composerState — queue feedback", () => {
     // message still in hand is a real, brief state — and the honest thing to
     // show is that the message has not landed yet.
     expect(state("running", "idle", 1).queuedNote).toBe("1 queued");
+  });
+});
+
+describe("completionRefusal — why ending the session isn't on offer", () => {
+  // The reason is what the composer shows when a confirmation is refused under
+  // the owner (issue #149) and what the disabled complete button's tooltip
+  // says the rest of the time, so each one is pinned to the state it explains
+  // — a table of six near-identical sentences is exactly where two would drift
+  // into being swapped.
+  const cases: Array<[string, string | null, string | null]> = [
+    ["running", "idle", null],
+    [
+      "running",
+      "running",
+      "The agent started a turn. You can end the session once it's idle again.",
+    ],
+    [
+      "running",
+      "setup",
+      "The agent is still starting up. You can end the session once it's idle.",
+    ],
+    ["queued", null, "The agent hasn't started yet — there's nothing to end."],
+    [
+      "blocked",
+      "idle",
+      "The agent is waiting on your answer — send it, then end the session.",
+    ],
+    ["running", "completing", "This session is already wrapping up."],
+    ["completed", "idle", "This session has already ended."],
+  ];
+
+  for (const [taskStatus, containerStatus, expected] of cases) {
+    const what = expected === null ? "offers completion" : "refuses";
+    it(`${what} on ${taskStatus}/${containerStatus ?? "no container"}`, () => {
+      expect(completionRefusal(state(taskStatus, containerStatus))).toBe(expected);
+    });
+  }
+
+  it("has words for every refusal the button can make", () => {
+    // The table above is keyed over every phase but `idle`, so this is the type
+    // system's promise restated at the boundary the composer relies on: a
+    // reason exists exactly when completion is off the table, and the composer
+    // gates the POST on that reason rather than on `canComplete` separately.
+    for (const [taskStatus, containerStatus] of cases) {
+      const s = state(taskStatus, containerStatus);
+      expect(completionRefusal(s) === null).toBe(s.canComplete);
+    }
   });
 });
 
