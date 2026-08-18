@@ -16,6 +16,18 @@ import { getConfig } from "@/lib/config";
  * so the compiled-in default the strip used to render was wrong on any install
  * that sets it — and it is the very number the press authorises.
  */
+
+/**
+ * Rendered per request, because the point of reading `getConfig()` here is to
+ * read the *running* process's environment. The image is built by `pnpm build`
+ * in a Docker stage with no Doppler env (the app gets it at boot, under
+ * `doppler run`), so prerendering this page — which Next did, it has no other
+ * dynamic signal — would bake the compiled-in default into the HTML and quietly
+ * reintroduce the exact defect this fixes. Nothing else here is cacheable
+ * anyway: every panel below loads its state client-side.
+ */
+export const dynamic = "force-dynamic";
+
 export default function SettingsPage() {
   return (
     <AppShell section="settings">
