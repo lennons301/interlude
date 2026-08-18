@@ -120,16 +120,22 @@ export function ControlButton({
   onClick,
   disabled,
   children,
+  // A plain prop in React 19. It is here so a caller can send focus back to a
+  // control that unmounted while a confirmation stood in its place — see
+  // `useReturnFocus`.
+  ref,
   ...rest
 }: {
   tone?: keyof typeof BUTTON_TONES;
   onClick: () => void;
   disabled?: boolean;
   children: React.ReactNode;
+  ref?: React.Ref<HTMLButtonElement>;
 } & Pick<React.ButtonHTMLAttributes<HTMLButtonElement>, "aria-expanded" | "aria-label">) {
   return (
     <button
       type="button"
+      ref={ref}
       onClick={onClick}
       disabled={disabled}
       className={`rounded-[4px] border px-2 py-0.5 font-plex-mono text-[11px] lowercase transition-opacity disabled:opacity-40 ${BUTTON_TONES[tone]} ${FOCUS_RING}`}

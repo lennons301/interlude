@@ -12,6 +12,7 @@ import {
 } from "@/components/fleet/fleet-bits";
 import { ConfirmStrip } from "@/components/confirm-strip";
 import { useLoad } from "@/lib/use-load";
+import { useReturnFocus } from "@/lib/use-return-focus";
 import {
   armBlocker,
   canArm,
@@ -201,6 +202,10 @@ function AutonomyControl({
   const [intent, setIntent] = useState<null | "arm" | "override">(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Every branch below renders a *different* button, and the strip renders none
+  // of them, so focus follows whichever control mounts in the pressed one's
+  // place rather than falling to `<body>` (issue #142).
+  const { triggerRef, returnFocus } = useReturnFocus<HTMLButtonElement>();
 
   const blocker = armBlocker(project);
 
@@ -217,6 +222,7 @@ function AutonomyControl({
       });
       if (!res.ok) throw new Error(`the server answered ${res.status}`);
       onUpdated(await res.json());
+      returnFocus();
       setIntent(null);
     } catch (err) {
       setError(
@@ -231,7 +237,11 @@ function AutonomyControl({
   if (project.autonomyEnabled) {
     return (
       <>
-        <ControlButton disabled={busy} onClick={() => setAutonomy(false)}>
+        <ControlButton
+          ref={triggerRef}
+          disabled={busy}
+          onClick={() => setAutonomy(false)}
+        >
           {busy ? "disarming…" : "disarm"}
         </ControlButton>
         <Failure error={error} />
@@ -241,12 +251,16 @@ function AutonomyControl({
 
   if (intent === null) {
     return canArm(project) ? (
-      <ControlButton tone="cool" onClick={() => setIntent("arm")}>
+      <ControlButton ref={triggerRef} tone="cool" onClick={() => setIntent("arm")}>
         arm…
       </ControlButton>
     ) : (
       <>
-        <ControlButton tone="amber" onClick={() => setIntent("override")}>
+        <ControlButton
+          ref={triggerRef}
+          tone="amber"
+          onClick={() => setIntent("override")}
+        >
           arm anyway…
         </ControlButton>
         <Failure error={error} />
@@ -266,7 +280,10 @@ function AutonomyControl({
       busy={busy}
       error={error}
       onConfirm={() => setAutonomy(true)}
-      onCancel={() => setIntent(null)}
+      onCancel={() => {
+        returnFocus();
+        setIntent(null);
+      }}
     >
       <p className="text-[13px]">
         Arm {project.name} for unattended work? The loop will claim its

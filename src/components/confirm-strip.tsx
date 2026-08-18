@@ -1,6 +1,12 @@
 "use client";
 
-import { ControlButton, PANEL, TONES } from "@/components/fleet/fleet-bits";
+import { useEffect, useRef } from "react";
+import {
+  ControlButton,
+  FOCUS_RING,
+  PANEL,
+  TONES,
+} from "@/components/fleet/fleet-bits";
 
 /**
  * The pause between pressing a control and it happening, for the two controls
@@ -12,6 +18,14 @@ import { ControlButton, PANEL, TONES } from "@/components/fleet/fleet-bits";
  *
  * Full width and last in its row: it opens *under* whatever was pressed, so the
  * card doesn't rearrange itself beneath the owner's finger.
+ *
+ * Opening it moves focus onto the strip (issue #142). It has to: the trigger
+ * unmounts as this mounts, so a keyboard user was left on `<body>`, tabbing from
+ * the top of the page to reach a decision they had just asked for — and hearing
+ * nothing about it. Focus lands on the group rather than on a button, so the
+ * label and the prose saying what will happen are what get announced, and the
+ * next Tab is the first press. Handing focus *back* is the caller's half, since
+ * only it knows which control replaces the strip (`useReturnFocus`).
  */
 export function ConfirmStrip({
   label,
@@ -38,11 +52,20 @@ export function ConfirmStrip({
   /** What is about to happen, in the owner's language. */
   children: React.ReactNode;
 }) {
+  const strip = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    strip.current?.focus();
+  }, []);
+
   return (
     <div
+      ref={strip}
       role="group"
       aria-label={label}
-      className={`order-last w-full ${PANEL} ${TONES[tone]}`}
+      // Focusable only programmatically: a decision you were sent to, never a
+      // stop on the way past.
+      tabIndex={-1}
+      className={`order-last w-full ${PANEL} ${TONES[tone]} ${FOCUS_RING}`}
     >
       {children}
       <div className="flex flex-wrap gap-2">

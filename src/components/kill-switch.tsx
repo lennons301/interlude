@@ -10,6 +10,7 @@ import {
 } from "@/components/fleet/fleet-bits";
 import { ConfirmStrip } from "@/components/confirm-strip";
 import { useLoad } from "@/lib/use-load";
+import { useReturnFocus } from "@/lib/use-return-focus";
 
 /**
  * The global autonomy kill switch, in the room where the owner arms things
@@ -46,6 +47,9 @@ export function KillSwitch() {
   const [busy, setBusy] = useState(false);
   const [confirmingLift, setConfirmingLift] = useState(false);
   const [moveError, setMoveError] = useState<string | null>(null);
+  // The button is replaced by the strip and then by its opposite, so focus is
+  // handed to whichever control mounts in its place (issue #142).
+  const { triggerRef, returnFocus } = useReturnFocus<HTMLButtonElement>();
 
   async function setPaused(paused: boolean) {
     setBusy(true);
@@ -60,6 +64,9 @@ export function KillSwitch() {
       // The endpoint answers with the whole state, so the panel shows what was
       // actually stored rather than what was asked for.
       setData(await res.json());
+      // A confirmed lift closes the strip, so focus goes to the control that
+      // takes its place — "stop the fleet", the undo for what just happened.
+      if (confirmingLift) returnFocus();
       setConfirmingLift(false);
     } catch (err) {
       setMoveError(
@@ -113,6 +120,7 @@ export function KillSwitch() {
 
         {!confirmingLift && (
           <ControlButton
+            ref={triggerRef}
             tone={held ? "cool" : "amber"}
             disabled={busy}
             onClick={() => (held ? setConfirmingLift(true) : setPaused(true))}
@@ -131,7 +139,10 @@ export function KillSwitch() {
           busy={busy}
           error={moveError}
           onConfirm={() => setPaused(false)}
-          onCancel={() => setConfirmingLift(false)}
+          onCancel={() => {
+            returnFocus();
+            setConfirmingLift(false);
+          }}
         >
           <p className="text-[13px]">
             Lift the kill switch? Every armed project resumes claiming tickets
