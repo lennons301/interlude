@@ -3,6 +3,9 @@ import { tasks, messages } from "@/db/schema";
 import { eq, and, isNull, asc, sql } from "drizzle-orm";
 import { startTask } from "./turn-manager";
 import { getActiveTasks, isParked, processQueuedMessages, scanForDevServer } from "./turn-manager";
+// The one predicate for "this task has stopped for good", shared with the live
+// view rather than restated here.
+import { isTerminalTaskStatus } from "../chat/composer";
 import {
   createLocalCapacityProvider,
   getCapacity,
@@ -26,12 +29,29 @@ const processingTasks = new Set<string>();
 let capacityProvider: CapacityProvider | null = null;
 let saturationLogged = false;
 
+/** The task's stored status, or null when its row is gone — the authority on
+ * whether a task is still live, independent of any in-memory bookkeeping. */
+function storedTaskStatus(taskId: string): string | null {
+  return (
+    db.select({ status: tasks.status }).from(tasks).where(eq(tasks.id, taskId)).get()
+      ?.status ?? null
+  );
+}
+
 /**
  * Slots in use: live containers plus pickups still provisioning theirs
  * (a task sits in processingTasks before it registers in activeTasks —
  * without counting those, back-to-back polls could overfill the box).
  * Parked autonomous containers (an implement pass idling while its PR is
  * reviewed) run no agent process and hold no slot — see isParked.
+ *
+ * A reservation for a task that has *finished* stands in for nothing: its
+ * container is gone and no pickup is provisioning one, so it is never counted
+ * (issue #151). That is what wedged the box on 2026-08-18 — a reservation whose
+ * driving promise hung on an unbounded GitHub call, so the `.finally()` release
+ * never ran, while the task it covered completed and took its container with
+ * it. Reading the task's status rather than trusting the reservation makes the
+ * count self-heal within one poll.
  */
 export function occupiedSlots(): number {
   const active = getActiveTasks();
@@ -40,7 +60,10 @@ export function occupiedSlots(): number {
     if (!isParked(entry)) count++;
   }
   for (const taskId of processingTasks) {
-    if (!active.has(taskId)) count++;
+    if (active.has(taskId)) continue;
+    const status = storedTaskStatus(taskId);
+    if (status === null || isTerminalTaskStatus(status)) continue;
+    count++;
   }
   return count;
 }
