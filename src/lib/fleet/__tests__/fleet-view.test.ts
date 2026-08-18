@@ -17,6 +17,9 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     slots: 2,
     dailyCapUsd: 500,
     globalAutonomyPaused: false,
+    // The boot master on, so every test that doesn't say otherwise describes an
+    // install where autonomy is actually armed at boot (issue #148).
+    autonomyEnabledAtBoot: true,
     discordGuildId: null,
     projects: [],
     runs: [],
@@ -331,11 +334,21 @@ describe("buildFleetView — spend", () => {
   });
 });
 
-// The live dot + banner surface (issue #118): a paused fleet must never read as
-// an idle one, and the two ways it can be paused are lifted differently.
+// The live dot + banner surface (issues #118, #148): a held fleet must never
+// read as an idle one, and the three ways pickup can be held are lifted in
+// three different ways.
 describe("buildFleetView — why pickup is paused", () => {
   it("reports nothing while pickup runs", () => {
     expect(buildFleetView(baseRows()).pickupPaused).toBeNull();
+  });
+
+  it("names the boot master when autonomy is off at boot", () => {
+    const view = buildFleetView(baseRows({ autonomyEnabledAtBoot: false }));
+
+    expect(view.pickupPaused?.reason).toBe("autonomy-off-at-boot");
+    expect(view.pickupPaused?.body).toMatch(/AUTONOMY_ENABLED/);
+    // Not the switch's wording: pressing that control would change nothing
+    expect(view.pickupPaused?.body).not.toMatch(/kill switch engaged/i);
   });
 
   it("names the kill switch when it is engaged", () => {
@@ -354,6 +367,45 @@ describe("buildFleetView — why pickup is paused", () => {
 
     expect(view.pickupPaused?.reason).toBe("daily-cap");
     expect(view.pickupPaused?.body).toMatch(/midnight/i);
+  });
+
+  it("names the boot master ahead of both runtime holds", () => {
+    // With no sweep running at all, sending the owner to lift the kill switch
+    // would be a remedy that does nothing — so the master leads.
+    const view = buildFleetView(
+      baseRows({
+        autonomyEnabledAtBoot: false,
+        globalAutonomyPaused: true,
+        runs: [makeRun({ id: "r1", totalCostUsd: 512 })],
+      })
+    );
+
+    expect(view.pickupPaused?.reason).toBe("autonomy-off-at-boot");
+    // Everything the other holds own is untouched by being outranked
+    expect(view.spend.capPaused).toBe(true);
+    expect(view.needsYou.map((i) => i.cause)).toContain("cap");
+  });
+
+  it("stays fleet-wide: a failing preflight on one project holds nothing here", () => {
+    // Six armed projects, one failing preflight, is not a held fleet — that
+    // would over-claim. It is said per project instead (issue #148).
+    const view = buildFleetView(
+      baseRows({
+        projects: [
+          makeProject({ id: "p1", name: "lemons", autonomyEnabled: true, preflightStatus: "passing" }),
+          makeProject({
+            id: "p2",
+            name: "moontide",
+            autonomyEnabled: true,
+            preflightStatus: "failing",
+            preflightReason: "no branch protection",
+          }),
+        ],
+      })
+    );
+
+    expect(view.pickupPaused).toBeNull();
+    expect(view.needsYou.map((i) => i.cause)).toEqual(["preflight"]);
   });
 
   it("names the kill switch ahead of the cap when both hold", () => {
@@ -900,7 +952,7 @@ describe("buildFleetView — needs you", () => {
     ]);
   });
 
-  it("raises failed preflight only for autonomy-enabled projects", () => {
+  it("raises failed preflight only for autonomy-enabled projects, and says nothing is picked up there", () => {
     const view = buildFleetView(
       baseRows({
         projects: [
@@ -927,7 +979,28 @@ describe("buildFleetView — needs you", () => {
         cause: "preflight",
         severity: "amber",
         context: "lemons",
-        body: "Preflight failing: reviewer is not a collaborator",
+        body: "Preflight failing, so none of its tickets are picked up: reviewer is not a collaborator",
+        action: { label: "Open settings", href: "/settings" },
+      },
+    ]);
+  });
+
+  it("raises a never-run preflight too — the reducer fails closed, so the card does", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [
+          makeProject({ id: "p1", name: "lemons", autonomyEnabled: true, preflightStatus: null }),
+          makeProject({ id: "p2", name: "moontide", autonomyEnabled: true, preflightStatus: "passing" }),
+        ],
+      })
+    );
+
+    expect(view.needsYou).toEqual([
+      {
+        cause: "preflight",
+        severity: "amber",
+        context: "lemons",
+        body: "Preflight has never run, so none of its tickets are picked up — pickup fails closed until it passes.",
         action: { label: "Open settings", href: "/settings" },
       },
     ]);
@@ -1770,10 +1843,56 @@ describe("buildFleetView — queue and autonomy", () => {
 
     expect(view.queue.readyForAgent).toBe(2);
     expect(view.queue.byProject).toEqual([
-      { projectName: "interlude", count: 2 },
-      { projectName: "lemons", count: 0 },
+      { projectName: "interlude", count: 2, hold: "autonomy-off" },
+      { projectName: "lemons", count: 0, hold: "preflight-unchecked" },
     ]);
     expect(view.autonomyOn).toBe(true);
+  });
+
+  it("marks each project's backlog with what would refuse it, and nothing when it is pickable", () => {
+    const view = buildFleetView(
+      baseRows({
+        backlogByProject: { p1: 3, p2: 2, p3: 1, p4: 4 },
+        projects: [
+          makeProject({ id: "p1", name: "armed", autonomyEnabled: true, preflightStatus: "passing" }),
+          makeProject({
+            id: "p2",
+            name: "broken",
+            autonomyEnabled: true,
+            preflightStatus: "failing",
+            preflightReason: "no branch protection",
+          }),
+          makeProject({ id: "p3", name: "unchecked", autonomyEnabled: true, preflightStatus: null }),
+          makeProject({ id: "p4", name: "dormant", autonomyEnabled: false, preflightStatus: "passing" }),
+        ],
+      })
+    );
+
+    expect(view.queue.byProject).toEqual([
+      { projectName: "dormant", count: 4, hold: "autonomy-off" },
+      { projectName: "armed", count: 3, hold: null },
+      { projectName: "broken", count: 2, hold: "preflight-failing" },
+      { projectName: "unchecked", count: 1, hold: "preflight-unchecked" },
+    ]);
+  });
+
+  it("keeps per-project holds out of the fleet-wide field, and the fleet-wide hold out of the rows", () => {
+    // The boot master holds everything, but it is said once — a row's `hold`
+    // stays the project's own answer, so the two can't double-count.
+    const view = buildFleetView(
+      baseRows({
+        autonomyEnabledAtBoot: false,
+        backlogByProject: { p1: 3 },
+        projects: [
+          makeProject({ id: "p1", name: "armed", autonomyEnabled: true, preflightStatus: "passing" }),
+        ],
+      })
+    );
+
+    expect(view.pickupPaused?.reason).toBe("autonomy-off-at-boot");
+    expect(view.queue.byProject).toEqual([
+      { projectName: "armed", count: 3, hold: null },
+    ]);
   });
 
   it("orders the backlog breakdown deepest first, then by name", () => {
