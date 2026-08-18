@@ -30,8 +30,8 @@ importers:
         specifier: ^0.45.1
         version: 0.45.1(@types/better-sqlite3@7.6.13)(better-sqlite3@12.6.2)
       highlight.js:
-        specifier: ^11.12.0
-        version: 11.12.0
+        specifier: ~11.11.0
+        version: 11.11.2
       jsonwebtoken:
         specifier: ^9.0.3
         version: 9.0.3
@@ -2849,10 +2849,6 @@ packages:
 
   highlight.js@11.11.2:
     resolution: {integrity: sha512-oaXMACAU0kzOMXBjWpNcX+vlwSBCIAiZ9BHa7gA15NOTtT2L/l8OSZDuqS2XppOhZBPJ7hm4o8ep2kyuip2uEQ==}
-    engines: {node: '>=12.0.0'}
-
-  highlight.js@11.12.0:
-    resolution: {integrity: sha512-nbfWpyRMcMrPMmDwJB+dhX/eiaPKtc2RB+0QZskqJ3WjRA/FDS0e9hZrx8EC/lbEv8gXy98FcDbNa/dspAaJMg==}
     engines: {node: '>=12.0.0'}
 
   hono@4.12.7:
@@ -7399,8 +7395,6 @@ snapshots:
       hermes-estree: 0.25.1
 
   highlight.js@11.11.2: {}
-
-  highlight.js@11.12.0: {}
 
   hono@4.12.7: {}
 
