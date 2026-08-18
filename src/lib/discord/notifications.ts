@@ -25,9 +25,56 @@ export function getBotClient(): Client | null {
 }
 
 /**
+ * Wall-clock ceiling on one Discord REST operation (issue #151). Best-effort
+ * notifications still have to *settle*: the idle and blocked embeds are awaited
+ * inside the promise that holds a queue reservation, so one that never came back
+ * is one more way to wedge dispatch — the same discipline the Docker admission
+ * probe got in #128.
+ *
+ * @discordjs/rest already aborts a single HTTP attempt after 15s, but nothing
+ * above that is bounded: it waits out rate limits, retries, and `sendWithRetry`
+ * retries again on top. This ceiling sits deliberately *above* the library's own
+ * per-attempt abort, so when it fires the underlying attempt has already been
+ * torn down — abandoning it cannot leave a duplicate embed in flight.
+ */
+export const DISCORD_REST_TIMEOUT_MS = 30_000;
+
+/** Sentinel the timeout resolves with, distinct from any value a REST call can
+ * return, so the race can tell "timed out" from a genuine answer. */
+const REST_TIMED_OUT = Symbol("discord-rest-timeout");
+
+/**
+ * Bound one Discord REST call. Throws when the bound is reached — every caller
+ * here either logs and moves on (the notify* helpers) or owns a retry (the
+ * digest scheduler), and both are better served by a failure than by waiting
+ * forever.
+ */
+async function bounded<T>(what: string, call: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // Keep a losing (timed-out) call's eventual rejection from surfacing as an
+  // unhandled rejection once nothing awaits the race any more.
+  call.catch(() => {});
+  try {
+    const timeout = new Promise<typeof REST_TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => resolve(REST_TIMED_OUT), DISCORD_REST_TIMEOUT_MS);
+    });
+    const result = await Promise.race([call, timeout]);
+    if (result === REST_TIMED_OUT) {
+      throw new Error(
+        `Discord ${what} did not answer within ${DISCORD_REST_TIMEOUT_MS}ms`
+      );
+    }
+    return result;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Send an embed with a few retries + backoff, so a transient network blip
  * (e.g. flaky connection) doesn't silently drop a notification. Throws if all
  * attempts fail — callers already wrap sends in try/catch (fire-and-forget).
+ * Each attempt is bounded, so the loop as a whole is too.
  */
 async function sendWithRetry(
   channel: TextChannel,
@@ -37,7 +84,7 @@ async function sendWithRetry(
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
-      return await channel.send({ embeds: [embed] });
+      return await bounded("send", channel.send({ embeds: [embed] }));
     } catch (err) {
       lastErr = err;
       if (i < attempts - 1) {
@@ -48,12 +95,16 @@ async function sendWithRetry(
   throw lastErr;
 }
 
-/** Resolve a channel or throw — for callers that retry, unlike the
- * fire-and-forget notify* helpers below which swallow their failures. */
+/** Resolve a channel to post in, or throw. The fire-and-forget notify* helpers
+ * call this inside their own try/catch and swallow the failure; the digest
+ * scheduler lets it through and retries. Bounded, like every REST call here. */
 async function fetchTextChannel(channelId: string): Promise<TextChannel> {
   const botClient = getBotClient();
   if (!botClient) throw new Error("Discord bot not connected");
-  const channel = await botClient.channels.fetch(channelId);
+  const channel = await bounded(
+    `channel ${channelId} lookup`,
+    botClient.channels.fetch(channelId)
+  );
   if (!channel || !channel.isTextBased()) {
     throw new Error(`Channel ${channelId} is not a text channel`);
   }
@@ -122,8 +173,7 @@ export async function notifyTaskQueued(
   if (!botClient) return null;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return null;
+    const channel = await fetchTextChannel(channelId);
 
     const domain = process.env.DOMAIN ?? "interludes.co.uk";
     const embed = new EmbedBuilder()
@@ -132,7 +182,7 @@ export async function notifyTaskQueued(
       .setURL(`https://${domain}/tasks/${task.id}`)
       .setColor(0x7b61ff);
 
-    const msg = await sendWithRetry(channel as TextChannel, embed);
+    const msg = await sendWithRetry(channel, embed);
     return msg.id;
   } catch (err) {
     console.error(`[discord] Failed to send queued notification:`, err);
@@ -156,8 +206,7 @@ export async function notifyTaskCompleted(
   if (!botClient) return;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return;
+    const channel = await fetchTextChannel(channelId);
 
     const domain = process.env.DOMAIN ?? "interludes.co.uk";
     const cost = task.totalCostUsd.toFixed(2);
@@ -173,7 +222,7 @@ export async function notifyTaskCompleted(
     }
     embed.setDescription(lines.join("\n"));
 
-    await sendWithRetry(channel as TextChannel, embed);
+    await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send completed notification:`, err);
   }
@@ -190,8 +239,7 @@ export async function notifyTaskFailed(
   if (!botClient) return;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return;
+    const channel = await fetchTextChannel(channelId);
 
     const domain = process.env.DOMAIN ?? "interludes.co.uk";
     const embed = new EmbedBuilder()
@@ -200,7 +248,7 @@ export async function notifyTaskFailed(
       .setURL(`https://${domain}/tasks/${task.id}`)
       .setColor(0xef4444);
 
-    await sendWithRetry(channel as TextChannel, embed);
+    await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send failed notification:`, err);
   }
@@ -219,8 +267,7 @@ export async function notifySlotsSaturated(
   if (!botClient || !channelId) return;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return;
+    const channel = await fetchTextChannel(channelId);
 
     const embed = new EmbedBuilder()
       .setTitle(`All ${payload.total} agent slot(s) busy`)
@@ -231,7 +278,7 @@ export async function notifySlotsSaturated(
       )
       .setColor(0xf59e0b);
 
-    await sendWithRetry(channel as TextChannel, embed);
+    await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send saturation notification:`, err);
   }
@@ -251,8 +298,7 @@ export async function notifyOwedReviewStalled(
   if (!botClient || !channelId) return;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return;
+    const channel = await fetchTextChannel(channelId);
 
     const embed = new EmbedBuilder()
       .setTitle(`Owed review stalled — PR #${payload.prNumber}`)
@@ -263,7 +309,7 @@ export async function notifyOwedReviewStalled(
       )
       .setColor(0xef4444);
 
-    await sendWithRetry(channel as TextChannel, embed);
+    await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send owed-review-stalled notification:`, err);
   }
@@ -282,8 +328,7 @@ export async function notifyPickupWedged(
   if (!botClient || !channelId) return;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return;
+    const channel = await fetchTextChannel(channelId);
 
     const embed = new EmbedBuilder()
       .setTitle(`Pickup wedged — a slot is free but nothing dispatches`)
@@ -294,7 +339,7 @@ export async function notifyPickupWedged(
       )
       .setColor(0xef4444);
 
-    await sendWithRetry(channel as TextChannel, embed);
+    await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send pickup-wedged notification:`, err);
   }
@@ -313,8 +358,7 @@ export async function notifyQueueStale(
   if (!botClient || !channelId) return;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return;
+    const channel = await fetchTextChannel(channelId);
 
     const embed = new EmbedBuilder()
       .setTitle(`Queue loop stalled`)
@@ -325,7 +369,7 @@ export async function notifyQueueStale(
       )
       .setColor(0xef4444);
 
-    await sendWithRetry(channel as TextChannel, embed);
+    await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send queue-stale notification:`, err);
   }
@@ -345,8 +389,7 @@ export async function notifyGateConfigError(
   if (!botClient || !channelId) return;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return;
+    const channel = await fetchTextChannel(channelId);
 
     const embed = new EmbedBuilder()
       .setTitle(`Gate config error — nothing armed`)
@@ -357,7 +400,7 @@ export async function notifyGateConfigError(
       )
       .setColor(0xef4444);
 
-    await sendWithRetry(channel as TextChannel, embed);
+    await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send gate-config-error notification:`, err);
   }
@@ -383,8 +426,7 @@ export async function notifyRunBlocked(
   if (!botClient) return null;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return null;
+    const channel = await fetchTextChannel(channelId);
 
     const domain = process.env.DOMAIN ?? "interludes.co.uk";
     const lines = [task.question.trim().slice(0, 1000), ""];
@@ -398,7 +440,7 @@ export async function notifyRunBlocked(
       .setURL(`https://${domain}/tasks/${task.id}`)
       .setColor(0xf59e0b);
 
-    const msg = await sendWithRetry(channel as TextChannel, embed);
+    const msg = await sendWithRetry(channel, embed);
     return msg.id;
   } catch (err) {
     console.error(`[discord] Failed to send blocked notification:`, err);
@@ -421,8 +463,7 @@ export async function notifyReviewBlocked(
   if (!botClient || !channelId) return;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return;
+    const channel = await fetchTextChannel(channelId);
 
     const embed = new EmbedBuilder()
       .setTitle(`Review blocked — nothing merged`)
@@ -432,7 +473,7 @@ export async function notifyReviewBlocked(
       )
       .setColor(0xef4444);
 
-    await sendWithRetry(channel as TextChannel, embed);
+    await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send review-blocked notification:`, err);
   }
@@ -452,8 +493,7 @@ export async function notifyIntegrationEscalation(
   if (!botClient || !channelId) return;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return;
+    const channel = await fetchTextChannel(channelId);
 
     const repairs = `${payload.integrationsMade} automated repair${
       payload.integrationsMade === 1 ? "" : "s"
@@ -467,7 +507,7 @@ export async function notifyIntegrationEscalation(
       )
       .setColor(0xef4444);
 
-    await sendWithRetry(channel as TextChannel, embed);
+    await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send integration-escalation notification:`, err);
   }
@@ -501,8 +541,7 @@ export async function notifyStaleReviewEscalation(
   if (!botClient || !channelId) return;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return;
+    const channel = await fetchTextChannel(channelId);
 
     const embed = new EmbedBuilder()
       .setTitle(`Reviewed commit moved — nothing merged`)
@@ -518,7 +557,7 @@ export async function notifyStaleReviewEscalation(
       )
       .setColor(0xef4444);
 
-    await sendWithRetry(channel as TextChannel, embed);
+    await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send stale-review notification:`, err);
   }
@@ -544,8 +583,7 @@ export async function notifyChecksEscalation(
   if (!botClient || !channelId) return;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return;
+    const channel = await fetchTextChannel(channelId);
 
     const repairs =
       payload.ciRepairsMade === 1
@@ -560,7 +598,7 @@ export async function notifyChecksEscalation(
       )
       .setColor(0xef4444);
 
-    await sendWithRetry(channel as TextChannel, embed);
+    await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send checks-escalation notification:`, err);
   }
@@ -579,8 +617,7 @@ export async function notifyTaskIdle(
   if (!botClient) return null;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return null;
+    const channel = await fetchTextChannel(channelId);
 
     const domain = process.env.DOMAIN ?? "interludes.co.uk";
     const summary = task.summary.trim()
@@ -595,7 +632,7 @@ export async function notifyTaskIdle(
       .setURL(`https://${domain}/tasks/${task.id}`)
       .setColor(0xf59e0b);
 
-    const msg = await sendWithRetry(channel as TextChannel, embed);
+    const msg = await sendWithRetry(channel, embed);
     return msg.id;
   } catch (err) {
     console.error(`[discord] Failed to send idle notification:`, err);
@@ -624,8 +661,7 @@ export async function notifyTriageRecommendation(
   if (!botClient) return null;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return null;
+    const channel = await fetchTextChannel(channelId);
 
     const domain = process.env.DOMAIN ?? "interludes.co.uk";
     const lines = [rec.assessment.trim().slice(0, 800), ""];
@@ -643,7 +679,7 @@ export async function notifyTriageRecommendation(
       .setURL(`https://${domain}/tasks/${rec.taskId}`)
       .setColor(0xf59e0b);
 
-    const msg = await sendWithRetry(channel as TextChannel, embed);
+    const msg = await sendWithRetry(channel, embed);
     return msg.id;
   } catch (err) {
     console.error(`[discord] Failed to send triage recommendation:`, err);
@@ -671,8 +707,7 @@ export async function notifyAttemptsExhausted(
   if (!botClient || !channelId) return;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return;
+    const channel = await fetchTextChannel(channelId);
 
     const embed =
       payload.reason === "interruptions"
@@ -694,7 +729,7 @@ export async function notifyAttemptsExhausted(
             )
             .setColor(0xef4444);
 
-    await sendWithRetry(channel as TextChannel, embed);
+    await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send attempts-exhausted notification:`, err);
   }
@@ -713,8 +748,7 @@ export async function notifyDailyCapReached(
   if (!botClient || !channelId) return;
 
   try {
-    const channel = await botClient.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) return;
+    const channel = await fetchTextChannel(channelId);
 
     const embed = new EmbedBuilder()
       .setTitle(`Daily autonomous spend cap reached`)
@@ -725,7 +759,7 @@ export async function notifyDailyCapReached(
       )
       .setColor(0xef4444);
 
-    await sendWithRetry(channel as TextChannel, embed);
+    await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send daily-cap notification:`, err);
   }

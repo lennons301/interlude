@@ -30,7 +30,7 @@ describe("boundedFetch", () => {
 
     await expect(
       fetch("https://api.github.com/repos/owner/repo/pulls")
-    ).rejects.toThrow(/repos\/owner\/repo\/pulls.*20ms/s);
+    ).rejects.toThrow(/repos\/owner\/repo\/pulls.*20ms/);
   });
 
   it("aborts the stalled request rather than abandoning its socket", async () => {
