@@ -263,13 +263,15 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
 
 // Same neutral/green/red split as before, in fleet tokens: only failure and a
 // live run earn a colour, and the two quiet neutrals keep their old ordering
-// (queued and completed read louder than a cancelled run).
+// (queued and completed read louder than a cancelled run). A dot is not text,
+// so the quietest of them is `--fl-mark` — the neutral that clears the 3:1
+// non-text floor — rather than `--fl-ink-3`, which does not (issue #142).
 const STATUS_DOT: Record<string, string> = {
   queued: "bg-fl-ink-2",
   running: "bg-fl-green",
   completed: "bg-fl-ink-2",
   failed: "bg-fl-red",
-  cancelled: "bg-fl-ink-3",
+  cancelled: "bg-fl-mark",
 };
 
 /**

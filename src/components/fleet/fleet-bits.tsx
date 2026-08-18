@@ -4,10 +4,14 @@
  * with a tick at its ceiling. Color is strictly semantic.
  */
 
-/** The system's one focus affordance: a hairline ring in the quietest ink, so
- * keyboard users get a visible target without a colour that means something. */
+/** The system's one focus affordance: a hairline ring in the quiet neutral, so
+ * keyboard users get a visible target without a colour that means something.
+ * Drawn in `--fl-mark` rather than `--fl-ink-3` because a ring is not text and
+ * so owes WCAG's 3:1 non-text floor, which ink-3 misses on the light ground
+ * (issue #142). This string is in nearly every file in the app, which is why
+ * the fix belongs here and not at any of them. */
 export const FOCUS_RING =
-  "focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-fl-ink-3";
+  "focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-fl-mark";
 
 /** The one text-input skin in the system — a fleet card behind a hairline, Plex
  * on top. Shared by every form the app has so a field can't drift between
