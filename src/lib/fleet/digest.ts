@@ -114,9 +114,9 @@ function runningLine(card: RunningCard): string {
  * Keyed by the union, so a new hold fails the build instead of printing a
  * depth that silently reads as work about to start. */
 const HOLD_NOTE: Record<ProjectPickupHold, string> = {
-  "autonomy-off": "not picked up — autonomy is off for this project",
-  "preflight-failing": "not picked up — preflight is failing",
-  "preflight-unchecked": "not picked up — preflight has never passed",
+  "autonomy-off": "autonomy is off for this project",
+  "preflight-failing": "preflight is failing",
+  "preflight-unchecked": "preflight has never passed",
 };
 
 /**
@@ -135,7 +135,7 @@ function backlogLines(byProject: FleetView["queue"]["byProject"]): string[] {
     withDepth.map((b) =>
       b.hold === null
         ? `${b.projectName}: ${b.count}`
-        : `${b.projectName}: ${b.count} — ${HOLD_NOTE[b.hold]}`
+        : `${b.projectName}: ${b.count} — not picked up: ${HOLD_NOTE[b.hold]}`
     ),
     "No tickets ready-for-agent."
   );

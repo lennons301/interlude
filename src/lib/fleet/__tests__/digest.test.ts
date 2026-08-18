@@ -526,9 +526,9 @@ describe("renderDailyDigest — backlog", () => {
 
     expect(section(content, "Backlog (ready-for-agent)")).toEqual([
       "armed: 5",
-      "broken: 4 — not picked up — preflight is failing",
-      "unchecked: 3 — not picked up — preflight has never passed",
-      "dormant: 2 — not picked up — autonomy is off for this project",
+      "broken: 4 — not picked up: preflight is failing",
+      "unchecked: 3 — not picked up: preflight has never passed",
+      "dormant: 2 — not picked up: autonomy is off for this project",
     ]);
     // And the fleet itself is not claimed to be held by any of it
     expect(section(content, "Autonomous pickup")[0]).toContain("No fleet-wide hold");
