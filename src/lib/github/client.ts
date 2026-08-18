@@ -1,6 +1,22 @@
 import { Octokit } from "octokit";
 import jwt from "jsonwebtoken";
 import { getConfig } from "../config";
+import { boundedFetch, GITHUB_REQUEST_TIMEOUT_MS } from "./request-timeout";
+
+/**
+ * The one place a GitHub client is built, so every outbound call carries the
+ * request bound (issue #151) — a stalled call must fail, not hang, because a
+ * call that never returns leaves whatever awaited it unsettled, and on
+ * 2026-08-18 that was a queue reservation holding the box's only slot.
+ *
+ * `timeoutMs` is injectable for tests; production callers use the default.
+ */
+export function createOctokit(
+  auth: string,
+  timeoutMs: number = GITHUB_REQUEST_TIMEOUT_MS
+): Octokit {
+  return new Octokit({ auth, request: { fetch: boundedFetch(timeoutMs) } });
+}
 
 let cachedToken: string | null = null;
 let tokenExpiresAt = 0;
@@ -55,7 +71,7 @@ export async function getInstallationToken(): Promise<string> {
   }
 
   const appJwt = createAppJwt();
-  const appOctokit = new Octokit({ auth: appJwt });
+  const appOctokit = createOctokit(appJwt);
 
   const { data: installation } = await appOctokit.rest.apps.createInstallationAccessToken({
     installation_id: parseInt(config.githubAppInstallationId, 10),
@@ -75,7 +91,7 @@ export async function getInstallationToken(): Promise<string> {
  */
 export function reviewerOctokit(): Octokit | null {
   const token = getConfig().reviewerGithubToken;
-  return token ? new Octokit({ auth: token }) : null;
+  return token ? createOctokit(token) : null;
 }
 
 /** The reviewer machine account's login, or null when it cannot be resolved —
@@ -95,7 +111,7 @@ export async function reviewerLogin(): Promise<string | null> {
 
 export async function getOctokit(): Promise<Octokit> {
   const token = await getInstallationToken();
-  return new Octokit({ auth: token });
+  return createOctokit(token);
 }
 
 /**
