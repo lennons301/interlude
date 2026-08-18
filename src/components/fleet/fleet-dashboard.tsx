@@ -9,15 +9,20 @@ import { NeedsYou } from "./needs-you";
 import { RunningList } from "./running-list";
 import { RecentLedger } from "./recent-ledger";
 
-// How a fleet-wide hold on pickup reads (issue #118). A deliberate operator
-// hold is amber and says "held"; a breached spend ceiling is red and says
-// "paused" — the estate's severity vocabulary, and not the same news.
+// How a fleet-wide hold on pickup reads (issues #118, #148). A deliberate
+// operator hold is amber and says "held"; the boot master is amber too but says
+// "off", because it is not the switch and is not lifted like one; a breached
+// spend ceiling is red and says "paused" — the estate's severity vocabulary,
+// and three states that are not the same news. Both maps are keyed by the
+// reason union, so a fourth hold fails the build rather than rendering green.
 const PAUSE_DOT: Record<PickupPause["reason"], LiveDotState> = {
+  "autonomy-off-at-boot": "off",
   "kill-switch": "held",
   "daily-cap": "paused",
 };
 
 const PAUSE_TONE: Record<PickupPause["reason"], keyof typeof TONES> = {
+  "autonomy-off-at-boot": "amber",
   "kill-switch": "amber",
   "daily-cap": "red",
 };
@@ -55,9 +60,10 @@ export function FleetDashboard() {
 
   // The dot is the liveness signal: offline whenever the stream is down, even
   // if a stale view is still on screen. Otherwise it carries whether new
-  // autonomous pickup is happening — held by the operator's kill switch (issue
-  // #118) or paused by the breached daily cap, each in its own tone, with the
-  // banner below naming it. The two are lifted in completely different ways.
+  // autonomous pickup is happening — off at boot (issue #148), held by the
+  // operator's kill switch (issue #118), or paused by the breached daily cap,
+  // each in its own tone, with the banner below naming it. All three are lifted
+  // in completely different ways, which is why the dot never merges them.
   const pickupPaused = view?.pickupPaused ?? null;
   const dotState: LiveDotState = !connected
     ? "offline"

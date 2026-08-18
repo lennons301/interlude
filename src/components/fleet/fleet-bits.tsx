@@ -163,11 +163,15 @@ export function LoadFailure({
 
 /** The one ambient animation on the page. `held` is a deliberate operator hold
  * on pickup — the kill switch (issue #118) — so it reads amber like the banner
- * beside it, where `paused` (the breached daily cap) reads red. */
-export type LiveDotState = "live" | "held" | "paused" | "offline";
+ * beside it, where `paused` (the breached daily cap) reads red. `off` is the
+ * boot master `AUTONOMY_ENABLED` (issue #148): amber too, because it is just as
+ * deliberate, but its own word — the dot prints its state, and an owner who
+ * reads `held` goes to press a switch that cannot start a sweep. */
+export type LiveDotState = "live" | "off" | "held" | "paused" | "offline";
 
 const DOT_COLOR: Record<LiveDotState, string> = {
   live: "bg-fl-green",
+  off: "bg-fl-amber",
   held: "bg-fl-amber",
   paused: "bg-fl-red",
   offline: "bg-fl-ink-3",
