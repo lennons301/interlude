@@ -286,11 +286,12 @@ export async function notifyPickupWedged(
     if (!channel || !channel.isTextBased()) return;
 
     const embed = new EmbedBuilder()
-      .setTitle(`Pickup wedged — a slot is free but nothing dispatches`)
+      .setTitle(`Pickup wedged — claimable work is not dispatching`)
+      // The remedy comes from the evaluator, not from here, so the ping and the
+      // dashboard card can never advise differently (issue #152: a phantom slot
+      // needs a restart, an ordinary wedge needs a look).
       .setDescription(
-        `${payload.detail} for ~${formatDuration(payload.wedgedForMs)}. The queue is not ` +
-          `picking up claimable work — check the orchestrator (a hung Docker daemon ` +
-          `or a stuck poll loop).`
+        `${payload.detail} for ~${formatDuration(payload.wedgedForMs)}. ${payload.remedy}`
       )
       .setColor(0xef4444);
 

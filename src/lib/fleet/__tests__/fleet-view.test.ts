@@ -948,7 +948,11 @@ describe("buildFleetView — needs you", () => {
               stalledForMs: 31 * 60_000,
             },
           ],
-          pickupWedged: { detail: "1 slot free but pickup is paused (no-slots)", wedgedForMs: 4 * 60_000 },
+          pickupWedged: {
+            detail: "1 slot free but pickup is paused (no-slots)",
+            wedgedForMs: 4 * 60_000,
+            remedy: "Check the orchestrator.",
+          },
           queueStale: { staleForMs: 3 * 60_000 },
         },
         projects: [
@@ -1029,7 +1033,7 @@ describe("buildFleetView — fleet health (#126)", () => {
     ]);
   });
 
-  it("raises a pickup-wedged card carrying the sweep's detail", () => {
+  it("raises a pickup-wedged card carrying the sweep's detail and its remedy", () => {
     const view = buildFleetView(
       baseRows({
         fleetHealth: {
@@ -1037,6 +1041,7 @@ describe("buildFleetView — fleet health (#126)", () => {
           pickupWedged: {
             detail: '1 slot free but "review: o/r#5" has not dispatched',
             wedgedForMs: 5 * 60_000,
+            remedy: "Check the orchestrator (a hung Docker daemon).",
           },
           queueStale: null,
         },
@@ -1047,10 +1052,34 @@ describe("buildFleetView — fleet health (#126)", () => {
         cause: "pickup-wedged",
         severity: "red",
         context: "pickup",
-        body: '1 slot free but "review: o/r#5" has not dispatched for 5m',
+        body:
+          '1 slot free but "review: o/r#5" has not dispatched for 5m. ' +
+          "Check the orchestrator (a hung Docker daemon).",
         action: null,
       },
     ]);
+  });
+
+  // Issue #152: the phantom-occupancy card and the ordinary wedge card are the
+  // same card — what differs is what it tells the operator to do, and that
+  // sentence comes from the evaluator so it cannot drift from the Discord ping.
+  it("carries a phantom slot's restart remedy onto the same card", () => {
+    const view = buildFleetView(
+      baseRows({
+        fleetHealth: {
+          owedReviewStalls: [],
+          pickupWedged: {
+            detail: "occupancy says 1 slot busy but the daemon reports 0 agent containers live",
+            wedgedForMs: 12 * 60_000,
+            remedy:
+              "The slot count is held in orchestrator memory with nothing behind it — restart the app to clear it.",
+          },
+          queueStale: null,
+        },
+      })
+    );
+    expect(view.needsYou[0].body).toContain("occupancy says 1 slot busy");
+    expect(view.needsYou[0].body).toContain("restart the app");
   });
 
   it("raises an owed-review-stalled card naming the PR, with a link when known", () => {

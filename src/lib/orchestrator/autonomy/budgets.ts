@@ -127,9 +127,20 @@ export const DAILY_AUTONOMOUS_CAP_USD = 500;
  * minutes, and a queue poll loop (which should tick every 2s) gone quiet for a
  * couple of minutes are each surfaced as a needs-you card + one Discord ping.
  * Env-overridable in minutes via config.ts (`OWED_REVIEW_STALL_MINUTES`,
- * `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES`); kept here as ms so
- * the leaf that holds every tunable also holds these.
+ * `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES`,
+ * `OCCUPANCY_DIVERGED_MINUTES`); kept here as ms so the leaf that holds every
+ * tunable also holds these.
  */
 export const DEFAULT_OWED_REVIEW_STALL_MS = 30 * 60_000;
 export const DEFAULT_PICKUP_WEDGED_MS = 3 * 60_000;
 export const DEFAULT_QUEUE_HEARTBEAT_STALE_MS = 2 * 60_000;
+/**
+ * Occupancy uncorroborated by real agent containers for this long is a phantom
+ * slot (issue #152). Longer than the pickup debounce on purpose: a task that
+ * has reserved its slot but not yet created its container is legitimately
+ * uncorroborated for the whole of provisioning — which includes the cold-image
+ * build inside `createWorkspaceContainer` — so the window must clear the
+ * slowest honest start, not the fastest. Ten minutes does, and still turns the
+ * ~1.5h invisible wedge of #151 into a card within minutes.
+ */
+export const DEFAULT_OCCUPANCY_DIVERGED_MS = 10 * 60_000;

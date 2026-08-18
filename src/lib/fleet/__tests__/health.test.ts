@@ -12,21 +12,32 @@ const THRESHOLDS: FleetHealthThresholds = {
   owedReviewStallMs: 30 * 60_000,
   pickupWedgedMs: 3 * 60_000,
   heartbeatStaleMs: 2 * 60_000,
+  occupancyDivergedMs: 10 * 60_000,
 };
 
 const T0 = new Date(2026, 7, 1, 12, 0, 0).getTime();
 const min = (n: number) => n * 60_000;
 
 function baseInput(overrides: Partial<FleetHealthInput> = {}): FleetHealthInput {
-  return {
+  const merged: FleetHealthInput = {
     nowMs: T0,
     owedReviews: [],
     slots: { total: 2, occupied: 0 },
     pickupPausedWithFreeSlot: false,
-    queuedWhileSlotFree: [],
+    queuedDispatchable: [],
+    agentContainers: null,
     queueRunning: true,
     queueLastProgressMs: T0,
     ...overrides,
+  };
+  // Unless a test says otherwise, the daemon corroborates the slot count — so
+  // only the tests that mean to exercise a divergence create one.
+  return {
+    ...merged,
+    agentContainers:
+      overrides.agentContainers !== undefined
+        ? overrides.agentContainers
+        : { live: merged.slots.occupied, stopped: 0 },
   };
 }
 
@@ -136,7 +147,7 @@ describe("evaluateFleetHealth — pickup wedged", () => {
 
   it("does not fire before the debounce window", () => {
     const { signals, announce, state } = evaluate(
-      baseInput({ slots: { total: 2, occupied: 1 }, queuedWhileSlotFree: queued })
+      baseInput({ slots: { total: 2, occupied: 1 }, queuedDispatchable: queued })
     );
     expect(signals.pickupWedged).toBeNull();
     expect(announce.pickupWedged).toBeNull();
@@ -145,13 +156,13 @@ describe("evaluateFleetHealth — pickup wedged", () => {
 
   it("fires once a task has been queued past the threshold while a slot is free", () => {
     const s1 = evaluate(
-      baseInput({ slots: { total: 2, occupied: 1 }, queuedWhileSlotFree: queued })
+      baseInput({ slots: { total: 2, occupied: 1 }, queuedDispatchable: queued })
     );
     const s2 = evaluate(
       baseInput({
         nowMs: T0 + min(4),
         slots: { total: 2, occupied: 1 },
-        queuedWhileSlotFree: queued,
+        queuedDispatchable: queued,
       }),
       s1.state
     );
@@ -165,7 +176,7 @@ describe("evaluateFleetHealth — pickup wedged", () => {
       baseInput({
         nowMs: T0 + min(5),
         slots: { total: 2, occupied: 1 },
-        queuedWhileSlotFree: queued,
+        queuedDispatchable: queued,
       }),
       s2.state
     );
@@ -187,17 +198,17 @@ describe("evaluateFleetHealth — pickup wedged", () => {
 
   it("does not fire when all slots are busy (no free slot to dispatch into)", () => {
     const { signals } = evaluate(
-      baseInput({ slots: { total: 1, occupied: 1 }, queuedWhileSlotFree: [] })
+      baseInput({ slots: { total: 1, occupied: 1 }, queuedDispatchable: [] })
     );
     expect(signals.pickupWedged).toBeNull();
   });
 
   it("resets the timer and re-arms once the wedge clears", () => {
     const s1 = evaluate(
-      baseInput({ slots: { total: 2, occupied: 1 }, queuedWhileSlotFree: queued })
+      baseInput({ slots: { total: 2, occupied: 1 }, queuedDispatchable: queued })
     );
     const s2 = evaluate(
-      baseInput({ nowMs: T0 + min(4), slots: { total: 2, occupied: 1 }, queuedWhileSlotFree: queued }),
+      baseInput({ nowMs: T0 + min(4), slots: { total: 2, occupied: 1 }, queuedDispatchable: queued }),
       s1.state
     );
     // Queue drains — no longer wedged.
@@ -208,6 +219,134 @@ describe("evaluateFleetHealth — pickup wedged", () => {
     expect(cleared.signals.pickupWedged).toBeNull();
     expect(cleared.state.pickupWedgedSinceMs).toBeNull();
     expect(cleared.state.pickupWedgedAnnounced).toBe(false);
+  });
+});
+
+describe("evaluateFleetHealth — phantom slot occupancy", () => {
+  // Issue #152: the wedge #126 could not see. In the #151 incident a leaked
+  // reservation held the box's only slot for ~1.5h with no agent container
+  // anywhere — occupancy itself was the lie, so every other pickup signal read
+  // "legitimately saturated" and stayed silent.
+  const phantom = {
+    slots: { total: 1, occupied: 1 },
+    agentContainers: { live: 0, stopped: 0 },
+  };
+
+  it("fires — card + one-time ping — once occupancy has been uncorroborated past the threshold", () => {
+    const s1 = evaluate(baseInput(phantom));
+    expect(s1.signals.pickupWedged).toBeNull(); // debounced
+
+    const s2 = evaluate(baseInput({ nowMs: T0 + min(11), ...phantom }), s1.state);
+    expect(s2.signals.pickupWedged).not.toBeNull();
+    expect(s2.signals.pickupWedged!.wedgedForMs).toBe(min(11));
+    expect(s2.signals.pickupWedged!.detail).toContain("occupancy says 1 slot busy");
+    expect(s2.signals.pickupWedged!.detail).toContain("0 agent containers live");
+    expect(s2.signals.pickupWedged!.remedy).toContain("restart");
+    expect(s2.announce.pickupWedged).not.toBeNull(); // one-time ping
+
+    // Deduped on the next diverged sweep — the card stays, the ping does not.
+    const s3 = evaluate(baseInput({ nowMs: T0 + min(12), ...phantom }), s2.state);
+    expect(s3.signals.pickupWedged).not.toBeNull();
+    expect(s3.announce.pickupWedged).toBeNull();
+  });
+
+  it("surfaces the starved task even at occupied == total, and clears once the count is real again", () => {
+    const queued = [{ taskId: "task-9", label: "review: lennons301/lemons#34" }];
+    const s1 = evaluate(baseInput({ ...phantom, queuedDispatchable: queued }));
+    const s2 = evaluate(
+      baseInput({ nowMs: T0 + min(11), ...phantom, queuedDispatchable: queued }),
+      s1.state
+    );
+    // No slot reads free — the classic wedge cannot see this — yet the starved
+    // review is named because occupancy could not be corroborated.
+    expect(s2.signals.pickupWedged!.detail).toContain("review: lennons301/lemons#34");
+
+    // A restart clears the phantom: one container for one counted slot.
+    const cleared = evaluate(
+      baseInput({
+        nowMs: T0 + min(12),
+        slots: { total: 1, occupied: 1 },
+        agentContainers: { live: 1, stopped: 0 },
+      }),
+      s2.state
+    );
+    expect(cleared.signals.pickupWedged).toBeNull();
+    expect(cleared.state.occupancyDivergedSinceMs).toBeNull();
+    expect(cleared.state.pickupWedgedAnnounced).toBe(false);
+  });
+
+  it("never alarms for a task still provisioning its container (uncorroborated, but briefly)", () => {
+    // A pickup reserves its slot before `createWorkspaceContainer` returns, so
+    // the count legitimately leads the daemon for as long as provisioning takes.
+    const s1 = evaluate(baseInput(phantom));
+    const s2 = evaluate(baseInput({ nowMs: T0 + min(4), ...phantom }), s1.state);
+    expect(s2.signals.pickupWedged).toBeNull();
+    // The container appears — the divergence closes without ever having fired.
+    const s3 = evaluate(
+      baseInput({
+        nowMs: T0 + min(5),
+        slots: { total: 1, occupied: 1 },
+        agentContainers: { live: 1, stopped: 0 },
+      }),
+      s2.state
+    );
+    expect(s3.signals.pickupWedged).toBeNull();
+    expect(s3.state.occupancyDivergedSinceMs).toBeNull();
+  });
+
+  it("never alarms for a parked autonomous container (holds no slot, runs nothing)", () => {
+    // A parked implement pass is stopped to free memory (#93): it is absent
+    // from `occupiedSlots()` and absent from the daemon's running set, so it
+    // cancels on both sides however long it stays parked.
+    const parked = {
+      slots: { total: 2, occupied: 1 },
+      agentContainers: { live: 1, stopped: 1 },
+    };
+    const s1 = evaluate(baseInput(parked));
+    const s2 = evaluate(baseInput({ nowMs: T0 + min(90), ...parked }), s1.state);
+    expect(s2.signals.pickupWedged).toBeNull();
+  });
+
+  it("never alarms when the daemon could not be asked (probe failed or timed out)", () => {
+    const unknown = { slots: { total: 1, occupied: 1 }, agentContainers: null };
+    const s1 = evaluate(baseInput(unknown));
+    const s2 = evaluate(baseInput({ nowMs: T0 + min(30), ...unknown }), s1.state);
+    expect(s2.signals.pickupWedged).toBeNull();
+    expect(s2.state.occupancyDivergedSinceMs).toBeNull();
+  });
+
+  it("never alarms when the daemon reports more containers than the counter claims", () => {
+    // Over-count is a parked pass mid-transition or a leaked container — the
+    // memory-admission probe's problem, not a pickup wedge.
+    const over = {
+      slots: { total: 2, occupied: 1 },
+      agentContainers: { live: 2, stopped: 0 },
+    };
+    const s1 = evaluate(baseInput(over));
+    const s2 = evaluate(baseInput({ nowMs: T0 + min(30), ...over }), s1.state);
+    expect(s2.signals.pickupWedged).toBeNull();
+  });
+
+  it("advises going to look, not restarting, when the count is corroborated", () => {
+    const queued = [{ taskId: "task-9", label: "review: lennons301/lemons#34" }];
+    const s1 = evaluate(
+      baseInput({
+        slots: { total: 2, occupied: 1 },
+        agentContainers: { live: 1, stopped: 0 },
+        queuedDispatchable: queued,
+      })
+    );
+    const s2 = evaluate(
+      baseInput({
+        nowMs: T0 + min(4),
+        slots: { total: 2, occupied: 1 },
+        agentContainers: { live: 1, stopped: 0 },
+        queuedDispatchable: queued,
+      }),
+      s1.state
+    );
+    expect(s2.signals.pickupWedged!.remedy).toContain("check the orchestrator");
+    expect(s2.signals.pickupWedged!.remedy).not.toContain("restart");
   });
 });
 

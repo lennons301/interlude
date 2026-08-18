@@ -530,9 +530,12 @@ export function buildFleetView(rows: FleetRows): FleetView {
       cause: "pickup-wedged",
       severity: "red",
       context: "pickup",
+      // The remedy is part of the card, not a thing to know: a phantom slot
+      // (#152) is cleared only by a restart, an ordinary wedge is something to
+      // go and look at, and the two are indistinguishable from the symptom.
       body: `${health.pickupWedged.detail} for ${formatDuration(
         health.pickupWedged.wedgedForMs
-      )}`,
+      )}. ${health.pickupWedged.remedy}`,
       action: null,
     });
   }
