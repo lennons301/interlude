@@ -146,6 +146,12 @@ export function isSession(row: TaskListRow): boolean {
   return row.kind === "interactive" && row.runId === null;
 }
 
+/** One filter option: a chip and how many rows carry it. */
+export interface ChipCount {
+  chip: TaskChip;
+  count: number;
+}
+
 export interface OrganizedTasks {
   /** Interactive sessions, most recently updated first. */
   interactive: TaskListRow[];
@@ -153,7 +159,7 @@ export interface OrganizedTasks {
   autonomous: TaskListRow[];
   /** Chips present in the *unfiltered* list, in `TASK_CHIPS` order, with their
    * counts — the filter offers only kinds that exist, so no option is dead. */
-  chips: { chip: TaskChip; count: number }[];
+  chips: ChipCount[];
   /** Rows before the filter, so the UI can say "3 of 40". */
   total: number;
 }
@@ -185,4 +191,73 @@ export function organizeTasks(
     }),
     total: rows.length,
   };
+}
+
+/**
+ * What the archive screen is showing, as a value (issue #142). This decision —
+ * loading, or failed, or an archive confirmed empty, or a list that may be stale
+ * — is what made `/tasks` lie in production: an empty state was rendered over a
+ * failed load, so an archive of 222 tasks read as "No tasks yet". The spec rules
+ * out component tests, so left inside the component it was verified only by
+ * reading it. Out here it is a table.
+ *
+ * The order of the branches is the argument. A failure with nothing to show is a
+ * failure, whether or not an earlier poll happened to answer "empty" — an
+ * *unconfirmed* empty archive is the exact lie above, so `empty` is reachable
+ * only from a load that succeeded.
+ */
+export type ListState =
+  | { state: "loading" }
+  /** Nothing to show, and something broke. */
+  | { state: "failed"; error: string }
+  /** The archive really is empty — a successful, unfiltered load said so. */
+  | { state: "empty" }
+  /** Render the list; `stale` is why the last refresh didn't land, if it didn't. */
+  | { state: "ready"; stale: string | null };
+
+export function listState(
+  rows: readonly TaskListRow[] | null,
+  error: string | null,
+  /** Whether these rows came from a *narrowed* load. A narrowed query answering
+   * "nothing" says nothing about the archive being empty, so the empty state
+   * stays unreachable from one — the list renders instead, with its filter row
+   * intact, and each section says "none of this kind". */
+  filtered = false
+): ListState {
+  if (error !== null && (rows === null || rows.length === 0)) {
+    return { state: "failed", error };
+  }
+  // null = never loaded, which is precisely what a failed first load must not
+  // be confused with.
+  if (rows === null) return { state: "loading" };
+  if (rows.length === 0 && !filtered) return { state: "empty" };
+  return { state: "ready", stale: error };
+}
+
+/**
+ * The filter row's options. Now that narrowing happens in SQL (issue #142) the
+ * rows on screen are only ever one chip's worth, so the vocabulary can't be read
+ * off them: `seen` is the last *unfiltered* load, which is what keeps every
+ * other option on offer while one is active — otherwise narrowing to `grill`
+ * would leave `grill` as the only way out of `grill`.
+ *
+ * The active option's count comes from `narrowed` instead, because that is the
+ * one number the screen can now state exactly. It can legitimately exceed what
+ * `seen` showed: the unfiltered window is bounded by recency, and reaching the
+ * rows it cut off is the whole reason the filter moved to the server.
+ */
+export function filterOptions(
+  seen: readonly ChipCount[],
+  narrowed: readonly ChipCount[],
+  filter: TaskFilter
+): ChipCount[] {
+  const countIn = (counts: readonly ChipCount[], chip: TaskChip) =>
+    counts.find((entry) => entry.chip === chip)?.count ?? 0;
+
+  return TASK_CHIPS.flatMap((chip) => {
+    if (chip === filter) return [{ chip, count: countIn(narrowed, chip) }];
+    const count = countIn(seen, chip);
+    // A chip nothing carries is left off rather than offered as a dead end.
+    return count > 0 ? [{ chip, count }] : [];
+  });
 }
