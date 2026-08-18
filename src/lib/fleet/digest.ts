@@ -10,6 +10,7 @@ import {
   type FleetView,
   type NeedsYouItem,
   type PickupPause,
+  type ProjectPickupHold,
   type RecentItem,
   type RunningCard,
 } from "./fleet-view";
@@ -109,13 +110,33 @@ function runningLine(card: RunningCard): string {
   return parts.join(" · ");
 }
 
+/** What a per-project hold reads as beside its backlog depth (issue #148).
+ * Keyed by the union, so a new hold fails the build instead of printing a
+ * depth that silently reads as work about to start. */
+const HOLD_NOTE: Record<ProjectPickupHold, string> = {
+  "autonomy-off": "not picked up — autonomy is off for this project",
+  "preflight-failing": "not picked up — preflight is failing",
+  "preflight-unchecked": "not picked up — preflight has never passed",
+};
+
+/**
+ * Backlog depth per project — and, per project, whether that depth is going
+ * anywhere. A count on its own reads as work about to start, which for a
+ * disarmed or preflight-failing repo it is not; preflight is per-project, so
+ * this is where it is said, rather than over-claiming a fleet-wide hold
+ * (issue #148).
+ */
 function backlogLines(byProject: FleetView["queue"]["byProject"]): string[] {
   if (byProject === null) {
     return ["Not observed — the tracker is only polled while autonomy is on."];
   }
   const withDepth = byProject.filter((b) => b.count > 0);
   return linesOr(
-    withDepth.map((b) => `${b.projectName}: ${b.count}`),
+    withDepth.map((b) =>
+      b.hold === null
+        ? `${b.projectName}: ${b.count}`
+        : `${b.projectName}: ${b.count} — ${HOLD_NOTE[b.hold]}`
+    ),
     "No tickets ready-for-agent."
   );
 }
@@ -137,26 +158,32 @@ function needsYouLine(item: NeedsYouItem, appBaseUrl: string): string {
  * held fleet must not arrive here reading like an ordinarily quiet one: the
  * hold leads the digest rather than hiding in a footnote to Spend.
  *
- * The two reasons carry their own copy *and their own tense*, because they are
- * not the same news and are not even about the same moment. The daily cap was
+ * Each reason carries its own copy *and its own tense*, because they are not
+ * the same news and are not even about the same moment. The daily cap was
  * breached inside the covered day and lifted itself at local midnight — past
  * news, and the Spend section reports the breach either way. The kill switch
- * has no history to read: `loadFleetRows` takes the flag off the live settings
- * row, so it says whether the fleet is held *as the digest is written*, which
- * is why its line says so out loud rather than implying anything about
- * yesterday. When both hold, the switch leads (the view's own precedence — it
- * is the one a human can lift) and Spend still names the breach, so neither
- * fact is lost.
+ * and the boot master have no history to read: `loadFleetRows` takes the flag
+ * off the live settings row and the master off the running process's config, so
+ * both say how the fleet stands *as the digest is written*, which is why their
+ * lines say so out loud rather than implying anything about yesterday. When
+ * several hold, the view's own precedence picks the line (the boot master over
+ * the switch, because lifting the switch under it would change nothing) and
+ * Spend still names any breach, so no fact is lost.
  *
- * The unheld line claims only what the read model actually knows: that neither
- * fleet-wide hold applies. It deliberately does not promise pickup was running
- * — a boot master left off (`AUTONOMY_ENABLED`) or a project whose preflight is
- * failing stops claims by routes this view doesn't model, and a reassurance
- * that can be false is the failure this section exists to remove.
+ * The unheld line claims only what the read model actually knows: that no
+ * fleet-wide hold applies. It still does not promise every project was picking
+ * up — preflight is per-project, and the Backlog section is where that is said.
  */
 function pickupLines(view: FleetView, appBaseUrl: string): string[] {
   const reason: PickupPause["reason"] | null = view.pickupPaused?.reason ?? null;
   switch (reason) {
+    case "autonomy-off-at-boot":
+      return [
+        "⏸ Off right now — autonomy is disabled on this install " +
+          "(AUTONOMY_ENABLED), so no sweep runs at all and nothing is claimed " +
+          "for any project. The kill switch cannot lift this one: it takes a " +
+          "config change and a restart.",
+      ];
     case "kill-switch":
       return [
         "⏸ Held right now — the kill switch is engaged: nothing new is being " +
@@ -173,14 +200,14 @@ function pickupLines(view: FleetView, appBaseUrl: string): string[] {
     case null:
       return [
         view.autonomyOn
-          ? "No fleet-wide hold — the kill switch is lifted and the day stayed inside the cap."
+          ? "No fleet-wide hold — autonomy is on, the kill switch is lifted and the day stayed inside the cap."
           : "No project has autonomy enabled — nothing is claimed unattended.",
       ];
     default: {
       // A hold this renderer hasn't been taught is still a hold. The `never`
-      // fails the build when PickupPause grows a third reason — the dashboard's
-      // own Record<PickupPause["reason"], …> maps already do — and until
-      // someone teaches it, the line says held rather than quietly reassuring.
+      // fails the build when PickupPause grows a further reason — the
+      // dashboard's own Record<PickupPause["reason"], …> maps already do — and
+      // until someone teaches it, the line says held rather than reassuring.
       const unhandled: never = reason;
       return [`⏸ Held — autonomous pickup is paused (${String(unhandled)}).`];
     }
