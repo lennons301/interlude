@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 /**
  * Shared atoms of the fleet's metering language: everything countable is
  * discrete segments or pips, everything continuous is a 3px hairline gauge
@@ -135,6 +137,36 @@ export function ControlButton({
     >
       {children}
     </button>
+  );
+}
+
+/** The system's one text link: cool ink under a hairline underline that firms up
+ * on hover. The atom owns where the link goes as well as how it reads — an
+ * internal href routes through `Link`, anything else opens in a new tab — so a
+ * caller can't ship an external link without `rel`, or a link without a focus
+ * ring, which is how the three hand-written copies of this string differed.
+ * `size` is the only variant: 12px on the dashboard's cards, 11px in the denser
+ * chat header. The words are the caller's, arrow and all. */
+export function ActionLink({
+  href,
+  size = "md",
+  children,
+}: {
+  href: string;
+  size?: "sm" | "md";
+  children: React.ReactNode;
+}) {
+  const className =
+    `font-plex-mono ${size === "sm" ? "text-[11px]" : "text-[12px]"} ` +
+    `text-fl-cool underline decoration-fl-cool/45 underline-offset-2 hover:decoration-fl-cool ${FOCUS_RING}`;
+  return href.startsWith("/") ? (
+    <Link href={href} className={className}>
+      {children}
+    </Link>
+  ) : (
+    <a href={href} target="_blank" rel="noopener noreferrer" className={className}>
+      {children}
+    </a>
   );
 }
 
