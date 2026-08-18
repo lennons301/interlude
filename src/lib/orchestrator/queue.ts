@@ -194,8 +194,9 @@ export function startQueue(): void {
               .catch((err) =>
                 console.error(`[orchestrator] Task ${next.id} failed:`, err)
               )
-              // Backstop only: a settled pass has long since had its
-              // reservation released by `releaseSpentReservations`.
+              // The lock's own release; for the slot reservation this is only a
+              // backstop — `releaseSpentReservations` normally let go of it back
+              // when the container registered.
               .finally(() => {
                 inFlightTasks.delete(next.id);
                 slotReservations.delete(next.id);
