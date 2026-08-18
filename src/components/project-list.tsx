@@ -19,10 +19,7 @@ import {
   type PreflightState,
   type ProjectAutonomy,
 } from "@/lib/projects/autonomy";
-import {
-  DEFAULT_ATTEMPT_BUDGET_USD,
-  MAX_ATTEMPTS,
-} from "@/lib/orchestrator/autonomy/budgets";
+import { MAX_ATTEMPTS } from "@/lib/orchestrator/autonomy/budgets";
 
 /**
  * The project half of the control room (issue #119). Each card says what the
@@ -34,6 +31,12 @@ import {
  * affordance is offered at all, and a failing preflight replaces it with an
  * explicit override beside its reason. Disarming and every other edit are
  * single-press — reversible things shouldn't be made to feel dangerous.
+ *
+ * `attemptBudgetUsd` is passed down from the settings page rather than imported
+ * (issue #142): the per-attempt ceiling the sweep enforces is `MAX_BUDGET_USD`
+ * from the environment, not the compiled-in default, and a confirmation that
+ * mis-states the spend it exists to authorise is worse than no number at all.
+ * `MAX_ATTEMPTS` is a true constant, so it is still imported.
  */
 
 interface Project extends ProjectAutonomy {
@@ -54,7 +57,7 @@ const VERDICT_TONE: Record<PreflightState, "green" | "amber" | "quiet"> = {
   unchecked: "quiet",
 };
 
-export function ProjectList() {
+export function ProjectList({ attemptBudgetUsd }: { attemptBudgetUsd: number }) {
   const { data: projects, error, reload, setData } = useLoad<Project[]>("/api/projects");
 
   /** A PATCH answers with the whole updated row — including the preflight the
@@ -104,7 +107,11 @@ export function ProjectList() {
         <ul className="space-y-2">
           {projects.map((project) => (
             <li key={project.id}>
-              <ProjectCard project={project} onUpdated={replace} />
+              <ProjectCard
+                project={project}
+                attemptBudgetUsd={attemptBudgetUsd}
+                onUpdated={replace}
+              />
             </li>
           ))}
         </ul>
@@ -115,9 +122,11 @@ export function ProjectList() {
 
 function ProjectCard({
   project,
+  attemptBudgetUsd,
   onUpdated,
 }: {
   project: Project;
+  attemptBudgetUsd: number;
   onUpdated: (updated: Project) => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -158,7 +167,11 @@ function ProjectCard({
       )}
 
       <div className="flex flex-wrap items-center gap-2">
-        <AutonomyControl project={project} onUpdated={onUpdated} />
+        <AutonomyControl
+          project={project}
+          attemptBudgetUsd={attemptBudgetUsd}
+          onUpdated={onUpdated}
+        />
         <ControlButton
           aria-expanded={editing}
           onClick={() => setEditing((open) => !open)}
@@ -178,9 +191,11 @@ function ProjectCard({
  * failing preflight leaves in its place. */
 function AutonomyControl({
   project,
+  attemptBudgetUsd,
   onUpdated,
 }: {
   project: Project;
+  attemptBudgetUsd: number;
   onUpdated: (updated: Project) => void;
 }) {
   const [intent, setIntent] = useState<null | "arm" | "override">(null);
@@ -255,9 +270,8 @@ function AutonomyControl({
     >
       <p className="text-[13px]">
         Arm {project.name} for unattended work? The loop will claim its
-        ready-for-agent tickets on its own, spending up to $
-        {DEFAULT_ATTEMPT_BUDGET_USD} an attempt and {MAX_ATTEMPTS} attempts a
-        ticket.
+        ready-for-agent tickets on its own, spending up to ${attemptBudgetUsd} an
+        attempt and {MAX_ATTEMPTS} attempts a ticket.
       </p>
       {overriding && (
         <p className="text-[13px]">
