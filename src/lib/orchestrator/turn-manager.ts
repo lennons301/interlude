@@ -35,7 +35,7 @@ import {
 import { getDocker } from "../docker/client";
 import { commentOnIssue, parseIssueRef } from "../github/issues";
 import { parseRepoFromGitUrl } from "../github/repo";
-import { createDraftPr, markPrReady } from "../github/pull-requests";
+import { createDraftPr, markPrReady, shouldOpenDraftPr } from "../github/pull-requests";
 import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed, notifyTaskIdle, notifyRunBlocked } from "../discord/notifications";
 import { decideNext, passOutcomeSnapshot } from "./autonomy/decide";
 import { composeSeed, composeSessionTurn } from "../sessions/seed";
@@ -1386,12 +1386,15 @@ async function postIdleNotification(taskId: string): Promise<void> {
  */
 async function runPostTurnCommitAndPush(taskId: string, running: RunningContainer): Promise<void> {
   try {
-    await execFallbackCommitAndPush(running);
+    const { commitsAhead } = await execFallbackCommitAndPush(running);
     const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
     insertSystemMessage(taskId, `Branch '${task?.branch}' pushed.`);
 
-    // Create draft PR on first push if none exists yet (any task origin)
-    if (task && !task.pullRequestNumber && task.branch) {
+    // Create draft PR on first push if none exists yet (any task origin) — but
+    // never for a branch level with its base, which GitHub cannot open a PR for
+    // (issue #151): a grilling session commits nothing, so it would re-attempt
+    // that doomed call every turn.
+    if (task && task.branch && shouldOpenDraftPr({ existingPr: task.pullRequestNumber, commitsAhead })) {
       const proj = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
       const repoRef = task.githubIssue
         ? parseIssueRef(task.githubIssue)

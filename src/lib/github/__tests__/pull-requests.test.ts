@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   createDraftPr,
+  shouldOpenDraftPr,
   dismissStaleReviewsAsReviewer,
   findOpenPrForHead,
   getPrState,
@@ -352,5 +353,29 @@ describe("dismissStaleReviewsAsReviewer (issue #131)", () => {
     expect(
       await dismissStaleReviewsAsReviewer("lennons301", "interlude", 180, MOVED, "moved")
     ).toBeNull();
+  });
+});
+
+/**
+ * A branch level with its base cannot carry a PR — GitHub 422s with "No commits
+ * between …". A grilling session never commits, so before issue #151 every turn
+ * re-attempted the same doomed call, and one of those attempts was the outbound
+ * call that never returned and wedged the box.
+ */
+describe("shouldOpenDraftPr (issue #151)", () => {
+  it("opens one for a branch with commits to propose", () => {
+    expect(shouldOpenDraftPr({ existingPr: null, commitsAhead: 2 })).toBe(true);
+  });
+
+  it("does not open one for a branch level with its base", () => {
+    expect(shouldOpenDraftPr({ existingPr: null, commitsAhead: 0 })).toBe(false);
+  });
+
+  it("opens one when the commit count could not be read", () => {
+    expect(shouldOpenDraftPr({ existingPr: null, commitsAhead: null })).toBe(true);
+  });
+
+  it("leaves a task that already has a PR alone", () => {
+    expect(shouldOpenDraftPr({ existingPr: 41, commitsAhead: 7 })).toBe(false);
   });
 });
