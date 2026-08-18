@@ -152,6 +152,34 @@ export function composerState(input: {
   };
 }
 
+/** Why ending the session is not on offer, by what the agent is doing. None of
+ * these is a failure — each one is the session having moved on. */
+const REFUSALS: Record<ComposerPhase, string | null> = {
+  waiting: "The agent hasn't started yet — there's nothing to end.",
+  starting: "The agent is still starting up. You can end the session once it's idle.",
+  working: "The agent started a turn. You can end the session once it's idle again.",
+  idle: null,
+  blocked: "The agent is waiting on your answer — send it, then end the session.",
+  closing: "This session is already wrapping up.",
+  closed: "This session has already ended.",
+};
+
+/**
+ * Why completion was refused, or null while it is on offer (issue #149).
+ *
+ * The composer asks this again at the moment the owner confirms, rather than
+ * trusting that the button was enabled when they pressed it: a turn can start
+ * in the seconds a confirmation sits open, and deciding a session is over just
+ * as the agent picks the next turn up is not a rare coincidence — it is the
+ * normal end of one. Refusing then is right, and nothing bad happens. Refusing
+ * *silently* is what leaves the owner pressing a control that does nothing, so
+ * the reason is a value the composer can say out loud rather than a bare early
+ * return.
+ */
+export function completionRefusal(state: ComposerState): string | null {
+  return state.canComplete ? null : REFUSALS[state.phase];
+}
+
 /**
  * What the primary button does. An empty draft on an idle agent means "carry
  * on" — the same move as replying in Discord to an idle notification — so the

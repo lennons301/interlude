@@ -627,7 +627,7 @@ export async function processQueuedMessages(
     }
 
     // Mark as delivered. `updatedAt` is stamped with it because that column is
-    // what the SSE stream re-emits a already-sent row on — without it the live
+    // what the SSE stream re-emits an already-sent row on — without it the live
     // view would keep counting this message as queued for the rest of the
     // session (issue #122).
     const deliveredAt = new Date();

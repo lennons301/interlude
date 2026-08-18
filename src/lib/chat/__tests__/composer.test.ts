@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  completionRefusal,
   composerState,
   isTerminalTaskStatus,
   queuedCount,
@@ -92,6 +93,46 @@ describe("composerState — queue feedback", () => {
     // message still in hand is a real, brief state — and the honest thing to
     // show is that the message has not landed yet.
     expect(state("running", "idle", 1).queuedNote).toBe("1 queued");
+  });
+});
+
+describe("completionRefusal — completing while the session moves on", () => {
+  it("refuses, and says why, when the agent starts a turn under an open confirmation", () => {
+    // The race this exists for: the owner presses complete on an idle agent,
+    // and in the seconds the confirmation sits open a queued message is
+    // delivered and the next turn starts.
+    const asked = state("running", "idle");
+    expect(completionRefusal(asked)).toBeNull();
+
+    const confirmed = state("running", "running");
+    expect(completionRefusal(confirmed)).toBe(
+      "The agent started a turn. You can end the session once it's idle again."
+    );
+  });
+
+  it("gives a reason for every state that refuses, so none can dead-end silently", () => {
+    const everyPhase: Array<[string, string | null]> = [
+      ["queued", null],
+      ["running", null],
+      ["running", "setup"],
+      ["running", "running"],
+      ["running", "idle"],
+      ["running", "completing"],
+      ["blocked", null],
+      ["completed", "idle"],
+      ["failed", null],
+      ["cancelled", null],
+    ];
+
+    for (const [taskStatus, containerStatus] of everyPhase) {
+      const s = state(taskStatus, containerStatus);
+      const refusal = completionRefusal(s);
+
+      // A reason exists exactly when the button would refuse — no phase can be
+      // added that refuses without being able to say why.
+      expect(refusal === null).toBe(s.canComplete);
+      if (refusal !== null) expect(refusal.length).toBeGreaterThan(0);
+    }
   });
 });
 
