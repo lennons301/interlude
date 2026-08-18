@@ -105,17 +105,12 @@ describe("fleet palette", () => {
     expect(FOCUS_RING).not.toContain("outline-fl-ink-3");
   });
 
-  it("draws the cancelled status dot in the mark too", () => {
-    expect(read("src/components/task-chat.tsx")).toContain(
-      'cancelled: "bg-fl-mark"'
-    );
-  });
-
   it("paints no background in the quietest ink, anywhere", () => {
-    // A background is never text, so every one of them owes the 3:1 floor —
-    // which makes this the general form of the finding, rather than a list of
-    // the dots that happened to be noticed. `text-fl-ink-3` is untouched: ink-3
-    // is still the quiet *ink*.
+    // A background is never text, so every one of them owes the 3:1 floor. This
+    // is the general form of the ticket's finding — the cancelled status dot it
+    // named included — rather than a list of the dots that happened to be
+    // noticed, and it needs no coupling to how any one map is formatted.
+    // `text-fl-ink-3` is untouched: ink-3 is still the quiet *ink*.
     const offenders = componentSources().filter(([, source]) =>
       source.includes("bg-fl-ink-3")
     );

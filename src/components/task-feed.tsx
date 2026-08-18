@@ -9,7 +9,6 @@ import {
   listState,
   organizeTasks,
   TASK_LIST_LIMIT,
-  type ChipCount,
   type TaskFilter,
   type TaskListRow,
 } from "@/lib/tasks/organize-tasks";
@@ -39,20 +38,24 @@ const POLL_MS = 10_000;
  * already unwell; `retry` is what shortcuts back to the fast cadence. */
 const MAX_BACKOFF_MS = 60_000;
 
-/** What the last *unfiltered* load found: the filter row is drawn from this, so
- * every other kind stays on offer while one of them is active. */
-interface Vocabulary {
-  chips: ChipCount[];
-  total: number;
+/** An answer, with the filter it was an answer *to*. The two travel together
+ * because they are read together: between pressing a chip and its rows arriving,
+ * the filter has moved on and these rows haven't, and every decision below needs
+ * to know which one it is looking at. */
+interface Loaded {
+  rows: TaskListRow[];
+  filter: TaskFilter;
 }
 
 export function TaskFeed() {
   // null = never loaded. Distinguishing "no answer yet" from "answered, empty"
   // is the whole reason a failed fetch can't masquerade as an empty archive.
-  const [rows, setRows] = useState<TaskListRow[] | null>(null);
+  const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<TaskFilter>("all");
-  const [vocabulary, setVocabulary] = useState<Vocabulary | null>(null);
+  // The last *unfiltered* answer, kept because the filter row can't be read off
+  // a narrowed one — see `filterOptions`.
+  const [unfiltered, setUnfiltered] = useState<TaskListRow[] | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
@@ -72,16 +75,11 @@ export function TaskFeed() {
         if (!res.ok) throw new Error(`the server answered ${res.status}`);
         const data: TaskListRow[] = await res.json();
         if (stopped) return;
-        setRows(data);
+        setLoaded({ rows: data, filter });
         // Only an unfiltered answer describes the whole archive, so only one
         // refreshes the filter row; a narrowed answer would otherwise leave the
         // active chip as the only way out of itself.
-        if (filter === "all") {
-          setVocabulary({
-            chips: organizeTasks(data, "all").chips,
-            total: data.length,
-          });
-        }
+        if (filter === "all") setUnfiltered(data);
         setError(null);
         failures = 0;
       } catch (err) {
@@ -121,17 +119,34 @@ export function TaskFeed() {
     setReloadKey((key) => key + 1);
   };
 
+  /** Pressing a chip is a fresh request, so a previous failure stops being
+   * reported: the effect below re-runs on `filter` and will say so again if the
+   * narrowed load fails too. */
+  const select = (next: TaskFilter) => {
+    setError(null);
+    setFilter(next);
+  };
+
   // Memoised so the 30s clock tick — which exists only to age the relative
   // times — doesn't re-derive the whole list behind it. The filter is applied
   // here as well as in SQL: between pressing a chip and its answer arriving,
   // these are still the previous query's rows, and narrowing them is what makes
   // the list correct in the meantime instead of briefly wrong.
   const organized = useMemo(
-    () => organizeTasks(rows ?? [], filter),
-    [rows, filter]
+    () => organizeTasks(loaded?.rows ?? [], filter),
+    [loaded, filter]
   );
 
-  const view = listState(rows, error, filter !== "all");
+  /** The whole archive's shape, for the filter row. One derivation, from the
+   * last unfiltered rows — or from whatever has arrived, before any have. */
+  const seen = useMemo(
+    () => organizeTasks(unfiltered ?? loaded?.rows ?? [], "all"),
+    [unfiltered, loaded]
+  );
+
+  // The filter the rows in hand were loaded under, not the one now selected:
+  // only that can say whether "nothing" means an empty archive.
+  const view = listState(loaded?.rows ?? null, error, loaded?.filter ?? "all");
 
   if (view.state === "failed") {
     return (
@@ -167,12 +182,9 @@ export function TaskFeed() {
     );
   }
 
-  // Before the first unfiltered answer lands there is nothing else to read the
-  // vocabulary from, and under `all` the two agree by construction.
-  const seen = vocabulary ?? { chips: organized.chips, total: organized.total };
   const options = filterOptions(seen.chips, organized.chips, filter);
   const emptyNote = filter === "all" ? "none yet" : "none of this kind";
-  const bounded = (rows ?? []).length >= TASK_LIST_LIMIT;
+  const bounded = (loaded?.rows.length ?? 0) >= TASK_LIST_LIMIT;
 
   return (
     <div className="space-y-6">
@@ -197,7 +209,7 @@ export function TaskFeed() {
           label="all"
           count={seen.total}
           active={filter === "all"}
-          onSelect={() => setFilter("all")}
+          onSelect={() => select("all")}
         />
         {options.map(({ chip, count }) => (
           <FilterOption
@@ -205,7 +217,7 @@ export function TaskFeed() {
             label={chip}
             count={count}
             active={filter === chip}
-            onSelect={() => setFilter(chip)}
+            onSelect={() => select(chip)}
           />
         ))}
       </div>

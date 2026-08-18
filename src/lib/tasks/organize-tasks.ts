@@ -74,6 +74,10 @@ export type TaskChip = (typeof TASK_CHIPS)[number];
  * grouping, no saved views). */
 export type TaskFilter = "all" | TaskChip;
 
+/** An ordinary chat task is the *absence* of a skill, so it is the one chip no
+ * map can key. Named, because both the classifier and the query need it. */
+const NO_SKILL_CHIP = "chat" satisfies TaskChip;
+
 const SESSION_CHIP: Record<SessionSkill, TaskChip> = {
   "grill-me": "grill",
   "grill-with-docs": "grill",
@@ -95,7 +99,9 @@ const KIND_CHIP: Record<Exclude<TaskKind, "interactive">, TaskChip> = {
  * in says who drove it. */
 export function taskChip(row: TaskListRow): TaskChip {
   if (row.kind === "interactive") {
-    return row.sessionSkill === null ? "chat" : SESSION_CHIP[row.sessionSkill];
+    return row.sessionSkill === null
+      ? NO_SKILL_CHIP
+      : SESSION_CHIP[row.sessionSkill];
   }
   return KIND_CHIP[row.kind];
 }
@@ -110,34 +116,39 @@ export interface ChipColumns {
 }
 
 /**
- * What each chip means in column terms, so the route can narrow *before* the
- * row bound (issue #142) and still return exactly the rows `taskChip` would
- * give that chip. Two entries are the interesting ones: `chat` is the absence of
- * a skill, and `triage` is genuinely two shapes — an unattended pass and a
- * human-driven session — because it is one kind of work whichever drove it.
+ * What a chip means in column terms, so the route can narrow *before* the row
+ * bound (issue #142) and still return exactly the rows `taskChip` would give
+ * that chip.
  *
- * This is a second statement of `taskChip`, which is a real risk, so the route's
- * tests (`src/app/api/__tests__/task-list-filter.test.ts`) run the generated SQL
- * against every `(kind, skill)` pair the schema allows and compare it with
- * `taskChip` row by row, rather than trusting the reading. `Record<TaskChip, …>` keeps it exhaustive: a chip
- * added to the vocabulary fails the type check here until it can be queried.
+ * Read off `SESSION_CHIP` and `KIND_CHIP` rather than restated, because a second
+ * hand-written statement of the same rule is the very thing this module warns
+ * about forty lines up — and skills, not chips, are the axis that grows: a new
+ * `SessionSkill` must be given a chip in `SESSION_CHIP` to type-check at all,
+ * and deriving from it is what makes the new skill filterable in the same
+ * stroke instead of silently unreachable.
  */
-export const CHIP_COLUMNS: Record<TaskChip, ChipColumns[]> = {
-  chat: [{ kind: "interactive", sessionSkills: [null] }],
-  grill: [
-    { kind: "interactive", sessionSkills: ["grill-me", "grill-with-docs"] },
-  ],
-  spec: [{ kind: "interactive", sessionSkills: ["to-spec"] }],
-  tickets: [{ kind: "interactive", sessionSkills: ["to-tickets"] }],
-  wayfinder: [{ kind: "interactive", sessionSkills: ["wayfinder"] }],
-  implement: [{ kind: "implement", sessionSkills: null }],
-  review: [{ kind: "review", sessionSkills: null }],
-  repair: [{ kind: "repair", sessionSkills: null }],
-  triage: [
-    { kind: "interactive", sessionSkills: ["triage"] },
-    { kind: "triage", sessionSkills: null },
-  ],
-};
+export function chipColumns(chip: TaskChip): ChipColumns[] {
+  const shapes: ChipColumns[] = [];
+
+  const skills = (Object.keys(SESSION_CHIP) as SessionSkill[]).filter(
+    (skill) => SESSION_CHIP[skill] === chip
+  );
+  // The skill-less shape and the skilled ones are both `interactive`, and no
+  // chip is ever both, so at most one of these two branches contributes.
+  if (chip === NO_SKILL_CHIP) {
+    shapes.push({ kind: "interactive", sessionSkills: [null] });
+  } else if (skills.length > 0) {
+    shapes.push({ kind: "interactive", sessionSkills: skills });
+  }
+
+  for (const kind of Object.keys(KIND_CHIP) as (keyof typeof KIND_CHIP)[]) {
+    // An unattended pass is named by its kind alone, whatever the skill column
+    // happens to hold.
+    if (KIND_CHIP[kind] === chip) shapes.push({ kind, sessionSkills: null });
+  }
+
+  return shapes;
+}
 
 /** The archive's split: a session is the owner at the keyboard — `interactive`
  * and owning no run. Anything a run owns is loop bookkeeping, whatever its
@@ -218,11 +229,12 @@ export type ListState =
 export function listState(
   rows: readonly TaskListRow[] | null,
   error: string | null,
-  /** Whether these rows came from a *narrowed* load. A narrowed query answering
-   * "nothing" says nothing about the archive being empty, so the empty state
-   * stays unreachable from one — the list renders instead, with its filter row
-   * intact, and each section says "none of this kind". */
-  filtered = false
+  /** The filter *these rows were loaded under* — not necessarily the one the
+   * screen now shows. A narrowed query answering "nothing" says nothing about
+   * the archive being empty, so the empty state stays unreachable from one: the
+   * list renders instead, with its filter row intact, and each section says
+   * "none of this kind". */
+  loadedUnder: TaskFilter = "all"
 ): ListState {
   if (error !== null && (rows === null || rows.length === 0)) {
     return { state: "failed", error };
@@ -230,7 +242,7 @@ export function listState(
   // null = never loaded, which is precisely what a failed first load must not
   // be confused with.
   if (rows === null) return { state: "loading" };
-  if (rows.length === 0 && !filtered) return { state: "empty" };
+  if (rows.length === 0 && loadedUnder === "all") return { state: "empty" };
   return { state: "ready", stale: error };
 }
 

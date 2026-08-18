@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  chipColumns,
   filterOptions,
   listState,
   organizeTasks,
@@ -272,7 +273,7 @@ describe("listState", () => {
 
   it("never claims an empty archive from a narrowed load", () => {
     // Nothing of this kind is not nothing at all, so the filter row must stay.
-    expect(listState([], null, true)).toEqual({ state: "ready", stale: null });
+    expect(listState([], null, "grill")).toEqual({ state: "ready", stale: null });
   });
 
   it("is ready when there are rows", () => {
@@ -340,6 +341,86 @@ describe("filterOptions", () => {
     expect(filterOptions(scrambled, scrambled, "all").map((o) => o.chip)).toEqual([
       "chat",
       "review",
+    ]);
+  });
+});
+
+/**
+ * `chipColumns` is `taskChip` read backwards, for the route to put in a `where`
+ * (issue #142). The route's own tests run the generated SQL over every row the
+ * schema allows; this is the same agreement one layer up, where a mismatch names
+ * the chip rather than a missing row.
+ */
+describe("chipColumns", () => {
+  /** Does `chip`'s column description admit this (kind, skill) pair? */
+  const admits = (
+    chip: Parameters<typeof chipColumns>[0],
+    row: TaskListRow
+  ): boolean =>
+    chipColumns(chip).some(
+      ({ kind, sessionSkills }) =>
+        kind === row.kind &&
+        (sessionSkills === null || sessionSkills.includes(row.sessionSkill))
+    );
+
+  const KINDS: TaskListRow["kind"][] = [
+    "interactive",
+    "implement",
+    "review",
+    "triage",
+    "repair",
+  ];
+  const SKILLS: TaskListRow["sessionSkill"][] = [
+    null,
+    "grill-me",
+    "grill-with-docs",
+    "to-spec",
+    "to-tickets",
+    "wayfinder",
+    "triage",
+  ];
+
+  it("admits exactly the rows taskChip gives that chip, over the whole space", () => {
+    for (const kind of KINDS) {
+      for (const sessionSkill of SKILLS) {
+        const row = makeRow({ kind, sessionSkill });
+        for (const chip of TASK_CHIPS) {
+          expect(admits(chip, row), `${chip} vs ${kind}/${sessionSkill}`).toBe(
+            taskChip(row) === chip
+          );
+        }
+      }
+    }
+  });
+
+  it("describes every chip in the vocabulary, so none is unfilterable", () => {
+    for (const chip of TASK_CHIPS) {
+      expect(chipColumns(chip).length, chip).toBeGreaterThan(0);
+    }
+  });
+
+  it("names a chat task by the absence of a skill, not by a skill", () => {
+    expect(chipColumns("chat")).toEqual([
+      { kind: "interactive", sessionSkills: [null] },
+    ]);
+  });
+
+  it("folds both grilling skills into one interactive shape", () => {
+    expect(chipColumns("grill")).toEqual([
+      { kind: "interactive", sessionSkills: ["grill-me", "grill-with-docs"] },
+    ]);
+  });
+
+  it("gives triage both of its shapes — the pass and the session", () => {
+    expect(chipColumns("triage")).toEqual([
+      { kind: "interactive", sessionSkills: ["triage"] },
+      { kind: "triage", sessionSkills: null },
+    ]);
+  });
+
+  it("ignores the skill column for an unattended pass", () => {
+    expect(chipColumns("implement")).toEqual([
+      { kind: "implement", sessionSkills: null },
     ]);
   });
 });

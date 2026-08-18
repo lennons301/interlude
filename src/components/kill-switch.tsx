@@ -49,7 +49,7 @@ export function KillSwitch() {
   const [moveError, setMoveError] = useState<string | null>(null);
   // The button is replaced by the strip and then by its opposite, so focus is
   // handed to whichever control mounts in its place (issue #142).
-  const { triggerRef, returnFocus } = useReturnFocus<HTMLButtonElement>();
+  const triggerRef = useReturnFocus<HTMLButtonElement>(confirmingLift);
 
   async function setPaused(paused: boolean) {
     setBusy(true);
@@ -64,9 +64,8 @@ export function KillSwitch() {
       // The endpoint answers with the whole state, so the panel shows what was
       // actually stored rather than what was asked for.
       setData(await res.json());
-      // A confirmed lift closes the strip, so focus goes to the control that
-      // takes its place — "stop the fleet", the undo for what just happened.
-      if (confirmingLift) returnFocus();
+      // Closing the strip is what hands focus on, so a confirmed lift needs no
+      // more than this: the control that replaces it is "stop the fleet".
       setConfirmingLift(false);
     } catch (err) {
       setMoveError(
@@ -139,10 +138,7 @@ export function KillSwitch() {
           busy={busy}
           error={moveError}
           onConfirm={() => setPaused(false)}
-          onCancel={() => {
-            returnFocus();
-            setConfirmingLift(false);
-          }}
+          onCancel={() => setConfirmingLift(false)}
         >
           <p className="text-[13px]">
             Lift the kill switch? Every armed project resumes claiming tickets

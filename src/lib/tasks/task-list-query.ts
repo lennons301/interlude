@@ -18,13 +18,11 @@
 import { and, desc, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
 import { db } from "@/db";
 import { projects, tasks } from "@/db/schema";
-import {
-  CHIP_COLUMNS,
-  TASK_LIST_LIMIT,
-  type TaskChip,
-  type TaskKind,
-  type TaskStatus,
-} from "./organize-tasks";
+import { chipColumns, TASK_LIST_LIMIT, type TaskChip } from "./organize-tasks";
+
+/** The column enums, from the schema this module already talks to rather than
+ * from the read model the browser reads — the query is the lower layer. */
+type TaskStatus = (typeof tasks.status.enumValues)[number];
 
 /** Only the columns a list row renders — deliberately not `select().from(tasks)`,
  * which shipped every task's `description` (the full autonomous implement
@@ -58,12 +56,13 @@ export interface TaskListFilters {
  * `chip` in column terms. Every chip is a disjunction of `(kind, skill)` shapes
  * because `taskChip` reads both columns: a grilling session is `interactive`
  * plus a skill, and `triage` is both an unattended pass and a human-driven
- * session. The map it reads is pure and lives beside `taskChip`, with a test
- * asserting the two agree over every row the schema allows — that agreement is
- * the whole safety argument for filtering in SQL.
+ * session. `chipColumns` derives those shapes from the same maps `taskChip`
+ * classifies with, and this route's tests compare the generated SQL with
+ * `taskChip` over every row the schema allows — that agreement is the whole
+ * safety argument for filtering in SQL.
  */
 function chipFilter(chip: TaskChip): SQL {
-  const alternatives = CHIP_COLUMNS[chip].map(({ kind, sessionSkills }) => {
+  const alternatives = chipColumns(chip).map(({ kind, sessionSkills }) => {
     const isKind = eq(tasks.kind, kind);
     // null = the kind is enough; taskChip ignores the skill column for it.
     if (sessionSkills === null) return isKind;
@@ -76,8 +75,8 @@ function chipFilter(chip: TaskChip): SQL {
       )
     );
   });
-  // Non-empty by construction: every chip in the map names at least one shape,
-  // which the exhaustive `Record<TaskChip, …>` guarantees.
+  // Non-empty by construction: every chip is in the image of `SESSION_CHIP` or
+  // `KIND_CHIP`, which `chipColumns` derives its shapes from.
   return or(...alternatives) as SQL;
 }
 
@@ -107,7 +106,3 @@ export function readTaskList({
 
 /** One row as the query returns it, server-side: `updatedAt` is still a Date. */
 export type TaskListQueryRow = ReturnType<typeof readTaskList>[number];
-
-/** Re-exported so a reader of the query doesn't have to know the enums live in
- * the read model. */
-export type { TaskKind, TaskStatus };

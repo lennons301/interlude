@@ -205,7 +205,7 @@ function AutonomyControl({
   // Every branch below renders a *different* button, and the strip renders none
   // of them, so focus follows whichever control mounts in the pressed one's
   // place rather than falling to `<body>` (issue #142).
-  const { triggerRef, returnFocus } = useReturnFocus<HTMLButtonElement>();
+  const triggerRef = useReturnFocus<HTMLButtonElement>(intent !== null);
 
   const blocker = armBlocker(project);
 
@@ -222,7 +222,6 @@ function AutonomyControl({
       });
       if (!res.ok) throw new Error(`the server answered ${res.status}`);
       onUpdated(await res.json());
-      returnFocus();
       setIntent(null);
     } catch (err) {
       setError(
@@ -280,10 +279,7 @@ function AutonomyControl({
       busy={busy}
       error={error}
       onConfirm={() => setAutonomy(true)}
-      onCancel={() => {
-        returnFocus();
-        setIntent(null);
-      }}
+      onCancel={() => setIntent(null)}
     >
       <p className="text-[13px]">
         Arm {project.name} for unattended work? The loop will claim its
