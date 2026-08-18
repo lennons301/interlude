@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { renderMarkdown } from "../markdown";
+import { REGISTERED_LANGUAGES, renderMarkdown } from "../markdown";
 
 describe("renderMarkdown — GFM", () => {
   it("renders headings and nested lists", () => {
@@ -70,6 +70,43 @@ describe("renderMarkdown — code", () => {
     expect(renderMarkdown("```sh\necho hi\n```")).toContain("hljs-built_in");
     expect(renderMarkdown("```py\nx = 'a'\n```")).toContain("hljs-string");
   });
+
+  /**
+   * One snippet per registered grammar. The assertion is deliberately about
+   * *whether the grammar ran*, not which token names it chose: a grammar
+   * executed on a different highlight.js core than the one it was compiled
+   * against throws at render time (issue #150), and only exercising all of them
+   * turns that into a test failure instead of a blank code block months later.
+   */
+  const snippets: Record<(typeof REGISTERED_LANGUAGES)[number], string> = {
+    bash: 'echo "hi"',
+    css: "a { color: red; }",
+    diff: "@@ -1 +1 @@\n-old\n+new",
+    dockerfile: "FROM node:24",
+    go: "package main",
+    javascript: "const x = 1;",
+    json: '{ "a": 1 }',
+    markdown: "# heading",
+    python: "def f():\n    pass",
+    rust: "fn main() {}",
+    sql: "SELECT 1;",
+    typescript: "const x: number = 1;",
+    xml: '<a href="x">y</a>',
+    yaml: "a: 1",
+  };
+
+  it("covers every grammar the pipeline registers", () => {
+    expect(Object.keys(snippets).sort()).toEqual([...REGISTERED_LANGUAGES].sort());
+  });
+
+  for (const language of REGISTERED_LANGUAGES) {
+    it(`runs the ${language} grammar`, () => {
+      const html = renderMarkdown(`\`\`\`${language}\n${snippets[language]}\n\`\`\``);
+
+      expect(html).toContain(`class="hljs language-${language}"`);
+      expect(html).toMatch(/<span class="hljs-/);
+    });
+  }
 
   it("leaves an unregistered language unhighlighted instead of failing", () => {
     const html = renderMarkdown("```brainfuck\n+++.\n```");
@@ -181,6 +218,31 @@ describe("self-hosted pipeline", () => {
     const html = renderMarkdown("```ts\nconst x = 1;\n```\n\n# heading");
 
     expect(html).not.toMatch(/https?:\/\//);
+  });
+
+  /**
+   * The grammars are imported straight from `highlight.js`; `rehype-highlight`
+   * runs them on the core its own `lowlight` resolves. Two cores in the tree is
+   * a runtime-only failure with no compile-time signal (issue #150), so the
+   * invariant is asserted where it is actually recorded — the lockfile.
+   */
+  it("resolves exactly one highlight.js core", () => {
+    const lock = readFileSync(
+      path.join(process.cwd(), "pnpm-lock.yaml"),
+      "utf8"
+    );
+    const cores = new Set(
+      [
+        // Package entries: `  highlight.js@11.11.2:`
+        ...lock.matchAll(/^ {2}highlight\.js@([^:\s]+):/gm),
+        // Resolved edges, i.e. lowlight's: `      highlight.js: 11.11.2`
+        ...lock.matchAll(/^\s+highlight\.js: (\S+)$/gm),
+      ].map((match) => match[1])
+    );
+
+    // One entry, so: the lockfile does mention it (a drifted regex fails here)
+    // and every dependant resolves the same core.
+    expect([...cores]).toHaveLength(1);
   });
 
   it("the stylesheet pulls nothing from a CDN", () => {
