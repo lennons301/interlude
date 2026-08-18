@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { renderMarkdown } from "../markdown";
+import { parse as parseYaml } from "yaml";
+import { REGISTERED_LANGUAGES, renderMarkdown } from "../markdown";
 
 describe("renderMarkdown — GFM", () => {
   it("renders headings and nested lists", () => {
@@ -70,6 +71,48 @@ describe("renderMarkdown — code", () => {
     expect(renderMarkdown("```sh\necho hi\n```")).toContain("hljs-built_in");
     expect(renderMarkdown("```py\nx = 'a'\n```")).toContain("hljs-string");
   });
+
+  /**
+   * One snippet per registered grammar. The assertion is deliberately about
+   * *whether the grammar ran*, not which token names it chose: a grammar
+   * executed on a different highlight.js core than the one it was compiled
+   * against throws at render time (issue #150), and only exercising all of them
+   * turns that into a test failure instead of a blank code block months later.
+   */
+  const snippets: Record<(typeof REGISTERED_LANGUAGES)[number], string> = {
+    bash: 'echo "hi"',
+    css: "a { color: red; }",
+    diff: "@@ -1 +1 @@\n-old\n+new",
+    dockerfile: "FROM node:24",
+    go: "package main",
+    javascript: "const x = 1;",
+    json: '{ "a": 1 }',
+    markdown: "# heading",
+    python: "def f():\n    pass",
+    rust: "fn main() {}",
+    sql: "SELECT 1;",
+    typescript: "const x: number = 1;",
+    xml: '<a href="x">y</a>',
+    yaml: "a: 1",
+  };
+
+  // The `Record` type above says this too, but nothing that runs typechecks
+  // test files — `pnpm build` does not, and `tsc --noEmit` is already red on
+  // main — so the coverage guard has to be an assertion to be a guard at all.
+  it("has a snippet for every grammar the pipeline registers", () => {
+    expect(Object.keys(snippets).sort()).toEqual([...REGISTERED_LANGUAGES].sort());
+  });
+
+  for (const language of REGISTERED_LANGUAGES) {
+    it(`runs the ${language} grammar`, () => {
+      const html = renderMarkdown(`\`\`\`${language}\n${snippets[language]}\n\`\`\``);
+
+      expect(html).toMatch(new RegExp(`class="[^"]*language-${language}\\b`));
+      // The load-bearing one: `hljs` is added before the grammar is tried, so
+      // only a token span proves the grammar actually ran.
+      expect(html).toMatch(/<span class="hljs-/);
+    });
+  }
 
   it("leaves an unregistered language unhighlighted instead of failing", () => {
     const html = renderMarkdown("```brainfuck\n+++.\n```");
@@ -181,6 +224,36 @@ describe("self-hosted pipeline", () => {
     const html = renderMarkdown("```ts\nconst x = 1;\n```\n\n# heading");
 
     expect(html).not.toMatch(/https?:\/\//);
+  });
+
+  /**
+   * The grammars are imported straight from `highlight.js`; `rehype-highlight`
+   * runs them on the core its own `lowlight` resolves. Two cores in the tree is
+   * a runtime-only failure with no compile-time signal (issue #150), so the
+   * invariant is asserted where it is actually recorded — the lockfile.
+   */
+  it("resolves exactly one highlight.js core, the one lowlight resolves", () => {
+    const lock = parseYaml(
+      readFileSync(path.join(process.cwd(), "pnpm-lock.yaml"), "utf8")
+    ) as {
+      importers: Record<string, { dependencies: Record<string, { version: string }> }>;
+      packages: Record<string, unknown>;
+      snapshots: Record<string, { dependencies?: Record<string, string> }>;
+    };
+
+    const ours = lock.importers["."].dependencies["highlight.js"].version;
+    const lowlight = Object.entries(lock.snapshots).find(([id]) =>
+      id.startsWith("lowlight@")
+    );
+    const installed = Object.keys(lock.packages).filter((id) =>
+      id.startsWith("highlight.js@")
+    );
+
+    // Asserting both edges *and* the installed set means a lockfile that stopped
+    // recording one of them fails here rather than passing on an empty read.
+    expect(ours).toMatch(/^\d+\./);
+    expect(lowlight?.[1].dependencies?.["highlight.js"]).toBe(ours);
+    expect(installed).toEqual([`highlight.js@${ours}`]);
   });
 
   it("the stylesheet pulls nothing from a CDN", () => {

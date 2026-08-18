@@ -8,6 +8,15 @@
  * variables in `globals.css` — no highlighter theme is imported and nothing is
  * fetched from a CDN at build or at runtime.
  *
+ * There must be exactly **one** highlight.js core in the tree (issue #150).
+ * The grammars below are imported directly; `rehype-highlight` executes them on
+ * whichever core its own `lowlight` resolves. Two cores works only by accident
+ * — grammar modules are standalone — and stops working the moment a grammar
+ * reaches for a helper its sibling core lacks, which fails at *render* time, in
+ * the browser, on whatever transcript happens to contain that language. So
+ * `package.json` tracks lowlight's own range (`~11.11.0`) rather than the
+ * latest 11.x, and the pipeline test asserts the lockfile resolves one core.
+ *
  * Safety is two independent layers, because agent output is semi-trusted text:
  *
  * 1. `remarkLiteralHtml` turns raw HTML in the source into literal text before
@@ -72,6 +81,15 @@ const LANGUAGES = {
   xml,
   yaml,
 };
+
+/**
+ * The registered grammar names, so a test can exercise every one without
+ * restating the list — a grammar added here with no coverage is a language
+ * that only fails once a real transcript contains it.
+ */
+export const REGISTERED_LANGUAGES = Object.keys(LANGUAGES) as Array<
+  keyof typeof LANGUAGES
+>;
 
 /** Layer 1: raw HTML in agent output is text, not markup. */
 function remarkLiteralHtml() {
