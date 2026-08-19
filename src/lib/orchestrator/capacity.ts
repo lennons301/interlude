@@ -10,7 +10,10 @@
  */
 
 import { getDocker } from "../docker/client";
-import { AGENT_CONTAINER_NAME_PREFIX } from "../docker/agent-containers";
+import {
+  AGENT_CONTAINER_NAME_PREFIX,
+  DOCKER_PROBE_TIMEOUT_MS,
+} from "../docker/agent-containers";
 import { runBoundedProbe } from "../timeout";
 import { getConfig } from "../config";
 
@@ -109,8 +112,12 @@ export function wouldOvercommitMemory(input: {
  * the 2026-08-11 incident (issue #115) this silently stalled *all* dispatch,
  * interactive included, for ~1.5h with the slot count reading free. The bound
  * guarantees a poll can always make progress.
+ *
+ * The value is the shared Docker-probe bound, defined once beside the container
+ * census that reasons the same way, so the two cannot drift apart. The local
+ * name stays because it is what this call site means by it.
  */
-export const ADMISSION_PROBE_TIMEOUT_MS = 5000;
+export const ADMISSION_PROBE_TIMEOUT_MS = DOCKER_PROBE_TIMEOUT_MS;
 
 /**
  * Gather the live numbers from the daemon and decide admission. Split out from

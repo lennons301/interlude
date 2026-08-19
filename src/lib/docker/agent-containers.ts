@@ -20,13 +20,15 @@ import type { AgentContainerCensus } from "../fleet/health";
 export const AGENT_CONTAINER_NAME_PREFIX = "interlude-task-";
 
 /**
- * How long the census may wait on the daemon before giving up. Same bound and
- * same reasoning as the memory-admission probe (ADMISSION_PROBE_TIMEOUT_MS): a
- * hung daemon connection has no timeout of its own, and this one runs inside
- * the sweep — an unbounded call here would stall the whole decide-and-act loop
- * to observe a health signal.
+ * How long either Docker probe may wait on the daemon before giving up — the
+ * census here, and the memory-admission check that gates a container start
+ * (which re-exports this as `ADMISSION_PROBE_TIMEOUT_MS`, the name its own call
+ * site reads). One number rather than two matching ones, because the reasoning
+ * is one: a hung daemon connection has no timeout of its own, and each of these
+ * runs inside a loop that must not stall — the queue's dispatch path, and the
+ * sweep's decide-and-act cycle.
  */
-export const CONTAINER_CENSUS_TIMEOUT_MS = 5000;
+export const DOCKER_PROBE_TIMEOUT_MS = 5000;
 
 /** Ask the daemon for every agent container and split it by whether it is
  * actually running. One listing, not two, so the two halves can never be read
@@ -53,7 +55,7 @@ async function probeAgentContainers(): Promise<AgentContainerCensus> {
  */
 export async function observeAgentContainers(
   probe: () => Promise<AgentContainerCensus> = probeAgentContainers,
-  timeoutMs: number = CONTAINER_CENSUS_TIMEOUT_MS
+  timeoutMs: number = DOCKER_PROBE_TIMEOUT_MS
 ): Promise<AgentContainerCensus | null> {
   const outcome = await runBoundedProbe(probe, timeoutMs);
   if (outcome.ok) return outcome.value;

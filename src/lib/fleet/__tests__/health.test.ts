@@ -358,6 +358,93 @@ describe("evaluateFleetHealth — phantom slot occupancy", () => {
     expect(s5.announce.pickupWedged).toBeNull();
   });
 
+  it("keeps counting across a census it could not take — a hiccupping daemon still fires", () => {
+    // The bug this pins: the census has a 5s bound and runs once per 30s sweep,
+    // so reaching a 20-minute threshold took 40 *consecutive* answers. A daemon
+    // degraded enough to time out now and then — the #125/#128 shape, and the
+    // likeliest companion of a real phantom — reset the clock on every hiccup,
+    // so the card could never fire. Unknown must not manufacture a divergence,
+    // but it must not erase one either.
+    const phantom = {
+      slots: { total: 1, occupied: 1 },
+      agentContainers: { live: 0, stopped: 0 },
+    };
+    const unknown = { slots: { total: 1, occupied: 1 }, agentContainers: null };
+
+    let state = evaluate(baseInput(phantom)).state;
+    expect(state.occupancyDivergedSinceMs).toBe(T0);
+    // Half a dozen sweeps where the daemon refuses to answer, spread over the
+    // window. Each one holds the clock rather than restarting it.
+    for (const at of [2, 5, 9, 13, 17, 19]) {
+      const step = evaluate(baseInput({ nowMs: T0 + min(at), ...unknown }), state);
+      expect(step.signals.pickupWedged).toBeNull(); // unknown never fires on its own
+      expect(step.state.occupancyDivergedSinceMs).toBe(T0);
+      state = step.state;
+    }
+    // The daemon answers again past the threshold, and the divergence is still real.
+    const fired = evaluate(baseInput({ nowMs: T0 + min(21), ...phantom }), state);
+    expect(fired.signals.pickupWedged!.cause).toBe("phantom-slot");
+    expect(fired.signals.pickupWedged!.wedgedForMs).toBe(min(21));
+    expect(fired.announce.pickupWedged).not.toBeNull();
+  });
+
+  it("only positive agreement clears the clock, never a census it could not take", () => {
+    const phantom = {
+      slots: { total: 1, occupied: 1 },
+      agentContainers: { live: 0, stopped: 0 },
+    };
+    const s1 = evaluate(baseInput(phantom));
+    // Unknown holds...
+    const s2 = evaluate(
+      baseInput({ nowMs: T0 + min(3), slots: { total: 1, occupied: 1 }, agentContainers: null }),
+      s1.state
+    );
+    expect(s2.state.occupancyDivergedSinceMs).toBe(T0);
+    // ...and the container turning up — reality agreeing — is what clears it (AC3).
+    const s3 = evaluate(
+      baseInput({
+        nowMs: T0 + min(4),
+        slots: { total: 1, occupied: 1 },
+        agentContainers: { live: 1, stopped: 0 },
+      }),
+      s2.state
+    );
+    expect(s3.state.occupancyDivergedSinceMs).toBeNull();
+    expect(s3.signals.pickupWedged).toBeNull();
+  });
+
+  it("never downgrades a standing phantom card's advice with a second ping", () => {
+    // `PickupWedgeCause` promises a re-ping when a card *upgrades*. The reverse
+    // must not ping: a sweep whose census could not be taken would otherwise
+    // demote "restart the app" to "go and look" on a box that still has a
+    // phantom slot, and tell the operator so a second time.
+    const queued = [{ taskId: "task-9", label: "review: lennons301/lemons#34" }];
+    const phantom = {
+      slots: { total: 2, occupied: 1 },
+      agentContainers: { live: 0, stopped: 0 },
+      queuedDispatchable: queued,
+    };
+    const s1 = evaluate(baseInput(phantom));
+    const s2 = evaluate(baseInput({ nowMs: T0 + min(21), ...phantom }), s1.state);
+    expect(s2.announce.pickupWedged!.cause).toBe("phantom-slot");
+
+    // Census unavailable for a sweep; the dispatch wedge is still over threshold.
+    const s3 = evaluate(
+      baseInput({
+        nowMs: T0 + min(22),
+        slots: { total: 2, occupied: 1 },
+        agentContainers: null,
+        queuedDispatchable: queued,
+      }),
+      s2.state
+    );
+    expect(s3.announce.pickupWedged).toBeNull();
+    // And when the census answers again, the same occurrence stays deduped.
+    const s4 = evaluate(baseInput({ nowMs: T0 + min(23), ...phantom }), s3.state);
+    expect(s4.announce.pickupWedged).toBeNull();
+    expect(s4.signals.pickupWedged!.cause).toBe("phantom-slot");
+  });
+
   it("advises going to look, not restarting, when the count is corroborated", () => {
     const queued = [{ taskId: "task-9", label: "review: lennons301/lemons#34" }];
     const s1 = evaluate(

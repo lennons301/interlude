@@ -109,8 +109,9 @@ export interface FleetHealthInput {
    * phantom slot is precisely what must still be surfaced. */
   queuedDispatchable: QueuedTaskObservation[];
   /** What the daemon says is really running, or null when the probe failed or
-   * timed out. Null is *unknown*, never divergence — an unhealthy daemon must
-   * not manufacture a wedge any more than it may freeze dispatch (#128). */
+   * timed out. Null is *unknown*, and unknown decides nothing: an unhealthy
+   * daemon must not manufacture a wedge any more than it may freeze dispatch
+   * (#128), and equally must not clear a divergence already being counted. */
   agentContainers: AgentContainerCensus | null;
   /** Whether the 2s queue poll loop is running at all. A stopped loop is boot
    * or shutdown, not a wedge, so it never alarms. */
@@ -174,9 +175,10 @@ export interface FleetHealthState {
   owedReviewAnnounced: string[];
   /** First-seen a free slot with work that will not dispatch (ms), or null. */
   pickupWedgedSinceMs: number | null;
-  /** First-seen occupancy-uncorroborated (ms), or null when the counter and the
-   * daemon agree (or the daemon could not be asked). Held separately from
-   * `pickupWedgedSinceMs` because the two conditions run on different
+  /** First-seen occupancy-uncorroborated (ms), or null once the daemon has
+   * positively agreed with the counter. A census that could not be taken holds
+   * this rather than clearing it — unknown is not agreement. Held separately
+   * from `pickupWedgedSinceMs` because the two conditions run on different
    * thresholds, even though they raise one card. */
   occupancyDivergedSinceMs: number | null;
   /** Which cause was last pinged, or null when the card is not standing. Keyed
@@ -249,18 +251,32 @@ export function evaluateFleetHealth(
   // The counter claims more busy slots than there are agent containers running.
   // Strictly one-directional: *more* containers than counted slots is a parked
   // pass mid-transition or a leaked container — the memory-admission probe's
-  // business, never a pickup wedge. A null census is unknown, not divergence.
-  // Held as the census itself rather than a flag, so the detail below reads the
-  // very numbers the divergence was judged on.
+  // business, never a pickup wedge. Held as the census itself rather than a
+  // flag, so the detail below reads the very numbers it was judged on.
   const diverged =
     input.agentContainers != null &&
     input.slots.occupied > input.agentContainers.live
       ? input.agentContainers
       : null;
+  // A census that could not be taken is *unknown*, and unknown decides nothing
+  // in either direction: it may not manufacture a divergence, and it may not
+  // erase one. Only the daemon positively agreeing clears the clock (AC3).
+  // Erasing on unknown was a real hole — the census has a 5s bound and runs
+  // once per 30s sweep, so a 20-minute threshold needed 40 *consecutive*
+  // answers, and a daemon degraded enough to time out now and then is the
+  // likeliest companion of a real phantom (#125, #128). The clock would have
+  // restarted on every hiccup and the card never fired.
   const occupancyDivergedSinceMs =
-    diverged != null ? (prev.occupancyDivergedSinceMs ?? now) : null;
+    diverged != null
+      ? (prev.occupancyDivergedSinceMs ?? now)
+      : input.agentContainers != null
+        ? null
+        : prev.occupancyDivergedSinceMs;
   const divergedForMs =
     occupancyDivergedSinceMs == null ? 0 : now - occupancyDivergedSinceMs;
+  // Firing still demands a *current* positive observation, so however long the
+  // clock has run, a daemon that cannot answer never raises this card — whose
+  // advice is "restart", which would not help an unresponsive daemon anyway.
   const divergenceFires =
     diverged != null && divergedForMs >= thresholds.occupancyDivergedMs;
 
@@ -272,7 +288,7 @@ export function evaluateFleetHealth(
           cause: "phantom-slot",
           detail: divergedOccupancyDetail(input, diverged),
           // How long the fleet has been in this state — the longer-standing of
-          // the two conditions when both hold.
+          // the two conditions, counting the dispatch wedge only once it fires.
           wedgedForMs: Math.max(divergedForMs, wedgeFires ? wedgedForMs : 0),
           remedy: PHANTOM_SLOT_REMEDY,
         }
@@ -288,13 +304,24 @@ export function evaluateFleetHealth(
   // suppressed, and inside a debounce window the memory is carried rather than
   // reset, so a condition flickering over threshold doesn't re-ping. Once
   // neither condition holds at all it clears and the next occurrence pings
-  // afresh — as does a standing card that changes cause, because its remedy
-  // changed with it.
+  // afresh — as does a standing card that *upgrades* its cause, because its
+  // remedy changed with it.
+  //
+  // Deliberately asymmetric, and only upwards. A downgrade means we learned
+  // less, not that the fleet recovered: the way it happens is a sweep whose
+  // census could not be taken while a dispatch wedge stands, and re-pinging
+  // there would demote "restart the app" to "go and look" on a box that still
+  // has a phantom slot. So the memory keeps the highest cause the occurrence
+  // has reached, and an unresolved divergence keeps the card standing even on a
+  // sweep that could not observe it.
+  const divergenceStanding = occupancyDivergedSinceMs != null;
   const pickupWedgedAnnounced =
-    pickupWedged?.cause ??
-    (wedgedNow || diverged != null ? prev.pickupWedgedAnnounced : null);
+    wedgedNow || divergenceStanding
+      ? highestCause(pickupWedged?.cause ?? null, prev.pickupWedgedAnnounced)
+      : (pickupWedged?.cause ?? null);
   const announcePickupWedged =
-    pickupWedged != null && prev.pickupWedgedAnnounced !== pickupWedged.cause
+    pickupWedged != null &&
+    causeRank(pickupWedged.cause) > causeRank(prev.pickupWedgedAnnounced)
       ? pickupWedged
       : null;
 
@@ -355,6 +382,22 @@ const PICKUP_WEDGE_REMEDY =
 const PHANTOM_SLOT_REMEDY =
   "The slot count is held in orchestrator memory with nothing behind it — " +
   "restart the app to clear it.";
+
+/** How much a cause tells the operator, so the ping can fire on an *upgrade*
+ * without firing on the loss of information that is a downgrade. `null` is "no
+ * card announced yet", below both. */
+function causeRank(cause: PickupWedgeCause | null): number {
+  if (cause === "phantom-slot") return 2;
+  if (cause === "dispatch") return 1;
+  return 0;
+}
+
+function highestCause(
+  a: PickupWedgeCause | null,
+  b: PickupWedgeCause | null
+): PickupWedgeCause | null {
+  return causeRank(a) >= causeRank(b) ? a : b;
+}
 
 function pickupWedgeDetail(input: FleetHealthInput): string {
   const free = input.slots.total - input.slots.occupied;
