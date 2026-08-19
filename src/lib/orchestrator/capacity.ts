@@ -10,8 +10,12 @@
  */
 
 import { getDocker } from "../docker/client";
+import {
+  AGENT_CONTAINER_NAME_PREFIX,
+  DOCKER_PROBE_TIMEOUT_MS,
+} from "../docker/agent-containers";
+import { runBoundedProbe } from "../timeout";
 import { getConfig } from "../config";
-import { raceWithTimeout, TIMED_OUT } from "../timeout";
 
 const MiB = 1024 * 1024;
 
@@ -108,8 +112,12 @@ export function wouldOvercommitMemory(input: {
  * the 2026-08-11 incident (issue #115) this silently stalled *all* dispatch,
  * interactive included, for ~1.5h with the slot count reading free. The bound
  * guarantees a poll can always make progress.
+ *
+ * The value is the shared Docker-probe bound, defined once beside the container
+ * census that reasons the same way, so the two cannot drift apart. The local
+ * name stays because it is what this call site means by it.
  */
-export const ADMISSION_PROBE_TIMEOUT_MS = 5000;
+export const ADMISSION_PROBE_TIMEOUT_MS = DOCKER_PROBE_TIMEOUT_MS;
 
 /**
  * Gather the live numbers from the daemon and decide admission. Split out from
@@ -124,7 +132,7 @@ async function probeMemoryAdmission(): Promise<{ ok: boolean; reason?: string }>
   // Default listing (no `all`) returns only running containers — the ones
   // holding memory right now.
   const running = await docker.listContainers({
-    filters: { name: ["interlude-task-"] },
+    filters: { name: [AGENT_CONTAINER_NAME_PREFIX] },
   });
   const liveContainers = running.length;
 
@@ -164,19 +172,19 @@ export async function checkMemoryAdmission(
   probe: () => Promise<{ ok: boolean; reason?: string }> = probeMemoryAdmission,
   timeoutMs: number = ADMISSION_PROBE_TIMEOUT_MS
 ): Promise<{ ok: boolean; reason?: string }> {
-  try {
-    const result = await raceWithTimeout(probe(), timeoutMs);
-    if (result === TIMED_OUT) {
-      console.error(
-        `[capacity] memory-admission probe timed out after ${timeoutMs}ms, allowing start`
-      );
-      return { ok: true };
-    }
-    return result;
-  } catch (err) {
-    console.error("[capacity] memory-admission probe failed, allowing start:", err);
-    return { ok: true };
+  const outcome = await runBoundedProbe(probe, timeoutMs);
+  if (outcome.ok) return outcome.value;
+  if (outcome.reason === "timeout") {
+    console.error(
+      `[capacity] memory-admission probe timed out after ${timeoutMs}ms, allowing start`
+    );
+  } else {
+    console.error(
+      "[capacity] memory-admission probe failed, allowing start:",
+      outcome.error
+    );
   }
+  return { ok: true };
 }
 
 /**

@@ -135,7 +135,8 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
 - **needs you** — blocked questions, `human-signoff` PRs, exhausted tickets, a
   daily-cap pause, failing preflights, and the fleet-health watchdog's stall
   signals (issue #126: an owed review that never started, a wedged pickup, a
-  stale queue heartbeat), each with a link where one applies.
+  stale queue heartbeat; issue #152: a slot count no real container
+  corroborates), each with a link where one applies.
 - **running** — each active run's ticket, attempt (n/3), turn, spend vs budget,
   and phase (implement ▸ review ▸ merge).
 - **recent** — the last 7 days of completions.
@@ -143,7 +144,8 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
 
 Discord is **push-only**: it tells you *when to look* (claimed, blocked question,
 sign-off needed, attempts exhausted, cap pause, slots saturated, a fleet-health
-stall — owed review / wedged pickup / stale queue, issue #126 — daily digest).
+stall — owed review / wedged pickup / stale queue / phantom slot — daily
+digest).
 Each stall pings once per occurrence, not every sweep. Autonomous success is
 deliberately silent — it shows on the dashboard. There is no `!status` command;
 the dashboard answers "what's happening".
@@ -349,6 +351,7 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 | `MAX_BUDGET_USD` | Per-attempt default budget ($20). |
 | `CAPACITY_SLOTS`, `AGENT_MEMORY_MB` | Override derived capacity — only when the derivation is wrong. |
 | `OWED_REVIEW_STALL_MINUTES`, `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES` | Fleet-health watchdog thresholds in minutes (issue #126). Defaults 30 / 3 / 2. |
+| `OCCUPANCY_DIVERGED_MINUTES` | How long occupancy may go uncorroborated by real agent containers before it reads as a phantom slot (issue #152). Default 20 — far longer than the pickup debounce because a task provisioning its container is legitimately uncorroborated until the container exists, and a cold agent-image build happens inside that window. The card's remedy is a restart, so a false positive is expensive. |
 
 ### Labels
 

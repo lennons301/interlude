@@ -4,6 +4,7 @@ import { getImageName, ensureImage } from "./image-builder";
 import { getConfig, PLATFORM_REPO_URL } from "../config";
 import { getInstallationToken } from "../github/client";
 import { getCapacity } from "../orchestrator/capacity";
+import { AGENT_CONTAINER_NAME_PREFIX } from "./agent-containers";
 
 /**
  * How setup gets onto `$GIT_BRANCH`:
@@ -287,7 +288,7 @@ export async function createWorkspaceContainer(
   // credentials, and whatever the image installs under /home/node/.claude
   // (e.g. plugins) is no longer shadowed at runtime. Before adding any Bind
   // here, weigh it against that: a mount is host reach that outlives the run.
-  const containerName = `interlude-task-${options.taskId}-${Date.now()}`;
+  const containerName = `${AGENT_CONTAINER_NAME_PREFIX}${options.taskId}-${Date.now()}`;
   // DNS-safe subdomain derived from task ID (last 8 chars of ULID, lowercased)
   const previewSubdomain = `task-${options.taskId.slice(-8).toLowerCase()}`;
 

@@ -1,6 +1,7 @@
 import {
   ALLOWED_TICKET_EFFORTS,
   DEFAULT_ATTEMPT_BUDGET_USD,
+  DEFAULT_OCCUPANCY_DIVERGED_MS,
   DEFAULT_OWED_REVIEW_STALL_MS,
   DEFAULT_PICKUP_WEDGED_MS,
   DEFAULT_QUEUE_HEARTBEAT_STALE_MS,
@@ -187,6 +188,10 @@ export function getConfig(): AppConfig {
       heartbeatStaleMs: minutesEnvMs(
         process.env.QUEUE_HEARTBEAT_STALE_MINUTES,
         DEFAULT_QUEUE_HEARTBEAT_STALE_MS
+      ),
+      occupancyDivergedMs: minutesEnvMs(
+        process.env.OCCUPANCY_DIVERGED_MINUTES,
+        DEFAULT_OCCUPANCY_DIVERGED_MS
       ),
     },
   };

@@ -127,9 +127,25 @@ export const DAILY_AUTONOMOUS_CAP_USD = 500;
  * minutes, and a queue poll loop (which should tick every 2s) gone quiet for a
  * couple of minutes are each surfaced as a needs-you card + one Discord ping.
  * Env-overridable in minutes via config.ts (`OWED_REVIEW_STALL_MINUTES`,
- * `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES`); kept here as ms so
- * the leaf that holds every tunable also holds these.
+ * `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES`,
+ * `OCCUPANCY_DIVERGED_MINUTES`); kept here as ms so the leaf that holds every
+ * tunable also holds these.
  */
 export const DEFAULT_OWED_REVIEW_STALL_MS = 30 * 60_000;
 export const DEFAULT_PICKUP_WEDGED_MS = 3 * 60_000;
 export const DEFAULT_QUEUE_HEARTBEAT_STALE_MS = 2 * 60_000;
+/**
+ * Occupancy uncorroborated by real agent containers for this long is a phantom
+ * slot (issue #152). Far longer than the pickup debounce on purpose, and set by
+ * the worst *honest* case rather than the typical one: a task holds its slot
+ * from the moment it is reserved, but its container does not exist until
+ * `createWorkspaceContainer` returns — and that call runs `ensureImage` inside
+ * itself, so the first task after a Dockerfile.agent change waits out a full
+ * agent-image build (apt, gh, a global npm install) on a 2-vCPU box before any
+ * container exists to corroborate it. The cost of being wrong is asymmetric:
+ * this card tells the operator to restart, which would kill exactly that
+ * legitimately-provisioning task. Twenty minutes clears a cold build with room
+ * to spare and still turns the ~1.5h invisible wedge of #151 into a card and a
+ * ping with over an hour left. Warming the image at boot would let this drop.
+ */
+export const DEFAULT_OCCUPANCY_DIVERGED_MS = 20 * 60_000;

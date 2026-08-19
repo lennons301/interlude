@@ -3,6 +3,7 @@ import { tasks, messages, runs } from "@/db/schema";
 import { and, eq, inArray, or } from "drizzle-orm";
 import { newId } from "../ulid";
 import { getDocker, isDockerAvailable } from "../docker/client";
+import { AGENT_CONTAINER_NAME_PREFIX } from "../docker/agent-containers";
 import { startQueue } from "./queue";
 import { getCapacity } from "./capacity";
 import { ACTIVE_RUN_STATUSES, startAutonomySweeps } from "./autonomy/sweep";
@@ -208,7 +209,7 @@ async function reapStaleContainers(): Promise<void> {
     const docker = getDocker();
     const containers = await docker.listContainers({
       all: true,
-      filters: { name: ["interlude-task-"] },
+      filters: { name: [AGENT_CONTAINER_NAME_PREFIX] },
     });
 
     if (containers.length === 0) return;

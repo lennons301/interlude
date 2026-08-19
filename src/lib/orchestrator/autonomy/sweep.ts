@@ -48,6 +48,7 @@ import {
 import { recordBacklog } from "../../fleet/backlog";
 import { getFailingChecks, recordFailingChecks } from "../../fleet/failing-checks";
 import { isContainerRunning, removeContainerByName } from "../../docker/container-manager";
+import { observeAgentContainers } from "../../docker/agent-containers";
 import { recordNeedsHuman } from "../../fleet/needs-human";
 import {
   EMPTY_FLEET_HEALTH_STATE,
@@ -248,17 +249,18 @@ export async function runAutonomySweep(): Promise<void> {
 
 /**
  * The fleet-health watchdog (issue #126). After a sweep has decided and acted,
- * evaluate the three signals that make a silent stall loud — an owed review that
- * never started, a wedged pickup, a quiet queue loop — record them for the
- * dashboard's needs-you cards, and fire a one-time Discord ping for any that
- * just crossed threshold. State is held across sweeps in `fleetHealthState`, the
+ * evaluate the observations that make a silent stall loud — an owed review that
+ * never started, a wedged pickup, a quiet queue loop, and (issue #152) a slot
+ * count no real container corroborates — record them for the dashboard's
+ * needs-you cards, and fire a one-time Discord ping for any that just crossed
+ * threshold. State is held across sweeps in `fleetHealthState`, the
  * same in-memory debounce the saturation/cap announcements use.
  */
 async function evaluateFleetHealthSignals(
   snapshot: AutonomySnapshot,
   actions: Action[]
 ): Promise<void> {
-  const input = gatherFleetHealthInput(snapshot, actions);
+  const input = await gatherFleetHealthInput(snapshot, actions);
   const { signals, announce, state } = evaluateFleetHealth(
     input,
     fleetHealthState,
@@ -278,7 +280,8 @@ async function evaluateFleetHealthSignals(
   if (announce.pickupWedged) {
     console.warn(
       `[autonomy] Pickup wedged: ${announce.pickupWedged.detail} ` +
-        `(~${Math.round(announce.pickupWedged.wedgedForMs / 60_000)}m)`
+        `(~${Math.round(announce.pickupWedged.wedgedForMs / 60_000)}m). ` +
+        announce.pickupWedged.remedy
     );
     await notifyPickupWedged(channelId, announce.pickupWedged);
   }
@@ -295,12 +298,13 @@ async function evaluateFleetHealthSignals(
  * Assemble the fleet-health input from a decided sweep. The reducer snapshot is
  * left untouched (it carries only the facts the reducer needs); the extra facts
  * the watchdog wants — a review task's *running* status, a run's PR URL, the
- * queued tasks' labels, the live queue heartbeat — are read here.
+ * queued tasks' labels, the live queue heartbeat, and what the Docker daemon
+ * says is really running — are read here.
  */
-function gatherFleetHealthInput(
+async function gatherFleetHealthInput(
   snapshot: AutonomySnapshot,
   actions: Action[]
-): FleetHealthInput {
+): Promise<FleetHealthInput> {
   const slotFree = snapshot.slots.occupied < snapshot.slots.total;
   const reason = owedReviewReason(snapshot.slots);
 
@@ -333,9 +337,12 @@ function gatherFleetHealthInput(
       reason,
     }));
 
-  // Queued dispatchable tasks observed while a slot sits free — the exact
-  // incident shape (#115): a review left queued while a slot is open.
-  const queuedWhileSlotFree = slotFree ? gatherQueuedDispatchable() : [];
+  // Queued tasks that reserve a slot — the #115 incident shape (a review left
+  // queued while a slot is open) and the #152 one (nothing dispatches because a
+  // phantom holds the last slot). Gathered unconditionally: whether a slot
+  // *reads* free is exactly the fact under suspicion, so the evaluator decides,
+  // not the gatherer.
+  const queuedDispatchable = gatherQueuedDispatchable();
 
   const pickupPausedWithFreeSlot =
     slotFree &&
@@ -344,9 +351,15 @@ function gatherFleetHealthInput(
   return {
     nowMs: snapshot.now.getTime(),
     owedReviews,
+    // `snapshot.slots.occupied` is `occupiedSlots()` — the in-memory counter
+    // every other pickup signal trusts.
     slots: { total: snapshot.slots.total, occupied: snapshot.slots.occupied },
     pickupPausedWithFreeSlot,
-    queuedWhileSlotFree,
+    queuedDispatchable,
+    // The daemon's answer to the same question, so a sustained disagreement is
+    // itself a signal (#152). Null when the daemon could not be asked —
+    // unknown, never divergence.
+    agentContainers: await observeAgentContainers(),
     queueRunning: isQueueRunning(),
     queueLastProgressMs: getQueueLastProgress()?.getTime() ?? null,
   };
