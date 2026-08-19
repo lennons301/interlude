@@ -612,4 +612,3 @@ export async function isContainerRunning(name: string): Promise<boolean> {
 export async function removeContainerByName(name: string): Promise<void> {
   await forceRemove(getDocker().getContainer(name));
 }
-

@@ -11,7 +11,7 @@
 
 import { getDocker } from "../docker/client";
 import { AGENT_CONTAINER_NAME_PREFIX } from "../docker/agent-containers";
-import { runBoundedProbe } from "../bounded-probe";
+import { runBoundedProbe } from "../timeout";
 import { getConfig } from "../config";
 
 const MiB = 1024 * 1024;

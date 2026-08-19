@@ -12,7 +12,7 @@
  */
 
 import { getDocker } from "./client";
-import { runBoundedProbe } from "../bounded-probe";
+import { runBoundedProbe } from "../timeout";
 import type { AgentContainerCensus } from "../fleet/health";
 
 /** Every agent container's name starts with this — the one string that says
