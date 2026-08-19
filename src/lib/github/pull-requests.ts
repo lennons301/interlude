@@ -50,6 +50,26 @@ export async function findOpenPrForHead(
 }
 
 /**
+ * Whether a turn should try to open the task's draft PR (issue #151).
+ *
+ * Two reasons not to. The task already has one — the ordinary case after the
+ * first push. Or the branch is level with its base, which GitHub refuses with
+ * "No commits between …" (a 422): a grilling session never commits, so without
+ * this it re-attempts that doomed call every single turn, and it was one of
+ * those attempts that never came back and wedged the box on 2026-08-18.
+ *
+ * `commitsAhead: null` means the count could not be read, never "zero" — the
+ * attempt goes ahead, exactly as it did before the count existed.
+ */
+export function shouldOpenDraftPr(state: {
+  existingPr: number | null;
+  commitsAhead: number | null;
+}): boolean {
+  if (state.existingPr != null) return false;
+  return state.commitsAhead !== 0;
+}
+
+/**
  * Ensure a draft PR exists for the branch, returning its number and URL.
  * Normally this creates one. On an autonomous retry that adopted a previous
  * attempt's branch (#72), the head already has an open PR and GitHub rejects a

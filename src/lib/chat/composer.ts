@@ -8,7 +8,13 @@
  * It lives here rather than in the component because "is my message queued?"
  * and "can I complete this?" are exactly the answers a reader needs to trust,
  * and a table of cases is how you check them.
+ *
+ * "Has this task stopped for good" is not one of its own answers: that is
+ * `isTerminalTaskStatus`, shared with the live view (which gates the whole
+ * composer on it) and the queue, so the `closed` phase below cannot drift from
+ * what those two believe.
  */
+import { isTerminalTaskStatus } from "../tasks/status";
 
 /** What the agent is doing, from the composer's point of view. */
 export type ComposerPhase =
@@ -41,16 +47,6 @@ export interface ComposerState {
   queuedNote: string | null;
 }
 
-const TERMINAL = new Set(["completed", "failed", "cancelled"]);
-
-/** A task that has stopped for good. Shared with the live view, which gates the
- * whole composer on it — so the `closed` phase below is what the state machine
- * says about a task the view will not in fact show a composer for, and the two
- * cannot drift into disagreeing. */
-export function isTerminalTaskStatus(status: string): boolean {
-  return TERMINAL.has(status);
-}
-
 /** A message row's queue-relevant shape — its own `deliveredAt` is the only
  * record of whether the agent has seen it. */
 export interface QueueableRow {
@@ -69,7 +65,7 @@ export function queuedCount(rows: readonly QueueableRow[]): number {
 }
 
 function phaseOf(taskStatus: string, containerStatus: string | null): ComposerPhase {
-  if (TERMINAL.has(taskStatus)) return "closed";
+  if (isTerminalTaskStatus(taskStatus)) return "closed";
   if (taskStatus === "blocked") return "blocked";
   if (taskStatus !== "running") return "waiting";
   if (containerStatus === "completing") return "closing";

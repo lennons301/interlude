@@ -162,13 +162,47 @@ export function buildTurnEnv(options: {
   return env;
 }
 
-/** Bash run after each turn: commit any changes and push the branch via origin. */
+/**
+ * Marker the push script reports the branch's commits-ahead count behind
+ * (issue #151), shared by the emitter (`buildPushScript`) and the reader
+ * (`parseCommitsAhead`) so they cannot drift.
+ */
+export const COMMITS_AHEAD_MARKER = "INTERLUDE_COMMITS_AHEAD:";
+
+/**
+ * Bash run after each turn: commit any changes, push the branch via origin, and
+ * report how far the branch is now ahead of the default branch.
+ *
+ * The count comes from the push rather than a GitHub round trip because it is
+ * free here: the container has a full clone, so `origin/HEAD` is the default
+ * branch the task branch was cut from. A branch that is level with it cannot
+ * carry a PR — GitHub answers "No commits between …" with a 422 — and a session
+ * that never commits (a grilling session) would otherwise re-attempt that
+ * doomed call every single turn. `unknown` when git cannot count (no
+ * `origin/HEAD`), which the caller treats as "attempt it anyway".
+ */
 export function buildPushScript(): string {
   return [
     "cd /workspace/repo",
     'git add -A && git diff --cached --quiet || git commit -m "agent: uncommitted changes"',
     "git push origin HEAD",
+    `echo "${COMMITS_AHEAD_MARKER}$(git rev-list --count origin/HEAD..HEAD 2>/dev/null || echo unknown)"`,
   ].join(" && ");
+}
+
+/**
+ * Lift the commits-ahead count out of captured push output, or null when it is
+ * unknown (git could not count, or the marker never arrived). Takes the last
+ * marker, and captures digits only, so neither earlier chatter nor a stray
+ * Docker exec-frame byte can bleed into the number — the same discipline as
+ * `parseSkillsVersion`.
+ */
+export function parseCommitsAhead(pushOutput: string): number | null {
+  const matches = [
+    ...pushOutput.matchAll(new RegExp(`${COMMITS_AHEAD_MARKER}(\\d+)`, "g")),
+  ];
+  if (!matches.length) return null;
+  return parseInt(matches[matches.length - 1][1], 10);
 }
 
 export interface WorkspaceOptions {
@@ -451,9 +485,14 @@ export async function execClaudeTurn(
   return { stream: merged, exec };
 }
 
+/**
+ * Commit anything uncommitted, push the branch, and report how far the branch is
+ * ahead of the default branch — `null` when the push output carried no readable
+ * count (issue #151). Throws if the push itself failed, as before.
+ */
 export async function execFallbackCommitAndPush(
   running: RunningContainer
-): Promise<void> {
+): Promise<{ commitsAhead: number | null }> {
   const token = await getInstallationToken();
   const exec = await running.container.exec({
     Cmd: ["bash", "-c", buildPushScript()],
@@ -501,6 +540,8 @@ export async function execFallbackCommitAndPush(
       `Commit and push failed (exit ${inspectResult.ExitCode})${detail ? ": " + detail : ""}`
     );
   }
+
+  return { commitsAhead: parseCommitsAhead(output) };
 }
 
 export async function stopContainer(

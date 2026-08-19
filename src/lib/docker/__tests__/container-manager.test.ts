@@ -4,6 +4,8 @@ import {
   buildSkillsInstallScript,
   parseSkillsVersion,
   buildPushScript,
+  COMMITS_AHEAD_MARKER,
+  parseCommitsAhead,
   buildTurnEnv,
   buildClaudeTurnCommand,
   createWorkspaceContainer,
@@ -283,6 +285,40 @@ describe("buildPushScript", () => {
   it("does not embed any token", () => {
     expect(script).not.toContain("GIT_TOKEN");
     expect(script).not.toContain("GIT_AUTH_TOKEN");
+  });
+
+  /**
+   * How far the branch is ahead of the default branch, reported by the push
+   * itself (issue #151) so the orchestrator can tell a branch that could carry
+   * a PR from one that could not — with no extra round trip to GitHub.
+   */
+  it("reports how far the branch is ahead of the default branch", () => {
+    expect(script).toContain(COMMITS_AHEAD_MARKER);
+    expect(script).toContain("git rev-list --count origin/HEAD..HEAD");
+  });
+});
+
+describe("parseCommitsAhead", () => {
+  it("reads the count the push reported", () => {
+    expect(parseCommitsAhead(`pushed\n${COMMITS_AHEAD_MARKER}3\n`)).toBe(3);
+  });
+
+  it("reads a branch level with the default branch as zero", () => {
+    expect(parseCommitsAhead(`${COMMITS_AHEAD_MARKER}0`)).toBe(0);
+  });
+
+  it("takes the last count when the output carries more than one", () => {
+    expect(
+      parseCommitsAhead(`${COMMITS_AHEAD_MARKER}1 ... ${COMMITS_AHEAD_MARKER}2`)
+    ).toBe(2);
+  });
+
+  it("is unknown when git could not count", () => {
+    expect(parseCommitsAhead(`${COMMITS_AHEAD_MARKER}unknown`)).toBeNull();
+  });
+
+  it("is unknown when the marker never arrived", () => {
+    expect(parseCommitsAhead("Everything up-to-date")).toBeNull();
   });
 });
 
