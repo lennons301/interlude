@@ -5,7 +5,7 @@ import type { SessionSkill } from "@/db/schema";
 import { SlimShell } from "@/components/app-shell";
 import { ActionLink, FOCUS_RING, Gauge, Money } from "@/components/fleet/fleet-bits";
 import { toChatView, type ChatMessageRow } from "@/lib/chat/chat-view";
-import { isTerminalTaskStatus } from "@/lib/chat/composer";
+import { isTerminalTaskStatus } from "@/lib/tasks/status";
 import { TaskStream } from "./task-stream";
 import { MessageInput } from "./message-input";
 import { PreviewPane } from "./preview-pane";
