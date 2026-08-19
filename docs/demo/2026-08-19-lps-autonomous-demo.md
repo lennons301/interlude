@@ -19,10 +19,11 @@ Milestone [**Demo: pot breakdown**](https://github.com/lennons301/last-person-st
 | --- | --- | --- |
 | **A** — merges itself | [#213](https://github.com/lennons301/last-person-standing/issues/213) | `enhancement`, **not yet armed** |
 | **B** — waits for a human | [#214](https://github.com/lennons301/last-person-standing/issues/214) | `enhancement`, carries `Blocked by: #213`, **not yet armed** |
-| **C** — triage demo | [#215](https://github.com/lennons301/last-person-standing/issues/215) | `needs-triage` — the triage pass will pick it up |
+| **C** — triage demo | closed as [#215](https://github.com/lennons301/last-person-standing/issues/215) | **you open a fresh one live** — text in §1 |
 
 `needs-triage` was cleared from A and B on creation so no triage pass wastes the single slot
-on tickets that are already specified. C keeps it, because that's the point of C.
+on tickets that are already specified. C was closed for the opposite reason: the webhook would
+have triaged it within 30 seconds, spending the beat before anyone was watching.
 
 **The one thing left to do: apply `ready-for-agent` to #213.** That's the launch button, and
 by design only a human ever presses it — so it's yours to click, not mine. Do it now: the
@@ -80,12 +81,41 @@ entirely when it is `0.00`.
 disarmed. `Blocked by:` must be its own line — prose mentions and headings don't count. The
 dependency is real: the field doesn't exist until A lands.
 
-### Ticket C — the triage issue (#215)
+### Ticket C — the triage issue (open this live)
 
-Deliberately vague:
+Title:
 
-> **Pot totals should be easier to read on mobile** — The pot numbers are cramped on my
-> phone. Would be good if they were clearer.
+```
+Pot totals should be easier to read on mobile
+```
+
+Body:
+
+```
+The pot numbers are cramped on my phone — hard to read at a glance when I open a game.
+Would be good if they were clearer.
+```
+
+No labels, no milestone. Deliberately vague — a real want with no acceptance criteria and no
+named files — and aimed at a `recommend` verdict so there's something to arm from Discord.
+Open it as `lennons301`: the loop silently skips issues from any other author.
+
+#### Creating an issue *without* triggering triage
+
+Worth knowing, because it bit us setting this up. `issues.opened` applies `needs-triage` to
+every new issue on a registered project **unless the issue already carries** one of
+`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix` / `interlude`
+(`src/app/api/webhooks/github/route.ts`). The label has to be present *in the creation call* —
+GitHub emits no `labeled` event for labels set at creation, so adding one a second later is a
+race against the 30 s sweep, and losing it means a triage pass has already been queued.
+
+- **Create and run in one step:** `gh issue create --label ready-for-agent`. No triage, claimed
+  on the next sweep.
+- **Stage a specified ticket for later:** create it with `needs-info`, which suppresses triage
+  and is inert — no pickup, no needs-you card. Swap it for `ready-for-agent` when you want it
+  to run; triage never fires again, because that only happens on `issues.opened`.
+- **Removing `needs-triage` after the fact does not cancel a queued pass** — the label is the
+  enqueue, not the work item.
 
 ---
 
@@ -102,8 +132,18 @@ At demo time you'll be in one of two states, and both work:
 - **A already merged** → you open with the completed audit trail, arm B on camera, and B is
   claimed within 30 s. You lose the live "skipped" moment but keep everything else.
 
-Ticket C is already open, so its triage pass runs before the slot is busy — there
-is only one slot, so triage would otherwise queue behind the implement pass.
+**When ticket C actually gets triaged.** Opening it fires `issues.opened`, and the webhook
+applies `needs-triage` **within seconds** — that's the part the audience sees. The triage
+*pass* is a container, and there is one slot:
+
+- while #213's implement pass is running, the slot is busy and triage queues;
+- when that pass ends its container is **parked**, holding no slot, so the slot frees;
+- queue priority is interactive → review → **triage** → implement, so at that first gap the
+  triage pass runs *before* #214 is claimed.
+
+So open it early in the demo: label instantly, pass a few minutes later at the first gap,
+recommendation and Discord embed shortly after. By the time you reach the `yes` beat it's
+waiting for you instead of you waiting for it.
 
 ---
 
@@ -116,10 +156,11 @@ is only one slot, so triage would otherwise queue behind the implement pass.
 | **Arm B** | Apply `ready-for-agent` on camera. If A is still open, B is now armed and **ineligible** — skipped, not queued behind. |
 | **Dashboard** (`/`) | The slot holds `LPS #213`, chip `afk`, phase strip `implement ▸ review ▸ merge`, attempt pips `●●○`, turns, elapsed, spend vs the $20 attempt budget, today's spend vs the $500 cap. Needs-you: *"Nothing needs you."* |
 | **Drill-down** | `/tasks/<id>` — tool calls streaming, colour-coded diffs, branch `agent/issue-213`, issue + PR links appearing live as the draft PR opens on the first push. |
+| **Open ticket C live** | Paste the title and body from §1 and open it. `needs-triage` lands within seconds — the tracker is the queue, and that label *is* the enqueue. The pass itself starts at the next slot gap (§2), so leave it running in a tab. |
 | **← talk track here** | §4, for as long as A takes. This is the filler; it's meant to absorb the wait. |
 | **Gate + merge** | A's PR: *"matched no gates — auto-merge (squash) armed."* Review pass posts an approving review as **`lennons301-reviewer`** — a different account. Four checks green. GitHub squash-merges. Issue closes via `Closes #213`. Scroll the PR: that's the audit trail. |
 | **Dependency releases** | A closed → next sweep claims B. Same dashboard, **no human action**. This is the beat that proves "a block of work", not "a task". |
-| **Triage → Discord** | Ticket C: `needs-triage` by webhook, the triage pass's `recommend` comment, the embed in Discord. Reply exactly **`yes`** → ✅, an audit comment naming the Discord route, `ready-for-agent` applied, claimed next sweep. |
+| **Triage → Discord** | Back to ticket C — by now the pass has run in the slot gap after #213's implement pass parked. Its `recommend` comment is on the issue and the embed is in Discord. Reply exactly **`yes`** → ✅, an audit comment naming the Discord route, `ready-for-agent` applied, claimed next sweep. |
 | **The human gate** | B's PR: `human-signoff`, auto-merge disarmed, `visual-ui` named in the comment, amber **needs you** card with a link. Merge it yourself — the loop handed you exactly one decision. |
 | **Close** | `/settings`: press the kill switch, watch pickup pause, lift it. Then the numbers (§5). |
 
