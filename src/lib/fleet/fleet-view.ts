@@ -25,6 +25,13 @@ export interface FleetRows {
    * engaged the sweep claims nothing new, so the dashboard has to say so — a
    * held fleet and an idle one look identical otherwise */
   globalAutonomyPaused: boolean;
+  /** The env boot master `AUTONOMY_ENABLED` (issue #148), fixed at boot: false
+   * and no sweep starts at all, so nothing anywhere can be picked up however
+   * the runtime holds read. Carried here because the surfaces were otherwise
+   * blind to it — a fleet with autonomy off at boot rendered as a running one.
+   * Distinct from `globalAutonomyPaused` in what lifts it: a config change and
+   * a restart, not a press on /settings. */
+  autonomyEnabledAtBoot: boolean;
   /** Discord guild for deep links into project channels; null = no Discord */
   discordGuildId: string | null;
   projects: FleetProjectRow[];
@@ -178,10 +185,17 @@ export interface NeedsYouItem {
 }
 
 /**
- * A fleet-wide hold on new autonomous pickup (issue #118). The kill switch is a
- * deliberate operator hold lifted by a human; the daily cap is a breached
- * ceiling that lifts itself at local midnight — different things to be told, so
- * each carries its own reason and copy.
+ * A fleet-wide hold on new autonomous pickup (issues #118, #148). Three things
+ * hold it, and no two are lifted the same way: the boot master
+ * (`AUTONOMY_ENABLED`) takes a config change and a restart, the kill switch is
+ * a press on /settings, and the daily cap lifts itself at local midnight. So
+ * each carries its own reason and its own copy — telling an owner to lift a
+ * switch that would change nothing is the failure this field exists to remove.
+ *
+ * Per-project holds are deliberately NOT here (issue #148): a fleet of six
+ * armed projects, one of them failing preflight, is not a held fleet, and
+ * saying so here would over-claim. Those ride {@link ProjectPickupHold}, said
+ * beside the project they belong to.
  *
  * Deliberately its own union rather than the reducer's `PauseReason` (which also
  * covers per-project and no-slots holds, neither of them fleet-wide) — the same
@@ -189,10 +203,26 @@ export interface NeedsYouItem {
  * the dashboard renders, not to another module's enum.
  */
 export interface PickupPause {
-  reason: "kill-switch" | "daily-cap";
+  reason: "autonomy-off-at-boot" | "kill-switch" | "daily-cap";
   /** One-line banner copy */
   body: string;
 }
+
+/**
+ * Why one project can't have its tickets claimed right now (issue #148), for
+ * the surfaces that already list projects. The reducer fails closed on
+ * preflight — a repo whose preflight has never run is as ineligible as one
+ * that failed — so "never checked" is its own hold rather than a silent pass.
+ *
+ * The project's own autonomy toggle is here for the same reason preflight is:
+ * a backlog depth printed with nothing beside it reads as work about to
+ * start. A hold this union omitted would be exactly the blindness the ticket
+ * closes, so it states every reason `decideNext` refuses a project for.
+ */
+export type ProjectPickupHold =
+  | "autonomy-off"
+  | "preflight-failing"
+  | "preflight-unchecked";
 
 export type PhaseState = "done" | "current" | "todo";
 
@@ -253,19 +283,26 @@ export interface FleetView {
     capUsd: number;
     capPaused: boolean;
   };
-  /** Why no new autonomous work is being picked up, or null while pickup runs
-   * (issue #118) — the live dot and the banner read this, so a paused fleet is
-   * never mistaken for an idle one. Both causes can hold at once; the operator's
-   * own kill switch is named first because it is the one they can lift. The
-   * cap's own `spend.capPaused` is untouched — the gauge and digest read that. */
+  /** Why no new autonomous work is being picked up, or null while nothing
+   * fleet-wide holds it (issues #118, #148) — the live dot, the banner and the
+   * digest all read this one field, so the surfaces cannot disagree about
+   * whether the fleet is running. More than one cause can hold at once; they
+   * are named in the order of what a reader must act on first (see the
+   * precedence at the assignment). The cap's own `spend.capPaused` is
+   * untouched — the gauge and the digest's Spend section read that. */
   pickupPaused: PickupPause | null;
   needsYou: NeedsYouItem[];
   running: RunningCard[];
   recent: { windowDays: number; totalUsd: number; items: RecentItem[] };
   queue: {
     readyForAgent: number | null;
-    /** Backlog depth per project, deepest first; null = never observed */
-    byProject: { projectName: string; count: number }[] | null;
+    /** Backlog depth per project, deepest first; null = never observed. `hold`
+     * (issue #148) is why that project's tickets can't be claimed — null means
+     * only that nothing *project-specific* holds them, since a fleet-wide hold
+     * is said once in `pickupPaused` rather than repeated per row. */
+    byProject:
+      | { projectName: string; count: number; hold: ProjectPickupHold | null }[]
+      | null;
   };
   /** True when any project has autonomy enabled */
   autonomyOn: boolean;
@@ -277,6 +314,34 @@ export function startOfLocalDay(now: Date): Date {
   const start = new Date(now);
   start.setHours(0, 0, 0, 0);
   return start;
+}
+
+/**
+ * Why `decideNext` would refuse this project's tickets, or null when nothing
+ * project-specific would (issue #148). Preflight fails closed exactly as the
+ * reducer does: only `passing` clears, so a preflight that has never run holds
+ * pickup just as a failing one does — and says which, because "we never
+ * checked" and "we checked and it's broken" ask different things of a reader.
+ */
+function projectHold(project: FleetProjectRow): ProjectPickupHold | null {
+  if (!project.autonomyEnabled) return "autonomy-off";
+  switch (project.preflightStatus) {
+    case "passing":
+      return null;
+    case "failing":
+      return "preflight-failing";
+    case null:
+      return "preflight-unchecked";
+    default: {
+      // Fail closed twice over, as the pause reasons do: the `never` fails the
+      // build when preflightStatus grows a state (the `void` only spends the
+      // binding), and until someone teaches this function, a state it doesn't
+      // know holds pickup rather than quietly clearing it.
+      const unhandled: never = project.preflightStatus;
+      void unhandled;
+      return "preflight-unchecked";
+    }
+  }
 }
 
 /** "owner/repo#34" -> "#34"; null when the ref has no issue number */
@@ -379,20 +444,30 @@ export function buildFleetView(rows: FleetRows): FleetView {
     .reduce((sum, r) => sum + r.totalCostUsd, 0);
   const capPaused = todayUsd >= rows.dailyCapUsd;
 
-  // What the live dot and the banner say (issue #118). The kill switch outranks
-  // the cap: both can hold, but the switch is the one a human engaged and the
-  // one they can lift, so it is what they need to read first.
-  const pickupPaused: PickupPause | null = rows.globalAutonomyPaused
+  // What the live dot, the banner and the digest all say (issues #118, #148).
+  // Precedence is by what a reader must act on, and it is why the boot master
+  // leads: with `AUTONOMY_ENABLED` off no sweep runs at all, so naming the kill
+  // switch there would send an owner to press a control that changes nothing.
+  // Below it the switch outranks the cap — both can hold, but the switch is the
+  // one a human engaged and the one they can lift, while midnight lifts the cap
+  // on its own. Whichever wins, the others keep their own surfaces: the cap's
+  // gauge and needs-you card are untouched by being outranked here.
+  const pickupPaused: PickupPause | null = !rows.autonomyEnabledAtBoot
     ? {
-        reason: "kill-switch",
-        body: "Kill switch engaged — no new autonomous pickup; runs already in flight continue",
+        reason: "autonomy-off-at-boot",
+        body: "Autonomy is off on this install (AUTONOMY_ENABLED) — no sweep runs at all, so nothing is claimed; the kill switch cannot start one",
       }
-    : capPaused
+    : rows.globalAutonomyPaused
       ? {
-          reason: "daily-cap",
-          body: "Daily cap reached — autonomous pickup paused until midnight",
+          reason: "kill-switch",
+          body: "Kill switch engaged — no new autonomous pickup; runs already in flight continue",
         }
-      : null;
+      : capPaused
+        ? {
+            reason: "daily-cap",
+            body: "Daily cap reached — autonomous pickup paused until midnight",
+          }
+        : null;
 
   const tasksOfRun = (runId: string) =>
     rows.tasks.filter((t) => t.runId === runId);
@@ -747,15 +822,23 @@ export function buildFleetView(rows: FleetRows): FleetView {
   }
 
   // Preflight only matters where autonomy is asked for — a dormant project
-  // failing preflight needs nothing from anyone.
-  for (const project of rows.projects.filter(
-    (p) => p.autonomyEnabled && p.preflightStatus === "failing"
-  )) {
+  // failing preflight needs nothing from anyone. Read through the same
+  // projectHold the backlog rows use, so a card and a backlog line can never
+  // disagree about whether a project is pickable; and each card says the
+  // consequence, not just the state, because "preflight failing" alone leaves
+  // the reader to infer that nothing is being claimed there (issue #148).
+  for (const project of rows.projects) {
+    if (!project.autonomyEnabled) continue;
+    const hold = projectHold(project);
+    if (hold === null) continue;
     needsYou.push({
       cause: "preflight",
       severity: "amber",
       context: project.name,
-      body: `Preflight failing: ${project.preflightReason ?? "reason unknown"}`,
+      body:
+        hold === "preflight-failing"
+          ? `Preflight failing, so none of its tickets are picked up: ${project.preflightReason ?? "reason unknown"}`
+          : "Preflight has never run, so none of its tickets are picked up — pickup fails closed until it passes.",
       action: { label: "Open settings", href: "/settings" },
     });
   }
@@ -805,11 +888,12 @@ export function buildFleetView(rows: FleetRows): FleetView {
   // since-deleted project counts nowhere.
   const backlog = rows.backlogByProject
     ? Object.entries(rows.backlogByProject)
-        .filter(([projectId]) => projectById.has(projectId))
-        .map(([projectId, count]) => ({
-          projectName: projectName(projectId),
-          count,
-        }))
+        .flatMap(([projectId, count]) => {
+          const project = projectById.get(projectId);
+          return project
+            ? [{ projectName: project.name, count, hold: projectHold(project) }]
+            : [];
+        })
         .sort(
           (a, b) =>
             b.count - a.count || a.projectName.localeCompare(b.projectName)

@@ -89,6 +89,10 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     // Read on every view build, exactly as the sweep reads it each tick — the
     // dashboard reflects a flip on its next SSE push, with no restart.
     globalAutonomyPaused: isGlobalAutonomyPaused(),
+    // The env boot master (issue #148), from the same config the sweep gates
+    // itself on: with it off no sweep ever starts, so the view must be able to
+    // say so rather than rendering a fleet that reads healthy and claims nothing.
+    autonomyEnabledAtBoot: getConfig().autonomyEnabled,
     discordGuildId: getConfig().discordGuildId,
     projects: projectRows.map((p) => ({
       id: p.id,

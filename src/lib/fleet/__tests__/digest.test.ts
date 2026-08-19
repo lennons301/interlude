@@ -30,6 +30,9 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     slots: 2,
     dailyCapUsd: 500,
     globalAutonomyPaused: false,
+    // The boot master on, so every test that doesn't say otherwise describes an
+    // install where autonomy is actually armed at boot (issue #148).
+    autonomyEnabledAtBoot: true,
     discordGuildId: null,
     projects: [],
     runs: [],
@@ -201,15 +204,52 @@ describe("renderDailyDigest — autonomous pickup", () => {
     ]);
   });
 
-  it("claims only what the view knows when neither hold applies", () => {
+  it("claims only what the view knows when no fleet-wide hold applies", () => {
     const content = render({
       projects: [makeProject({ id: "p1", autonomyEnabled: true })],
     });
 
-    // Not "pickup was running" — a boot master left off or a failing preflight
-    // also stops claims, by routes this read model doesn't see.
+    // Still not "pickup was running": preflight is per-project, and the
+    // Backlog section is where that is said (issue #148).
     expect(section(content, "Autonomous pickup")).toEqual([
-      "No fleet-wide hold — the kill switch is lifted and the day stayed inside the cap.",
+      "No fleet-wide hold — autonomy is on, the kill switch is lifted and the day stayed inside the cap.",
+    ]);
+  });
+
+  it("leads with the boot master, and does not offer the kill switch as the remedy", () => {
+    const content = render({
+      autonomyEnabledAtBoot: false,
+      projects: [makeProject({ id: "p1", autonomyEnabled: true })],
+    });
+
+    expect(section(content, "Autonomous pickup")).toEqual([
+      "⏸ Off right now — autonomy is disabled on this install " +
+        "(AUTONOMY_ENABLED), so no sweep runs at all and nothing is claimed " +
+        "for any project. The kill switch cannot lift this one: it takes a " +
+        "config change and a restart.",
+    ]);
+    expect(section(content, "Autonomous pickup")[0]).not.toContain("/settings");
+  });
+
+  it("keeps the boot master ahead of a runtime hold, and still reports the breach", () => {
+    const content = render({
+      autonomyEnabledAtBoot: false,
+      globalAutonomyPaused: true,
+      dailyCapUsd: 500,
+      runs: [
+        makeRun({
+          id: "r1",
+          totalCostUsd: 512.34,
+          status: "merged",
+          finishedAt: aug(1, 21),
+        }),
+      ],
+      projects: [makeProject({ id: "proj-1" })],
+    });
+
+    expect(section(content, "Autonomous pickup")[0]).toContain("AUTONOMY_ENABLED");
+    expect(section(content, "Spend")).toEqual([
+      "$512.34 of $500.00 daily cap — cap hit, pickup was paused",
     ]);
   });
 
@@ -450,11 +490,12 @@ describe("renderDailyDigest — blocked on you", () => {
 
 describe("renderDailyDigest — backlog", () => {
   it("shows backlog depth per project, deepest first", () => {
+    const armed = { autonomyEnabled: true, preflightStatus: "passing" } as const;
     const content = render({
       backlogByProject: { p1: 2, p2: 5 },
       projects: [
-        makeProject({ id: "p1", name: "interlude" }),
-        makeProject({ id: "p2", name: "lemons" }),
+        makeProject({ id: "p1", name: "interlude", ...armed }),
+        makeProject({ id: "p2", name: "lemons", ...armed }),
       ],
     });
 
@@ -462,6 +503,35 @@ describe("renderDailyDigest — backlog", () => {
       "lemons: 5",
       "interlude: 2",
     ]);
+  });
+
+  it("says per project when a depth isn't going anywhere", () => {
+    // Preflight is per-project, so this is where it is said — a depth printed
+    // bare reads as work about to start (issue #148).
+    const content = render({
+      backlogByProject: { p1: 5, p2: 4, p3: 3, p4: 2 },
+      projects: [
+        makeProject({ id: "p1", name: "armed", autonomyEnabled: true, preflightStatus: "passing" }),
+        makeProject({
+          id: "p2",
+          name: "broken",
+          autonomyEnabled: true,
+          preflightStatus: "failing",
+          preflightReason: "no branch protection",
+        }),
+        makeProject({ id: "p3", name: "unchecked", autonomyEnabled: true, preflightStatus: null }),
+        makeProject({ id: "p4", name: "dormant", autonomyEnabled: false }),
+      ],
+    });
+
+    expect(section(content, "Backlog (ready-for-agent)")).toEqual([
+      "armed: 5",
+      "broken: 4 — not picked up: preflight is failing",
+      "unchecked: 3 — not picked up: preflight has never passed",
+      "dormant: 2 — not picked up: autonomy is off for this project",
+    ]);
+    // And the fleet itself is not claimed to be held by any of it
+    expect(section(content, "Autonomous pickup")[0]).toContain("No fleet-wide hold");
   });
 
   it("distinguishes a drained backlog from one never observed", () => {

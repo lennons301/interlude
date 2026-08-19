@@ -51,7 +51,12 @@ checks four things and, on failure, names exactly what is missing:
 
 The reducer **fails closed**: a repo whose preflight has never run, or is failing,
 is as ineligible as one with autonomy off. Nothing is claimed until preflight
-passes, so a half-configured repo can never be run against by accident.
+passes, so a half-configured repo can never be run against by accident. The
+dashboard and the digest say so **per project**, not fleet-wide (issue #148):
+the repo gets a *needs you* card naming what's missing and stating that none of
+its tickets are being picked up, and if it has armed tickets waiting, its line in
+the digest's Backlog reads `moontide: 3 — not picked up: preflight is failing`.
+One repo failing preflight is not a held fleet, so it is never reported as one.
 
 Preflight is recomputed (a) immediately when you enable autonomy on a project,
 and (b) periodically (every few minutes) for enabled projects, so drift — e.g.
@@ -169,10 +174,11 @@ chat/preview is never affected.
   restart.
 
   **Confirm it took** from the row itself, not from the log: the dashboard's
-  live dot turns amber and reads `held` (`paused` is the daily cap — a
-  deliberately different word for a deliberately different state), with a *Kill
-  switch engaged* banner above the panels, and `GET /api/settings/autonomy`
-  answers the same row headless. The sweep's `Pickup paused (kill-switch)` line
+  live dot turns amber and reads `held` (`paused` is the daily cap, `off` the
+  boot master — deliberately different words for deliberately different states,
+  because they are lifted in three different ways), with a *Kill switch
+  engaged* banner above the panels, and `GET /api/settings/autonomy` answers
+  the same row headless. The sweep's `Pickup paused (kill-switch)` line
   is **not** the confirmation: the hold is evaluated only on a tick that found
   an eligible ticket it would otherwise have claimed, so engaging the switch
   over an empty queue logs nothing at all — and if the daily cap is breached
@@ -184,6 +190,13 @@ chat/preview is never affected.
 - **Globally, hard off (boot master):** set `AUTONOMY_ENABLED=false` in Doppler
   `interlude/prd` and restart. Sweeps never start at all. Use this to stand the
   fleet down for a while; use the kill switch to stop it now.
+
+  The dashboard's dot reads `off` with a banner naming `AUTONOMY_ENABLED`, and
+  the digest leads with it (issue #148) — neither offers the kill switch as the
+  remedy, because lifting it under a boot master that's off changes nothing.
+  It outranks both runtime holds on those surfaces for the same reason: it is
+  the one you have to act on first. Turning it back on takes a config change
+  and a restart.
 - **Per project:** press **disarm** on the project's card in `/settings`, or
   disable the toggle by hand —
 
@@ -348,11 +361,15 @@ trigger) · `workflow:<skill>` (per-ticket workflow selector).
 
 ## When something's off
 
-- **Nothing is being claimed.** Check, in order: `AUTONOMY_ENABLED=true` and the
-  orchestrator restarted; the project's `autonomyEnabled` is true; its
-  `preflightStatus` is `passing` (a failing/never-run preflight blocks pickup —
-  read `preflightReason`); the issue has `ready-for-agent`, no open blocker, no
-  active run, and an allow-listed author; the daily cap isn't paused; a slot is free.
+- **Nothing is being claimed.** Read the dashboard first: since issue #148 it
+  names every hold it can see — the dot and banner for the fleet-wide ones
+  (`off` = boot master, `held` = kill switch, `paused` = daily cap), a *needs
+  you* card per project for preflight. If it says nothing, check the rest in
+  order: `AUTONOMY_ENABLED=true` and the orchestrator restarted; the project's
+  `autonomyEnabled` is true; its `preflightStatus` is `passing` (a
+  failing/never-run preflight blocks pickup — read `preflightReason`); the issue
+  has `ready-for-agent`, no open blocker, no active run, and an allow-listed
+  author; the daily cap isn't paused; a slot is free.
 - **Preflight won't pass.** Read `preflightReason` — it names the missing piece.
   "no branch protection" can also mean the App lacks *Administration: read*; "not a
   collaborator" can mean `REVIEWER_GH_TOKEN` is unset or its account isn't on the repo.

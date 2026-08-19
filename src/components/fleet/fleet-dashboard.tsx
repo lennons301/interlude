@@ -1,26 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { FleetView, PickupPause } from "@/lib/fleet/fleet-view";
+import type { FleetView } from "@/lib/fleet/fleet-view";
 import { AppShell } from "@/components/app-shell";
-import { LiveDot, TONES, type LiveDotState } from "./fleet-bits";
+import {
+  LiveDot,
+  PAUSE_DOT,
+  PAUSE_TONE,
+  TONES,
+  type LiveDotState,
+} from "./fleet-bits";
 import { PulseStrip } from "./pulse-strip";
 import { NeedsYou } from "./needs-you";
 import { RunningList } from "./running-list";
 import { RecentLedger } from "./recent-ledger";
-
-// How a fleet-wide hold on pickup reads (issue #118). A deliberate operator
-// hold is amber and says "held"; a breached spend ceiling is red and says
-// "paused" — the estate's severity vocabulary, and not the same news.
-const PAUSE_DOT: Record<PickupPause["reason"], LiveDotState> = {
-  "kill-switch": "held",
-  "daily-cap": "paused",
-};
-
-const PAUSE_TONE: Record<PickupPause["reason"], keyof typeof TONES> = {
-  "kill-switch": "amber",
-  "daily-cap": "red",
-};
 
 function useFleetStream() {
   const [view, setView] = useState<FleetView | null>(null);
@@ -55,9 +48,10 @@ export function FleetDashboard() {
 
   // The dot is the liveness signal: offline whenever the stream is down, even
   // if a stale view is still on screen. Otherwise it carries whether new
-  // autonomous pickup is happening — held by the operator's kill switch (issue
-  // #118) or paused by the breached daily cap, each in its own tone, with the
-  // banner below naming it. The two are lifted in completely different ways.
+  // autonomous pickup is happening — off at boot (issue #148), held by the
+  // operator's kill switch (issue #118), or paused by the breached daily cap,
+  // each in its own tone, with the banner below naming it. All three are lifted
+  // in completely different ways, which is why the dot never merges them.
   const pickupPaused = view?.pickupPaused ?? null;
   const dotState: LiveDotState = !connected
     ? "offline"

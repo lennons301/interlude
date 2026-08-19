@@ -6,6 +6,8 @@ import Link from "next/link";
  * with a tick at its ceiling. Color is strictly semantic.
  */
 
+import type { PickupPause } from "@/lib/fleet/fleet-view";
+
 /** The system's one focus affordance: a hairline ring in the quiet neutral, so
  * keyboard users get a visible target without a colour that means something.
  * Drawn in `--fl-mark` rather than `--fl-ink-3` because a ring is not text and
@@ -209,15 +211,44 @@ export function LoadFailure({
 
 /** The one ambient animation on the page. `held` is a deliberate operator hold
  * on pickup — the kill switch (issue #118) — so it reads amber like the banner
- * beside it, where `paused` (the breached daily cap) reads red. */
-export type LiveDotState = "live" | "held" | "paused" | "offline";
+ * beside it, where `paused` (the breached daily cap) reads red. `off` is the
+ * boot master `AUTONOMY_ENABLED` (issue #148): amber too, because it is just as
+ * deliberate, but its own word — the dot prints its state, and an owner who
+ * reads `held` goes to press a switch that cannot start a sweep. */
+export type LiveDotState = "live" | "off" | "held" | "paused" | "offline";
 
 const DOT_COLOR: Record<LiveDotState, string> = {
   live: "bg-fl-green",
+  off: "bg-fl-amber",
   held: "bg-fl-amber",
   paused: "bg-fl-red",
   // The mark, not ink-3: a dot is not text (issue #142).
   offline: "bg-fl-mark",
+};
+
+/**
+ * How a fleet-wide hold on pickup reads (issues #118, #148) — one map, here,
+ * because more than one component names the hold and they must not drift: the
+ * dot and banner at the top of the dashboard, and the quiet sub-line under
+ * "Nothing needs you", which would otherwise still report the fleet as armed.
+ *
+ * A deliberate operator hold is amber and says "held"; the boot master is amber
+ * too but says "off", because it is not the switch and is not lifted like one;
+ * a breached spend ceiling is red and says "paused" — the estate's severity
+ * vocabulary, and three states that are not the same news. Both maps are keyed
+ * by the reason union, so a fourth hold fails the build rather than rendering
+ * as though nothing were wrong.
+ */
+export const PAUSE_DOT: Record<PickupPause["reason"], LiveDotState> = {
+  "autonomy-off-at-boot": "off",
+  "kill-switch": "held",
+  "daily-cap": "paused",
+};
+
+export const PAUSE_TONE: Record<PickupPause["reason"], keyof typeof TONES> = {
+  "autonomy-off-at-boot": "amber",
+  "kill-switch": "amber",
+  "daily-cap": "red",
 };
 
 export function LiveDot({ state }: { state: LiveDotState }) {
