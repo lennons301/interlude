@@ -39,16 +39,32 @@ import { createDraftPr, markPrReady, shouldOpenDraftPr } from "../github/pull-re
 import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed, notifyTaskIdle, notifyRunBlocked } from "../discord/notifications";
 import { decideNext, passOutcomeSnapshot } from "./autonomy/decide";
 import { composeSeed, composeSessionTurn } from "../sessions/seed";
+import { processSingleton } from "../process-singleton";
 
-/** Track all active task containers for cancellation and idle polling */
-const activeTasks = new Map<
-  string,
-  {
-    container: RunningContainer;
-    state: "setup" | "running" | "idle" | "completing";
-    kind: AgentPassKind;
-  }
->();
+/**
+ * Track all active task containers for cancellation and idle polling.
+ *
+ * Process-wide, not module-wide (issue #159). This module is evaluated twice —
+ * once in the graph Next compiles `instrumentation.ts` into, where the queue
+ * loop and the sweep read this map, and once in the app-router graph, where
+ * `POST /api/tasks/[id]/complete` and `.../cancel` mutate it. As a module-level
+ * `const` those were two maps: completing an interactive session from the UI
+ * deleted the entry the route could see and left the one the queue counted, so
+ * one normal UI close held the box's only slot until the app was restarted. See
+ * {@link processSingleton} for why `globalThis` is the only fix available.
+ */
+const activeTasks = processSingleton(
+  "turn-manager.activeTasks",
+  () =>
+    new Map<
+      string,
+      {
+        container: RunningContainer;
+        state: "setup" | "running" | "idle" | "completing";
+        kind: AgentPassKind;
+      }
+    >()
+);
 
 export function getActiveTasks() {
   return activeTasks;
