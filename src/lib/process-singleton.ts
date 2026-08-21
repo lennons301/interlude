@@ -25,6 +25,15 @@
  * state a route handler and the orchestrator both touch has to live. Reach for
  * this whenever that is true; a plain module-level value is still right for
  * state only one side ever sees.
+ *
+ * Three older stores reach `globalThis` by hand for the same reason and are
+ * deliberately left alone: `fleet/health-store.ts`, `fleet/backlog.ts` and
+ * `fleet/needs-human.ts`. They need something this cannot give them — a slot
+ * that is *absent* until the first sweep writes it, because "never observed"
+ * has to stay distinguishable from "observed, and empty". This creates its
+ * value on first use, so it can only offer a container that always exists.
+ * Which to pick follows from that: this one for a live collection every graph
+ * mutates, a hand-rolled slot when absence itself carries meaning.
  */
 
 /** Symbol-keyed so the registry cannot collide with anything else on the global

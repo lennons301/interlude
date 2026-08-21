@@ -33,19 +33,3 @@ export function taskIsFinished(taskId: string): boolean {
   const status = storedTaskStatus(taskId);
   return status === null || isTerminalTaskStatus(status);
 }
-
-/**
- * The container the task has on record, or null when it has none yet (or none
- * any more). `startTask` writes it immediately after the container is created,
- * so its absence is how the queue tells a pickup still provisioning from one
- * whose provisioning never finished (issue #159).
- */
-export function storedTaskContainerId(taskId: string): string | null {
-  return (
-    db
-      .select({ containerId: tasks.containerId })
-      .from(tasks)
-      .where(eq(tasks.id, taskId))
-      .get()?.containerId ?? null
-  );
-}

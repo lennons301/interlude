@@ -41,11 +41,12 @@ const turns = vi.hoisted(() => ({
   hang: true,
 }));
 
-/** What the daemon says when the queue asks whether a container still exists.
- * `"absent"` is a positive 404; `"unreachable"` stands for every way of not
- * answering, which must decide nothing. */
+/** What the daemon says when the queue asks whether a container still exists —
+ * the three outcomes `observeContainerAbsent` reports. `"unknown"` is the
+ * daemon not answering (an error or a timeout, folded to null by the probe's
+ * own bound), and it must decide nothing either way. */
 const daemon = vi.hoisted(() => ({
-  says: "present" as "present" | "absent" | "unreachable",
+  says: "present" as "present" | "absent" | "unknown",
   asked: [] as string[],
 }));
 
@@ -53,9 +54,9 @@ vi.mock("../../docker/container-manager", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../docker/container-manager")>();
   return {
     ...actual,
-    containerIsAbsent: async (name: string) => {
+    observeContainerAbsent: async (name: string) => {
       daemon.asked.push(name);
-      if (daemon.says === "unreachable") throw new Error("daemon is not answering");
+      if (daemon.says === "unknown") return null;
       return daemon.says === "absent";
     },
   };
@@ -301,7 +302,7 @@ describe("queue slot accounting", () => {
   });
 
   /** The reconciliation runs every RECONCILE_EVERY_POLLS cycles, not every one. */
-  const RECONCILE_MS = 15 * POLL_MS;
+  const RECONCILE_MS = 16 * POLL_MS;
 
   it("releases a slot the daemon says has no container behind it", async () => {
     const projectId = seedProject();
@@ -334,6 +335,59 @@ describe("queue slot accounting", () => {
     // The freed slot goes straight to the work that was starving — which is why
     // it reads occupied again, this time by something real.
     expect(turns.dispatched).toEqual([waiting]);
+    // And the task is recorded failed rather than left `running` with no
+    // container: a row the dashboard still counts and the queue does not is the
+    // disagreement this ticket was about.
+    expect(
+      testDb.select().from(schema.tasks).where(eq(schema.tasks.id, orphaned)).get()
+    ).toMatchObject({ status: "failed", containerStatus: null, containerId: null });
+  });
+
+  it("leaves a run-owned pass to its own recovery paths", async () => {
+    const projectId = seedProject();
+    const runId = newId();
+    testDb
+      .insert(schema.runs)
+      .values({
+        id: runId,
+        projectId,
+        githubIssue: "lennons301/moontide#33",
+        status: "implementing",
+        mode: "autonomous",
+        attempt: 1,
+        budgetUsd: 20,
+        claimedAt: new Date(),
+      })
+      .run();
+    const pass = seedTask(projectId, {
+      title: "Implement #33",
+      kind: "implement",
+      status: "running",
+      containerStatus: "running",
+      runId,
+    });
+    active.set(pass, {
+      container: { name: "interlude-task-pass" },
+      state: "running",
+      kind: "implement",
+    });
+    // Something has to be waiting on the slot: with nothing queued there is no
+    // wedge to clear, and the reconciliation never runs.
+    seedTask(projectId, { title: "The waiting task" });
+
+    queue.startQueue();
+    daemon.says = "absent";
+    await vi.advanceTimersByTimeAsync(RECONCILE_MS);
+
+    // Failing it from here would burn one of MAX_ATTEMPTS on work that did not
+    // fail, or strand the run mid-status. The #95 reaper, the #97 interruption
+    // bound and the #106 boot sweep account for this properly, so the queue
+    // says what it saw and leaves the entry alone.
+    expect(daemon.asked).toContain("interlude-task-pass");
+    expect(active.has(pass)).toBe(true);
+    expect(
+      testDb.select().from(schema.tasks).where(eq(schema.tasks.id, pass)).get()?.status
+    ).toBe("running");
   });
 
   it("holds the slot when the daemon cannot answer", async () => {
@@ -355,7 +409,7 @@ describe("queue slot accounting", () => {
     // An unhealthy daemon may not manufacture an absence: freeing a slot out
     // from under live work is worse than the wedge it would fix, and a daemon
     // that cannot answer is the likeliest companion of a box under pressure.
-    daemon.says = "unreachable";
+    daemon.says = "unknown";
     await vi.advanceTimersByTimeAsync(RECONCILE_MS);
     expect(daemon.asked).toContain("interlude-task-live");
     expect(active.has(live)).toBe(true);
@@ -392,35 +446,35 @@ describe("queue slot accounting", () => {
     expect(active.has(pass)).toBe(true);
   });
 
-  it("releases a reservation whose provisioning never produced a container", async () => {
+  it("holds a provisioning pickup's reservation however long it takes", async () => {
     const projectId = seedProject();
-    const stuck = seedTask(projectId, { title: "The stuck pickup" });
+    const provisioning = seedTask(projectId, { title: "The slow pickup" });
 
     queue.startQueue();
     await vi.advanceTimersByTimeAsync(POLL_MS);
 
-    // Picked up, and provisioning hung inside createWorkspaceContainer before a
-    // container existed — so the task is `running` (startTask writes that first)
-    // with no container id, and its reservation stands in for nothing.
-    expect(turns.dispatched).toEqual([stuck]);
+    // Picked up, and still inside `createWorkspaceContainer` — which runs
+    // `ensureImage`, so a cold agent-image build legitimately has no container
+    // to show for many minutes. The task is `running` (startTask writes that
+    // before provisioning) with no container id: indistinguishable, from here,
+    // from a provision that will never finish.
+    expect(turns.dispatched).toEqual([provisioning]);
     testDb
       .update(schema.tasks)
       .set({ status: "running", containerStatus: "setup" })
-      .where(eq(schema.tasks.id, stuck))
+      .where(eq(schema.tasks.id, provisioning))
       .run();
-    const waiting = seedTask(projectId, { title: "The starved task" });
+    seedTask(projectId, { title: "The waiting task" });
 
-    // Inside the grace it is left alone: a cold agent-image build is
-    // legitimately uncorroborated for minutes, and releasing early would let a
-    // second pickup in beside work that is genuinely still starting.
-    await vi.advanceTimersByTimeAsync(RECONCILE_MS);
+    // So the reservation is never released on age alone. Letting it go and
+    // admitting the next pickup would put two agent containers on a one-slot
+    // box the moment the slow provision landed, with nothing re-checking memory
+    // — the overcommit shape behind the 2026-08-19 host OOM. A phantom
+    // reservation is left to the watchdog's phantom-slot card, whose remedy is
+    // a human-gated restart.
+    await vi.advanceTimersByTimeAsync(40 * 60_000);
     expect(queue.occupiedSlots()).toBe(1);
-    expect(turns.dispatched).toEqual([stuck]);
-
-    await vi.advanceTimersByTimeAsync(21 * 60_000);
-
-    // Past the grace the reservation goes, and the starved task takes the slot.
-    expect(turns.dispatched).toEqual([stuck, waiting]);
+    expect(turns.dispatched).toEqual([provisioning]);
   });
 
   it("dispatches a queued task after a hung pickup's task is cancelled", async () => {

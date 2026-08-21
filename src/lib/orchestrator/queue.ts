@@ -3,6 +3,7 @@ import { tasks, messages } from "@/db/schema";
 import { eq, and, isNull, asc, sql } from "drizzle-orm";
 import { startTask } from "./turn-manager";
 import {
+  abandonSessionWithoutContainer,
   getActiveTasks,
   isParked,
   processQueuedMessages,
@@ -12,14 +13,8 @@ import {
 // The one predicate for "this task has stopped for good", shared with the turn
 // manager rather than restated here — a fleet that disagreed with itself about
 // whether a task had finished is how bookkeeping came to outlive its task twice.
-import {
-  storedTaskContainerId,
-  storedTaskStatus,
-  taskIsFinished,
-} from "../tasks/stored-status";
-import { containerIsAbsent } from "../docker/container-manager";
-import { DOCKER_PROBE_TIMEOUT_MS } from "../docker/agent-containers";
-import { runBoundedProbe } from "../timeout";
+import { storedTaskStatus, taskIsFinished } from "../tasks/stored-status";
+import { observeContainerAbsent } from "../docker/container-manager";
 import {
   createLocalCapacityProvider,
   getCapacity,
@@ -60,15 +55,8 @@ const inFlightTasks = new Set<string>();
  * its container, or its status turns terminal without one
  * (`releaseSpentReservations`). Never waits on `startTask`'s promise to settle
  * (issue #151).
- *
- * Keyed to the moment it was taken, because "how long has this stood in for a
- * container?" is the only thing that separates a pickup still provisioning from
- * one whose provisioning is never going to finish (issue #159). A cold
- * `ensureImage` build runs inside `createWorkspaceContainer`, so a legitimate
- * reservation can be uncorroborated for a long time — see
- * `PROVISIONING_GRACE_MS`.
  */
-const slotReservations = new Map<string, number>();
+const slotReservations = new Set<string>();
 
 let capacityProvider: CapacityProvider | null = null;
 let saturationLogged = false;
@@ -102,7 +90,7 @@ export function occupiedSlots(): number {
     if (taskIsFinished(taskId)) continue;
     count++;
   }
-  for (const taskId of slotReservations.keys()) {
+  for (const taskId of slotReservations) {
     if (active.has(taskId)) continue;
     if (taskIsFinished(taskId)) continue;
     count++;
@@ -129,7 +117,7 @@ export function occupiedSlots(): number {
  */
 function releaseSpentReservations(): void {
   const active = getActiveTasks();
-  for (const taskId of slotReservations.keys()) {
+  for (const taskId of slotReservations) {
     if (active.has(taskId) || taskIsFinished(taskId)) slotReservations.delete(taskId);
   }
   for (const taskId of inFlightTasks) {
@@ -143,27 +131,18 @@ function releaseSpentReservations(): void {
   }
 }
 
-/**
- * How long a reservation may stand in for a container that has not appeared
- * before the queue stops believing in it. Generous on purpose: a reservation is
- * taken before `createWorkspaceContainer`, which runs `ensureImage` inside
- * itself, so a cold agent-image build is legitimately uncorroborated for many
- * minutes — the same worst case that sizes the fleet watchdog's
- * `OCCUPANCY_DIVERGED_MINUTES`. Releasing one early would let a second pickup in
- * beside work that is genuinely still starting.
- */
-const PROVISIONING_GRACE_MS = 20 * 60_000;
-
-/** How often the daemon reconciliation below runs, in poll cycles (~30s at the
- * 2s poll). A saturated box is the *normal* state on a one-slot machine, so this
- * would otherwise ask Docker about every occupant every 2s forever; the wedges
- * it exists to clear lasted 20 minutes and more, so 30s is ample. */
-const RECONCILE_EVERY_POLLS = 15;
+/** How often the reconciliation below runs, in poll cycles — ~32s at the 2s
+ * poll. A saturated box is the *normal* state on a one-slot machine, so per-poll
+ * probing would ask Docker about every occupant every 2s forever, and the wedges
+ * this clears lasted 20 minutes and more. Deliberately not the port scan's 15,
+ * so the two do not land on the same tick for the life of the process. */
+const RECONCILE_EVERY_POLLS = 16;
 
 /**
  * When pickup is blocked, ask the daemon whether the containers behind those
- * slots exist — and stop counting the ones that do not (issue #159). Returns
- * whether anything was released, so the caller can re-check its slot.
+ * slots exist — and give up on the sessions whose do not (issue #159). Returns
+ * whether a slot was freed, so the caller can re-check before giving up on the
+ * cycle.
  *
  * This is the check the queue already owned and never ran. The memory-admission
  * probe is the one place that asks Docker what is really there, but it sat
@@ -172,66 +151,48 @@ const RECONCILE_EVERY_POLLS = 15;
  * over-counting. Which is the wrong way round for a wedge — over-counting is
  * what stops work starting.
  *
- * Both halves are deliberately one-directional and fail-safe, because freeing a
- * slot out from under live work is worse than the wedge it fixes:
+ * One-directional and fail-safe throughout, because freeing a slot out from
+ * under live work is worse than the wedge it fixes: a session goes only when the
+ * daemon *positively* answers 404 for its container. Unknown decides nothing
+ * (see `observeContainerAbsent`), and parked passes are not even asked about —
+ * they hold no slot, so there is nothing to reclaim.
  *
- * - a session entry goes only when the daemon *positively* answers 404 for its
- *   container (see `containerIsAbsent`). A daemon that errors or times out says
- *   nothing, and nothing is what it decides. Parked entries are skipped — they
- *   hold no slot anyway, so there is nothing to reclaim and no reason to ask.
- * - a reservation goes only once it has outlived `PROVISIONING_GRACE_MS` *and*
- *   its task still has no container recorded. If provisioning had succeeded the
- *   task would carry a container id and its entry would have released the
- *   reservation already, so no container after the grace means provisioning is
- *   not going to finish. No Docker call needed for this half.
+ * Releasing the slot is not the whole job: the task is recorded `failed` too, or
+ * it would linger `running` with no container — counted by the dashboard,
+ * uncounted by the queue, which is the disagreement this ticket was about. When
+ * a run owns the task that accounting belongs to the run's own recovery paths
+ * (#95, #97, #106), so those keep both their entry and their slot and this only
+ * says what it saw.
  *
- * Terminal tasks are not this function's business — they are released without
- * asking anyone (see `occupiedSlots`), which is why this only ever looks at
- * tasks the DB still calls live.
+ * Terminal tasks never get here: they are released without asking anyone (see
+ * `occupiedSlots`), so this only ever looks at tasks the DB still calls live.
  */
 async function reconcileSlotsAgainstDaemon(): Promise<boolean> {
-  const active = getActiveTasks();
   let released = false;
 
-  for (const [taskId, entry] of active) {
+  for (const [taskId, entry] of getActiveTasks()) {
     // Parked passes hold no slot, and their container is `docker stop`ped by
     // design (#93) — nothing to reclaim, nothing to suspect.
     if (isParked(entry)) continue;
     if (taskIsFinished(taskId)) continue;
 
-    const outcome = await runBoundedProbe(
-      () => containerIsAbsent(entry.container.name),
-      DOCKER_PROBE_TIMEOUT_MS
-    );
-    if (!outcome.ok) {
-      console.error(
-        `[orchestrator] Could not corroborate the container for task ${taskId} ` +
-          `(${outcome.reason}) — leaving its slot held`
+    const absent = await observeContainerAbsent(entry.container.name);
+    if (absent !== true) continue;
+
+    const status = storedTaskStatus(taskId) ?? "gone";
+    const reason = `its container (${entry.container.name}) is no longer known to Docker`;
+    if (!abandonSessionWithoutContainer(taskId, reason)) {
+      console.warn(
+        `[orchestrator] Task ${taskId} is '${status}' but ${reason} — leaving its ` +
+          `slot held: it belongs to a run, whose own recovery owns this (issue #159)`
       );
       continue;
     }
-    if (!outcome.value) continue;
 
-    active.delete(taskId);
     released = true;
     console.warn(
-      `[orchestrator] Released the slot held by task ${taskId}: the daemon has no ` +
-        `container ${entry.container.name}. The task is still '${storedTaskStatus(taskId)}' ` +
-        `with nothing running behind it (issue #159)`
-    );
-  }
-
-  const now = Date.now();
-  for (const [taskId, reservedAt] of slotReservations) {
-    if (active.has(taskId)) continue;
-    if (now - reservedAt < PROVISIONING_GRACE_MS) continue;
-    if (storedTaskContainerId(taskId) !== null) continue;
-
-    slotReservations.delete(taskId);
-    released = true;
-    console.warn(
-      `[orchestrator] Released the slot reserved for task ${taskId}: no container ` +
-        `after ${Math.round((now - reservedAt) / 60_000)}m of provisioning (issue #159)`
+      `[orchestrator] Freed the slot held by task ${taskId} and failed it: it was ` +
+        `'${status}' and ${reason} (issue #159)`
     );
   }
 
@@ -311,7 +272,7 @@ export function startQueue(): void {
           // short-circuits above without probing. Released again if the probe
           // refuses the start.
           inFlightTasks.add(next.id);
-          slotReservations.set(next.id, Date.now());
+          slotReservations.add(next.id);
           const admission = await checkMemoryAdmission();
           if (admission.ok) {
             saturationLogged = false;
