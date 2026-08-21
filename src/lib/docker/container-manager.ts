@@ -607,6 +607,29 @@ export async function isContainerRunning(name: string): Promise<boolean> {
   }
 }
 
+/**
+ * Whether the daemon has definitively lost a container (by name) — it answered,
+ * and the answer was 404. For the queue's slot reconciliation (issue #159),
+ * which needs *existence*, not liveness: an entry in `setup` has been created
+ * but not started yet, and a parked pass is deliberately `docker stop`ped since
+ * #93, so {@link isContainerRunning} would call both of those gone and the
+ * reconciliation would free a slot out from under live work.
+ *
+ * Fail-safe in the same direction as its sibling, and for the same reason:
+ * anything other than a definitive 404 — the container exists, or the daemon
+ * errored, or it is briefly unreachable under memory pressure — returns false,
+ * so an unhealthy daemon can never manufacture an absence. Only a positive
+ * "no such container" counts (the #152 discipline: unknown decides nothing).
+ */
+export async function containerIsAbsent(name: string): Promise<boolean> {
+  try {
+    await getDocker().getContainer(name).inspect();
+    return false;
+  } catch (err) {
+    return (err as { statusCode?: number })?.statusCode === 404;
+  }
+}
+
 /** Force-remove a container by name — for reaping a dead pass's container
  * whose `RunningContainer` handle the orchestrator no longer holds (issue #95). */
 export async function removeContainerByName(name: string): Promise<void> {
