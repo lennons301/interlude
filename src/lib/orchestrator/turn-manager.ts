@@ -3,6 +3,7 @@ import { tasks, messages, projects, runs, isGenerationSession } from "@/db/schem
 import { eq, and, isNull, asc, desc } from "drizzle-orm";
 import { newId } from "../ulid";
 import {
+  observeContainerAbsent,
   createWorkspaceContainer,
   execSetup,
   execClaudeTurn,
@@ -40,7 +41,7 @@ import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed, notifyTaskIdle
 import { decideNext, passOutcomeSnapshot } from "./autonomy/decide";
 import { composeSeed, composeSessionTurn } from "../sessions/seed";
 import { processSingleton } from "../process-singleton";
-import { taskIsFinished } from "../tasks/stored-status";
+import { storedTaskStatus, taskIsFinished } from "../tasks/stored-status";
 
 /**
  * Track all active task containers for cancellation and idle polling.
@@ -106,6 +107,38 @@ export function pruneTerminalActiveTasks(): string[] {
 }
 
 /**
+ * Give up on a live session whose container the daemon has definitively lost
+ * (issue #159): record the task `failed`, say so in its feed, and drop the
+ * entry. Returns whether it did — false means this task is not ours to
+ * finalize.
+ *
+ * Freeing the slot alone would not be enough. A task left `running` with no
+ * container is a zombie the fleet can never resolve: `isLiveTask` still counts
+ * it, so the dashboard reads a slot busy that the queue reads free — the very
+ * disagreement #159 complained about, re-created by the thing meant to fix it —
+ * its feed shows no reason, and any follow-up message the owner sends queues
+ * against a session with nothing to deliver it. Recording the failure is what
+ * makes the two surfaces agree again and lets the composer close.
+ *
+ * Only a session no run owns, which is to say an interactive one. A pass inside
+ * a run has three recovery routes that own this exact situation and account for
+ * it properly — the #95 reaper for a review, the #97 interruption bound for an
+ * implement pass, the #106 dangling-run sweep at boot — and a bare `failed`
+ * written from here would either burn an attempt that no work failed or strand
+ * the run mid-status. So an autonomous pass keeps its entry and its slot, and
+ * the caller says so out loud rather than acting.
+ */
+export function abandonSessionWithoutContainer(taskId: string, reason: string): boolean {
+  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+  if (!task || task.runId) return false;
+
+  insertSystemMessage(taskId, `Session ended: ${reason}`);
+  updateTask(taskId, { status: "failed", containerStatus: null, containerId: null });
+  activeTasks.delete(taskId);
+  return true;
+}
+
+/**
  * An idle autonomous container is *parked*: an implement pass waiting on its
  * review verdict, or blocked on a question to the owner (issue #19), keeps its
  * container (so the verdict's fix-up or the owner's answer can be a follow-up
@@ -167,6 +200,28 @@ async function resumeParkedContainer(
 
 export function getTaskState(taskId: string) {
   return activeTasks.get(taskId)?.state ?? null;
+}
+
+/**
+ * Move a live session's state along, tolerating an entry that is no longer
+ * there. A turn does not own its entry: the owner can complete or cancel the
+ * task from the UI or Discord while the turn is mid-flight — `completeTask` is
+ * fire-and-forget from its route — and those paths delete the entry and remove
+ * the container as they go.
+ *
+ * These writes used to be `activeTasks.get(taskId)!.state = ...`, which turns
+ * that ordinary race into a TypeError thrown from inside `startTask`'s try, and
+ * so into a *failed* task (with a Discord embed and an issue comment) for a
+ * session the owner had just successfully completed. The state of a session
+ * that has ended is not a thing worth crashing over — the terminal path already
+ * recorded the outcome.
+ */
+function setTaskState(
+  taskId: string,
+  state: "setup" | "running" | "idle" | "completing"
+): void {
+  const entry = activeTasks.get(taskId);
+  if (entry) entry.state = state;
 }
 
 /**
@@ -352,7 +407,7 @@ export async function startTask(taskId: string): Promise<void> {
 
     insertSystemMessage(taskId, "Agent started.");
     updateTask(taskId, { containerStatus: "running" });
-    activeTasks.get(taskId)!.state = "running";
+    setTaskState(taskId, "running");
 
     // Notify GitHub issue that agent has started. Autonomous passes skip
     // this: the claim comment already announced the run with the task link,
@@ -401,7 +456,7 @@ export async function startTask(taskId: string): Promise<void> {
       totalCostUsd: turnResult.costUsd,
     });
     if (run) syncRunCost(run.id);
-    activeTasks.get(taskId)!.state = "idle";
+    setTaskState(taskId, "idle");
 
     if (isReviewPass) {
       // Reviews never write: no commit, no push, no PR. Parse the verdict,
@@ -467,6 +522,22 @@ export async function startTask(taskId: string): Promise<void> {
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
 
+    // The turn died because the task it was running ended underneath it: the
+    // owner completed or cancelled the session from the UI or Discord, which
+    // deletes the session entry and force-removes the container while this turn
+    // is still in flight (the complete route is fire-and-forget). Everything
+    // from here would overwrite that outcome — a `completed` task re-marked
+    // `failed`, a "task failed" Discord embed and issue comment for work the
+    // owner successfully closed. The terminal path has already recorded what
+    // happened and pushed the branch, so there is nothing to add (issue #159).
+    if (taskIsFinished(taskId)) {
+      console.log(
+        `[orchestrator] Turn for task ${taskId} ended with its task already ` +
+          `${storedTaskStatus(taskId) ?? "gone"} — not overriding that outcome (${reason})`
+      );
+      return;
+    }
+
     // An implement pass that threw before delivering a terminal result died to
     // the container, not to bad work (issue #97): a mid-turn OOM (exit 137),
     // docker error, or lost stream. Route it to the interruption bound rather
@@ -491,7 +562,7 @@ export async function startTask(taskId: string): Promise<void> {
     // A review pass the sweep already reaped as dead (issue #95) is `failed`
     // before this catch runs — the reaper queued its replacement, so this
     // dead pass must not store a verdict over it below.
-    const alreadyReaped = isReviewPass && taskStatus(taskId) === "failed";
+    const alreadyReaped = isReviewPass && storedTaskStatus(taskId) === "failed";
     updateTask(taskId, {
       status: "failed",
       containerStatus: null,
@@ -698,7 +769,7 @@ export async function processQueuedMessages(
 
     // Run next turn with the user message
     updateTask(taskId, { status: "running", containerStatus: "running" });
-    activeTasks.get(taskId)!.state = "running";
+    setTaskState(taskId, "running");
 
     // Extract raw text from JSON content for the CLI prompt
     let promptText = queued.content;
@@ -745,7 +816,7 @@ export async function processQueuedMessages(
       totalCostUsd: currentCost + turnResult.costUsd,
     });
     if (run) syncRunCost(run.id);
-    activeTasks.get(taskId)!.state = "idle";
+    setTaskState(taskId, "idle");
 
     // Commit and push after each turn
     await runPostTurnCommitAndPush(taskId, running);
@@ -832,6 +903,20 @@ export async function completeTask(taskId: string): Promise<void> {
     } catch {
       // Container no longer exists
     }
+  } else if (running && (await observeContainerAbsent(running.name)) === true) {
+    // A held handle is not proof the container is there. The DB path above
+    // verifies with an `inspect` before trusting its id, and an in-memory entry
+    // owes the same check — otherwise a session whose container died out of
+    // band (a host OOM kill, a manual `docker rm`) fails its *completion*: the
+    // push exec below throws and the catch marks the task `failed`, announcing
+    // a failure for work the owner was closing normally. Dropping the handle
+    // takes the graceful path instead, the one the doc comment above describes
+    // (issue #159 — before `activeTasks` was shared, every UI-initiated
+    // complete reached that path by accident, because the route could not see
+    // the entry at all). Only a definitive absence drops it: on `null` — the
+    // daemon did not answer — the handle is kept and the push is attempted, the
+    // same benefit of the doubt this path has always given.
+    running = null;
   }
 
   updateTask(taskId, { containerStatus: "completing" });
@@ -1022,6 +1107,14 @@ async function failImplementAttempt(
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
   const run = db.select().from(runs).where(eq(runs.id, runId)).get();
 
+  // Take the container handle before the status goes terminal. From that write
+  // on, the queue's poll is entitled to drop the session entry (issue #159) —
+  // and the issue comment below is awaited, so a 2s poll fits comfortably
+  // inside the gap. Reading the map afterwards would find nothing and leak a
+  // ~2 GiB container until the 5-minute reaper caught it, on exactly the box
+  // that OOM-wedged on 2026-08-19.
+  const container = activeTasks.get(taskId)?.container ?? null;
+
   insertSystemMessage(taskId, `Attempt failed: ${reason}`);
   updateTask(taskId, { status: "failed", containerStatus: null });
   syncRunCost(runId);
@@ -1047,7 +1140,7 @@ async function failImplementAttempt(
     );
   }
 
-  await removeTaskContainer(taskId, activeTasks.get(taskId)?.container ?? null);
+  await removeTaskContainer(taskId, container);
 }
 
 /**
@@ -1111,7 +1204,7 @@ async function finishReviewPass(
   // no retry. The `running`-status guard mirrors the store below: a pass the
   // sweep already reaped and replaced (#95) must not be touched again.
   if (verdict.kind === "unparseable" && !passProducedResult(rawStream)) {
-    if (taskStatus(taskId) === "running") {
+    if (storedTaskStatus(taskId) === "running") {
       updateTask(taskId, { status: "failed", containerStatus: null });
       insertSystemMessage(
         taskId,
@@ -1132,7 +1225,7 @@ async function finishReviewPass(
   // sweep reaped it as dead (container gone, task no longer `running` — issue
   // #95) while its turn was hung, a replacement review may already be in
   // flight; writing this pass's verdict now would clobber it.
-  if (runId && taskStatus(taskId) === "running") {
+  if (runId && storedTaskStatus(taskId) === "running") {
     db.update(runs).set({ reviewResult: verdict }).where(eq(runs.id, runId)).run();
   }
 
@@ -1357,14 +1450,18 @@ async function parkBlockedRun(taskId: string, runId: string, question: string): 
 
 /**
  * Cancel a task: stop container, cleanup.
+ *
+ * Records `cancelled` *before* touching the container, because killing it ends
+ * the turn running inside it and that turn's own error handling then races this
+ * one: it would write `failed` and `finishRun(runId, "failed")` over the
+ * owner's cancellation, burning one of MAX_ATTEMPTS on a run nobody's work
+ * failed. Writing the status first makes the loser of that race a no-op —
+ * `startTask`'s catch returns early once its task is already terminal (issue
+ * #159). Before `activeTasks` was shared this ordering was unreachable from the
+ * UI, because the route's copy of the map never held the entry.
  */
 export async function cancelTask(taskId: string): Promise<void> {
   const entry = activeTasks.get(taskId);
-  if (entry) {
-    await stopContainer(entry.container);
-    await removeContainer(entry.container);
-    activeTasks.delete(taskId);
-  }
 
   updateTask(taskId, {
     status: "cancelled",
@@ -1375,6 +1472,12 @@ export async function cancelTask(taskId: string): Promise<void> {
   // Owner-cancelled runs don't consume an attempt: cancelled is not failed
   if (task?.runId) finishRun(task.runId, "cancelled");
   insertSystemMessage(taskId, "Task cancelled by user.");
+
+  if (entry) {
+    activeTasks.delete(taskId);
+    await stopContainer(entry.container);
+    await removeContainer(entry.container);
+  }
 }
 
 /**
@@ -1563,15 +1666,6 @@ function updateTask(
     .set({ ...fields, updatedAt: new Date() })
     .where(eq(tasks.id, taskId))
     .run();
-}
-
-/** A task's current status, or null if it has vanished — used to tell whether
- * a review pass was reaped out from under itself (issue #95). */
-function taskStatus(taskId: string): string | null {
-  return (
-    db.select({ status: tasks.status }).from(tasks).where(eq(tasks.id, taskId)).get()?.status ??
-    null
-  );
 }
 
 /**
