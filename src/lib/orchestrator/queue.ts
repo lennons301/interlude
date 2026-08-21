@@ -2,10 +2,17 @@ import { db } from "@/db";
 import { tasks, messages } from "@/db/schema";
 import { eq, and, isNull, asc, sql } from "drizzle-orm";
 import { startTask } from "./turn-manager";
-import { getActiveTasks, isParked, processQueuedMessages, scanForDevServer } from "./turn-manager";
-// The one predicate for "this task has stopped for good", shared with the
-// composer and the live view rather than restated here.
-import { isTerminalTaskStatus } from "../tasks/status";
+import {
+  getActiveTasks,
+  isParked,
+  processQueuedMessages,
+  pruneTerminalActiveTasks,
+  scanForDevServer,
+} from "./turn-manager";
+// The one predicate for "this task has stopped for good", shared with the turn
+// manager rather than restated here — a fleet that disagreed with itself about
+// whether a task had finished is how bookkeeping came to outlive its task twice.
+import { taskIsFinished } from "../tasks/stored-status";
 import {
   createLocalCapacityProvider,
   getCapacity,
@@ -52,40 +59,34 @@ const slotReservations = new Set<string>();
 let capacityProvider: CapacityProvider | null = null;
 let saturationLogged = false;
 
-/** The task's stored status, or null when its row is gone — the authority on
- * whether a task is still live, independent of any in-memory bookkeeping. */
-function storedTaskStatus(taskId: string): string | null {
-  return (
-    db.select({ status: tasks.status }).from(tasks).where(eq(tasks.id, taskId)).get()
-      ?.status ?? null
-  );
-}
-
-/** Has the task stopped for good — or gone entirely? Either way nothing it
- * once held can still be in use. */
-function taskIsFinished(taskId: string): boolean {
-  const status = storedTaskStatus(taskId);
-  return status === null || isTerminalTaskStatus(status);
-}
-
 /**
  * Slots in use: live containers plus pickups still provisioning theirs.
  * Parked autonomous containers (an implement pass idling while its PR is
  * reviewed) run no agent process and hold no slot — see isParked.
  *
- * A reservation for a task that has *finished* stands in for nothing: its
- * container is gone and no pickup is provisioning one, so it is never counted
- * (issue #151). That is what wedged the box on 2026-08-18 — a reservation whose
- * driving promise hung on an unbounded GitHub call, so the `.finally()` release
- * never ran, while the task it covered completed and took its container with
- * it. Reading the task's status rather than trusting the reservation makes the
- * count self-heal within one poll.
+ * Nothing a *finished* task once held is counted, whichever set holds it. A
+ * reservation for a finished task stands in for nothing: its container is gone
+ * and no pickup is provisioning one (issue #151) — that is what wedged the box
+ * on 2026-08-18, a reservation whose driving promise hung on an unbounded GitHub
+ * call so its `.finally()` release never ran, while the task it covered
+ * completed and took its container with it. A session entry for a finished task
+ * is the same lie from the other side (issue #159): it claims an agent process
+ * that cannot exist, and on a one-slot box it held all pickup — interactive and
+ * autonomous alike — until the app was restarted.
+ *
+ * So the task row, not the bookkeeping, decides: reading it makes the count
+ * self-heal within one poll however the entry came to be stranded. The reading
+ * is a handful of indexed lookups over at most a couple of ids, and this is the
+ * value that gates every dispatch, so it is worth paying every poll.
+ * `releaseSpentReservations` then lets go of what this skipped.
  */
 export function occupiedSlots(): number {
   const active = getActiveTasks();
   let count = 0;
-  for (const entry of active.values()) {
-    if (!isParked(entry)) count++;
+  for (const [taskId, entry] of active) {
+    if (isParked(entry)) continue;
+    if (taskIsFinished(taskId)) continue;
+    count++;
   }
   for (const taskId of slotReservations) {
     if (active.has(taskId)) continue;
@@ -107,7 +108,10 @@ export function occupiedSlots(): number {
  *   finished task can neither be picked up again (pickup reads `queued` only)
  *   nor delivered into (its `activeTasks` entry is gone), so a lock left behind
  *   by a hung promise protects nothing and would sit there for the life of the
- *   process.
+ *   process;
+ * - a session entry ends with its task (issue #159). Every terminal path
+ *   deletes its own, so anything left here is bookkeeping that went astray —
+ *   and until it goes, `occupiedSlots` has already stopped counting it.
  */
 function releaseSpentReservations(): void {
   const active = getActiveTasks();
@@ -116,6 +120,12 @@ function releaseSpentReservations(): void {
   }
   for (const taskId of inFlightTasks) {
     if (taskIsFinished(taskId)) inFlightTasks.delete(taskId);
+  }
+  for (const taskId of pruneTerminalActiveTasks()) {
+    console.warn(
+      `[orchestrator] Dropped stranded session entry for finished task ${taskId} — ` +
+        `it was holding a slot with no agent process behind it (issue #159)`
+    );
   }
 }
 

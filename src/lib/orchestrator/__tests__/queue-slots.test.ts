@@ -11,13 +11,19 @@ import { createOctokit } from "@/lib/github/client";
  * busy while the DB — and Docker — said idle, and nothing dispatched again
  * until a restart.
  *
+ * Issue #159 is the same wedge from the other side — a *session entry* that
+ * outlived its task, which on a one-slot box held all pickup until a restart.
+ *
  * The turn manager is stubbed at the two promises the queue drives (`startTask`
  * and `processQueuedMessages`) because the hang has to be reproduced, and only
  * a stub can hang on demand. The delivery stub hangs on a *real* GitHub request
  * through the repo's own client — the post-turn `createDraftPr` that never
  * returned — with the request bound set beyond the test's horizon, so what is
- * under test is the slot, not the bound. `isParked` and the local capacity
- * provider stay real: they are the other half of the count.
+ * under test is the slot, not the bound. Everything that decides the count
+ * stays real: `isParked`, `pruneTerminalActiveTasks`, the local capacity
+ * provider, and `activeTasks` itself — the tests drive the turn manager's own
+ * map rather than a stand-in, so the prune under test is the one production
+ * runs.
  */
 
 let testDb: ReturnType<typeof createTestDb>["db"];
@@ -29,8 +35,6 @@ vi.mock("@/db", () => ({
 }));
 
 const turns = vi.hoisted(() => ({
-  /** The turn manager's activeTasks map, ours to drive */
-  active: new Map<string, { container: unknown; state: string; kind: string }>(),
   dispatched: [] as string[],
   delivered: [] as string[],
   /** Resolve/never-resolve control for the stubbed promises */
@@ -41,7 +45,6 @@ vi.mock("../turn-manager", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../turn-manager")>();
   return {
     ...actual,
-    getActiveTasks: () => turns.active,
     startTask: (taskId: string) => {
       turns.dispatched.push(taskId);
       return turns.hang ? new Promise<void>(() => {}) : Promise.resolve();
@@ -140,8 +143,12 @@ function completeTask(taskId: string): void {
     .set({ status: "completed", containerStatus: null })
     .where(eq(schema.tasks.id, taskId))
     .run();
-  turns.active.delete(taskId);
+  active.delete(taskId);
 }
+
+/** The turn manager's own activeTasks map, ours to drive. Process-wide since
+ * #159, so it survives `vi.resetModules()` and each test must start it empty. */
+let active: Map<string, { container: unknown; state: string; kind: string }>;
 
 describe("queue slot accounting", () => {
   let queue: Queue;
@@ -149,17 +156,19 @@ describe("queue slot accounting", () => {
   beforeEach(async () => {
     testDb = createTestDb().db;
     vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.stubGlobal(
       "fetch",
       vi.fn(() => new Promise<Response>(() => {}))
     );
-    turns.active.clear();
     turns.dispatched.length = 0;
     turns.delivered.length = 0;
     turns.hang = true;
     vi.resetModules();
     vi.useFakeTimers();
     queue = await import("../queue");
+    active = (await import("../turn-manager")).getActiveTasks() as typeof active;
+    active.clear();
   });
 
   afterEach(() => {
@@ -175,7 +184,7 @@ describe("queue slot accounting", () => {
       status: "running",
       containerStatus: "idle",
     });
-    turns.active.set(chatting, {
+    active.set(chatting, {
       container: {},
       state: "idle",
       kind: "interactive",
@@ -201,6 +210,72 @@ describe("queue slot accounting", () => {
     await vi.advanceTimersByTimeAsync(POLL_MS);
 
     expect(turns.dispatched).toEqual([next]);
+  });
+
+  it("frees the slot when a session entry outlives its completed task", async () => {
+    const projectId = seedProject();
+    const chatting = seedTask(projectId, {
+      status: "running",
+      containerStatus: "idle",
+    });
+    active.set(chatting, {
+      container: {},
+      state: "idle",
+      kind: "interactive",
+    });
+
+    queue.startQueue();
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+
+    // An idle interactive session legitimately holds its slot — its dev server
+    // and the owner's next message are live concerns.
+    expect(queue.occupiedSlots()).toBe(1);
+
+    // The owner clicks Complete. The task row goes terminal and the container
+    // goes, but the session entry is left behind — what #159's split module
+    // graphs did on *every* UI close, and what any terminal path that failed to
+    // hand its entry back would do. The entry claims an agent process that
+    // cannot exist.
+    testDb
+      .update(schema.tasks)
+      .set({ status: "completed", containerStatus: null, containerId: null })
+      .where(eq(schema.tasks.id, chatting))
+      .run();
+
+    // Not counted the moment the row says finished — no Docker call needed, and
+    // no waiting for a poll.
+    expect(queue.occupiedSlots()).toBe(0);
+
+    const next = seedTask(projectId, { title: "The next task" });
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+
+    // The wedge is over: queued work dispatches instead of waiting for a restart.
+    expect(turns.dispatched).toEqual([next]);
+    // ...and the stranded entry is gone, so it cannot be a delivery target or a
+    // port-scan target either.
+    expect(active.has(chatting)).toBe(false);
+  });
+
+  it("keeps a parked autonomous pass's entry, which is still live work", async () => {
+    const projectId = seedProject();
+    const pass = seedTask(projectId, {
+      title: "Implement #159",
+      kind: "implement",
+      status: "running",
+      containerStatus: "idle",
+    });
+    // Parked awaiting its review verdict: container stopped to free memory
+    // (#93), entry kept so a fix-up turn lands in the same attempt.
+    active.set(pass, { container: {}, state: "idle", kind: "implement" });
+
+    queue.startQueue();
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+
+    // It holds no slot (parked)...
+    expect(queue.occupiedSlots()).toBe(0);
+    // ...but its task is `running`, so the prune must not touch it: dropping it
+    // would strand the attempt with a container nothing can deliver into.
+    expect(active.has(pass)).toBe(true);
   });
 
   it("dispatches a queued task after a hung pickup's task is cancelled", async () => {
@@ -241,7 +316,7 @@ describe("queue slot accounting", () => {
     // The container comes up: the entry is the occupant from here on, and the
     // pickup that stood in for it must not be counted a second time — even
     // though its promise is still running.
-    turns.active.set(pass, { container: {}, state: "setup", kind: "implement" });
+    active.set(pass, { container: {}, state: "setup", kind: "implement" });
     testDb
       .update(schema.tasks)
       .set({ status: "running", containerStatus: "setup" })
@@ -253,7 +328,7 @@ describe("queue slot accounting", () => {
     // The pass ends its turn and parks awaiting review (#93): it runs no agent
     // process, so the slot is free for the next ticket — which is only true if
     // the pickup let go of its reservation when the container registered.
-    turns.active.set(pass, { container: {}, state: "idle", kind: "implement" });
+    active.set(pass, { container: {}, state: "idle", kind: "implement" });
     expect(queue.occupiedSlots()).toBe(0);
 
     const review = seedTask(projectId, { title: "Review PR #157", kind: "review" });

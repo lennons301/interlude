@@ -40,6 +40,7 @@ import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed, notifyTaskIdle
 import { decideNext, passOutcomeSnapshot } from "./autonomy/decide";
 import { composeSeed, composeSessionTurn } from "../sessions/seed";
 import { processSingleton } from "../process-singleton";
+import { taskIsFinished } from "../tasks/stored-status";
 
 /**
  * Track all active task containers for cancellation and idle polling.
@@ -68,6 +69,40 @@ const activeTasks = processSingleton(
 
 export function getActiveTasks() {
   return activeTasks;
+}
+
+/**
+ * Drop every entry whose task row has reached a terminal status, or vanished —
+ * the invariant that no session entry outlives its task (issue #159). Returns
+ * the ids dropped, for the caller's log.
+ *
+ * A true invariant rather than a heuristic, and it needs no Docker call: a
+ * `completed` / `failed` / `cancelled` task runs no agent process and owns no
+ * container the orchestrator will ever exec into again, so an entry claiming
+ * otherwise can only be bookkeeping the terminal path failed to hand back.
+ * Nothing *should* reach here — every terminal path deletes its own entry — but
+ * when one does, pickup has to self-heal within a poll instead of wedging the
+ * box until the app is restarted. That was the whole cost of #159: the count
+ * lives in memory, so no label, cancel or container action reaches it.
+ *
+ * Deliberately does not touch the container. If a terminal task's container
+ * somehow still exists, the stale-container reaper owns it — it removes any
+ * `interlude-task-*` container whose task is neither live nor owned by a live
+ * run — and removing it from here would mean racing that. Letting go of the
+ * slot is this function's whole job.
+ *
+ * Parked entries are never at risk: a pass awaiting its verdict or blocked on a
+ * question is `running`/`blocked`, so its row is not terminal (and it holds no
+ * slot anyway — see {@link isParked}).
+ */
+export function pruneTerminalActiveTasks(): string[] {
+  const dropped: string[] = [];
+  for (const taskId of activeTasks.keys()) {
+    if (!taskIsFinished(taskId)) continue;
+    activeTasks.delete(taskId);
+    dropped.push(taskId);
+  }
+  return dropped;
 }
 
 /**
