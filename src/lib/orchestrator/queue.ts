@@ -2,10 +2,19 @@ import { db } from "@/db";
 import { tasks, messages } from "@/db/schema";
 import { eq, and, isNull, asc, sql } from "drizzle-orm";
 import { startTask } from "./turn-manager";
-import { getActiveTasks, isParked, processQueuedMessages, scanForDevServer } from "./turn-manager";
-// The one predicate for "this task has stopped for good", shared with the
-// composer and the live view rather than restated here.
-import { isTerminalTaskStatus } from "../tasks/status";
+import {
+  abandonSessionWithoutContainer,
+  getActiveTasks,
+  isParked,
+  processQueuedMessages,
+  pruneTerminalActiveTasks,
+  scanForDevServer,
+} from "./turn-manager";
+// The one predicate for "this task has stopped for good", shared with the turn
+// manager rather than restated here — a fleet that disagreed with itself about
+// whether a task had finished is how bookkeeping came to outlive its task twice.
+import { storedTaskStatus, taskIsFinished } from "../tasks/stored-status";
+import { observeContainerAbsent } from "../docker/container-manager";
 import {
   createLocalCapacityProvider,
   getCapacity,
@@ -52,40 +61,34 @@ const slotReservations = new Set<string>();
 let capacityProvider: CapacityProvider | null = null;
 let saturationLogged = false;
 
-/** The task's stored status, or null when its row is gone — the authority on
- * whether a task is still live, independent of any in-memory bookkeeping. */
-function storedTaskStatus(taskId: string): string | null {
-  return (
-    db.select({ status: tasks.status }).from(tasks).where(eq(tasks.id, taskId)).get()
-      ?.status ?? null
-  );
-}
-
-/** Has the task stopped for good — or gone entirely? Either way nothing it
- * once held can still be in use. */
-function taskIsFinished(taskId: string): boolean {
-  const status = storedTaskStatus(taskId);
-  return status === null || isTerminalTaskStatus(status);
-}
-
 /**
  * Slots in use: live containers plus pickups still provisioning theirs.
  * Parked autonomous containers (an implement pass idling while its PR is
  * reviewed) run no agent process and hold no slot — see isParked.
  *
- * A reservation for a task that has *finished* stands in for nothing: its
- * container is gone and no pickup is provisioning one, so it is never counted
- * (issue #151). That is what wedged the box on 2026-08-18 — a reservation whose
- * driving promise hung on an unbounded GitHub call, so the `.finally()` release
- * never ran, while the task it covered completed and took its container with
- * it. Reading the task's status rather than trusting the reservation makes the
- * count self-heal within one poll.
+ * Nothing a *finished* task once held is counted, whichever set holds it. A
+ * reservation for a finished task stands in for nothing: its container is gone
+ * and no pickup is provisioning one (issue #151) — that is what wedged the box
+ * on 2026-08-18, a reservation whose driving promise hung on an unbounded GitHub
+ * call so its `.finally()` release never ran, while the task it covered
+ * completed and took its container with it. A session entry for a finished task
+ * is the same lie from the other side (issue #159): it claims an agent process
+ * that cannot exist, and on a one-slot box it held all pickup — interactive and
+ * autonomous alike — until the app was restarted.
+ *
+ * So the task row, not the bookkeeping, decides: reading it makes the count
+ * self-heal within one poll however the entry came to be stranded. The reading
+ * is a handful of indexed lookups over at most a couple of ids, and this is the
+ * value that gates every dispatch, so it is worth paying every poll.
+ * `releaseSpentReservations` then lets go of what this skipped.
  */
 export function occupiedSlots(): number {
   const active = getActiveTasks();
   let count = 0;
-  for (const entry of active.values()) {
-    if (!isParked(entry)) count++;
+  for (const [taskId, entry] of active) {
+    if (isParked(entry)) continue;
+    if (taskIsFinished(taskId)) continue;
+    count++;
   }
   for (const taskId of slotReservations) {
     if (active.has(taskId)) continue;
@@ -107,7 +110,10 @@ export function occupiedSlots(): number {
  *   finished task can neither be picked up again (pickup reads `queued` only)
  *   nor delivered into (its `activeTasks` entry is gone), so a lock left behind
  *   by a hung promise protects nothing and would sit there for the life of the
- *   process.
+ *   process;
+ * - a session entry ends with its task (issue #159). Every terminal path
+ *   deletes its own, so anything left here is bookkeeping that went astray —
+ *   and until it goes, `occupiedSlots` has already stopped counting it.
  */
 function releaseSpentReservations(): void {
   const active = getActiveTasks();
@@ -117,6 +123,80 @@ function releaseSpentReservations(): void {
   for (const taskId of inFlightTasks) {
     if (taskIsFinished(taskId)) inFlightTasks.delete(taskId);
   }
+  for (const taskId of pruneTerminalActiveTasks()) {
+    console.warn(
+      `[orchestrator] Dropped stranded session entry for finished task ${taskId} — ` +
+        `it was holding a slot with no agent process behind it (issue #159)`
+    );
+  }
+}
+
+/** How often the reconciliation below runs, in poll cycles — ~32s at the 2s
+ * poll. A saturated box is the *normal* state on a one-slot machine, so per-poll
+ * probing would ask Docker about every occupant every 2s forever, and the wedges
+ * this clears lasted 20 minutes and more. Deliberately not the port scan's 15,
+ * so the two do not land on the same tick for the life of the process. */
+const RECONCILE_EVERY_POLLS = 16;
+
+/**
+ * When pickup is blocked, ask the daemon whether the containers behind those
+ * slots exist — and give up on the sessions whose do not (issue #159). Returns
+ * whether a slot was freed, so the caller can re-check before giving up on the
+ * cycle.
+ *
+ * This is the check the queue already owned and never ran. The memory-admission
+ * probe is the one place that asks Docker what is really there, but it sat
+ * behind `slotFree`, so a *phantom* slot failed the slot test first and the
+ * probe never ran: it could only ever catch under-counting drift, never
+ * over-counting. Which is the wrong way round for a wedge — over-counting is
+ * what stops work starting.
+ *
+ * One-directional and fail-safe throughout, because freeing a slot out from
+ * under live work is worse than the wedge it fixes: a session goes only when the
+ * daemon *positively* answers 404 for its container. Unknown decides nothing
+ * (see `observeContainerAbsent`), and parked passes are not even asked about —
+ * they hold no slot, so there is nothing to reclaim.
+ *
+ * Releasing the slot is not the whole job: the task is recorded `failed` too, or
+ * it would linger `running` with no container — counted by the dashboard,
+ * uncounted by the queue, which is the disagreement this ticket was about. When
+ * a run owns the task that accounting belongs to the run's own recovery paths
+ * (#95, #97, #106), so those keep both their entry and their slot and this only
+ * says what it saw.
+ *
+ * Terminal tasks never get here: they are released without asking anyone (see
+ * `occupiedSlots`), so this only ever looks at tasks the DB still calls live.
+ */
+async function reconcileSlotsAgainstDaemon(): Promise<boolean> {
+  let released = false;
+
+  for (const [taskId, entry] of getActiveTasks()) {
+    // Parked passes hold no slot, and their container is `docker stop`ped by
+    // design (#93) — nothing to reclaim, nothing to suspect.
+    if (isParked(entry)) continue;
+    if (taskIsFinished(taskId)) continue;
+
+    const absent = await observeContainerAbsent(entry.container.name);
+    if (absent !== true) continue;
+
+    const status = storedTaskStatus(taskId) ?? "gone";
+    const reason = `its container (${entry.container.name}) is no longer known to Docker`;
+    if (!abandonSessionWithoutContainer(taskId, reason)) {
+      console.warn(
+        `[orchestrator] Task ${taskId} is '${status}' but ${reason} — leaving its ` +
+          `slot held: it belongs to a run, whose own recovery owns this (issue #159)`
+      );
+      continue;
+    }
+
+    released = true;
+    console.warn(
+      `[orchestrator] Freed the slot held by task ${taskId} and failed it: it was ` +
+        `'${status}' and ${reason} (issue #159)`
+    );
+  }
+
+  return released;
 }
 
 export function startQueue(): void {
@@ -164,7 +244,16 @@ export function startQueue(): void {
         // backstop against overcommit (issue #93) — it asks the daemon what is
         // actually running, catching any drift the slot bookkeeping missed
         // before the host OOMs. Both must clear before a task starts.
-        const slotFree = await capacityProvider.isSlotAvailable();
+        let slotFree = await capacityProvider.isSlotAvailable();
+        // A blocked pickup is the one verdict worth double-checking, because it
+        // is the one that stops work (issue #159). Periodically rather than
+        // every poll: on a one-slot box "busy" is the normal reading, and the
+        // wedges this clears last minutes.
+        if (!slotFree && pollCount % RECONCILE_EVERY_POLLS === 0) {
+          if (await reconcileSlotsAgainstDaemon()) {
+            slotFree = await capacityProvider.isSlotAvailable();
+          }
+        }
         if (!slotFree) {
           if (!saturationLogged) {
             saturationLogged = true;

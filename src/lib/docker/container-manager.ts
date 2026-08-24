@@ -4,7 +4,11 @@ import { getImageName, ensureImage } from "./image-builder";
 import { getConfig, PLATFORM_REPO_URL } from "../config";
 import { getInstallationToken } from "../github/client";
 import { getCapacity } from "../orchestrator/capacity";
-import { AGENT_CONTAINER_NAME_PREFIX } from "./agent-containers";
+import {
+  AGENT_CONTAINER_NAME_PREFIX,
+  DOCKER_PROBE_TIMEOUT_MS,
+} from "./agent-containers";
+import { runBoundedProbe } from "../timeout";
 
 /**
  * How setup gets onto `$GIT_BRANCH`:
@@ -605,6 +609,59 @@ export async function isContainerRunning(name: string): Promise<boolean> {
   } catch (err) {
     return (err as { statusCode?: number })?.statusCode !== 404;
   }
+}
+
+/**
+ * Has the daemon definitively lost this container? Answers only when it can:
+ * true on a 404, false when the container is there, and *throws* on anything
+ * else, so a daemon that cannot answer is never mistaken for one that said
+ * "gone". Its caller folds that into `unknown` — see
+ * {@link observeContainerAbsent}, which is what everything uses.
+ */
+async function probeContainerAbsent(name: string): Promise<boolean> {
+  try {
+    await getDocker().getContainer(name).inspect();
+    return false;
+  } catch (err) {
+    if ((err as { statusCode?: number })?.statusCode === 404) return true;
+    throw err;
+  }
+}
+
+/**
+ * Whether a container (by name) is gone, as three outcomes: true = the daemon
+ * has definitively lost it, false = it is there, null = the daemon did not
+ * answer (issue #159).
+ *
+ * Asks about *existence*, not liveness, which is why it cannot reuse
+ * {@link isContainerRunning}: an entry in `setup` has been created but not
+ * started yet, and a parked pass is deliberately `docker stop`ped since #93, so
+ * that predicate would call both of those gone.
+ *
+ * Null is the point. Both callers act on absence — the queue frees the slot, a
+ * completing task drops its handle — and acting on a *guess* is worse than the
+ * problem: freeing a slot out from under live work overcommits the box, and a
+ * daemon degraded enough to error is the likeliest companion of a box under
+ * memory pressure. So unknown decides nothing, exactly as the agent-container
+ * census reports unknown rather than none (#152), and it is bounded on the
+ * shared Docker-probe timeout because an unresponsive connection has no timeout
+ * of its own and both call sites sit in paths that must not stall (#115, #128).
+ */
+export async function observeContainerAbsent(name: string): Promise<boolean | null> {
+  const outcome = await runBoundedProbe(
+    () => probeContainerAbsent(name),
+    DOCKER_PROBE_TIMEOUT_MS
+  );
+  if (outcome.ok) return outcome.value;
+  if (outcome.reason === "timeout") {
+    console.error(
+      `[docker] container ${name} existence probe timed out after ` +
+        `${DOCKER_PROBE_TIMEOUT_MS}ms — left uncorroborated`
+    );
+  } else {
+    console.error(`[docker] container ${name} existence probe failed:`, outcome.error);
+  }
+  return null;
 }
 
 /** Force-remove a container by name — for reaping a dead pass's container
