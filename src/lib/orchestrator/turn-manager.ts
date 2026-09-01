@@ -14,7 +14,10 @@ import {
   type RunningContainer,
 } from "../docker/container-manager";
 import { checkMemoryAdmission } from "./capacity";
+import { runBoundedProbe } from "../timeout";
+import { DOCKER_PROBE_TIMEOUT_MS } from "../docker/agent-containers";
 import { createOutputHandler, type TurnResult } from "./output-parser";
+import { getStreamRecorder } from "./stream-recorder";
 import { parseReviewVerdict } from "./autonomy/verdict";
 import { parseTriageExit } from "./autonomy/triage";
 import { passProducedResult } from "./autonomy/pass-output";
@@ -628,6 +631,28 @@ export async function startTask(taskId: string): Promise<void> {
 }
 
 /**
+ * Ask the daemon what a finished exec exited with, bounded and best-effort
+ * (issue #165) — evidence for the passive recorder, never a decision input.
+ *
+ * Null covers both "still running" and "the daemon would not say", which is
+ * honest: this is called the moment the turn settles, and `runTurn` deliberately
+ * returns as soon as the terminal `result` event arrives rather than waiting for
+ * the exec to close, because a background dev server can hold the stream open
+ * long after Claude is done. Bounded on the shared Docker-probe timeout for the
+ * usual #115/#128 reason: a hung daemon connection has no timeout of its own,
+ * and nothing in the recorder's path may stall a turn.
+ */
+async function observeExecExitCode(exec: {
+  inspect: () => Promise<{ ExitCode?: number | null }>;
+}): Promise<number | null> {
+  const outcome = await runBoundedProbe(
+    () => exec.inspect(),
+    DOCKER_PROBE_TIMEOUT_MS
+  );
+  return outcome.ok ? (outcome.value.ExitCode ?? null) : null;
+}
+
+/**
  * Run a single Claude turn and stream output to DB. With `captureRaw` the
  * raw stream-json is also returned — a review pass's verdict is parsed from
  * it after the turn ends.
@@ -665,6 +690,7 @@ async function runTurn(
   // long after Claude exits, so the result event is the reliable signal.
   const resultReceived = new Promise<void>((resolve) => handler.onDone(resolve));
 
+  const startedAtMs = Date.now();
   await Promise.race([
     waitForExecStream(stream, exec, (chunk) => {
       handler.write(chunk);
@@ -674,6 +700,19 @@ async function runTurn(
   ]);
 
   const result = handler.flush();
+
+  // How this pass ended, written down whether or not anyone is watching (issue
+  // #165). The case worth the trouble is the one where nothing else records
+  // anything: a container torn down mid-turn, an OOM, or a quota wall — which
+  // arrives looking like a *successful* result and so leaves no trace in the
+  // task feed at all.
+  getStreamRecorder().passExit(taskId, {
+    resultArrived: result.terminalResult !== null,
+    terminalResult: result.terminalResult,
+    execExitCode: await observeExecExitCode(exec),
+    durationMs: Date.now() - startedAtMs,
+  });
+
   if (!opts?.captureRaw) return result;
   return { ...result, raw: Buffer.concat(rawChunks).toString() };
 }
