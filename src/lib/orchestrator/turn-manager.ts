@@ -691,27 +691,36 @@ async function runTurn(
   const resultReceived = new Promise<void>((resolve) => handler.onDone(resolve));
 
   const startedAtMs = Date.now();
-  await Promise.race([
-    waitForExecStream(stream, exec, (chunk) => {
-      handler.write(chunk);
-      if (opts?.captureRaw) rawChunks.push(chunk);
-    }),
-    resultReceived,
-  ]);
-
-  const result = handler.flush();
-
-  // How this pass ended, written down whether or not anyone is watching (issue
-  // #165). The case worth the trouble is the one where nothing else records
-  // anything: a container torn down mid-turn, an OOM, or a quota wall — which
-  // arrives looking like a *successful* result and so leaves no trace in the
-  // task feed at all.
-  getStreamRecorder().passExit(taskId, {
-    resultArrived: result.terminalResult !== null,
-    terminalResult: result.terminalResult,
-    execExitCode: await observeExecExitCode(exec),
-    durationMs: Date.now() - startedAtMs,
-  });
+  let result: TurnResult;
+  try {
+    await Promise.race([
+      waitForExecStream(stream, exec, (chunk) => {
+        handler.write(chunk);
+        if (opts?.captureRaw) rawChunks.push(chunk);
+      }),
+      resultReceived,
+    ]);
+  } finally {
+    // How this pass ended, written down whether or not anyone is watching
+    // (issue #165). In a `finally` because the exits worth the trouble are
+    // exactly the ones that throw: `waitForExecStream` rejects on a stream
+    // error, which is the shape of an OOM, a lost stream, or a container torn
+    // down mid-turn — the last being what a rate-limit pause will deliberately
+    // do. On the normal path the record still lands, capturing the other case
+    // nothing else notices: a quota wall, which arrives looking like a
+    // *successful* result and so leaves no trace in the task feed at all.
+    result = handler.flush();
+    // Read the clock before the probe below, not after: the probe may wait up
+    // to its bound, and this duration is the measurement the "a rejected pass
+    // exits in seconds rather than waiting" finding rests on.
+    const durationMs = Date.now() - startedAtMs;
+    getStreamRecorder().passExit(taskId, {
+      resultArrived: result.terminalResult !== null,
+      terminalResult: result.terminalResult,
+      execExitCode: await observeExecExitCode(exec),
+      durationMs,
+    });
+  }
 
   if (!opts?.captureRaw) return result;
   return { ...result, raw: Buffer.concat(rawChunks).toString() };

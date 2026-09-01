@@ -63,7 +63,7 @@ export type Observation =
       at: string;
       kind: "pass-exit";
       taskId: string;
-      exit: PassExit;
+      exit: RecordedPassExit;
     }
   | {
       at: string;
@@ -74,17 +74,18 @@ export type Observation =
       recorded: number;
     };
 
-/** How a pass ended, as observed from outside the agent. */
+/** How a pass ended, as observed from outside the agent — what the caller
+ * hands in. */
 export interface PassExit {
   /** Did a terminal `result` event arrive before the stream closed? `false` is
    * the interesting case: an OOM, a lost stream, or a container torn down
    * mid-turn — the shape a rate-limit *pause* will deliberately create. */
   resultArrived: boolean;
-  /** The terminal `result` event verbatim, or null when none arrived. Kept
-   * whole because the fields that distinguish a quota wall from a clean finish
-   * (`is_error`, `terminal_reason`, `api_error_status`) are not the field the
-   * orchestrator reads (`subtype`), and a summary written today would be
-   * written by someone who did not yet know that. */
+  /** The terminal `result` event, or null when none arrived. Kept whole because
+   * the fields that distinguish a quota wall from a clean finish (`is_error`,
+   * `terminal_reason`, `api_error_status`) are not the field the orchestrator
+   * reads (`subtype`), and a summary written today would be written by someone
+   * who did not yet know that. */
   terminalResult: Record<string, unknown> | null;
   /** The exec's exit code, or null when the daemon did not answer in time.
    * Null is not zero: 137 (OOM) and null (unknown) are different facts and a
@@ -92,6 +93,16 @@ export interface PassExit {
   execExitCode: number | null;
   /** Wall time from exec start to the stream settling. */
   durationMs: number;
+}
+
+/** How a pass exit lands in the log. Identical to {@link PassExit} except that
+ * the terminal event is serialized JSON text under the same payload cap as
+ * every other verbatim capture — the agent's final message rides in that event,
+ * and an unbounded line would put the log's ceiling in the hands of whatever
+ * the agent last said. */
+export interface RecordedPassExit extends Omit<PassExit, "terminalResult"> {
+  terminalResult: string | null;
+  terminalResultTruncated?: true;
 }
 
 /** Event types the output parser already understands, whether it acts on them
@@ -127,11 +138,18 @@ export function shouldRecordEventType(eventType: string | null): boolean {
  * log. */
 export const MAX_PAYLOAD_CHARS = 16_384;
 
-/** Cap on how many observations one (task, event type) pair may write. The
- * guard against a CLI upgrade that starts emitting a *frequent* new event type
- * and turns a forensic log into a firehose: past the cap one `suppressed`
- * record is written and the rest are dropped, so the log still says that it
- * stopped rather than going quiet. */
+/** Cap on how many observations one (task, event type) pair may write **within
+ * one turn**. The guard against a CLI upgrade that starts emitting a *frequent*
+ * new event type and turns a forensic log into a firehose: past the cap one
+ * `suppressed` record is written and the rest are dropped, so the log still
+ * says that it stopped rather than going quiet.
+ *
+ * Per turn, not per task, and that distinction is load-bearing: an interactive
+ * session runs unboundedly many turns and emits a `rate_limit_event` on each,
+ * so a per-task cap would quietly stop recording quota state after 25 turns —
+ * and the event most likely to be lost is the last one, the rejection. The
+ * turn's end is a signal the recorder already receives ({@link
+ * StreamRecorder.passExit}), so the reset costs no new plumbing. */
 export const MAX_RECORDS_PER_EVENT_TYPE = 25;
 
 function truncate(text: string): { text: string; truncated: boolean } {
@@ -171,7 +189,10 @@ export function createStreamRecorder(
   // in the orchestrator's own module graph, so unlike the session maps of #159
   // there is no second copy for a route handler to disagree with. A duplicate
   // evaluation would at worst double the cap, never lose an observation.
-  const counts = new Map<string, number>();
+  //
+  // Nested by task so a turn's end can drop that task's counters in one step
+  // without walking every other task's.
+  const counts = new Map<string, Map<string, number>>();
 
   const guard = (body: () => void) => {
     try {
@@ -183,12 +204,17 @@ export function createStreamRecorder(
     }
   };
 
-  /** Whether this observation is within its (task, type) cap, emitting the
-   * one-off `suppressed` marker on the transition past it. */
+  /** Whether this observation is within its (task, type) cap for the current
+   * turn, emitting the one-off `suppressed` marker on the transition past it. */
   const withinCap = (taskId: string, eventType: string | null): boolean => {
-    const key = `${taskId} ${eventType ?? ""}`;
-    const seen = counts.get(key) ?? 0;
-    counts.set(key, seen + 1);
+    let perType = counts.get(taskId);
+    if (!perType) {
+      perType = new Map<string, number>();
+      counts.set(taskId, perType);
+    }
+    const key = eventType ?? "";
+    const seen = perType.get(key) ?? 0;
+    perType.set(key, seen + 1);
     if (seen < MAX_RECORDS_PER_EVENT_TYPE) return true;
     if (seen === MAX_RECORDS_PER_EVENT_TYPE) {
       sink({
@@ -237,13 +263,26 @@ export function createStreamRecorder(
 
     passExit(taskId, exit) {
       guard(() => {
+        const { terminalResult, ...rest } = exit;
+        const serialized =
+          terminalResult === null ? null : truncate(JSON.stringify(terminalResult));
         sink({
           at: now().toISOString(),
           kind: "pass-exit",
           taskId,
-          exit,
+          exit: {
+            ...rest,
+            terminalResult: serialized?.text ?? null,
+            ...(serialized?.truncated ? { terminalResultTruncated: true } : {}),
+          },
         });
       });
+      // Never suppressed and always last: a turn's exit is the one record most
+      // worth having, and it doubles as the turn boundary the per-turn cap
+      // resets on. Outside `guard` on purpose — a sink that threw must still
+      // release the next turn's budget, or one bad write silences a task for
+      // the rest of the process's life.
+      counts.delete(taskId);
     },
   };
 }

@@ -79,7 +79,7 @@ describe("createStreamRecorder", () => {
       },
     ]);
     // Verbatim means round-trippable: the point of the log is that a later
-        // reader can parse fields nobody thought to extract today.
+    // reader can parse fields nobody thought to extract today.
     const logged = observations[0] as Extract<Observation, { kind: "stream-event" }>;
     expect(JSON.parse(logged.event)).toEqual(event);
   });
@@ -238,6 +238,107 @@ describe("createStreamRecorder", () => {
     expect(logged.exit.execExitCode).toBeNull();
   });
 
+  it("keeps the terminal result verbatim and round-trippable", () => {
+    // The whole reason it is kept whole: a rate-limit wall is only visible in
+    // fields nobody reads yet, so a later reader has to be able to parse it.
+    const { observations, sink } = collect();
+    const recorder = createStreamRecorder(sink, AT);
+    const terminalResult = {
+      type: "result",
+      subtype: "success",
+      is_error: true,
+      terminal_reason: "api_error",
+      api_error_status: 429,
+    };
+
+    recorder.passExit("task-1", {
+      resultArrived: true,
+      terminalResult,
+      execExitCode: 1,
+      durationMs: 332,
+    });
+
+    const logged = observations[0] as Extract<Observation, { kind: "pass-exit" }>;
+    expect(JSON.parse(logged.exit.terminalResult!)).toEqual(terminalResult);
+    expect(logged.exit.terminalResultTruncated).toBeUndefined();
+  });
+
+  it("bounds an outsized terminal result under the same payload cap", () => {
+    // The agent's final message rides in the terminal event, so leaving this
+    // uncapped would put the log's ceiling in the hands of whatever the agent
+    // last said.
+    const { observations, sink } = collect();
+    const recorder = createStreamRecorder(sink, AT);
+
+    recorder.passExit("task-1", {
+      resultArrived: true,
+      terminalResult: { type: "result", result: "x".repeat(MAX_PAYLOAD_CHARS * 2) },
+      execExitCode: 0,
+      durationMs: 1,
+    });
+
+    const logged = observations[0] as Extract<Observation, { kind: "pass-exit" }>;
+    expect(logged.exit.terminalResult).toHaveLength(MAX_PAYLOAD_CHARS);
+    expect(logged.exit.terminalResultTruncated).toBe(true);
+  });
+
+  it("resets a task's cap at the end of each turn", () => {
+    // Per-turn, not per-task: an interactive session runs unboundedly many
+    // turns and emits a rate_limit_event on each, so a per-task cap would stop
+    // recording quota state after 25 turns — losing, of all events, the
+    // rejection at the end.
+    const { observations, sink } = collect();
+    const recorder = createStreamRecorder(sink, AT);
+    const floodOneTurn = () => {
+      for (let i = 0; i < MAX_RECORDS_PER_EVENT_TYPE + 5; i++) {
+        recorder.streamEvent("task-1", { type: "rate_limit_event", i });
+      }
+      recorder.passExit("task-1", {
+        resultArrived: true,
+        terminalResult: null,
+        execExitCode: 0,
+        durationMs: 1,
+      });
+    };
+
+    floodOneTurn();
+    floodOneTurn();
+
+    const recorded = observations.filter(
+      (o) => o.kind === "stream-event"
+    );
+    // Full budget again on the second turn, rather than nothing.
+    expect(recorded).toHaveLength(MAX_RECORDS_PER_EVENT_TYPE * 2);
+  });
+
+  it("releases the next turn's budget even when the sink threw", () => {
+    // One failed write must not silence a task for the rest of the process's
+    // life, which is why the reset sits outside the error guard.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const written: Observation[] = [];
+    let failNext = false;
+    const recorder = createStreamRecorder((o) => {
+      if (failNext) throw new Error("ENOSPC");
+      written.push(o);
+    }, AT);
+
+    for (let i = 0; i < MAX_RECORDS_PER_EVENT_TYPE; i++) {
+      recorder.streamEvent("task-1", { type: "rate_limit_event", i });
+    }
+    failNext = true;
+    recorder.passExit("task-1", {
+      resultArrived: true,
+      terminalResult: null,
+      execExitCode: 0,
+      durationMs: 1,
+    });
+    failNext = false;
+    recorder.streamEvent("task-1", { type: "rate_limit_event", i: 99 });
+
+    expect(written).toHaveLength(MAX_RECORDS_PER_EVENT_TYPE + 1);
+    spy.mockRestore();
+  });
+
   it("is never suppressed for a pass exit", () => {
     // One per turn by construction, and the record most worth having.
     const { observations, sink } = collect();
@@ -331,5 +432,50 @@ describe("createFileSink", () => {
     expect(fs.readFileSync(file, "utf-8")).toContain("third");
     // Both generations stay bounded by the ceiling.
     expect(fs.statSync(file).size).toBeLessThanOrEqual(600);
+  });
+});
+
+describe("getStreamRecorder", () => {
+  let dir: string;
+  const previousDatabaseUrl = process.env.DATABASE_URL;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "interlude-recorder-default-"));
+  });
+
+  afterEach(() => {
+    if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousDatabaseUrl;
+    fs.rmSync(dir, { recursive: true, force: true });
+    vi.resetModules();
+  });
+
+  it("writes to a durable file beside the database, with no wiring by the caller", () => {
+    // The two halves above are tested apart; this is the join between them, and
+    // the acceptance criterion the ticket actually states — that the recording
+    // ships and is durable. `resetModules` is what lets the lazily-resolved
+    // default be observed against a chosen DATABASE_URL.
+    process.env.DATABASE_URL = path.join(dir, "interlude.db");
+    vi.resetModules();
+
+    return import("../stream-recorder").then(({ getStreamRecorder }) => {
+      getStreamRecorder().streamEvent("task-1", {
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected" },
+      });
+      getStreamRecorder().passExit("task-1", {
+        resultArrived: false,
+        terminalResult: null,
+        execExitCode: 137,
+        durationMs: 9,
+      });
+
+      const written = fs
+        .readFileSync(path.join(dir, "stream-observations.jsonl"), "utf-8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(written.map((o) => o.kind)).toEqual(["stream-event", "pass-exit"]);
+    });
   });
 });

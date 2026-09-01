@@ -24,7 +24,13 @@
  *
  * Usage:
  *   node scripts/rate-limit-stub.mjs --port 4399 --scenario session-limit-reached
- *   ANTHROPIC_BASE_URL=http://127.0.0.1:4399 ANTHROPIC_API_KEY=stub-key claude -p ...
+ *   ANTHROPIC_BASE_URL=http://127.0.0.1:4399 claude -p ...
+ *
+ * Point the harness at it with the *subscription* auth path
+ * (`CLAUDE_CODE_OAUTH_TOKEN`), not an API key: the unified-window machinery is
+ * subscription-gated, and on an API key the CLI emits no `rate_limit_event` at
+ * all however the headers are set. Reaching it from an agent container needs
+ * `--host 0.0.0.0`, since it binds loopback by default.
  *
  * Live control (no restart needed — a scenario can be switched mid-pass):
  *   POST /__control  {"scenario":"weekly-limit-reached"}
@@ -197,7 +203,11 @@ const SCENARIOS = {
 };
 
 function parseArgs(argv) {
-  const out = { port: 4399, scenario: "normal", log: null };
+  // 127.0.0.1 by default: this answers unauthenticated requests and echoes
+  // whatever limit state it is told to, so it may not become reachable on every
+  // interface just because someone forgot a flag. `--host 0.0.0.0` is what the
+  // container-on-the-interlude-network usage needs.
+  const out = { port: 4399, host: "127.0.0.1", scenario: "normal", log: null };
   for (let i = 0; i < argv.length; i++) {
     const [flag, inlineValue] = argv[i].split("=");
     const value = inlineValue ?? argv[i + 1];
@@ -205,6 +215,7 @@ function parseArgs(argv) {
       if (inlineValue === undefined) i++;
     };
     if (flag === "--port") { out.port = Number(value); consume(); }
+    else if (flag === "--host") { out.host = value; consume(); }
     else if (flag === "--scenario") { out.scenario = value; consume(); }
     else if (flag === "--log") { out.log = value; consume(); }
     else if (flag === "--help" || flag === "-h") { out.help = true; }
@@ -218,6 +229,8 @@ if (args.help) {
   console.log(
     `rate-limit-stub — see the header comment in this file.\n\n` +
       `  --port <n>        listen port (default 4399)\n` +
+      `  --host <addr>     listen address (default 127.0.0.1; use 0.0.0.0 to\n` +
+      `                    reach it from an agent container)\n` +
       `  --scenario <name> initial scenario (default normal)\n` +
       `  --log <path>      also append a JSONL request log here\n\n` +
       `scenarios: ${Object.keys(SCENARIOS).join(", ")}\n`
@@ -281,11 +294,27 @@ function record(entry) {
   );
 }
 
+/**
+ * Read a request body, resolving with whatever arrived even if the client hung
+ * up mid-send. An abandoned request must still reach `record()`: the request log
+ * is the instrument that answers "did the pass wait or exit", and a harness that
+ * gives up on a rejected call is precisely the behaviour under test — so
+ * dropping those requests would delete the evidence.
+ */
 function readBody(req) {
   return new Promise((resolve) => {
     const chunks = [];
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks).toString());
+    };
     req.on("data", (c) => chunks.push(c));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    req.on("end", done);
+    req.on("aborted", done);
+    req.on("error", done);
+    req.on("close", done);
   });
 }
 
@@ -441,6 +470,11 @@ const server = http.createServer(async (req, res) => {
 
   const wire = { ...wireHeaders(headers), "request-id": `stub-${requestLog.length}` };
 
+  // The request is logged above whether or not it is still answerable; writing
+  // to a socket the client already abandoned would throw and take the whole
+  // server down with it, and the evidence is already safe.
+  if (res.destroyed || res.writableEnded) return;
+
   if (httpStatus !== 200) {
     res.writeHead(httpStatus, { ...wire, "content-type": "application/json" });
     res.end(
@@ -473,9 +507,9 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify(nonStreamedMessage(model)));
 });
 
-server.listen(args.port, "127.0.0.1", () => {
+server.listen(args.port, args.host, () => {
   console.log(
-    `[stub] listening on http://127.0.0.1:${args.port} scenario=${args.scenario}\n` +
-      `[stub] point the harness at it with ANTHROPIC_BASE_URL=http://127.0.0.1:${args.port}`
+    `[stub] listening on http://${args.host}:${args.port} scenario=${args.scenario}\n` +
+      `[stub] point the harness at it with ANTHROPIC_BASE_URL=http://${args.host}:${args.port}`
   );
 });
