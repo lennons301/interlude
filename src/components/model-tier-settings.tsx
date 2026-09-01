@@ -224,6 +224,7 @@ function TierOption({
       <input
         type="radio"
         name={name}
+        value={option}
         className="sr-only"
         checked={selected}
         disabled={disabled}

@@ -230,3 +230,73 @@ describe("resolveAgentModel ticket model override (issue #80)", () => {
     );
   });
 });
+
+/**
+ * The three layers of "which model does this pass run on", in order (issue
+ * #166): a ticket's directive, then the UI override, then the environment.
+ */
+describe("resolveAgentModel with UI overrides (issue #166)", () => {
+  const c = cfg({
+    agentModel: "claude-opus-4-8",
+    agentModelReview: "review-model",
+    agentModelTriage: "triage-model",
+  });
+
+  it("runs each pass kind on the tier its own field is set to", () => {
+    expect(
+      resolveAgentModel("implement", c, null, { modelTierImplement: "light" })
+    ).toBe("haiku");
+    expect(
+      resolveAgentModel("review", c, null, { modelTierReview: "standard" })
+    ).toBe("sonnet");
+    expect(
+      resolveAgentModel("triage", c, null, { modelTierTriage: "light" })
+    ).toBe("haiku");
+    expect(
+      resolveAgentModel("interactive", c, null, {
+        modelTierInteractive: "heavy",
+      })
+    ).toBe("opus");
+  });
+
+  it("falls an unset field through to the environment default", () => {
+    // One field set, the rest untouched — a fresh deployment's behaviour is
+    // what the others keep.
+    const overrides = { modelTierTriage: "light" as const };
+    expect(resolveAgentModel("triage", c, null, overrides)).toBe("haiku");
+    expect(resolveAgentModel("review", c, null, overrides)).toBe("review-model");
+    expect(resolveAgentModel("implement", c, null, overrides)).toBe(
+      "claude-opus-4-8"
+    );
+  });
+
+  it("lets a ticket's model directive outrank the UI override", () => {
+    // The directive is the ticket saying this *work* is hard; the setting is
+    // the fleet's standing default.
+    expect(
+      resolveAgentModel("implement", c, "heavy", { modelTierImplement: "light" })
+    ).toBe("opus");
+    expect(
+      resolveAgentModel("repair", c, "opus", { modelTierImplement: "light" })
+    ).toBe("opus");
+  });
+
+  it("still keeps a ticket directive off the reviewer's and triage's tiers", () => {
+    expect(
+      resolveAgentModel("review", c, "heavy", { modelTierReview: "light" })
+    ).toBe("haiku");
+    expect(
+      resolveAgentModel("triage", c, "heavy", { modelTierTriage: "light" })
+    ).toBe("haiku");
+  });
+
+  it("ignores a recorded raw model id in the directive slot", () => {
+    // A run row records the model the pass actually ran; fed back on a
+    // follow-up turn it names no tier, so the configured default decides.
+    expect(
+      resolveAgentModel("implement", c, "claude-opus-4-8", {
+        modelTierImplement: "light",
+      })
+    ).toBe("haiku");
+  });
+});
