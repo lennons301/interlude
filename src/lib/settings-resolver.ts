@@ -58,14 +58,20 @@ export type SettingsOverrides = Partial<Record<SettingKey, string>>;
  * deployment's own default? */
 export type SettingSource = "override" | "environment";
 
+/** The environment default a field falls through to, and the variable that
+ * actually supplied it — both, because a provenance line that names a variable
+ * the operator would find empty is worse than none. */
+export interface EnvDefault {
+  envVar: string;
+  /** Verbatim (null = the variable is unset and the harness resolves its own
+   * default). */
+  value: string | null;
+}
+
 export interface SettingSpec {
   key: SettingKey;
   label: string;
   help: string;
-  /** The environment variable this field falls through to when unset — named
-   * on screen, because "environment default" without the name is not an
-   * answer an operator can act on. */
-  envVar: string;
   /** The values an override may take, in display order. */
   options: readonly string[];
   /** Validate a candidate override, returning the canonical form to store, or
@@ -73,28 +79,42 @@ export interface SettingSpec {
   normalize(raw: string): string | null;
   /** A one-line statement of what is accepted, for a rejection message. */
   vocabulary(): string;
-  /** The environment default in force, verbatim (null = the variable is unset
-   * and the harness resolves its own default). */
-  envValue(config: AppConfig): string | null;
+  envDefault(config: AppConfig): EnvDefault;
 }
 
 function modelTierField(
   key: SettingKey,
   label: string,
   help: string,
-  envVar: string,
-  envValue: (config: AppConfig) => string | null
+  envDefault: (config: AppConfig) => EnvDefault
 ): SettingSpec {
   return {
     key,
     label,
     help,
-    envVar,
     options: MODEL_TIERS,
     normalize: (raw) => normalizeModelTier(raw),
     vocabulary: describeModelTierVocabulary,
-    envValue,
+    envDefault,
   };
+}
+
+/** The base every pass kind falls back to. */
+function baseModelEnv(config: AppConfig): EnvDefault {
+  return { envVar: "AGENT_MODEL", value: config.agentModel };
+}
+
+/** A read-heavy pass reads its own variable and falls back to the base, so the
+ * row reports whichever actually supplied the value. With both unset it names
+ * the row's own variable — the place to set one. */
+function cheaperTierEnv(
+  envVar: string,
+  own: string | null,
+  config: AppConfig
+): EnvDefault {
+  if (own !== null) return { envVar, value: own };
+  const base = baseModelEnv(config);
+  return base.value !== null ? base : { envVar, value: null };
 }
 
 /**
@@ -107,29 +127,27 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
     "modelTierImplement",
     "Implement",
     "The tier an implement pass — and the repair pass that fixes up its PR — runs on. A ticket's own model: directive still outranks it.",
-    "AGENT_MODEL",
-    (config) => config.agentModel
+    baseModelEnv
   ),
   modelTierReview: modelTierField(
     "modelTierReview",
     "Review",
     "The tier a review pass runs on. Reviewing is read-heavy, so it is the first thing worth running cheaper than the work it reads.",
-    "AGENT_MODEL_REVIEW",
-    (config) => config.agentModelReview ?? config.agentModel
+    (config) =>
+      cheaperTierEnv("AGENT_MODEL_REVIEW", config.agentModelReview, config)
   ),
   modelTierTriage: modelTierField(
     "modelTierTriage",
     "Triage",
     "The tier a triage pass runs on. Shaping the backlog must cost a fraction of implementing it.",
-    "AGENT_MODEL_TRIAGE",
-    (config) => config.agentModelTriage ?? config.agentModel
+    (config) =>
+      cheaperTierEnv("AGENT_MODEL_TRIAGE", config.agentModelTriage, config)
   ),
   modelTierInteractive: modelTierField(
     "modelTierInteractive",
     "Interactive",
     "The tier a chat or generation session runs on — the work you are sitting in front of.",
-    "AGENT_MODEL",
-    (config) => config.agentModel
+    baseModelEnv
   ),
 };
 
@@ -151,12 +169,12 @@ export const SETTINGS_FIELD_ORDER: readonly SettingKey[] = [
  * is excluded for the same reason and never gets a key at all.
  */
 export const FIXED_CEILINGS: Readonly<Record<string, string>> = {
+  // Keyed by the camelCase of the constant that holds each one, so a caller
+  // guessing at a name lands on the explanation rather than "unknown key".
   maxAttemptBudgetUsd: "the maximum per-attempt budget",
   maxBudgetUsd: "the maximum per-attempt budget",
-  dailyCapUsd: "the estate daily spend cap",
-  dailySpendCapUsd: "the estate daily spend cap",
+  dailyAutonomousCapUsd: "the estate daily spend cap",
   maxAttempts: "the per-ticket attempt count",
-  maxTurnsCeiling: "the per-exec turn ceiling",
 };
 
 function isSettingKey(key: string): key is SettingKey {
@@ -280,6 +298,8 @@ export interface ResolvedModelTier {
   source: SettingSource;
   /** The stored override, or null when the field falls through. */
   override: ModelTier | null;
+  /** The variable that supplies (or would supply) the environment default. */
+  envVar: string;
   /** The environment default this field falls through to, verbatim. */
   envValue: string | null;
 }
@@ -320,7 +340,7 @@ export function resolveModelTierField(
   overrides: SettingsOverrides
 ): ResolvedModelTier {
   const spec = SETTINGS_FIELDS[key];
-  const envValue = spec.envValue(config);
+  const { envVar, value: envValue } = spec.envDefault(config);
   const override = normalizeModelTier(overrides[key] ?? null);
 
   if (override !== null) {
@@ -330,16 +350,23 @@ export function resolveModelTierField(
       model: tierModelId(override),
       source: "override",
       override,
+      envVar,
       envValue,
     };
   }
 
+  // A tier named in the environment goes through the same map an override
+  // does — `AGENT_MODEL=heavy` must reach the CLI as a model it accepts, not
+  // as the word "heavy". Anything that names no tier is a pinned model id and
+  // is passed through verbatim.
+  const envTier = normalizeModelTier(envValue);
   return {
     key,
-    tier: normalizeModelTier(envValue),
-    model: envValue,
+    tier: envTier,
+    model: envTier !== null ? tierModelId(envTier) : envValue,
     source: "environment",
     override: null,
+    envVar,
     envValue,
   };
 }
@@ -350,11 +377,12 @@ export interface SettingFieldView {
   key: SettingKey;
   label: string;
   help: string;
-  envVar: string;
   options: readonly string[];
   source: SettingSource;
   /** The stored override, or null when the field falls through. */
   override: string | null;
+  /** The variable that supplies (or would supply) the environment default. */
+  envVar: string;
   /** The environment default, verbatim (null = unset). */
   envValue: string | null;
   /** The tier in force, or null when the environment pins a raw model id. */
@@ -377,7 +405,7 @@ export function describeSettings(
       key,
       label: spec.label,
       help: spec.help,
-      envVar: spec.envVar,
+      envVar: resolved.envVar,
       options: spec.options,
       source: resolved.source,
       override: resolved.override,

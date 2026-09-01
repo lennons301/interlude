@@ -72,6 +72,18 @@ describe("fall-through — an unset override behaves exactly as before", () => {
     }
   });
 
+  it("maps a tier named in the environment through the same map an override uses", () => {
+    // `AGENT_MODEL=heavy` must reach the CLI as a model it accepts, not as the
+    // word "heavy" — the environment speaks the same vocabulary as the screen.
+    expect(resolveModelTier("implement", cfg({ agentModel: "heavy" }), NONE)).toMatchObject(
+      { tier: "heavy", model: "opus", source: "environment" }
+    );
+    // A legacy alias in the environment is unchanged by that mapping.
+    expect(resolveModelTier("implement", cfg({ agentModel: "sonnet" }), NONE)).toMatchObject(
+      { tier: "standard", model: "sonnet" }
+    );
+  });
+
   it("passes a raw environment model id through verbatim, tier or not", () => {
     const c = cfg({ agentModel: "claude-opus-4-8" });
     const resolved = resolveModelTier("implement", c, NONE);
@@ -79,6 +91,30 @@ describe("fall-through — an unset override behaves exactly as before", () => {
     // It names no tier, and saying so is not the same as rejecting it.
     expect(resolved.tier).toBeNull();
     expect(resolved.source).toBe("environment");
+  });
+
+  it("names the variable that actually supplied the value", () => {
+    // Review and triage read their own variable and fall back to the base. A
+    // provenance line naming a variable the operator would find empty is worse
+    // than none, so the row reports whichever one answered.
+    const own = cfg({ agentModel: "base-model", agentModelReview: "review-model" });
+    expect(resolveModelTier("review", own, NONE)).toMatchObject({
+      envVar: "AGENT_MODEL_REVIEW",
+      envValue: "review-model",
+    });
+
+    const fellBack = cfg({ agentModel: "base-model" });
+    expect(resolveModelTier("review", fellBack, NONE)).toMatchObject({
+      envVar: "AGENT_MODEL",
+      envValue: "base-model",
+    });
+
+    // With neither set there is nothing to point at but the row's own
+    // variable — the place to set one.
+    expect(resolveModelTier("triage", cfg(), NONE)).toMatchObject({
+      envVar: "AGENT_MODEL_TRIAGE",
+      envValue: null,
+    });
   });
 
   it("keeps each kind's own environment fall-through", () => {
@@ -158,8 +194,10 @@ describe("provenance — every field says where its value came from", () => {
     expect(describeSettings(cfg(), NONE).map((f) => f.key)).toEqual([
       ...SETTINGS_FIELD_ORDER,
     ]);
-    expect(SETTINGS_FIELD_ORDER).toHaveLength(
-      Object.keys(SETTINGS_FIELDS).length
+    // Every settable field is placed, and nothing is placed twice — a length
+    // check alone would pass a swapped-out key.
+    expect([...SETTINGS_FIELD_ORDER].sort()).toEqual(
+      Object.keys(SETTINGS_FIELDS).sort()
     );
   });
 });

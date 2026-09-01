@@ -6,9 +6,10 @@
  * model choice (the settings UI, a ticket's `model:` directive) speaks tiers;
  * only the last step, reaching the CLI's `--model` flag, speaks ids.
  *
- * A leaf module on purpose: the directive parser, the settings resolver and
- * `config.ts` all need it, and importing any of those into the others would
- * make a cycle.
+ * A leaf module on purpose. Three surfaces speak the vocabulary — the
+ * directive parser, the settings resolver and `config.ts` — and it imports
+ * none of them, so all three can share it. (`config.ts` and the settings
+ * resolver do reference each other, but only for types, which erase.)
  */
 
 /** The vocabulary, ordered most to least capable — the order the quota degrade

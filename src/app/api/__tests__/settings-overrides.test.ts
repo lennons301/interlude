@@ -77,8 +77,10 @@ describe("GET/PATCH /api/settings/overrides", () => {
       override: "light",
       tier: "light",
       model: "haiku",
-      // Named, because clearing the override lands back here.
-      envVar: "AGENT_MODEL_REVIEW",
+      // Named, because clearing the override lands back here — and it names
+      // AGENT_MODEL, the variable that would actually supply the value, since
+      // AGENT_MODEL_REVIEW is unset on this install.
+      envVar: "AGENT_MODEL",
       envValue: "claude-opus-4-8",
     });
 

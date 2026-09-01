@@ -7,6 +7,7 @@ import {
   PANEL,
   PANEL_PLAIN,
   TONES,
+  formatChanged,
 } from "@/components/fleet/fleet-bits";
 import { ConfirmStrip } from "@/components/confirm-strip";
 import { useLoad } from "@/lib/use-load";
@@ -156,13 +157,4 @@ export function KillSwitch() {
       )}
     </div>
   );
-}
-
-/** Rendered only after the client fetch resolves, so a locale-formatted time
- * can never disagree with the server's first paint. */
-function formatChanged(iso: string): string {
-  const at = new Date(iso);
-  return Number.isNaN(at.getTime())
-    ? iso
-    : at.toLocaleString("en-GB", { hour12: false });
 }

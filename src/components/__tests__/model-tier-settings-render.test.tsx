@@ -62,6 +62,15 @@ describe("the model-tier settings panel", () => {
     expect(html).toContain("from AGENT_MODEL_REVIEW = claude-opus-4-8");
   });
 
+  it("names the variable that actually supplied the value", () => {
+    // Review falls back to the base when its own variable is unset, so the
+    // row must say AGENT_MODEL — pointing at a variable the operator would
+    // find empty is worse than saying nothing.
+    const html = render({ envVar: "AGENT_MODEL" });
+
+    expect(html).toContain("from AGENT_MODEL = claude-opus-4-8");
+  });
+
   it("reads an overridden field as this screen's, and says what it runs", () => {
     const html = render({
       source: "override",

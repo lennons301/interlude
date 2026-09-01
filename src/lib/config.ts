@@ -217,6 +217,15 @@ export type AgentPassKind =
   | "triage"
   | "repair";
 
+/** Whether a pass carries the *ticket's own* work, and so answers to a ticket
+ * directive. Review and triage do not: they read the work rather than doing
+ * it, and the ticket chooses the model its work runs on, not the reviewer's.
+ * Named once here because the model and effort resolvers both draw the line
+ * and it must be the same line. */
+function isWorkPassKind(kind: AgentPassKind): boolean {
+  return kind !== "review" && kind !== "triage";
+}
+
 /**
  * Which model a turn of the given kind runs on (issues #74, #80, #166), and
  * the one place the three layers of that answer are ordered:
@@ -244,8 +253,7 @@ export function resolveAgentModel(
   ticketModel: string | null,
   overrides: SettingsOverrides
 ): string | null {
-  const isWorkKind = kind !== "review" && kind !== "triage";
-  if (isWorkKind) {
+  if (isWorkPassKind(kind)) {
     // A tier or a legacy alias (`opus`) both resolve; anything else — a raw
     // model id previously recorded on the run row, say — names no tier and
     // falls through to the configured default rather than reaching `--model`.

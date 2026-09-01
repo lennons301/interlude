@@ -1,7 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { Chip, LoadFailure, PANEL_PLAIN } from "@/components/fleet/fleet-bits";
+import {
+  Chip,
+  LoadFailure,
+  PANEL_PLAIN,
+  formatChanged,
+} from "@/components/fleet/fleet-bits";
 import { useLoad } from "@/lib/use-load";
 import type { SettingFieldView } from "@/lib/settings-resolver";
 
@@ -233,13 +238,4 @@ function TierOption({
       {option}
     </label>
   );
-}
-
-/** Rendered only after the client fetch resolves, so a locale-formatted time
- * can never disagree with the server's first paint. */
-function formatChanged(iso: string): string {
-  const at = new Date(iso);
-  return Number.isNaN(at.getTime())
-    ? iso
-    : at.toLocaleString("en-GB", { hour12: false });
 }
