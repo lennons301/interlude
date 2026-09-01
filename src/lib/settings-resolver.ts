@@ -60,8 +60,6 @@ export type SettingSource = "override" | "environment";
 
 export interface SettingSpec {
   key: SettingKey;
-  /** Which section of the settings screen the field belongs to. */
-  group: "models";
   label: string;
   help: string;
   /** The environment variable this field falls through to when unset — named
@@ -89,7 +87,6 @@ function modelTierField(
 ): SettingSpec {
   return {
     key,
-    group: "models",
     label,
     help,
     envVar,
@@ -351,7 +348,6 @@ export function resolveModelTierField(
  * from, and what clearing it would fall back to. */
 export interface SettingFieldView {
   key: SettingKey;
-  group: SettingSpec["group"];
   label: string;
   help: string;
   envVar: string;
@@ -379,7 +375,6 @@ export function describeSettings(
     const resolved = resolveModelTierField(key, config, overrides);
     return {
       key,
-      group: spec.group,
       label: spec.label,
       help: spec.help,
       envVar: spec.envVar,

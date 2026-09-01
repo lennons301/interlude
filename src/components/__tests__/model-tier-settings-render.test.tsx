@@ -28,7 +28,6 @@ import { ModelTierSettings } from "../model-tier-settings";
 function field(over: Partial<SettingFieldView> = {}): SettingFieldView {
   return {
     key: "modelTierReview",
-    group: "models",
     label: "Review",
     help: "The tier a review pass runs on.",
     envVar: "AGENT_MODEL_REVIEW",
