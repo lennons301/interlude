@@ -267,3 +267,36 @@ export const messages = sqliteTable("messages", {
   createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: int("updated_at", { mode: "timestamp_ms" }),
 });
+
+/** The one row id in `quota_state` — one account backs the whole fleet, so its
+ * quota is one durable row, latest observation wins. */
+export const QUOTA_STATE_ROW_ID = "fleet";
+
+/**
+ * The fleet's last observed quota state (issue #167): what the Claude Code
+ * CLI's `rate_limit_event` said, the last time any pass saw one.
+ *
+ * A table rather than a column on `settings` because the two have opposite
+ * lifecycles — `settings` is state a human flips and stamps `updatedAt` when
+ * they do, and folding an observation written on every API attempt into that
+ * row would make the settings screen's "last changed" report the fleet's
+ * traffic instead of the operator's last press.
+ *
+ * A row rather than the in-memory stores the sweep's observations use
+ * (`fleet/health-store.ts` and friends): a quota window is five hours or seven
+ * days, far longer than the gap between two deploys, so an observation that
+ * did not survive a restart would be lost exactly when it mattered — and the
+ * writer (the stream parser, in the orchestrator's module graph) and the
+ * reader (the dashboard's route handler, in the app-router's) do not share
+ * module state at all (issue #159).
+ *
+ * The observation itself is one JSON column for #166's reason: the wire shape
+ * already carries two fields the CLI's own schema does not document, so a later
+ * ticket reading one more of them should be a code change and not a migration.
+ * Written by `lib/quota/quota-store.ts`, which never trusts it verbatim on read.
+ */
+export const quotaState = sqliteTable("quota_state", {
+  id: text("id").primaryKey(),
+  observation: text("observation", { mode: "json" }).notNull(),
+  observedAt: int("observed_at", { mode: "timestamp_ms" }).notNull(),
+});

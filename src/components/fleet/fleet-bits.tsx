@@ -54,15 +54,19 @@ export function Gauge({
 }: {
   value: number;
   max: number;
-  tone: "green" | "red" | "cool";
+  /** The severity vocabulary the rest of the system paints in, minus `quiet`:
+   * a gauge with nothing to say renders no bar at all rather than a grey one. */
+  tone: "green" | "amber" | "red" | "cool";
 }) {
   const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
   const fill =
     tone === "red"
       ? "bg-fl-red"
-      : tone === "cool"
-        ? "bg-fl-cool"
-        : "bg-fl-green";
+      : tone === "amber"
+        ? "bg-fl-amber"
+        : tone === "cool"
+          ? "bg-fl-cool"
+          : "bg-fl-green";
   return (
     <div className="relative h-[3px] w-full bg-fl-line">
       <div className={`absolute inset-y-0 left-0 ${fill}`} style={{ width: `${pct}%` }} />
@@ -273,6 +277,19 @@ export function formatChanged(iso: string): string {
   return Number.isNaN(at.getTime())
     ? iso
     : at.toLocaleString("en-GB", { hour12: false });
+}
+
+/** How long until an instant in the future — "2h 14m", or null once it has
+ * passed. Null rather than "0m" because a reset time in the past is not a
+ * countdown at all: it says the window has already turned over and the reading
+ * beside it is stale (issue #167). */
+export function formatCountdown(at: string, now: number): string | null {
+  const mins = Math.floor((Date.parse(at) - now) / 60000);
+  if (!Number.isFinite(mins) || mins < 0) return null;
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ${mins % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
 
 export function formatElapsed(startedAt: string, now: number): string {

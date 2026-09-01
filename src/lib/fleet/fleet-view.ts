@@ -13,6 +13,12 @@ import {
   MAX_INTEGRATION_ATTEMPTS,
 } from "../orchestrator/autonomy/budgets";
 import { formatDuration, type FleetHealthSignals } from "./health";
+import {
+  describeRateLimitType,
+  quotaSeverity,
+  type QuotaObservation,
+  type QuotaSeverity,
+} from "../quota/rate-limit-event";
 
 export interface FleetRows {
   /** Current time — passed in, never read inside */
@@ -60,6 +66,11 @@ export interface FleetRows {
    * (the window after a repair pushes, while the new head's checks run, is not a
    * stall). null = never observed (no sweep yet), which renders no such cards. */
   failingChecksByRun: Record<string, string[]> | null;
+  /** The fleet's last observed quota state (issue #167), from the durable row;
+   * null = no pass has ever reported one, which is also the permanent state of
+   * a fleet running on API-key auth, where the CLI emits no quota telemetry at
+   * all. */
+  quota: QuotaObservation | null;
 }
 
 export interface FleetProjectRow {
@@ -306,6 +317,54 @@ export interface FleetView {
   };
   /** True when any project has autonomy enabled */
   autonomyOn: boolean;
+  /** The account's quota as last observed (issue #167), or null when nothing
+   * has been observed yet. Pure display: nothing in the fleet acts on it. */
+  quota: QuotaGlance | null;
+}
+
+/**
+ * The quota tile's whole content (issue #167) — one observation, said in the
+ * dashboard's own terms.
+ *
+ * Only one limit window appears because the event only carries one, and that
+ * is the answer to "which limit is closest to tripping" rather than a
+ * simplification of it: the server picks the *representative claim* — the
+ * window nearest its ceiling — and the CLI reports that one.
+ *
+ * Times are ISO strings, formatted against the client's own clock like the
+ * running cards' elapsed times, so "observed 4m ago" keeps ticking between SSE
+ * pushes instead of freezing at whatever the last push computed.
+ */
+export interface QuotaGlance {
+  /** The status verbatim, as the CLI said it — including a member this build
+   * has never heard of, which reads as itself rather than as nothing. */
+  status: string;
+  /** How to paint it; `unknown` for a status outside this build's vocabulary. */
+  severity: QuotaSeverity;
+  /** The limit window closest to tripping, humanised, or null when unreported. */
+  limitLabel: string | null;
+  /** Percent of that window consumed, or null when the event did not report it
+   * — which is usual, and is not zero. */
+  utilization: number | null;
+  /** When the window resets, or null when unreported (a warning often is). */
+  resetsAt: string | null;
+  observedAt: string;
+}
+
+/** The stored observation, in the terms the tile renders. */
+function quotaGlance(observation: QuotaObservation | null): QuotaGlance | null {
+  if (!observation) return null;
+  return {
+    status: observation.status,
+    severity: quotaSeverity(observation.status),
+    limitLabel:
+      observation.rateLimitType === null
+        ? null
+        : describeRateLimitType(observation.rateLimitType),
+    utilization: observation.utilization,
+    resetsAt: observation.resetsAt?.toISOString() ?? null,
+    observedAt: observation.observedAt.toISOString(),
+  };
 }
 
 /** Start of the local calendar day containing `now` — the daily autonomous
@@ -927,5 +986,6 @@ export function buildFleetView(rows: FleetRows): FleetView {
       byProject: backlog,
     },
     autonomyOn: rows.projects.some((p) => p.autonomyEnabled),
+    quota: quotaGlance(rows.quota),
   };
 }

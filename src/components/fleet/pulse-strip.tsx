@@ -1,11 +1,17 @@
 import type { FleetView } from "@/lib/fleet/fleet-view";
 import { Gauge, Money } from "./fleet-bits";
+import { QuotaTile } from "./quota-tile";
 
 /**
  * The two-second glance: slots as equal segments naming their occupants,
- * today's autonomous spend against the daily cap underneath.
+ * today's autonomous spend against the daily cap underneath, and beneath that
+ * the quota the fleet is spending it out of (issue #167).
+ *
+ * `now` is the dashboard's ticking clock, not the view's `generatedAt`: the
+ * quota tile's "seen 4m ago" has to keep counting between SSE pushes, exactly
+ * as the running cards' elapsed times do.
  */
-export function PulseStrip({ view }: { view: FleetView }) {
+export function PulseStrip({ view, now }: { view: FleetView; now: number }) {
   const { slots, spend } = view;
   return (
     <section aria-label="Fleet pulse" className="space-y-3">
@@ -55,6 +61,7 @@ export function PulseStrip({ view }: { view: FleetView }) {
           tone={spend.capPaused ? "red" : "green"}
         />
       </div>
+      <QuotaTile quota={view.quota} now={now} />
     </section>
   );
 }

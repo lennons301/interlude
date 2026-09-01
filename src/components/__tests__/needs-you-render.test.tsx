@@ -33,6 +33,7 @@ function render(overrides: Partial<FleetRows> = {}): string {
     needsHumanByProject: null,
     fleetHealth: null,
     failingChecksByRun: null,
+    quota: null,
     ...overrides,
   });
   return renderToStaticMarkup(<NeedsYou view={view} />);

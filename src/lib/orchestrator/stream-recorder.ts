@@ -22,9 +22,12 @@ import path from "path";
  *  - **Unrecognised stream events**, verbatim. The parser handles a known set
  *    of event types and ignores the rest; a CLI upgrade that starts emitting
  *    something new is invisible today. `rate_limit_event` is recorded too, even
- *    though it is now recognised, because it is the quota evidence the whole of
- *    #164 depends on and it costs nothing to keep until #167 consumes it
- *    properly.
+ *    though it is now recognised and read into fleet quota state (#167), for
+ *    two reasons that outlive that ticket: the state row is latest-wins with no
+ *    history, so this log is the only place a window's *shape over time* can be
+ *    reconstructed from, and it is verbatim, so it also holds the fields this
+ *    build does not model — which is how the stub-derived findings on #165 get
+ *    confirmed against a real wall nobody was watching.
  *  - **Pass exit conditions**: whether a terminal `result` event arrived at
  *    all, what it said about itself, and the exec's exit code. A quota wall
  *    reports `subtype: "success"` with `is_error: true` (see the findings on
@@ -121,7 +124,8 @@ export const KNOWN_STREAM_EVENT_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /** Recognised, but recorded anyway, because it is the evidence the quota work
- * needs and it arrives at most a handful of times per turn. */
+ * needs — verbatim and with history, which the single latest-wins state row
+ * #167 keeps is neither — and it arrives at most a handful of times per turn. */
 export const ALWAYS_RECORDED_EVENT_TYPES: ReadonlySet<string> = new Set([
   "rate_limit_event",
 ]);

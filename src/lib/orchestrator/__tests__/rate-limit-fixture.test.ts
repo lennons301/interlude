@@ -3,7 +3,9 @@ import fs from "fs";
 import path from "path";
 import * as schema from "@/db/schema";
 import { createTestDb } from "@/test/create-test-db";
+import { eq } from "drizzle-orm";
 import type { Observation } from "../stream-recorder";
+import type { QuotaObservation } from "@/lib/quota/rate-limit-event";
 
 /**
  * Fixture-driven tests over two streams captured from the real Claude Code CLI
@@ -29,9 +31,9 @@ import type { Observation } from "../stream-recorder";
  * Both are verbatim, including the `system init` noise, deliberately: a fixture
  * somebody tidied is a fixture somebody could have tidied a fact out of.
  *
- * These assert what the *stream* contains, not what the orchestrator does with
- * it. Acting on the event is #167's job, and the assertions here are what it
- * gets to build against.
+ * They started life asserting only what the *stream* contains. #167 now reads
+ * the event, so the same bytes also pin what the orchestrator makes of it —
+ * still without anything *acting* on it, which is #168's and #171's job.
  */
 
 let testDb: ReturnType<typeof createTestDb>["db"];
@@ -44,6 +46,7 @@ vi.mock("@/db", () => ({
 
 const { createOutputHandler } = await import("../output-parser");
 const { createStreamRecorder } = await import("../stream-recorder");
+const { getQuotaObservation } = await import("@/lib/quota/quota-store");
 
 /** The parser writes messages as it goes, so every replay needs a task row to
  * hang them off. Same seeding as `output-parser.test.ts`. */
@@ -82,7 +85,13 @@ function loadFixture(name: string): Record<string, unknown>[] {
 const ALLOWED = loadFixture("rate-limit-allowed-fixture.ndjson");
 const REJECTED = loadFixture("rate-limit-rejected-fixture.ndjson");
 
-/** Feed a fixture through the parser line by line, as the exec stream does. */
+/**
+ * Feed a fixture through the parser line by line, as the exec stream does.
+ *
+ * The quota sink is left at its default, so a replay writes the fleet's quota
+ * row exactly as a live turn would and `getQuotaObservation()` can be read
+ * afterwards — the wiring, not a stand-in for it.
+ */
 function replay(events: Record<string, unknown>[], taskId: string) {
   const observations: Observation[] = [];
   const recorder = createStreamRecorder((o) => observations.push(o));
@@ -91,6 +100,24 @@ function replay(events: Record<string, unknown>[], taskId: string) {
     handler.write(JSON.stringify(event) + "\n");
   }
   return { result: handler.flush(), observations };
+}
+
+/** The task feed as the replay left it — the comparison for "a stream with no
+ * rate-limit event parses exactly as it did before". */
+function feed(taskId: string) {
+  return testDb
+    .select()
+    .from(schema.messages)
+    .where(eq(schema.messages.taskId, taskId))
+    .all()
+    .map((m) => ({ role: m.role, type: m.type, content: m.content }));
+}
+
+/** Every field of the turn result except the one #167 added. */
+function withoutQuota(result: { rateLimit: QuotaObservation | null }) {
+  const { rateLimit, ...rest } = result;
+  void rateLimit;
+  return rest;
 }
 
 function rateLimitInfo(events: Record<string, unknown>[]) {
@@ -222,5 +249,94 @@ describe("captured stream: the recorder keeps the evidence", () => {
         .map((o) => o.eventType)
     );
     expect([...eventTypes]).toEqual(["rate_limit_event"]);
+  });
+});
+
+describe("captured stream: the event reaches the turn result (issue #167)", () => {
+  it("carries the rejection's fields, intact, off a real captured stream", () => {
+    const { result } = replay(REJECTED, "task-rejected");
+
+    expect(result.rateLimit).toMatchObject({
+      status: "rejected",
+      rateLimitType: "five_hour",
+      resetsAt: new Date(1788310954 * 1000),
+      isUsingOverage: false,
+      // Absent on the wire, and absent here — the distinction #171 needs.
+      utilization: null,
+    });
+    expect(result.rateLimit?.observedAt).toBeInstanceOf(Date);
+  });
+
+  it("carries the allowed capture's overage fields, which the schema omits", () => {
+    // The two fields #165 found on the wire beyond #167's documented shape. A
+    // reader written to the list alone would have dropped the pair #173 needs.
+    const { result } = replay(ALLOWED, "task-allowed");
+
+    expect(result.rateLimit).toMatchObject({
+      status: "allowed",
+      rateLimitType: "overage",
+      overageStatus: "allowed",
+      isUsingOverage: false,
+      overageInUse: true,
+    });
+  });
+
+  it("persists the observation as the fleet's quota state", () => {
+    // End to end through the default sink: what the dashboard will read.
+    expect(getQuotaObservation()).toBeNull();
+    replay(REJECTED, "task-rejected");
+
+    expect(getQuotaObservation()).toMatchObject({
+      status: "rejected",
+      rateLimitType: "five_hour",
+    });
+  });
+
+  it("keeps the last event of a turn, not the first", () => {
+    // The CLI emits one per API attempt, and a turn that retried past a
+    // warning into a rejection must not report itself as merely warned.
+    const warning = {
+      type: "rate_limit_event",
+      rate_limit_info: { status: "allowed_warning", rateLimitType: "seven_day", utilization: 91 },
+    };
+    replay([warning, ...REJECTED], "task-rejected");
+
+    expect(getQuotaObservation()).toMatchObject({ status: "rejected" });
+  });
+
+  it("parses a stream with no rate-limit event exactly as it did before", () => {
+    // The regression this ticket could most easily cause: every other fact the
+    // turn reports, and every message it wrote, identical with the event
+    // removed. Nothing about the rest of the stream runs through the new path.
+    // Stripped stream first, so "nothing was persisted" is a fact about this
+    // replay and not about the order of the two.
+    const withoutEvent = replay(
+      ALLOWED.filter((e) => e.type !== "rate_limit_event"),
+      "task-rejected"
+    );
+    expect(withoutEvent.result.rateLimit).toBeNull();
+    expect(getQuotaObservation()).toBeNull();
+
+    const withEvent = replay(ALLOWED, "task-allowed");
+
+    expect(withoutQuota(withoutEvent.result)).toEqual(withoutQuota(withEvent.result));
+    expect(feed("task-rejected")).toEqual(feed("task-allowed"));
+  });
+
+  it("does not throw on an enum member from a future CLI, and shows it", () => {
+    const { result } = replay(
+      [
+        {
+          type: "rate_limit_event",
+          rate_limit_info: { status: "throttled_soft", rateLimitType: "thirty_day_haiku" },
+        },
+      ],
+      "task-allowed"
+    );
+
+    expect(result.rateLimit).toMatchObject({
+      status: "throttled_soft",
+      rateLimitType: "thirty_day_haiku",
+    });
   });
 });
