@@ -14,7 +14,9 @@ import {
   type RunningContainer,
 } from "../docker/container-manager";
 import { checkMemoryAdmission } from "./capacity";
+import { runBoundedProbe } from "../timeout";
 import { createOutputHandler, type TurnResult } from "./output-parser";
+import { getStreamRecorder } from "./stream-recorder";
 import { parseReviewVerdict } from "./autonomy/verdict";
 import { parseTriageExit } from "./autonomy/triage";
 import { passProducedResult } from "./autonomy/pass-output";
@@ -637,6 +639,41 @@ export async function startTask(taskId: string): Promise<void> {
 }
 
 /**
+ * How long the recorder will wait for the daemon to say what an exec exited
+ * with (issue #165). Deliberately *not* the shared `DOCKER_PROBE_TIMEOUT_MS`,
+ * and shorter than it: every other bounded Docker probe in the fleet is
+ * answering a question something decides on — admission, occupancy,
+ * container existence — and can justify five seconds of patience. This one
+ * fills in a field of a forensic log, on the completion path of every turn the
+ * fleet runs, so it may not spend a decision's patience. A daemon too busy to
+ * answer in a second leaves the field `null`, which the log already has a
+ * meaning for.
+ */
+const EXIT_CODE_OBSERVATION_TIMEOUT_MS = 1000;
+
+/**
+ * Ask the daemon what a finished exec exited with, bounded and best-effort
+ * (issue #165) — evidence for the passive recorder, never a decision input.
+ *
+ * Null covers both "still running" and "the daemon would not say", which is
+ * honest: this is called the moment the turn settles, and `runTurn` deliberately
+ * returns as soon as the terminal `result` event arrives rather than waiting for
+ * the exec to close, because a background dev server can hold the stream open
+ * long after Claude is done. Bounded for the usual #115/#128 reason — a hung
+ * daemon connection has no timeout of its own — and nothing in the recorder's
+ * path may stall a turn.
+ */
+async function observeExecExitCode(exec: {
+  inspect: () => Promise<{ ExitCode?: number | null }>;
+}): Promise<number | null> {
+  const outcome = await runBoundedProbe(
+    () => exec.inspect(),
+    EXIT_CODE_OBSERVATION_TIMEOUT_MS
+  );
+  return outcome.ok ? (outcome.value.ExitCode ?? null) : null;
+}
+
+/**
  * Run a single Claude turn and stream output to DB. With `captureRaw` the
  * raw stream-json is also returned — a review pass's verdict is parsed from
  * it after the turn ends.
@@ -674,15 +711,38 @@ async function runTurn(
   // long after Claude exits, so the result event is the reliable signal.
   const resultReceived = new Promise<void>((resolve) => handler.onDone(resolve));
 
-  await Promise.race([
-    waitForExecStream(stream, exec, (chunk) => {
-      handler.write(chunk);
-      if (opts?.captureRaw) rawChunks.push(chunk);
-    }),
-    resultReceived,
-  ]);
+  const startedAtMs = Date.now();
+  let result: TurnResult;
+  try {
+    await Promise.race([
+      waitForExecStream(stream, exec, (chunk) => {
+        handler.write(chunk);
+        if (opts?.captureRaw) rawChunks.push(chunk);
+      }),
+      resultReceived,
+    ]);
+  } finally {
+    // How this pass ended, written down whether or not anyone is watching
+    // (issue #165). In a `finally` because the exits worth the trouble are
+    // exactly the ones that throw: `waitForExecStream` rejects on a stream
+    // error, which is the shape of an OOM, a lost stream, or a container torn
+    // down mid-turn — the last being what a rate-limit pause will deliberately
+    // do. On the normal path the record still lands, capturing the other case
+    // nothing else notices: a quota wall, which arrives looking like a
+    // *successful* result and so leaves no trace in the task feed at all.
+    result = handler.flush();
+    // Read the clock before the probe below, not after: the probe may wait up
+    // to its bound, and this duration is the measurement the "a rejected pass
+    // exits in seconds rather than waiting" finding rests on.
+    const durationMs = Date.now() - startedAtMs;
+    getStreamRecorder().passExit(taskId, {
+      resultArrived: result.terminalResult !== null,
+      terminalResult: result.terminalResult,
+      execExitCode: await observeExecExitCode(exec),
+      durationMs,
+    });
+  }
 
-  const result = handler.flush();
   if (!opts?.captureRaw) return result;
   return { ...result, raw: Buffer.concat(rawChunks).toString() };
 }
