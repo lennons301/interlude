@@ -30,6 +30,12 @@ vi.mock("@/db", () => ({
 
 type TurnManager = typeof import("../turn-manager");
 
+/** Two full evaluations of the orchestrator's module graph is the cost of
+ * reproducing the defect, and it comfortably outruns vitest's 5s default once
+ * the rest of the suite is running beside it — so these two tests state their
+ * own bound rather than failing on how busy the machine was. */
+const TWO_GRAPHS_MS = 30_000;
+
 /** A fresh module graph, as Next gives the app-router alongside the
  * orchestrator's. */
 async function loadInSeparateGraph(): Promise<TurnManager> {
@@ -51,7 +57,7 @@ describe("orchestrator state across module graphs", () => {
     expect(routeGraph).not.toBe(orchestratorGraph);
 
     expect(routeGraph.getActiveTasks()).toBe(orchestratorGraph.getActiveTasks());
-  });
+  }, TWO_GRAPHS_MS);
 
   it("lets a route-graph delete free the slot the orchestrator graph counts", async () => {
     const orchestratorGraph = await loadInSeparateGraph();
@@ -72,5 +78,5 @@ describe("orchestrator state across module graphs", () => {
 
     // The slot the queue reads is free again. Two maps, and it never was.
     expect(orchestratorGraph.getActiveTasks().size).toBe(0);
-  });
+  }, TWO_GRAPHS_MS);
 });

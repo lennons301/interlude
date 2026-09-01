@@ -33,6 +33,7 @@ import {
   resolveAgentEffort,
   type AgentPassKind,
 } from "../config";
+import { getSettingsOverrides } from "../settings";
 import { getDocker } from "../docker/client";
 import { commentOnIssue, parseIssueRef } from "../github/issues";
 import { parseRepoFromGitUrl } from "../github/repo";
@@ -295,7 +296,15 @@ export async function startTask(taskId: string): Promise<void> {
   // directive (issue #80). Passed to every turn as `--model` and recorded on
   // the run row below so spend is interpretable against the tier it was
   // earned on.
-  const passModel = resolveAgentModel(task.kind, getConfig(), run?.model ?? null);
+  // Read fresh from the settings row, not from a cached config: a UI-set tier
+  // (issue #166) has to reach the next pass without a restart, and
+  // `getConfig()` memoises on first read.
+  const passModel = resolveAgentModel(
+    task.kind,
+    getConfig(),
+    run?.model ?? null,
+    getSettingsOverrides()
+  );
 
   // The reasoning-effort level this pass runs at (issue #81), the other half
   // of the cost/quality dial. Pinned by kind and, for an implement-shaped or
@@ -801,7 +810,14 @@ export async function processQueuedMessages(
       {
         maxBudgetUsd: run ? run.budgetUsd - (task.totalCostUsd ?? 0) : undefined,
         maxTurns: run?.maxTurns ?? undefined,
-        model: resolveAgentModel(task.kind, config, run?.model ?? null),
+        // Fresh again on a follow-up turn, so a tier changed mid-session
+        // applies from the next turn (issue #166).
+        model: resolveAgentModel(
+          task.kind,
+          config,
+          run?.model ?? null,
+          getSettingsOverrides()
+        ),
         effort: resolveAgentEffort(task.kind, config, run?.effort ?? null),
         // A generation session's follow-up exec gets a `gh` token too (#62).
         isGenerationSession: isGenerationSession(task),

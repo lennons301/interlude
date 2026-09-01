@@ -1,5 +1,7 @@
 import { int, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
+import type { SettingsOverrides } from "../lib/settings-resolver";
+
 // Generation-session skills (issue #61): the estate's ticket-loop generation
 // half, runnable from an interactive session. The single source of truth for
 // the runtime list — the DB column enum, the task-creation API's validation,
@@ -52,6 +54,16 @@ export const settings = sqliteTable("settings", {
   globalAutonomyPaused: int("global_autonomy_paused", { mode: "boolean" })
     .notNull()
     .default(false),
+  // UI-set overrides of env config (issue #166), as a sparse JSON object keyed
+  // by setting name — absent means "fall through to the environment default",
+  // which is the state a fresh install is in and why nothing is seeded here.
+  // Deliberately one JSON column rather than a column per setting: the fields
+  // are a version-controlled allowlist in `settings-resolver.ts`, so adding one
+  // is a code change there and not a migration, and an override retired by a
+  // later version is dropped on read rather than left as a dead column.
+  // Read through `sanitizeOverrides` — never trusted verbatim, because this is
+  // JSON written by an older build of the app.
+  overrides: text("overrides", { mode: "json" }).$type<SettingsOverrides>(),
   updatedAt: int("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 

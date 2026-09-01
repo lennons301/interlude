@@ -264,6 +264,17 @@ export function LiveDot({ state }: { state: LiveDotState }) {
   );
 }
 
+/** A "last changed" stamp, rendered only after a client fetch resolves so a
+ * locale-formatted time can never disagree with the server's first paint. The
+ * settings room has two panels that say this and they must not word it
+ * differently. */
+export function formatChanged(iso: string): string {
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime())
+    ? iso
+    : at.toLocaleString("en-GB", { hour12: false });
+}
+
 export function formatElapsed(startedAt: string, now: number): string {
   const mins = Math.max(0, Math.floor((now - Date.parse(startedAt)) / 60000));
   if (mins < 60) return `${mins}m`;

@@ -306,16 +306,35 @@ pass normally but then forces `human-signoff` regardless of gate matches, carryi
 `<text>` as the note for what needs your decision. Use it for
 agent-doable-but-risky work you want to eyeball before merge.
 
-### Model tier (`model:`)
+### Model tier (`model:`, and the Models settings section)
 
-A `model: <alias>` directive in a ticket's Workflow section picks the tier the
-implement (and repair) pass runs on — `opus`, `sonnet` or `haiku`. Use it to
-match spend to the work: a mechanical rename doesn't need Opus; a gnarly
-refactor can ask for it explicitly. The set is a fixed allowlist (issue text is
-semi-trusted, so it may only select a tier, never name an arbitrary model); an
-unrecognised value is ignored — the run keeps its default model and the claim
-comment notes that it was dropped. Review and triage passes keep their own
-(cheaper) tier regardless. The chosen tier is recorded on the run.
+Model choice is a **tier** — `heavy`, `standard` or `light` — not a vendor model
+id, so the choice survives a change of provider. The old names still work as
+aliases: `opus` = heavy, `sonnet` = standard, `haiku` = light.
+
+**The standing default** for each kind of pass — implement, review, triage,
+interactive — is set in **Settings → Models**. Each row shows the tier in force,
+whether that came from the UI or from the environment, and which variable it
+falls back to; picking `environment` clears the override. A change is written to
+the durable settings row and read fresh when the next pass starts, so it takes
+effect at the next sweep with **no restart** and survives one. An unset row
+follows the environment exactly as before the screen existed
+(`AGENT_MODEL`, with `AGENT_MODEL_REVIEW` / `AGENT_MODEL_TRIAGE` for the
+read-heavy passes). A run already in flight keeps the tier it recorded.
+
+The screen only takes a tier: a raw model id is rejected with a message rather
+than clamped, and a safety ceiling (the per-attempt budget maximum, the estate
+daily cap, the attempt count) is refused by name — those stay in code and
+environment.
+
+**Per ticket**, a `model: <tier>` directive in a ticket's Workflow section
+outranks the configured default for the implement (and repair) pass. Use it to
+match spend to the work: a mechanical rename doesn't need the heavy tier; a
+gnarly refactor can ask for it explicitly. The set is a fixed allowlist (issue
+text is semi-trusted, so it may only select a tier, never name an arbitrary
+model); an unrecognised value is ignored — the run keeps its configured default
+and the claim comment notes that it was dropped. Review and triage passes keep
+their own (cheaper) tier regardless. The honoured tier is recorded on the run.
 
 ### Reasoning effort (`effort:`)
 
@@ -349,6 +368,7 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 | `REVIEWER_GH_TOKEN` | Reviewer machine account PAT. Orchestrator-only — **never** enters a container. Canonical home is `platform/prd`, mirrored into `interlude/prd`; rotation updates both. |
 | `DISCORD_FLEET_CHANNEL_ID` | Channel for fleet events + fallback for blocked questions when a project has no linked channel. |
 | `MAX_BUDGET_USD` | Per-attempt default budget ($20). |
+| `AGENT_MODEL`, `AGENT_MODEL_REVIEW`, `AGENT_MODEL_TRIAGE` | Default model per pass kind, as a tier (`heavy`/`standard`/`light`, or the `opus`/`sonnet`/`haiku` aliases) or a raw model id. The fall-through for a Settings → Models row left on `environment`; unset means no `--model` and the CLI resolves the account default. |
 | `CAPACITY_SLOTS`, `AGENT_MEMORY_MB` | Override derived capacity — only when the derivation is wrong. |
 | `OWED_REVIEW_STALL_MINUTES`, `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES` | Fleet-health watchdog thresholds in minutes (issue #126). Defaults 30 / 3 / 2. |
 | `OCCUPANCY_DIVERGED_MINUTES` | How long occupancy may go uncorroborated by real agent containers before it reads as a phantom slot (issue #152). Default 20 — far longer than the pickup debounce because a task provisioning its container is legitimately uncorroborated until the container exists, and a cold agent-image build happens inside that window. The card's remedy is a restart, so a false positive is expensive. |

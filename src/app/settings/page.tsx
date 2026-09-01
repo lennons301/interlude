@@ -3,6 +3,7 @@ import { Eyebrow } from "@/components/fleet/fleet-bits";
 import { ProjectList } from "@/components/project-list";
 import { DockerStatus } from "@/components/docker-status";
 import { KillSwitch } from "@/components/kill-switch";
+import { ModelTierSettings } from "@/components/model-tier-settings";
 import { getConfig } from "@/lib/config";
 
 /**
@@ -42,6 +43,11 @@ export default function SettingsPage() {
         <section aria-label="Autonomy" className="space-y-3">
           <Eyebrow>Autonomy</Eyebrow>
           <KillSwitch />
+        </section>
+
+        <section aria-label="Models" className="space-y-3">
+          <Eyebrow>Models</Eyebrow>
+          <ModelTierSettings />
         </section>
 
         <section aria-label="Projects" className="space-y-3">

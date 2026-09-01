@@ -7,6 +7,11 @@ import {
   DEFAULT_QUEUE_HEARTBEAT_STALE_MS,
 } from "./orchestrator/autonomy/budgets";
 import type { FleetHealthThresholds } from "./fleet/health";
+import { normalizeModelTier, tierModelId } from "./model-tiers";
+import {
+  resolveModelTier,
+  type SettingsOverrides,
+} from "./settings-resolver";
 
 /** Parse an env value expressed in minutes into ms, falling back to a default.
  * A blank, non-numeric or non-positive value keeps the default (a mistyped
@@ -212,32 +217,50 @@ export type AgentPassKind =
   | "triage"
   | "repair";
 
+/** Whether a pass carries the *ticket's own* work, and so answers to a ticket
+ * directive. Review and triage do not: they read the work rather than doing
+ * it, and the ticket chooses the model its work runs on, not the reviewer's.
+ * Named once here because the model and effort resolvers both draw the line
+ * and it must be the same line. */
+function isWorkPassKind(kind: AgentPassKind): boolean {
+  return kind !== "review" && kind !== "triage";
+}
+
 /**
- * Which model a turn of the given kind runs on (issue #74). `AGENT_MODEL` is
- * the base — implement, repair and interactive passes all use it; review and
- * triage may name a cheaper tier via `AGENT_MODEL_REVIEW` / `AGENT_MODEL_TRIAGE`
- * and otherwise fall back to it. Null means "pass no `--model`": the CLI
- * resolves the account default, exactly as before this was configurable.
+ * Which model a turn of the given kind runs on (issues #74, #80, #166), and
+ * the one place the three layers of that answer are ordered:
  *
- * `ticketModel` is a per-ticket `model:` directive (issue #80), already
- * clamped to the allowlist by the directive parser. When present it overrides
- * the base for the pass kinds that carry a run's tier — implement, repair and
- * interactive. Review and triage keep their own (cheaper) tier regardless: the
- * ticket chooses the model its *work* runs on, not the reviewer's.
+ * 1. A ticket's `model:` directive — already normalised to a tier by the
+ *    directive parser — wins, for the pass kinds that carry a run's tier
+ *    (implement, repair and interactive). Review and triage keep their own
+ *    (cheaper) tier regardless: the ticket chooses the model its *work* runs
+ *    on, not the reviewer's.
+ * 2. Then the UI override for this pass kind, if one is set (issue #166).
+ * 3. Then the environment default — `AGENT_MODEL` as the base, with
+ *    `AGENT_MODEL_REVIEW` / `AGENT_MODEL_TRIAGE` for the read-heavy passes.
+ *    Null means "pass no `--model`": the CLI resolves the account default,
+ *    exactly as before any of this was configurable.
+ *
+ * `overrides` is explicit rather than fetched here, and has no default, so a
+ * new call site has to decide where it reads them from — the answer is
+ * `getSettingsOverrides()` at the point of use, never a cached copy, because
+ * `getConfig()` memoises and a UI override cannot ride on something that never
+ * re-reads.
  */
 export function resolveAgentModel(
   kind: AgentPassKind,
-  config: AppConfig = getConfig(),
-  ticketModel: string | null = null
+  config: AppConfig,
+  ticketModel: string | null,
+  overrides: SettingsOverrides
 ): string | null {
-  switch (kind) {
-    case "review":
-      return config.agentModelReview ?? config.agentModel;
-    case "triage":
-      return config.agentModelTriage ?? config.agentModel;
-    default:
-      return ticketModel ?? config.agentModel;
+  if (isWorkPassKind(kind)) {
+    // A tier or a legacy alias (`opus`) both resolve; anything else — a raw
+    // model id previously recorded on the run row, say — names no tier and
+    // falls through to the configured default rather than reaching `--model`.
+    const ticketTier = normalizeModelTier(ticketModel);
+    if (ticketTier !== null) return tierModelId(ticketTier);
   }
+  return resolveModelTier(kind, config, overrides).model;
 }
 
 /**

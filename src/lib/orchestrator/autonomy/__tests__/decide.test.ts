@@ -331,11 +331,12 @@ describe("decideNext — claiming", () => {
     expect(claims(actions)[0]).toMatchObject({ budgetUsd: 20, maxTurns: null });
   });
 
-  it("carries an allowlisted model directive, and ignores an unknown one", () => {
+  it("carries an allowlisted model directive as a tier, and ignores an unknown one", () => {
+    // The legacy alias resolves to the tier the fleet actually acts on (#166).
     const honoured = "Spec.\n\n## Workflow\n\nmodel: haiku\n";
     expect(
       claims(decideNext(makeSnapshot({ candidates: [makeCandidate({ body: honoured })] })))[0]
-    ).toMatchObject({ model: "haiku" });
+    ).toMatchObject({ model: "light" });
 
     const ignored = "Spec.\n\n## Workflow\n\nmodel: gpt-4\n";
     expect(

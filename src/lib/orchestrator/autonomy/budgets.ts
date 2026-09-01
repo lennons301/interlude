@@ -16,13 +16,13 @@ export const MAX_ATTEMPT_BUDGET_USD = 75;
  * per-exec turn limit to (the default is the orchestrator's MAX_TURNS). */
 export const MAX_TURNS_CEILING = 100;
 
-/** Model tiers a ticket's `model:` directive may select (issue #80). A ticket
- * body is semi-trusted input, so it may only choose from this fixed set of
- * aliases — never name an arbitrary model string — mirroring the reasoning
- * behind the $75 budget clamp. The alias reaches the CLI as `--model`; an
- * unrecognised value is ignored (the run keeps its default model), never
- * fatal. Clamped in the directive parser, resolved through `resolveAgentModel`. */
-export const ALLOWED_TICKET_MODELS = ["opus", "sonnet", "haiku"] as const;
+/* The tiers a ticket's `model:` directive may select live in
+ * `src/lib/model-tiers.ts` (issue #166), not here: the same vocabulary is what
+ * the settings UI offers and what the environment defaults are read against,
+ * and a body is semi-trusted input that may only choose from it — never name
+ * an arbitrary model string — mirroring the reasoning behind the $75 budget
+ * clamp. Clamped in the directive parser, resolved through
+ * `resolveAgentModel`. */
 
 /** Reasoning-effort levels a ticket's `effort:` directive may select (issue
  * #81), the exact set the headless CLI's `--effort` flag accepts. A ticket

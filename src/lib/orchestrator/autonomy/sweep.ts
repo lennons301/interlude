@@ -2830,10 +2830,13 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
 
     // Note the model directive on the run's issue thread (issue #80): the
     // honoured tier when one was picked, or an unrecognised request that was
-    // ignored — never silently swallowed, never fatal.
+    // ignored — never silently swallowed, never fatal. The tier is what is
+    // reported, not the word the ticket used, because a legacy alias
+    // (`model: opus`) resolves to one (issue #166) and the tier is what the
+    // fleet acted on.
     let modelNote = "";
     if (action.model) {
-      modelNote = `\n\nModel: \`${action.model}\` (ticket directive).`;
+      modelNote = `\n\nModel tier: \`${action.model}\` (ticket directive).`;
     } else {
       const rawModel = rawModelDirective(action.issueBody);
       if (rawModel) {
