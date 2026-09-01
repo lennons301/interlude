@@ -57,6 +57,11 @@ Schema at `src/db/schema.ts`. Five tables: `projects`, `tasks`, `messages`, `run
 - Restart recovery (issue #24): boot marks claimed/implementing/reviewing runs that own a `running` task as `interrupted` (a run holding a stored review verdict is left for the verdict path instead; gated/blocked runs wait on a human, not a lost turn). The sweep then re-claims the ticket **without** consuming an attempt — interruptions are counted from `interrupted` ledger rows, separately from failed attempts, and bounded by `MAX_INTERRUPTIONS_PER_TICKET` (5, in `budgets.ts`); past the bound the ticket is routed `ready-for-human` like exhaustion. The reaper never removes a container whose task belongs to a live run. Boot also **finalizes dangling runs** (issue #106): a run left non-terminal with no PR, no stored verdict, and all tasks terminal is driven to `failed` so a pre-fix ghost `running` card self-heals on the next restart — the durable fix drives such runs terminal at pass completion in `decideNext` (`finalizeEmptyPass`), this only backfills runs stranded before it landed
 
 - Run migrations: `npx drizzle-kit push`
+- **Adding a generated migration:** set the new journal entry's `when` to at
+  least one day past the prior entry's (drizzle skips same-day entries it
+  believes it has applied), and `rm local.db*` before running tests — a stale
+  local DB makes the runs-ledger and parallel-worker migration tests fail on
+  code that is actually correct
 - Generate migrations: `npx drizzle-kit generate`
 - DB client: `import { db } from "@/db"`
 
@@ -67,6 +72,10 @@ pnpm dev          # Start dev server
 pnpm build        # Production build
 pnpm lint         # Run ESLint
 ```
+
+`pnpm lint` fails on `main` with pre-existing errors (known baseline). Lint
+only the files you changed — don't fix or be blocked by baseline errors in
+files you didn't touch.
 
 ### Running locally (outside Docker Compose)
 
