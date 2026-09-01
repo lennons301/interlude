@@ -72,6 +72,21 @@ describe("quota state", () => {
     });
   });
 
+  it("stores the row in the wire's own encoding, so one reader serves both", () => {
+    // Why this matters beyond tidiness: the column is read back through
+    // `parseRateLimitEvent`, the same function the stream goes through, so
+    // there is no second defensive reader to fall out of step with the first.
+    recordQuotaObservation(observation());
+    const row = testDb.select().from(quotaState).get()!;
+
+    expect(row.observation).toMatchObject({
+      status: "allowed_warning",
+      rateLimitType: "seven_day",
+      // Unix seconds, as the CLI sends them — not an ISO string.
+      resetsAt: Math.floor(Date.parse("2026-09-05T00:00:00.000Z") / 1000),
+    });
+  });
+
   it("keeps an absent utilization absent across the round trip", () => {
     // The field the whole record exists to be honest about: null must not come
     // back as 0 through a JSON column.

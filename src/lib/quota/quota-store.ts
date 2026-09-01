@@ -8,62 +8,42 @@
  * time, the passive recorder (`orchestrator/stream-recorder.ts`) already has
  * every event verbatim on disk to build it from.
  *
- * Writes swallow their own errors, for the recorder's reason: this sits on the
- * stream-parse path of every turn the fleet runs, and telemetry that can fail
- * the pass it describes is worse than no telemetry. Reads are defensive for
- * `settings.overrides`' reason: the JSON was written by some build of this app,
- * not necessarily this one.
+ * **The row is stored in the wire's own encoding**, so there is exactly one
+ * reader of a quota observation in the codebase: writing projects the
+ * observation back to the field names and unix-second timestamps the CLI sent,
+ * and reading hands that object to `parseRateLimitEvent`. A stored row this
+ * build cannot read therefore fails in precisely the way an unreadable event
+ * does — as null, never as a throw — without a second defensive reader to keep
+ * in step with the first.
+ *
+ * Writes swallow their own errors, for the passive recorder's reason: this sits
+ * on the stream-parse path of every turn the fleet runs, and telemetry that can
+ * fail the pass it describes is worse than no telemetry.
  */
 
 import { db } from "@/db";
 import { QUOTA_STATE_ROW_ID, quotaState } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import type { QuotaObservation } from "./rate-limit-event";
+import { parseRateLimitEvent, type QuotaObservation } from "./rate-limit-event";
 
-/** The stored shape: the observation with its Dates as ISO text, because JSON
- * has no date and a column that round-trips differently than it was written is
- * a bug waiting for a reader. */
-interface StoredObservation {
-  status: string;
-  rateLimitType: string | null;
-  utilization: number | null;
-  resetsAt: string | null;
-  overageStatus: string | null;
-  overageResetsAt: string | null;
-  isUsingOverage: boolean | null;
-  overageInUse: boolean | null;
+/** Back to the wire's encoding: the CLI sends reset times as unix seconds, and
+ * a row that speaks JSON's own date dialect instead would need its own reader. */
+function epochSeconds(at: Date | null): number | null {
+  return at === null ? null : Math.floor(at.getTime() / 1000);
 }
 
-function toStored(observation: QuotaObservation): StoredObservation {
+/** The `rate_limit_info` this observation would have arrived as. */
+function toStoredInfo(observation: QuotaObservation): Record<string, unknown> {
   return {
     status: observation.status,
     rateLimitType: observation.rateLimitType,
     utilization: observation.utilization,
-    resetsAt: observation.resetsAt?.toISOString() ?? null,
+    resetsAt: epochSeconds(observation.resetsAt),
     overageStatus: observation.overageStatus,
-    overageResetsAt: observation.overageResetsAt?.toISOString() ?? null,
+    overageResetsAt: epochSeconds(observation.overageResetsAt),
     isUsingOverage: observation.isUsingOverage,
     overageInUse: observation.overageInUse,
   };
-}
-
-function readString(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function readBoolean(value: unknown): boolean | null {
-  return typeof value === "boolean" ? value : null;
-}
-
-function readNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function readDate(value: unknown): Date | null {
-  const iso = readString(value);
-  if (iso === null) return null;
-  const at = new Date(iso);
-  return Number.isNaN(at.getTime()) ? null : at;
 }
 
 /**
@@ -72,16 +52,16 @@ function readDate(value: unknown): Date | null {
  */
 export function recordQuotaObservation(observation: QuotaObservation): void {
   try {
-    const values = {
-      id: QUOTA_STATE_ROW_ID,
-      observation: toStored(observation),
-      observedAt: observation.observedAt,
-    };
+    const info = toStoredInfo(observation);
     db.insert(quotaState)
-      .values(values)
+      .values({
+        id: QUOTA_STATE_ROW_ID,
+        observation: info,
+        observedAt: observation.observedAt,
+      })
       .onConflictDoUpdate({
         target: quotaState.id,
-        set: { observation: values.observation, observedAt: values.observedAt },
+        set: { observation: info, observedAt: observation.observedAt },
       })
       .run();
   } catch (err) {
@@ -93,12 +73,10 @@ export function recordQuotaObservation(observation: QuotaObservation): void {
  * The fleet's last observed quota state, or null when no pass has reported one.
  *
  * Null is a real answer the tile renders, not a failure: a fresh install has
- * never seen an event, and so does one whose passes all authenticate with an
- * API key — the unified-window machinery is subscription-only (#165's finding
- * 6), so a metered lane reports no quota at all.
- *
- * Anything unreadable in the row also reads as null rather than throwing, so a
- * column written by a since-changed build cannot break the dashboard.
+ * never seen an event, and neither has one whose passes all authenticate with
+ * an API key — the unified-window machinery is subscription-only (#165's
+ * finding 6), so a metered lane reports no quota at all. A row written by a
+ * since-changed build reads as null too, rather than breaking the dashboard.
  */
 export function getQuotaObservation(): QuotaObservation | null {
   try {
@@ -109,22 +87,10 @@ export function getQuotaObservation(): QuotaObservation | null {
       .get();
     if (!row) return null;
 
-    const stored = row.observation as Partial<StoredObservation> | null;
-    if (typeof stored !== "object" || stored === null) return null;
-    const status = readString(stored.status);
-    if (status === null) return null;
-
-    return {
-      status,
-      rateLimitType: readString(stored.rateLimitType),
-      utilization: readNumber(stored.utilization),
-      resetsAt: readDate(stored.resetsAt),
-      overageStatus: readString(stored.overageStatus),
-      overageResetsAt: readDate(stored.overageResetsAt),
-      isUsingOverage: readBoolean(stored.isUsingOverage),
-      overageInUse: readBoolean(stored.overageInUse),
-      observedAt: row.observedAt,
-    };
+    return parseRateLimitEvent(
+      { type: "rate_limit_event", rate_limit_info: row.observation },
+      row.observedAt
+    );
   } catch (err) {
     console.error("[quota] failed to read observation:", err);
     return null;

@@ -12,6 +12,10 @@ import type { QuotaGlance } from "@/lib/fleet/fleet-view";
 
 const NOW = new Date("2026-09-01T12:00:00.000Z").getTime();
 
+/** The gauge's own geometry — the 3px hairline bar, and nothing else in the
+ * tile, is drawn at this height. */
+const GAUGE = "h-[3px]";
+
 function render(quota: QuotaGlance | null): string {
   return renderToStaticMarkup(<QuotaTile quota={quota} now={NOW} />);
 }
@@ -40,6 +44,7 @@ describe("quota tile", () => {
     const html = render(OBSERVED);
 
     expect(html).toContain("91%");
+    expect(html).toContain(GAUGE);
     expect(html).toContain("weekly opus");
     expect(html).toContain("resets in 2h 30m");
     expect(html).toContain("seen 15m ago");
@@ -54,7 +59,7 @@ describe("quota tile", () => {
     const html = render({ ...OBSERVED, utilization: null });
 
     expect(html).toContain("utilization not reported");
-    expect(html).not.toContain("width:0%");
+    expect(html).not.toContain(GAUGE);
   });
 
   it("says so when the event carried no reset time", () => {
@@ -70,7 +75,25 @@ describe("quota tile", () => {
     expect(html).not.toContain("resets in");
   });
 
-  it("shows a rejection in red, and a status it has never seen as itself", () => {
+  it("goes quiet once the window it describes has reset", () => {
+    // The tile's one inference, and the point of it: a red `rejected` chip
+    // standing over a wall that lifted hours ago is crying wolf. The words
+    // stay — it is still the last thing the fleet observed — and the colour,
+    // and the bar that would make a claim about a spent window, go.
+    const html = render({
+      ...OBSERVED,
+      status: "rejected",
+      severity: "blocked",
+      resetsAt: "2026-09-01T09:00:00.000Z",
+    });
+
+    expect(html).toContain("rejected");
+    expect(html).not.toContain("fl-red");
+    expect(html).not.toContain(GAUGE);
+  });
+
+  it("shows a live rejection in red, and a status it has never seen as itself", () => {
+    // Live = its reset is still ahead, which OBSERVED's is.
     expect(render({ ...OBSERVED, status: "rejected", severity: "blocked" })).toContain(
       "fl-red"
     );

@@ -9,7 +9,7 @@ import { Chip, Gauge, TONES, formatCountdown, formatElapsed } from "./fleet-bits
  * spend is what the fleet has cost, quota is whether it may keep going at all.
  * Purely a readout — nothing in the fleet acts on this yet.
  *
- * Three states, all of them ordinary:
+ * Four states, all of them ordinary:
  *
  *  - **Nothing observed.** A fresh install, and also the permanent state of a
  *    fleet on API-key auth, where the CLI emits no quota telemetry at all
@@ -19,26 +19,30 @@ import { Chip, Gauge, TONES, formatCountdown, formatElapsed } from "./fleet-bits
  *    account: the figure only appears when the reported window has a
  *    claim-scoped utilization header. The gauge is omitted rather than drawn
  *    at zero, for the same reason.
- *  - **Observed with one.** Gauge, in the tone of the status.
+ *  - **Observed, and its own reset time has since passed.** The reading is
+ *    history: the window it describes has turned over, so the words stay and
+ *    the colour goes. A red `rejected` chip standing over a wall that lifted
+ *    hours ago is the tile crying wolf, and this fleet's other watchdogs are
+ *    built not to (see the fleet-health signals' debounce).
+ *  - **Observed and current.** Gauge, in the tone of the status.
  *
  * The observed-at stamp is not decoration: a five-hour window reported nine
  * hours ago says nothing about now, and only the reader can judge that.
  */
 
-const SEVERITY_TONE: Record<QuotaSeverity, keyof typeof TONES> = {
+/**
+ * One tone per severity, shared by the chip and the bar so the two can never
+ * disagree about how alarming the same reading is. `quiet` is the tone for a
+ * reading this build cannot vouch for — a status it has never heard of, or one
+ * whose window has since reset — and it is also the tone that draws no bar at
+ * all, because a grey gauge would still be a claim about how full the window is.
+ */
+const QUOTA_TONE: Record<QuotaSeverity, keyof typeof TONES> = {
   ok: "green",
   warning: "amber",
   blocked: "red",
-  // A status this build has never heard of is shown, in the tone that claims
-  // nothing about it — guessing green would be the dangerous guess.
+  // Guessing green would be the dangerous guess.
   unknown: "quiet",
-};
-
-const GAUGE_TONE: Record<QuotaSeverity, "green" | "amber" | "red" | "cool"> = {
-  ok: "green",
-  warning: "amber",
-  blocked: "red",
-  unknown: "cool",
 };
 
 export function QuotaTile({
@@ -63,15 +67,19 @@ export function QuotaTile({
   }
 
   const resetsIn = quota.resetsAt ? formatCountdown(quota.resetsAt, now) : null;
+  // The one thing the tile can work out for itself: an observation that named
+  // its own reset, which has since passed, describes a window that no longer
+  // exists. Judged against the client's ticking clock, so a tile left open
+  // goes quiet the moment it should.
+  const spent = quota.resetsAt !== null && resetsIn === null;
+  const tone = spent ? "quiet" : QUOTA_TONE[quota.severity];
 
   return (
     <section aria-label="Quota" className="space-y-1.5">
       <div className="flex items-baseline justify-between gap-2 font-plex-mono text-[11px] tabular-nums text-fl-ink-2">
         <span className="flex items-baseline gap-1.5">
           <span>quota</span>
-          <Chip tone={SEVERITY_TONE[quota.severity]}>
-            {quota.status.replace(/_/g, " ")}
-          </Chip>
+          <Chip tone={tone}>{quota.status.replace(/_/g, " ")}</Chip>
           {quota.limitLabel && (
             <span className="truncate text-fl-ink-3">{quota.limitLabel}</span>
           )}
@@ -84,18 +92,14 @@ export function QuotaTile({
           )}
         </span>
       </div>
-      {quota.utilization !== null && (
-        <Gauge
-          value={quota.utilization}
-          max={100}
-          tone={GAUGE_TONE[quota.severity]}
-        />
+      {quota.utilization !== null && tone !== "quiet" && (
+        <Gauge value={quota.utilization} max={100} tone={tone} />
       )}
       <div className="flex items-baseline justify-between gap-2 font-plex-mono text-[11px] text-fl-ink-3">
         <span>
           {quota.resetsAt === null
             ? "no reset reported"
-            : resetsIn === null
+            : spent
               ? "reset time passed"
               : `resets in ${resetsIn}`}
         </span>
