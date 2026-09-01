@@ -39,14 +39,19 @@ import {
   tierModelId,
 } from "./model-tiers";
 
-/** The settings a human may override from the UI. Later tickets in issue #164
- * (the quota admission threshold, the overflow daily cap, the per-attempt
- * pause bound) add members here and an entry to `SETTINGS_FIELDS`. */
-export type SettingKey =
+/** The model-tier fields, named as their own union because they share a
+ * resolver: asking one of them "what tier is in force?" is meaningful, and
+ * asking the lane field the same question is not. */
+export type ModelTierSettingKey =
   | "modelTierImplement"
   | "modelTierReview"
   | "modelTierTriage"
   | "modelTierInteractive";
+
+/** The settings a human may override from the UI. Later tickets in issue #164
+ * (the quota admission threshold, the overflow daily cap, the per-attempt
+ * pause bound) add members here and an entry to `SETTINGS_FIELDS`. */
+export type SettingKey = ModelTierSettingKey | "primaryLane";
 
 /** What is stored on the settings row: a sparse map, because absent means
  * "fall through to the environment", which is a different thing from any
@@ -68,22 +73,44 @@ export interface EnvDefault {
   value: string | null;
 }
 
+/**
+ * What a field needs to know beyond the raw value to judge it. Empty for every
+ * field whose vocabulary is compiled in; `laneIds` carries the vocabulary that
+ * is *not* — the execution lanes (issue #172) live in a checked-in file read at
+ * runtime, so only a caller that has loaded it can say whether a lane id names
+ * a real lane. A caller without it gets the syntactic check, which is why the
+ * defensive read path may omit it and the write path does not.
+ */
+export interface SettingsContext {
+  laneIds?: readonly string[];
+}
+
 export interface SettingSpec {
   key: SettingKey;
   label: string;
   help: string;
-  /** The values an override may take, in display order. */
-  options: readonly string[];
+  /** The values an override may take, in display order — omitted by a field
+   * whose vocabulary is not compiled in (see `SettingsContext`). */
+  options?: readonly string[];
   /** Validate a candidate override, returning the canonical form to store, or
    * null to reject it. Never clamps. */
-  normalize(raw: string): string | null;
+  normalize(raw: string, context: SettingsContext): string | null;
   /** A one-line statement of what is accepted, for a rejection message. */
-  vocabulary(): string;
+  vocabulary(context: SettingsContext): string;
   envDefault(config: AppConfig): EnvDefault;
 }
 
+/**
+ * A lane id, syntactically — the same slug shape `lanes.yaml` enforces, with a
+ * length bound. Membership in the real catalog is the check that matters and it
+ * needs `SettingsContext`; this is what can be asserted without one, and it is
+ * bounded so a caller that has no catalog still cannot park something large in
+ * the settings row.
+ */
+const LANE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
 function modelTierField(
-  key: SettingKey,
+  key: ModelTierSettingKey,
   label: string,
   help: string,
   envDefault: (config: AppConfig) => EnvDefault
@@ -94,7 +121,7 @@ function modelTierField(
     help,
     options: MODEL_TIERS,
     normalize: (raw) => normalizeModelTier(raw),
-    vocabulary: describeModelTierVocabulary,
+    vocabulary: () => describeModelTierVocabulary(),
     envDefault,
   };
 }
@@ -149,11 +176,45 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
     "The tier a chat or generation session runs on — the work you are sitting in front of.",
     baseModelEnv
   ),
+  primaryLane: {
+    key: "primaryLane",
+    label: "Primary lane",
+    help:
+      "Which execution lane every pass runs on — the harness, the endpoint and the credentials behind each tier.",
+    // No compiled-in options: the lanes are declared in a checked-in file read
+    // at runtime, so the vocabulary arrives through `SettingsContext` instead.
+    normalize: (raw, context) => {
+      const value = raw.trim().toLowerCase();
+      if (!LANE_ID.test(value)) return null;
+      // With the catalog in hand, a lane that does not exist is rejected by
+      // name rather than stored and quietly ignored later; without it, the
+      // shape check is all that can honestly be asserted.
+      if (context.laneIds && !context.laneIds.includes(value)) return null;
+      return value;
+    },
+    vocabulary: (context) =>
+      context.laneIds
+        ? `the declared lanes: ${context.laneIds.join(", ")}`
+        : "a lane id declared in lanes.yaml",
+    envDefault: (config) => ({ envVar: "AGENT_LANE", value: config.agentLane }),
+  },
 };
 
-/** Display order for the screen and the API. Kept beside the registry so a new
- * field is placed deliberately rather than wherever object iteration puts it. */
+/** Every settable key, for a rejection message that tells the operator what
+ * *would* have been accepted. */
 export const SETTINGS_FIELD_ORDER: readonly SettingKey[] = [
+  "modelTierImplement",
+  "modelTierReview",
+  "modelTierTriage",
+  "modelTierInteractive",
+  "primaryLane",
+];
+
+/** Display order for the model-tier panel. Kept beside the registry so a new
+ * field is placed deliberately rather than wherever object iteration puts it.
+ * The lane field is deliberately not here: it needs the lane catalog to render
+ * at all, so it has its own view model (`describeLanes`) and its own panel. */
+export const MODEL_TIER_FIELD_ORDER: readonly ModelTierSettingKey[] = [
   "modelTierImplement",
   "modelTierReview",
   "modelTierTriage",
@@ -188,12 +249,15 @@ function isSettingKey(key: string): key is SettingKey {
  * the environment rather than failing the read or reaching the CLI. The write
  * path rejects both loudly — this one only has to not make things worse.
  */
-export function sanitizeOverrides(raw: unknown): SettingsOverrides {
+export function sanitizeOverrides(
+  raw: unknown,
+  context: SettingsContext = {}
+): SettingsOverrides {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return {};
   const clean: SettingsOverrides = {};
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!isSettingKey(key) || typeof value !== "string") continue;
-    const normalized = SETTINGS_FIELDS[key].normalize(value);
+    const normalized = SETTINGS_FIELDS[key].normalize(value, context);
     if (normalized !== null) clean[key] = normalized;
   }
   return clean;
@@ -212,7 +276,10 @@ export type PatchParse =
  * what would have been accepted: the point of refusing rather than clamping is
  * that the operator learns what the fleet will actually do.
  */
-export function parseSettingsPatch(body: unknown): PatchParse {
+export function parseSettingsPatch(
+  body: unknown,
+  context: SettingsContext = {}
+): PatchParse {
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
     return { ok: false, error: "Body must be an object of settings to change" };
   }
@@ -252,13 +319,13 @@ export function parseSettingsPatch(body: unknown): PatchParse {
       };
     }
     const spec = SETTINGS_FIELDS[key];
-    const normalized = spec.normalize(value);
+    const normalized = spec.normalize(value, context);
     if (normalized === null) {
       return {
         ok: false,
         error:
           `"${value}" is not a valid ${key} — expected one of ` +
-          `${spec.vocabulary()}.`,
+          `${spec.vocabulary(context)}.`,
       };
     }
     patch[key] = normalized;
@@ -292,7 +359,7 @@ export function applySettingsPatch(
  * `claude-opus-4-8` today must keep running it.
  */
 export interface ResolvedModelTier {
-  key: SettingKey;
+  key: ModelTierSettingKey;
   tier: ModelTier | null;
   model: string | null;
   source: SettingSource;
@@ -308,7 +375,7 @@ export interface ResolvedModelTier {
  * same attempt continuing — so it deliberately reads the implement field
  * rather than getting a knob of its own. */
 export const MODEL_TIER_FIELD_BY_KIND: Readonly<
-  Record<AgentPassKind, SettingKey>
+  Record<AgentPassKind, ModelTierSettingKey>
 > = {
   implement: "modelTierImplement",
   repair: "modelTierImplement",
@@ -335,7 +402,7 @@ export function resolveModelTier(
 /** The same resolution addressed by field rather than by pass kind — what the
  * settings screen reads, and the one place the merge itself is written. */
 export function resolveModelTierField(
-  key: SettingKey,
+  key: ModelTierSettingKey,
   config: AppConfig,
   overrides: SettingsOverrides
 ): ResolvedModelTier {
@@ -374,7 +441,7 @@ export function resolveModelTierField(
 /** One field as the settings screen shows it: what is in force, where it came
  * from, and what clearing it would fall back to. */
 export interface SettingFieldView {
-  key: SettingKey;
+  key: ModelTierSettingKey;
   label: string;
   help: string;
   options: readonly string[];
@@ -394,11 +461,11 @@ export interface SettingFieldView {
 
 /** Every field, resolved for display. The API and the screen both read this,
  * so the value the UI shows is the value the resolver would hand a pass. */
-export function describeSettings(
+export function describeModelTierSettings(
   config: AppConfig,
   overrides: SettingsOverrides
 ): SettingFieldView[] {
-  return SETTINGS_FIELD_ORDER.map((key) => {
+  return MODEL_TIER_FIELD_ORDER.map((key) => {
     const spec = SETTINGS_FIELDS[key];
     const resolved = resolveModelTierField(key, config, overrides);
     return {
@@ -406,7 +473,7 @@ export function describeSettings(
       label: spec.label,
       help: spec.help,
       envVar: resolved.envVar,
-      options: spec.options,
+      options: spec.options ?? [],
       source: resolved.source,
       override: resolved.override,
       envValue: resolved.envValue,

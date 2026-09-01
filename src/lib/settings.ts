@@ -18,6 +18,7 @@ import {
   type SettingsOverrides,
   type SettingsPatch,
 } from "./settings-resolver";
+import { laneCatalogContext } from "./lanes/settings-context";
 
 export interface FleetSettings {
   /** The global autonomy kill switch: engaged, no sweep claims new work */
@@ -49,8 +50,11 @@ export function getFleetSettings(): FleetSettings {
     globalAutonomyPaused: row.globalAutonomyPaused,
     // Defensive: the column is JSON an older build wrote, so a retired key or
     // a value a since-narrowed vocabulary no longer accepts falls through to
-    // the environment rather than reaching the CLI.
-    overrides: sanitizeOverrides(row.overrides),
+    // the environment rather than reaching the CLI. The lane catalog is passed
+    // so a stored lane id that a deploy has since removed from `lanes.yaml`
+    // falls through to the file's own preference order (issue #172) rather
+    // than pinning the fleet to a lane that no longer exists.
+    overrides: sanitizeOverrides(row.overrides, laneCatalogContext()),
     updatedAt: row.updatedAt,
   };
 }

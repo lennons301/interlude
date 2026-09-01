@@ -7,10 +7,11 @@ import {
 } from "../model-tiers";
 import {
   FIXED_CEILINGS,
+  MODEL_TIER_FIELD_ORDER,
   SETTINGS_FIELDS,
   SETTINGS_FIELD_ORDER,
   applySettingsPatch,
-  describeSettings,
+  describeModelTierSettings,
   parseSettingsPatch,
   resolveModelTier,
   sanitizeOverrides,
@@ -29,11 +30,13 @@ function cfg(models: {
   agentModel?: string | null;
   agentModelReview?: string | null;
   agentModelTriage?: string | null;
+  agentLane?: string | null;
 } = {}): AppConfig {
   return {
     agentModel: models.agentModel ?? null,
     agentModelReview: models.agentModelReview ?? null,
     agentModelTriage: models.agentModelTriage ?? null,
+    agentLane: models.agentLane ?? null,
   } as AppConfig;
 }
 
@@ -166,7 +169,7 @@ describe("override — a set field wins, and only for itself", () => {
 
 describe("provenance — every field says where its value came from", () => {
   it("reports the environment and names the variable when nothing is set", () => {
-    const fields = describeSettings(cfg({ agentModel: "sonnet" }), NONE);
+    const fields = describeModelTierSettings(cfg({ agentModel: "sonnet" }), NONE);
     const implement = fields.find((f) => f.key === "modelTierImplement")!;
     expect(implement).toMatchObject({
       source: "environment",
@@ -179,7 +182,7 @@ describe("provenance — every field says where its value came from", () => {
   });
 
   it("reports the override, and still names what clearing it falls back to", () => {
-    const fields = describeSettings(cfg({ agentModel: "sonnet" }), {
+    const fields = describeModelTierSettings(cfg({ agentModel: "sonnet" }), {
       modelTierImplement: "heavy",
     });
     expect(fields.find((f) => f.key === "modelTierImplement")).toMatchObject({
@@ -190,15 +193,19 @@ describe("provenance — every field says where its value came from", () => {
     });
   });
 
-  it("describes every settable field, in display order", () => {
-    expect(describeSettings(cfg(), NONE).map((f) => f.key)).toEqual([
-      ...SETTINGS_FIELD_ORDER,
+  it("describes every model-tier field, in display order", () => {
+    expect(describeModelTierSettings(cfg(), NONE).map((f) => f.key)).toEqual([
+      ...MODEL_TIER_FIELD_ORDER,
     ]);
-    // Every settable field is placed, and nothing is placed twice — a length
-    // check alone would pass a swapped-out key.
+    // Every settable field is placed somewhere, and nothing is placed twice —
+    // a length check alone would pass a swapped-out key. The lane field has
+    // its own panel (it needs the lane catalog to render), so it is in the
+    // settable set without being in the tier panel's order.
     expect([...SETTINGS_FIELD_ORDER].sort()).toEqual(
       Object.keys(SETTINGS_FIELDS).sort()
     );
+    expect(SETTINGS_FIELD_ORDER).toContain("primaryLane");
+    expect(MODEL_TIER_FIELD_ORDER).not.toContain("primaryLane");
   });
 });
 
@@ -323,5 +330,68 @@ describe("applying and storing a patch", () => {
     expect(sanitizeOverrides({ modelTierReview: "haiku" })).toEqual({
       modelTierReview: "light",
     });
+  });
+});
+
+/**
+ * The primary-lane field (issue #172). Its vocabulary is the one thing in the
+ * registry that is *not* compiled in — the lanes live in a checked-in file read
+ * at runtime — so it arrives as context, and these tests pin what happens with
+ * and without it.
+ */
+describe("the primary-lane setting", () => {
+  const LANES = { laneIds: ["claude-subscription", "openrouter"] };
+
+  it("accepts a declared lane and stores it canonically", () => {
+    const parsed = parseSettingsPatch({ primaryLane: " OpenRouter " }, LANES);
+    expect(parsed).toEqual({ ok: true, patch: { primaryLane: "openrouter" } });
+  });
+
+  it("refuses a lane that is not declared, listing the ones that are", () => {
+    const parsed = parseSettingsPatch({ primaryLane: "kimi" }, LANES);
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toContain("kimi");
+    expect(parsed.error).toContain("claude-subscription, openrouter");
+  });
+
+  it("refuses a value that is not even lane-shaped", () => {
+    expect(parseSettingsPatch({ primaryLane: "../../etc/passwd" }, LANES).ok).toBe(
+      false
+    );
+    expect(parseSettingsPatch({ primaryLane: "Bearer sk-x" }, LANES).ok).toBe(false);
+    expect(parseSettingsPatch({ primaryLane: "a".repeat(80) }, LANES).ok).toBe(false);
+    // Without a catalog only the shape can honestly be asserted — which is
+    // exactly why the write path always supplies one, and why the shape is
+    // bounded rather than "any string".
+    expect(parseSettingsPatch({ primaryLane: "../../etc/passwd" }).ok).toBe(false);
+  });
+
+  it("clears back to the environment like any other field", () => {
+    expect(parseSettingsPatch({ primaryLane: null }, LANES)).toEqual({
+      ok: true,
+      patch: { primaryLane: null },
+    });
+    expect(
+      applySettingsPatch({ primaryLane: "openrouter" }, { primaryLane: null })
+    ).toEqual({});
+  });
+
+  it("keeps a stored lane id the catalog cannot vouch for, on the read path", () => {
+    // The defensive read has no catalog, deliberately: an unreadable lane file
+    // must not erase the operator's choice. Whether the lane still exists is
+    // the *resolver's* question, and it reports rather than deletes.
+    expect(sanitizeOverrides({ primaryLane: "openrouter" })).toEqual({
+      primaryLane: "openrouter",
+    });
+    expect(
+      sanitizeOverrides({ primaryLane: "retired-lane" }, LANES)
+    ).toEqual({});
+  });
+
+  it("falls through to AGENT_LANE, and names it", () => {
+    expect(
+      SETTINGS_FIELDS.primaryLane.envDefault(cfg({ agentLane: "openrouter" }))
+    ).toEqual({ envVar: "AGENT_LANE", value: "openrouter" });
   });
 });

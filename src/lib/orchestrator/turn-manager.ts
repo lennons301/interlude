@@ -6,7 +6,7 @@ import {
   observeContainerAbsent,
   createWorkspaceContainer,
   execSetup,
-  execClaudeTurn,
+  execAgentTurn,
   execFallbackCommitAndPush,
   removeContainer,
   stopContainer,
@@ -14,7 +14,7 @@ import {
   type RunningContainer,
 } from "../docker/container-manager";
 import { checkMemoryAdmission } from "./capacity";
-import { createOutputHandler, type TurnResult } from "./output-parser";
+import { type TurnResult } from "./output-parser";
 import { parseReviewVerdict } from "./autonomy/verdict";
 import { parseTriageExit } from "./autonomy/triage";
 import { passProducedResult } from "./autonomy/pass-output";
@@ -29,12 +29,15 @@ import {
 import { scanPorts } from "./port-scanner";
 import {
   getConfig,
-  resolveAgentModel,
   resolveAgentEffort,
   type AgentPassKind,
 } from "../config";
 import { getSettingsOverrides } from "../settings";
+import { getLaneCatalog } from "../lanes/catalog";
+import { resolveLane, type ResolvedLane } from "../lanes/resolve";
+import { getHarnessAdapter } from "../harness/claude-code";
 import { getDocker } from "../docker/client";
+import { getInstallationToken } from "../github/client";
 import { commentOnIssue, parseIssueRef } from "../github/issues";
 import { parseRepoFromGitUrl } from "../github/repo";
 import { createDraftPr, markPrReady, shouldOpenDraftPr } from "../github/pull-requests";
@@ -291,20 +294,21 @@ export async function startTask(taskId: string): Promise<void> {
     ? db.select().from(runs).where(eq(runs.id, task.runId)).get()
     : undefined;
 
-  // The model this pass runs on, pinned by kind (issue #74) and, for an
+  // The execution lane this pass runs on (issue #172): the harness adapter,
+  // the endpoint, the credentials and the model identifier standing behind the
+  // tier that kind of pass runs at — pinned by kind (issue #74) and, for an
   // implement-shaped or interactive pass, overridable by the run's `model:`
-  // directive (issue #80). Passed to every turn as `--model` and recorded on
-  // the run row below so spend is interpretable against the tier it was
-  // earned on.
+  // directive (issue #80).
+  //
+  // Resolved *before* the container is provisioned, so a lane whose named
+  // variables are absent fails the pass here, naming them, rather than dying
+  // inside a live harness twenty seconds later with "Not logged in".
+  //
   // Read fresh from the settings row, not from a cached config: a UI-set tier
-  // (issue #166) has to reach the next pass without a restart, and
-  // `getConfig()` memoises on first read.
-  const passModel = resolveAgentModel(
-    task.kind,
-    getConfig(),
-    run?.model ?? null,
-    getSettingsOverrides()
-  );
+  // or lane (issues #166, #172) has to reach the next pass without a restart,
+  // and `getConfig()` memoises on first read.
+  const passLane = requireLane(task.kind, run?.model ?? null);
+  const passModel = passLane.model;
 
   // The reasoning-effort level this pass runs at (issue #81), the other half
   // of the cost/quality dial. Pinned by kind and, for an implement-shaped or
@@ -321,15 +325,17 @@ export async function startTask(taskId: string): Promise<void> {
   // pass keeps the run's original startedAt so the dashboard's elapsed time
   // does not jump when a conflict is repaired mid-life.
   if (run && isImplementShaped) {
-    // Record the implement-pass model and effort on the run — they drive the
-    // bulk of a run's spend, so they are the tier and depth the run's cost
-    // should be read against. A review pass writes its own (cheaper/lower)
-    // model and effort nowhere on the run, leaving these stable. Repair keeps
-    // the original implement values (same tier and depth).
+    // Record the implement-pass lane, model and effort on the run — they drive
+    // the bulk of a run's spend, so they are the substrate, tier and depth the
+    // run's cost should be read against, and the lane is what says whether
+    // that cost was subscription quota or real money (issue #172). A review
+    // pass writes its own (cheaper/lower) model and effort nowhere on the run,
+    // leaving these stable. Repair keeps the original implement values.
     db.update(runs)
       .set({
         status: "implementing",
         startedAt: run.startedAt ?? new Date(),
+        lane: passLane.id,
         model: passModel,
         effort: passEffort,
       })
@@ -448,7 +454,7 @@ export async function startTask(taskId: string): Promise<void> {
           ? undefined
           : (run?.maxTurns ?? undefined),
       captureRaw: isReviewPass || isTriagePass,
-      model: passModel,
+      lane: passLane,
       effort: passEffort,
       // A generation session's exec gets a `gh` token; no autonomous pass does (#62).
       isGenerationSession: isGenerationSession(task),
@@ -637,36 +643,85 @@ export async function startTask(taskId: string): Promise<void> {
 }
 
 /**
- * Run a single Claude turn and stream output to DB. With `captureRaw` the
- * raw stream-json is also returned — a review pass's verdict is parsed from
- * it after the turn ends.
+ * The execution lane one pass runs on, or a throw naming what is missing
+ * (issue #172).
+ *
+ * Read fresh on every call rather than resolved once per pass: the catalog
+ * itself is checked-in and cached, but which lane is primary lives on the
+ * settings row, so a follow-up turn picks up a lane changed mid-session for
+ * the same reason it picks up a tier changed mid-session.
+ *
+ * Throws rather than falling back. An unavailable lane is a configuration
+ * fact, and the two wrong answers here — run on some other lane, or provision
+ * a container and let the harness fail — are respectively "spend money nobody
+ * authorised" and "the failure mode this ticket exists to remove".
+ */
+function requireLane(
+  kind: AgentPassKind,
+  ticketModel: string | null
+): ResolvedLane {
+  const catalog = getLaneCatalog();
+  if (!catalog.ok) {
+    throw new Error(`No usable execution lanes — ${catalog.reason}`);
+  }
+  const resolution = resolveLane({
+    catalog: catalog.catalog,
+    kind,
+    config: getConfig(),
+    ticketModel,
+    overrides: getSettingsOverrides(),
+    env: process.env,
+  });
+  if (!resolution.ok) throw new Error(resolution.reason);
+  return resolution.lane;
+}
+
+/**
+ * Run a single agent turn and stream output to DB. With `captureRaw` the
+ * raw stream is also returned — a review pass's verdict is parsed from it
+ * after the turn ends.
+ *
+ * The command, the exec environment and the output handler all come from the
+ * harness adapter the resolved lane names (issue #172), so this function is
+ * the orchestration around a turn and knows nothing about the harness itself.
  */
 async function runTurn(
   taskId: string,
   running: RunningContainer,
   prompt: string,
-  sessionId?: string,
-  opts?: {
+  sessionId: string | undefined,
+  opts: {
+    lane: ResolvedLane;
     maxBudgetUsd?: number;
     maxTurns?: number;
     captureRaw?: boolean;
-    model?: string | null;
     effort?: string | null;
     isGenerationSession?: boolean;
   }
 ): Promise<TurnResult & { raw?: string }> {
-  const handler = createOutputHandler(taskId);
+  const adapter = getHarnessAdapter(opts.lane.adapter);
+  const handler = adapter.createOutputHandler(taskId);
   const rawChunks: Buffer[] = [];
 
-  const { stream, exec } = await execClaudeTurn({
+  // One fresh, short-lived App token per exec, serving both the git credential
+  // helper and — for a generation session only (#62) — `gh`.
+  const gitAuthToken = await getInstallationToken();
+
+  const { stream, exec } = await execAgentTurn({
     container: running.container,
-    prompt,
-    sessionId,
-    maxBudgetUsd: opts?.maxBudgetUsd,
-    maxTurns: opts?.maxTurns,
-    model: opts?.model,
-    effort: opts?.effort,
-    isGenerationSession: opts?.isGenerationSession,
+    command: adapter.buildCommand({
+      sessionId,
+      maxBudgetUsd: opts.maxBudgetUsd,
+      maxTurns: opts.maxTurns,
+      effort: opts.effort,
+      lane: opts.lane,
+    }),
+    env: adapter.buildExecEnv({
+      prompt,
+      gitAuthToken,
+      ghToken: opts.isGenerationSession ? gitAuthToken : null,
+      lane: opts.lane,
+    }),
   });
 
   // Race: wait for the exec stream to close OR the "result" event from Claude.
@@ -677,13 +732,13 @@ async function runTurn(
   await Promise.race([
     waitForExecStream(stream, exec, (chunk) => {
       handler.write(chunk);
-      if (opts?.captureRaw) rawChunks.push(chunk);
+      if (opts.captureRaw) rawChunks.push(chunk);
     }),
     resultReceived,
   ]);
 
   const result = handler.flush();
-  if (!opts?.captureRaw) return result;
+  if (!opts.captureRaw) return result;
   return { ...result, raw: Buffer.concat(rawChunks).toString() };
 }
 
@@ -810,14 +865,9 @@ export async function processQueuedMessages(
       {
         maxBudgetUsd: run ? run.budgetUsd - (task.totalCostUsd ?? 0) : undefined,
         maxTurns: run?.maxTurns ?? undefined,
-        // Fresh again on a follow-up turn, so a tier changed mid-session
-        // applies from the next turn (issue #166).
-        model: resolveAgentModel(
-          task.kind,
-          config,
-          run?.model ?? null,
-          getSettingsOverrides()
-        ),
+        // Fresh again on a follow-up turn, so a tier or lane changed
+        // mid-session applies from the next turn (issues #166, #172).
+        lane: requireLane(task.kind, run?.model ?? null),
         effort: resolveAgentEffort(task.kind, config, run?.effort ?? null),
         // A generation session's follow-up exec gets a `gh` token too (#62).
         isGenerationSession: isGenerationSession(task),

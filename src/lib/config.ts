@@ -7,7 +7,11 @@ import {
   DEFAULT_QUEUE_HEARTBEAT_STALE_MS,
 } from "./orchestrator/autonomy/budgets";
 import type { FleetHealthThresholds } from "./fleet/health";
-import { normalizeModelTier, tierModelId } from "./model-tiers";
+import {
+  normalizeModelTier,
+  tierModelId,
+  type ModelTier,
+} from "./model-tiers";
 import {
   resolveModelTier,
   type SettingsOverrides,
@@ -57,6 +61,14 @@ export interface AppConfig {
   agentModelReview: string | null;
   /** Optional cheaper-tier override for triage passes; falls back to `agentModel` */
   agentModelTriage: string | null;
+  /**
+   * The deployment's default execution lane (issue #172) — the id of a lane
+   * declared in `lanes.yaml`. Null = fall through to that file's own
+   * preference order, which is the state a fresh deployment is in. A lane
+   * picked on the settings screen outranks this, exactly as a model-tier
+   * override outranks `AGENT_MODEL`.
+   */
+  agentLane: string | null;
   /**
    * Reasoning-effort level the CLI runs an implement pass at — and the base
    * every other pass falls back to (issue #81). The headless CLI exposes this
@@ -137,6 +149,12 @@ export function getConfig(): AppConfig {
   // `claude setup-token`), with ANTHROPIC_API_KEY as an alternative. The old
   // mounted-credentials-file path was retired with the host `~/.claude` mount
   // (#28), so there is nothing to detect on disk here.
+  //
+  // These two variables are the ones the default lane preference reads (issue
+  // #172) — with neither set, both Anthropic-direct lanes are unavailable and
+  // no pass can start. Which lane a pass actually runs on, and which variables
+  // that lane names, is `lanes.yaml`'s answer, not this one; the warning stays
+  // here because it is the boot-time "you have configured nothing" case.
   if (!anthropicApiKey && !claudeCodeOauthToken) {
     console.warn(
       "Warning: No agent Claude auth configured. Set CLAUDE_CODE_OAUTH_TOKEN " +
@@ -150,6 +168,7 @@ export function getConfig(): AppConfig {
     agentModel: process.env.AGENT_MODEL ?? null,
     agentModelReview: process.env.AGENT_MODEL_REVIEW ?? null,
     agentModelTriage: process.env.AGENT_MODEL_TRIAGE ?? null,
+    agentLane: process.env.AGENT_LANE ?? null,
     agentEffort: normalizeEffort(process.env.AGENT_EFFORT),
     agentEffortReview: normalizeEffort(process.env.AGENT_EFFORT_REVIEW),
     agentEffortTriage: normalizeEffort(process.env.AGENT_EFFORT_TRIAGE),
@@ -253,14 +272,47 @@ export function resolveAgentModel(
   ticketModel: string | null,
   overrides: SettingsOverrides
 ): string | null {
+  const { tier, pinnedModel } = resolveAgentModelChoice(
+    kind,
+    config,
+    ticketModel,
+    overrides
+  );
+  return tier !== null ? tierModelId(tier) : pinnedModel;
+}
+
+/**
+ * The same three-layer answer, stopped one step earlier: the **tier** the pass
+ * runs at, before anything decides what that tier means as a model identifier.
+ *
+ * Execution lanes (issue #172) are why this seam exists. A tier is the durable
+ * choice a human makes; which identifier stands behind it is a property of the
+ * lane the pass runs on, so the mapping cannot live here any more — it belongs
+ * to whichever endpoint is about to be called. `resolveAgentModel` above keeps
+ * the pre-lane mapping (`TIER_MODEL_IDS`) for callers with no lane in hand.
+ *
+ * `pinnedModel` is the escape hatch that must keep working: an environment
+ * that names a raw model id rather than a tier (`AGENT_MODEL=claude-opus-4-8`)
+ * has no tier to map, so the id passes through verbatim.
+ */
+export function resolveAgentModelChoice(
+  kind: AgentPassKind,
+  config: AppConfig,
+  ticketModel: string | null,
+  overrides: SettingsOverrides
+): { tier: ModelTier | null; pinnedModel: string | null } {
   if (isWorkPassKind(kind)) {
     // A tier or a legacy alias (`opus`) both resolve; anything else — a raw
     // model id previously recorded on the run row, say — names no tier and
     // falls through to the configured default rather than reaching `--model`.
     const ticketTier = normalizeModelTier(ticketModel);
-    if (ticketTier !== null) return tierModelId(ticketTier);
+    if (ticketTier !== null) return { tier: ticketTier, pinnedModel: null };
   }
-  return resolveModelTier(kind, config, overrides).model;
+  const resolved = resolveModelTier(kind, config, overrides);
+  return {
+    tier: resolved.tier,
+    pinnedModel: resolved.tier === null ? resolved.model : null,
+  };
 }
 
 /**

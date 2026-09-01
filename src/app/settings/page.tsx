@@ -4,6 +4,7 @@ import { ProjectList } from "@/components/project-list";
 import { DockerStatus } from "@/components/docker-status";
 import { KillSwitch } from "@/components/kill-switch";
 import { ModelTierSettings } from "@/components/model-tier-settings";
+import { ExecutionLaneSettings } from "@/components/execution-lane-settings";
 import { getConfig } from "@/lib/config";
 
 /**
@@ -48,6 +49,11 @@ export default function SettingsPage() {
         <section aria-label="Models" className="space-y-3">
           <Eyebrow>Models</Eyebrow>
           <ModelTierSettings />
+        </section>
+
+        <section aria-label="Execution lane" className="space-y-3">
+          <Eyebrow>Execution lane</Eyebrow>
+          <ExecutionLaneSettings />
         </section>
 
         <section aria-label="Projects" className="space-y-3">

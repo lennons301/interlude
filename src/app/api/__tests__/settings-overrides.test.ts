@@ -17,6 +17,8 @@ vi.mock("@/db", () => ({
 import { GET, PATCH } from "@/app/api/settings/overrides/route";
 import { getConfig, resetConfig, resolveAgentModel } from "@/lib/config";
 import { getSettingsOverrides } from "@/lib/settings";
+import { getLaneCatalog, resetLaneCatalog } from "@/lib/lanes/catalog";
+import { resolveLane } from "@/lib/lanes/resolve";
 
 function patch(body: unknown, raw?: string): Request {
   return new Request("http://test/api/settings/overrides", {
@@ -32,15 +34,20 @@ describe("GET/PATCH /api/settings/overrides", () => {
   beforeEach(() => {
     testDb = createTestDb().db;
     process.env.ANTHROPIC_API_KEY = "test-key"; // silence the no-auth warning
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-test";
     process.env.AGENT_MODEL = "claude-opus-4-8";
     delete process.env.AGENT_MODEL_REVIEW;
     delete process.env.AGENT_MODEL_TRIAGE;
+    delete process.env.AGENT_LANE;
+    delete process.env.OPENROUTER_API_KEY;
     resetConfig();
+    resetLaneCatalog();
   });
 
   afterEach(() => {
     process.env = { ...savedEnv };
     resetConfig();
+    resetLaneCatalog();
   });
 
   it("reports every field as falling through on a fresh install", async () => {
@@ -135,6 +142,119 @@ describe("GET/PATCH /api/settings/overrides", () => {
     const res = await PATCH(patch(null, "not json"));
 
     expect(res.status).toBe(400);
+    expect(getSettingsOverrides()).toEqual({});
+  });
+});
+
+/**
+ * The execution-lane half of the same endpoint (issue #172). The lanes are the
+ * repo's own checked-in file — read here rather than stubbed, because "the
+ * screen offers the lanes the fleet would actually run" is the property under
+ * test, and a fixture catalog would prove it about a file nobody ships.
+ */
+describe("execution lanes on /api/settings/overrides", () => {
+  const savedEnv = { ...process.env };
+
+  beforeEach(() => {
+    testDb = createTestDb().db;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-test";
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.AGENT_LANE;
+    resetConfig();
+    resetLaneCatalog();
+  });
+
+  afterEach(() => {
+    process.env = { ...savedEnv };
+    resetConfig();
+    resetLaneCatalog();
+  });
+
+  it("reports the declared lanes, which is primary, and which cannot run", async () => {
+    const state = await (await GET()).json();
+
+    expect(state.laneError).toBeNull();
+    expect(state.lanes).toMatchObject({
+      primaryLaneId: "claude-subscription",
+      source: "preference",
+      override: null,
+      envVar: "AGENT_LANE",
+    });
+    const openrouter = state.lanes.lanes.find(
+      (l: { id: string }) => l.id === "openrouter"
+    );
+    expect(openrouter).toMatchObject({
+      available: false,
+      missingEnvVars: ["OPENROUTER_API_KEY"],
+    });
+  });
+
+  it("never serves a lane secret, only the names of the variables", async () => {
+    // A project API route has previously leaked a stored token in cleartext.
+    process.env.OPENROUTER_API_KEY = "sk-or-v1-should-never-appear";
+    resetConfig();
+    resetLaneCatalog();
+
+    const body = JSON.stringify(await (await GET()).json());
+
+    expect(body).not.toContain("sk-or-v1-should-never-appear");
+    expect(body).not.toContain("sk-ant-oat01-test");
+    expect(body).toContain("OPENROUTER_API_KEY");
+  });
+
+  it("stores a chosen lane, and the next pass resolves onto it", async () => {
+    process.env.OPENROUTER_API_KEY = "sk-or-v1-test";
+    resetConfig();
+    resetLaneCatalog();
+
+    const res = await PATCH(patch({ primaryLane: "openrouter" }));
+
+    expect(res.status).toBe(200);
+    const state = await res.json();
+    expect(state.lanes).toMatchObject({
+      primaryLaneId: "openrouter",
+      source: "override",
+      override: "openrouter",
+    });
+
+    // What the orchestrator itself would resolve, fresh from the row.
+    const catalog = getLaneCatalog();
+    expect(catalog.ok).toBe(true);
+    if (!catalog.ok) return;
+    const resolved = resolveLane({
+      catalog: catalog.catalog,
+      kind: "implement",
+      config: getConfig(),
+      ticketModel: null,
+      overrides: getSettingsOverrides(),
+      env: process.env,
+    });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.lane.id).toBe("openrouter");
+    expect(resolved.lane.baseUrl).toBe("https://openrouter.ai/api");
+    expect(resolved.lane.auth).toEqual({ ANTHROPIC_AUTH_TOKEN: "sk-or-v1-test" });
+  });
+
+  it("refuses a lane that is not declared, storing nothing", async () => {
+    const res = await PATCH(patch({ primaryLane: "kimi" }));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("claude-subscription");
+    expect(getSettingsOverrides()).toEqual({});
+  });
+
+  it("clears the choice back to the file's preference order", async () => {
+    await PATCH(patch({ primaryLane: "anthropic-api" }));
+
+    const state = await (await PATCH(patch({ primaryLane: null }))).json();
+
+    expect(state.lanes).toMatchObject({
+      source: "preference",
+      override: null,
+      primaryLaneId: "claude-subscription",
+    });
     expect(getSettingsOverrides()).toEqual({});
   });
 });

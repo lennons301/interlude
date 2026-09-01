@@ -3,6 +3,7 @@
 import { useState } from "react";
 import {
   Chip,
+  ChipRadio,
   LoadFailure,
   PANEL_PLAIN,
   formatChanged,
@@ -153,10 +154,10 @@ function TierRow({
         </legend>
         <div className="flex flex-wrap items-center gap-1.5">
           {[...field.options, FALL_THROUGH].map((option) => (
-            <TierOption
+            <ChipRadio
               key={option}
               name={field.key}
-              option={option}
+              value={option}
               selected={selected === option}
               disabled={disabled}
               onSelect={() => onChoose(option)}
@@ -200,42 +201,4 @@ function fallback(field: SettingFieldView): string {
   return field.source === "override"
     ? `${field.envVar} ${value}, unused`
     : `from ${field.envVar} ${value}`;
-}
-
-/** One tier choice, in the chip voice the rest of the control room speaks. The
- * radio itself is the control — screen-reader-visible and keyboard-operable —
- * with the chip as its skin. */
-function TierOption({
-  name,
-  option,
-  selected,
-  disabled,
-  onSelect,
-}: {
-  name: string;
-  option: string;
-  selected: boolean;
-  disabled: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <label
-      className={`cursor-pointer rounded-[4px] border px-1.5 py-px font-plex-mono text-[11px] lowercase transition-colors focus-within:border-fl-cool ${
-        selected
-          ? "border-fl-cool/45 bg-fl-cool/13 text-fl-cool"
-          : "border-fl-line text-fl-ink-2 hover:border-fl-line-strong hover:text-fl-ink"
-      } ${disabled ? "opacity-40" : ""}`}
-    >
-      <input
-        type="radio"
-        name={name}
-        value={option}
-        className="sr-only"
-        checked={selected}
-        disabled={disabled}
-        onChange={onSelect}
-      />
-      {option}
-    </label>
-  );
 }

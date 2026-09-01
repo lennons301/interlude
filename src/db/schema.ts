@@ -115,6 +115,13 @@ export const runs = sqliteTable("runs", {
   budgetUsd: real("budget_usd").notNull(),
   // Per-exec turn limit from a ticket's max-turns directive; null = default
   maxTurns: int("max_turns"),
+  // Execution lane the implement pass ran on (issue #172) — the id of a lane
+  // declared in `lanes.yaml`. Recorded so a run's spend stays interpretable:
+  // the same dollar figure means subscription quota on one lane and real money
+  // on another, and without the lane there is no way to tell them apart after
+  // the fact. Set when the implement pass starts; null for a run that predates
+  // lanes, and for an interactive task (which has no run row at all).
+  lane: text("lane"),
   // Model the implement pass ran on (issue #74), so this run's spend is
   // interpretable against its tier. A ticket's `model:` directive (issue #80)
   // pins it from claim time; otherwise it is set when the implement pass
