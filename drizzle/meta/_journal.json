@@ -155,6 +155,13 @@
       "when": 1787097600000,
       "tag": "0021_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1788292853826,
+      "tag": "0022_settings_overrides",
+      "breakpoints": true
     }
   ]
 }

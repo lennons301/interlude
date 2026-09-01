@@ -7,6 +7,11 @@ import {
   type AppConfig,
   type AgentPassKind,
 } from "../config";
+import type { SettingsOverrides } from "../settings-resolver";
+
+/** No UI overrides stored — the state a fresh install is in, where every
+ * field falls through to the environment. */
+const NO_OVERRIDES: SettingsOverrides = {};
 
 /** A config carrying only the fields resolveAgentModel reads. */
 function cfg(models: {
@@ -44,21 +49,21 @@ describe("resolveAgentModel (issue #74)", () => {
       "triage",
       "repair",
     ] as AgentPassKind[]) {
-      expect(resolveAgentModel(kind, c)).toBeNull();
+      expect(resolveAgentModel(kind, c, null, NO_OVERRIDES)).toBeNull();
     }
   });
 
   it("uses AGENT_MODEL as the base for implement, repair and interactive", () => {
     const c = cfg({ agentModel: "base-model" });
-    expect(resolveAgentModel("implement", c)).toBe("base-model");
-    expect(resolveAgentModel("repair", c)).toBe("base-model");
-    expect(resolveAgentModel("interactive", c)).toBe("base-model");
+    expect(resolveAgentModel("implement", c, null, NO_OVERRIDES)).toBe("base-model");
+    expect(resolveAgentModel("repair", c, null, NO_OVERRIDES)).toBe("base-model");
+    expect(resolveAgentModel("interactive", c, null, NO_OVERRIDES)).toBe("base-model");
   });
 
   it("falls back review and triage to the base when they have no override", () => {
     const c = cfg({ agentModel: "base-model" });
-    expect(resolveAgentModel("review", c)).toBe("base-model");
-    expect(resolveAgentModel("triage", c)).toBe("base-model");
+    expect(resolveAgentModel("review", c, null, NO_OVERRIDES)).toBe("base-model");
+    expect(resolveAgentModel("triage", c, null, NO_OVERRIDES)).toBe("base-model");
   });
 
   it("prefers the cheaper-tier overrides for review and triage", () => {
@@ -67,17 +72,17 @@ describe("resolveAgentModel (issue #74)", () => {
       agentModelReview: "review-model",
       agentModelTriage: "triage-model",
     });
-    expect(resolveAgentModel("review", c)).toBe("review-model");
-    expect(resolveAgentModel("triage", c)).toBe("triage-model");
+    expect(resolveAgentModel("review", c, null, NO_OVERRIDES)).toBe("review-model");
+    expect(resolveAgentModel("triage", c, null, NO_OVERRIDES)).toBe("triage-model");
     // Overrides never leak onto the base kinds.
-    expect(resolveAgentModel("implement", c)).toBe("base-model");
+    expect(resolveAgentModel("implement", c, null, NO_OVERRIDES)).toBe("base-model");
   });
 
   it("lets an override apply even when the base is unset", () => {
     const c = cfg({ agentModel: null, agentModelReview: "review-model" });
-    expect(resolveAgentModel("review", c)).toBe("review-model");
-    expect(resolveAgentModel("triage", c)).toBeNull();
-    expect(resolveAgentModel("implement", c)).toBeNull();
+    expect(resolveAgentModel("review", c, null, NO_OVERRIDES)).toBe("review-model");
+    expect(resolveAgentModel("triage", c, null, NO_OVERRIDES)).toBeNull();
+    expect(resolveAgentModel("implement", c, null, NO_OVERRIDES)).toBeNull();
   });
 });
 
@@ -193,14 +198,18 @@ describe("getConfig effort env validation (issue #81)", () => {
 describe("resolveAgentModel ticket model override (issue #80)", () => {
   it("lets a ticket model override the base for the work-carrying kinds", () => {
     const c = cfg({ agentModel: "base-model" });
-    expect(resolveAgentModel("implement", c, "opus")).toBe("opus");
-    expect(resolveAgentModel("repair", c, "opus")).toBe("opus");
-    expect(resolveAgentModel("interactive", c, "opus")).toBe("opus");
+    // `opus` is the legacy alias for the heavy tier, which reaches the CLI
+    // as `opus` — so a ticket written before tiers existed is unchanged.
+    expect(resolveAgentModel("implement", c, "opus", NO_OVERRIDES)).toBe("opus");
+    expect(resolveAgentModel("repair", c, "opus", NO_OVERRIDES)).toBe("opus");
+    expect(resolveAgentModel("interactive", c, "heavy", NO_OVERRIDES)).toBe(
+      "opus"
+    );
   });
 
   it("overrides even when no base model is configured", () => {
     const c = cfg({ agentModel: null });
-    expect(resolveAgentModel("implement", c, "sonnet")).toBe("sonnet");
+    expect(resolveAgentModel("implement", c, "sonnet", NO_OVERRIDES)).toBe("sonnet");
   });
 
   it("never lets a ticket model touch the reviewer's or triage's tier", () => {
@@ -209,13 +218,15 @@ describe("resolveAgentModel ticket model override (issue #80)", () => {
       agentModelReview: "review-model",
       agentModelTriage: "triage-model",
     });
-    expect(resolveAgentModel("review", c, "opus")).toBe("review-model");
-    expect(resolveAgentModel("triage", c, "opus")).toBe("triage-model");
+    expect(resolveAgentModel("review", c, "opus", NO_OVERRIDES)).toBe("review-model");
+    expect(resolveAgentModel("triage", c, "opus", NO_OVERRIDES)).toBe("triage-model");
   });
 
   it("falls back to the base when the override is null", () => {
     const c = cfg({ agentModel: "base-model" });
-    expect(resolveAgentModel("implement", c, null)).toBe("base-model");
-    expect(resolveAgentModel("implement", c)).toBe("base-model");
+    expect(resolveAgentModel("implement", c, null, NO_OVERRIDES)).toBe("base-model");
+    expect(resolveAgentModel("implement", c, null, NO_OVERRIDES)).toBe(
+      "base-model"
+    );
   });
 });

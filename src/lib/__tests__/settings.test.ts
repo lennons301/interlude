@@ -28,6 +28,7 @@ describe("fleet settings — the global autonomy kill switch", () => {
   it("defaults to not paused on an install that has never written a setting", () => {
     expect(getFleetSettings()).toEqual({
       globalAutonomyPaused: false,
+      overrides: {},
       updatedAt: null,
     });
     expect(isGlobalAutonomyPaused()).toBe(false);
@@ -36,6 +37,7 @@ describe("fleet settings — the global autonomy kill switch", () => {
   it("engages the switch and reads it back", () => {
     expect(setGlobalAutonomyPaused(true, NOW)).toEqual({
       globalAutonomyPaused: true,
+      overrides: {},
       updatedAt: NOW,
     });
 
@@ -51,6 +53,7 @@ describe("fleet settings — the global autonomy kill switch", () => {
 
     expect(getFleetSettings()).toEqual({
       globalAutonomyPaused: false,
+      overrides: {},
       updatedAt: later,
     });
   });

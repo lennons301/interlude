@@ -75,7 +75,7 @@ describe("parseTicketDirectives", () => {
       checkpoint: "pause before deploy",
       workflow: "tdd",
       effort: "high",
-      model: "opus",
+      model: "heavy",
     });
   });
 
@@ -179,9 +179,20 @@ describe("parseTicketDirectives", () => {
     expect(parseTicketDirectives("## Workflow\neffort:").effort).toBeNull();
   });
 
-  it("parses a model directive and lowercases the alias", () => {
-    expect(parseTicketDirectives("## Workflow\nmodel: sonnet").model).toBe("sonnet");
-    expect(parseTicketDirectives("## Workflow\nmodel: HAIKU").model).toBe("haiku");
+  it("parses a model directive as a tier, case-insensitively", () => {
+    expect(parseTicketDirectives("## Workflow\nmodel: standard").model).toBe(
+      "standard"
+    );
+    expect(parseTicketDirectives("## Workflow\nmodel: LIGHT").model).toBe("light");
+  });
+
+  it("keeps the legacy vendor names working as tier aliases (issue #166)", () => {
+    // A ticket written before tiers existed must not break.
+    expect(parseTicketDirectives("## Workflow\nmodel: opus").model).toBe("heavy");
+    expect(parseTicketDirectives("## Workflow\nmodel: sonnet").model).toBe(
+      "standard"
+    );
+    expect(parseTicketDirectives("## Workflow\nmodel: HAIKU").model).toBe("light");
   });
 
   it("ignores a model value that is not on the allowlist", () => {
@@ -195,7 +206,7 @@ describe("parseTicketDirectives", () => {
 
   it("takes the first model when the directive repeats", () => {
     expect(parseTicketDirectives("## Workflow\nmodel: opus\nmodel: haiku").model).toBe(
-      "opus"
+      "heavy"
     );
   });
 });
