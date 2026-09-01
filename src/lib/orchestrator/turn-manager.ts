@@ -15,7 +15,6 @@ import {
 } from "../docker/container-manager";
 import { checkMemoryAdmission } from "./capacity";
 import { runBoundedProbe } from "../timeout";
-import { DOCKER_PROBE_TIMEOUT_MS } from "../docker/agent-containers";
 import { createOutputHandler, type TurnResult } from "./output-parser";
 import { getStreamRecorder } from "./stream-recorder";
 import { parseReviewVerdict } from "./autonomy/verdict";
@@ -631,6 +630,19 @@ export async function startTask(taskId: string): Promise<void> {
 }
 
 /**
+ * How long the recorder will wait for the daemon to say what an exec exited
+ * with (issue #165). Deliberately *not* the shared `DOCKER_PROBE_TIMEOUT_MS`,
+ * and shorter than it: every other bounded Docker probe in the fleet is
+ * answering a question something decides on — admission, occupancy,
+ * container existence — and can justify five seconds of patience. This one
+ * fills in a field of a forensic log, on the completion path of every turn the
+ * fleet runs, so it may not spend a decision's patience. A daemon too busy to
+ * answer in a second leaves the field `null`, which the log already has a
+ * meaning for.
+ */
+const EXIT_CODE_OBSERVATION_TIMEOUT_MS = 1000;
+
+/**
  * Ask the daemon what a finished exec exited with, bounded and best-effort
  * (issue #165) — evidence for the passive recorder, never a decision input.
  *
@@ -638,16 +650,16 @@ export async function startTask(taskId: string): Promise<void> {
  * honest: this is called the moment the turn settles, and `runTurn` deliberately
  * returns as soon as the terminal `result` event arrives rather than waiting for
  * the exec to close, because a background dev server can hold the stream open
- * long after Claude is done. Bounded on the shared Docker-probe timeout for the
- * usual #115/#128 reason: a hung daemon connection has no timeout of its own,
- * and nothing in the recorder's path may stall a turn.
+ * long after Claude is done. Bounded for the usual #115/#128 reason — a hung
+ * daemon connection has no timeout of its own — and nothing in the recorder's
+ * path may stall a turn.
  */
 async function observeExecExitCode(exec: {
   inspect: () => Promise<{ ExitCode?: number | null }>;
 }): Promise<number | null> {
   const outcome = await runBoundedProbe(
     () => exec.inspect(),
-    DOCKER_PROBE_TIMEOUT_MS
+    EXIT_CODE_OBSERVATION_TIMEOUT_MS
   );
   return outcome.ok ? (outcome.value.ExitCode ?? null) : null;
 }
