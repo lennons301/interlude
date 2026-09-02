@@ -511,6 +511,26 @@ export function buildImplementPrompt(ticket: ImplementTicket): string {
 }
 
 /**
+ * Where a resume preamble ends and the pass's own brief begins (issue #169).
+ *
+ * A marker rather than a convention, because an attempt may be resumed several
+ * times and each resume is built from the *last* pass's prompt: without
+ * something to cut on, resume 3 would open with three stacked preambles
+ * counting down from three different numbers.
+ */
+export const RESUME_PREAMBLE_END = "--- END RESUME NOTE ---";
+
+/** A prompt with any earlier resume preamble taken off, so what remains is the
+ * pass's own brief. Exported for the test that a twice-resumed prompt still
+ * carries exactly one preamble. */
+export function stripResumePreamble(prompt: string): string {
+  const end = prompt.lastIndexOf(RESUME_PREAMBLE_END);
+  return end === -1
+    ? prompt
+    : prompt.slice(end + RESUME_PREAMBLE_END.length).trimStart();
+}
+
+/**
  * The prompt a resumed pass opens with (issue #169) — the pause's own preamble
  * followed by the pass's original prompt, verbatim.
  *
@@ -550,6 +570,10 @@ export function buildResumePrompt(args: {
       `starting the work again. The pause cost the ticket no attempt, so ` +
       `nothing about the brief below has changed.`,
     ``,
-    args.originalPrompt,
+    RESUME_PREAMBLE_END,
+    ``,
+    // The pass's own brief — with any earlier resume's preamble stripped, so a
+    // third resume does not open with three countdowns.
+    stripResumePreamble(args.originalPrompt),
   ].join("\n");
 }

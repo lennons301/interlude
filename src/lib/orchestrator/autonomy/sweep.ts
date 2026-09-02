@@ -700,24 +700,36 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
  * pretending to be claimed.
  */
 function gatherPausedRuns(allRuns: Array<typeof runs.$inferSelect>): PausedRun[] {
-  return allRuns
-    .filter((run) => run.status === "rate_limited")
-    .map((run) => ({
-      runId: run.id,
-      issueRef: run.githubIssue,
-      resumeAfter: run.resumeAfter,
-      resumesMade: run.resumeCount,
-      hasLiveTask: db
-        .select({ id: tasks.id })
-        .from(tasks)
-        .where(
-          and(
-            eq(tasks.runId, run.id),
-            inArray(tasks.status, ["queued", "running"])
-          )
+  const paused = allRuns.filter((run) => run.status === "rate_limited");
+  if (paused.length === 0) return [];
+
+  // One query for every paused run, as the sibling gatherers do — a sweep runs
+  // every 30 seconds and its cost should not scale with how walled the account
+  // happens to be.
+  const resuming = new Set(
+    db
+      .select({ runId: tasks.runId })
+      .from(tasks)
+      .where(
+        and(
+          inArray(
+            tasks.runId,
+            paused.map((run) => run.id)
+          ),
+          inArray(tasks.status, ["queued", "running"])
         )
-        .all().length > 0,
-    }));
+      )
+      .all()
+      .map((task) => task.runId)
+  );
+
+  return paused.map((run) => ({
+    runId: run.id,
+    issueRef: run.githubIssue,
+    resumeAfter: run.resumeAfter,
+    resumesMade: run.resumeCount,
+    hasLiveTask: resuming.has(run.id),
+  }));
 }
 
 /**

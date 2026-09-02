@@ -94,6 +94,20 @@ function defaultDir(): string {
 }
 
 /**
+ * The largest transcript worth keeping, and the reason there is a limit at all:
+ * this store shares the `/data` volume with the SQLite database, exactly as the
+ * stream recorder's log does, so it may not grow without a ceiling.
+ *
+ * Refused rather than truncated, because half a transcript is not a smaller
+ * transcript — it is a conversation the harness would resume into. A pass whose
+ * transcript is over the ceiling takes the ordinary fallback (same branch,
+ * prior context lost), which is a real answer; a truncated one would not be.
+ * 32 MiB is far past any transcript observed (the #165 spike's was ~15 KB after
+ * a full turn), so this is a runaway guard rather than a policy.
+ */
+export const MAX_TRANSCRIPT_BYTES = 32 * 1024 * 1024;
+
+/**
  * Keep a paused run's transcript. Overwrites any earlier one: a run that
  * pauses twice has one conversation, and the later copy contains the earlier.
  *
@@ -107,6 +121,14 @@ export function saveTranscript(
   contents: Buffer | string,
   dir: string = defaultDir()
 ): boolean {
+  const size = Buffer.byteLength(contents);
+  if (size > MAX_TRANSCRIPT_BYTES) {
+    console.warn(
+      `[transcripts] Not keeping run ${runId}'s transcript: ${size} bytes is ` +
+        `past the ${MAX_TRANSCRIPT_BYTES}-byte ceiling`
+    );
+    return false;
+  }
   try {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(transcriptPath(runId, dir), contents);

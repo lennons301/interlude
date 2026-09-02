@@ -8,7 +8,7 @@ import {
   AGENT_CONTAINER_NAME_PREFIX,
   DOCKER_PROBE_TIMEOUT_MS,
 } from "./agent-containers";
-import { runBoundedProbe } from "../timeout";
+import { raceWithTimeout, runBoundedProbe, TIMED_OUT } from "../timeout";
 
 /**
  * How setup gets onto `$GIT_BRANCH`:
@@ -390,13 +390,24 @@ export async function execAgentTurn(options: {
 }
 
 /**
+ * How long a single-file transfer in or out of a container may take before the
+ * caller stops waiting on it (issue #151's rule, applied to #169's copies).
+ *
+ * Generous, because the work is real: a long pass's transcript is megabytes
+ * moving through an exec on a 2-vCPU box. The bound exists for the other case —
+ * a daemon that stops answering — because both callers sit on paths that must
+ * not freeze: the pause path, which is protecting a ticket's attempt, and the
+ * start of a resumed pass.
+ */
+const FILE_TRANSFER_TIMEOUT_MS = 60_000;
+
+/**
  * Wait for an exec to finish and report its exit code.
  *
  * Both signals, for the reason every exec in this file uses both: the stream
  * ending is the fast path, and the poll is what covers a stream that never
  * ends (which is the normal case for a demuxed or hijacked attach — the socket
- * outlives the process). Bounded by neither, deliberately: these execs are a
- * `cat` of one file, and the container itself is the bound.
+ * outlives the process).
  */
 async function awaitExecExit(
   exec: Docker.Exec,
@@ -439,25 +450,40 @@ async function awaitExecExit(
 /**
  * Read one file out of a container, verbatim (issue #169).
  *
- * Null means "no such file" (or an unreadable one), which is a state the
- * caller has an answer for — a paused pass whose transcript cannot be copied
- * out resumes on the same branch with its context declared lost — so this
- * reports rather than throws.
+ * Null means "no such file", "unreadable", or "not read whole" — one state,
+ * because the caller has one answer for all three: a paused pass whose
+ * transcript cannot be copied out resumes on the same branch with its context
+ * declared lost. So this reports rather than throws, and a partial read is
+ * reported as no read at all.
  *
- * Two details make the bytes trustworthy. The exec runs with `Tty: true`, so
- * the daemon hands back a **raw** stream rather than Docker's multiplexed
- * frames, which no caller here could safely strip out of file content. A TTY
- * then rewrites newlines, so the file is read as `base64` and decoded on this
- * side: one long line, no newlines to rewrite, and byte-exact either way. The
- * path travels in the environment rather than the command line, so nothing in
- * a session id can reach `bash` as syntax.
+ * Three details make the bytes trustworthy:
+ *
+ * - The exec runs with `Tty: true`, so the daemon hands back a **raw** stream
+ *   rather than Docker's multiplexed frames, which no caller here could safely
+ *   strip out of file content.
+ * - A TTY rewrites newlines, so the file is read as `base64` and decoded on
+ *   this side: one long line, no newlines to rewrite, byte-exact either way.
+ * - The command prints the file's **size** after the payload, and the decode is
+ *   checked against it. Waiting on an exec is a race between the process
+ *   exiting and its output arriving, and `Buffer.from(halfALine, "base64")`
+ *   decodes happily — so without the check a large transcript could be stored
+ *   half-copied and restored into the next container, which is precisely the
+ *   failure the fallback exists to avoid. A truncated read loses the trailing
+ *   size and fails the check.
+ *
+ * The path travels in the environment rather than the command line, so nothing
+ * in a session id can reach `bash` as syntax.
  */
 export async function readContainerFile(
   container: Docker.Container,
   filePath: string
 ): Promise<Buffer | null> {
   const exec = await container.exec({
-    Cmd: ["bash", "-c", 'base64 -w0 -- "$INTERLUDE_FILE"'],
+    Cmd: [
+      "bash",
+      "-c",
+      'base64 -w0 -- "$INTERLUDE_FILE" && printf "\n%s\n" "$(wc -c < "$INTERLUDE_FILE")"',
+    ],
     Env: [`INTERLUDE_FILE=${filePath}`],
     AttachStdout: true,
     AttachStderr: true,
@@ -468,13 +494,36 @@ export async function readContainerFile(
   const chunks: Buffer[] = [];
   stream.on("data", (chunk: Buffer) => chunks.push(chunk));
 
-  const exitCode = await awaitExecExit(exec, stream);
+  // Bounded like every other outbound call the orchestrator awaits (issue
+  // #151): a daemon that stops answering must not hold the pause that is
+  // protecting a ticket's attempt. A read that timed out is a read that
+  // produced nothing, which is a state this function already reports.
+  const exitCode = await raceWithTimeout(
+    awaitExecExit(exec, stream),
+    FILE_TRANSFER_TIMEOUT_MS
+  );
+  if (exitCode === TIMED_OUT) {
+    console.warn(`[docker] Reading ${filePath} out of the container timed out`);
+    return null;
+  }
   if (exitCode !== 0) return null;
 
-  // Whitespace is the TTY's, never the payload's: `base64 -w0` emits one line.
-  const encoded = Buffer.concat(chunks).toString("utf8").replace(/\s+/g, "");
-  if (encoded === "") return null;
-  return Buffer.from(encoded, "base64");
+  // Whitespace is the TTY's, never the payload's: `base64 -w0` emits one line,
+  // and the size follows it on its own.
+  const parts = Buffer.concat(chunks).toString("utf8").trim().split(/\s+/);
+  const declaredSize = Number(parts.pop());
+  const encoded = parts.join("");
+  if (encoded === "" || !Number.isInteger(declaredSize)) return null;
+
+  const bytes = Buffer.from(encoded, "base64");
+  if (bytes.length !== declaredSize) {
+    console.warn(
+      `[docker] Read ${bytes.length} of ${declaredSize} bytes of ${filePath} — ` +
+        "discarding a partial copy"
+    );
+    return null;
+  }
+  return bytes;
 }
 
 /**
@@ -514,7 +563,13 @@ export async function writeContainerFile(
   stream.write(contents);
   stream.end();
 
-  const exitCode = await awaitExecExit(exec, stream);
+  const exitCode = await raceWithTimeout(
+    awaitExecExit(exec, stream),
+    FILE_TRANSFER_TIMEOUT_MS
+  );
+  if (exitCode === TIMED_OUT) {
+    throw new Error(`Writing ${filePath} into the container timed out`);
+  }
   if (exitCode !== 0) {
     throw new Error(`Writing ${filePath} into the container failed (exit ${exitCode})`);
   }

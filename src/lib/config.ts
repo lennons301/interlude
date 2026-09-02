@@ -1,7 +1,6 @@
 import {
   ALLOWED_TICKET_EFFORTS,
   DEFAULT_ATTEMPT_BUDGET_USD,
-  MAX_RESUMES_CEILING,
   DEFAULT_OCCUPANCY_DIVERGED_MS,
   DEFAULT_OWED_REVIEW_STALL_MS,
   DEFAULT_PICKUP_WEDGED_MS,
@@ -10,32 +9,38 @@ import {
 import type { FleetHealthThresholds } from "./fleet/health";
 import { normalizeModelTier, type ModelTier } from "./model-tiers";
 import {
+  SETTINGS_FIELDS,
   resolveModelTier,
+  type SettingKey,
   type SettingsOverrides,
 } from "./settings-resolver";
 
 /**
- * Parse an env value that is a whole count, bounded by a ceiling. Null covers
- * both "unset" and "unusable": a blank, non-numeric, negative or over-ceiling
- * value falls through to the built-in default rather than reaching a bound as
- * a NaN — the same defensiveness `normalizeEffort` applies to a closed enum,
- * for the same reason (this value decides when a ticket goes to a human).
+ * Parse a settable count from the environment against the *same* rules the
+ * settings screen writes it by — the field's own `normalize` from the registry
+ * (issue #166), not a second copy of the digits-and-ceiling logic. That is what
+ * makes "the environment and the UI accept exactly the same values" true rather
+ * than asserted, so an operator cannot set through Doppler a value the screen
+ * would refuse.
+ *
+ * Null covers both "unset" and "unusable": a blank, non-numeric, negative or
+ * over-ceiling value falls through to the built-in default rather than reaching
+ * a bound as a NaN — the same defensiveness `normalizeEffort` applies to a
+ * closed enum, and for the same reason (this value decides when a ticket goes
+ * to a human).
  */
-function countEnv(raw: string | undefined, ceiling: number): number | null {
+function countEnv(raw: string | undefined, key: SettingKey): number | null {
   if (raw == null || raw === "") return null;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < 0) {
-    console.warn(`Warning: ignoring non-integer count "${raw}" — using the default.`);
-    return null;
-  }
-  if (value > ceiling) {
+  const spec = SETTINGS_FIELDS[key];
+  const normalized = spec.normalize(raw, {});
+  if (normalized === null) {
     console.warn(
-      `Warning: ignoring count "${raw}" — above the ceiling of ${ceiling}. ` +
+      `Warning: ignoring "${raw}" — expected ${spec.vocabulary({})}. ` +
         "Using the default."
     );
     return null;
   }
-  return value;
+  return Number(normalized);
 }
 
 /** Parse an env value expressed in minutes into ms, falling back to a default.
@@ -230,7 +235,7 @@ export function getConfig(): AppConfig {
     autonomyEnabled: process.env.AUTONOMY_ENABLED === "true",
     maxResumesPerAttempt: countEnv(
       process.env.MAX_RESUMES_PER_ATTEMPT,
-      MAX_RESUMES_CEILING
+      "maxResumesPerAttempt"
     ),
     autonomyAllowedAuthors: (process.env.AUTONOMY_ALLOWED_AUTHORS ?? "")
       .split(",")

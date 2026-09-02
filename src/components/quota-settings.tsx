@@ -105,7 +105,7 @@ export function QuotaPanel({
 /** What the fleet actually does — including the case the provenance line alone
  * would leave unexplained: with the variable unset, the number in force comes
  * from the built-in default, not from nowhere. */
-export function effective(field: SettingCountView): string {
+function effective(field: SettingCountView): string {
   const plural = field.value === 1 ? "resume" : "resumes";
   const origin =
     field.source === "environment" && field.envValue === null

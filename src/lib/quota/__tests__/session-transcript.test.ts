@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  MAX_TRANSCRIPT_BYTES,
   containerTranscriptDir,
   containerTranscriptPath,
   discardTranscript,
@@ -87,6 +88,16 @@ describe("keeping and forgetting a run's transcript", () => {
     saveTranscript("run-1", "first\nsecond\n", dir);
 
     expect(readTranscript("run-1", dir)?.toString("utf8")).toBe("first\nsecond\n");
+  });
+
+  it("refuses a transcript past the ceiling rather than truncating it", () => {
+    // Half a transcript is not a smaller transcript — it is a conversation the
+    // harness would resume into. Refusing leaves the caller with the fallback
+    // it already knows how to take.
+    const huge = "x".repeat(MAX_TRANSCRIPT_BYTES + 1);
+
+    expect(saveTranscript("run-1", huge, dir)).toBe(false);
+    expect(hasTranscript("run-1", dir)).toBe(false);
   });
 
   it("reports a missing transcript rather than throwing", () => {

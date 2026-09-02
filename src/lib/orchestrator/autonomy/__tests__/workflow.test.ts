@@ -440,6 +440,24 @@ describe("buildResumePrompt — reopening a paused pass (issue #169)", () => {
     );
   });
 
+  it("carries one preamble however often the pass has been resumed", () => {
+    // Each resume is built from the *last* pass's prompt, so without the cut
+    // resume 3 would open with three preambles counting down from three
+    // different numbers.
+    const once = buildResumePrompt(RESUMED);
+    const twice = buildResumePrompt({
+      ...RESUMED,
+      originalPrompt: once,
+      resume: 2,
+    });
+
+    expect(twice.split("This pass was paused")).toHaveLength(2);
+    expect(twice).toContain("resume 2 of 3");
+    expect(twice).not.toContain("resume 1 of 3");
+    // And the brief is still there, which is the point of carrying it.
+    expect(twice).toContain(TICKET.issueBody);
+  });
+
   it("tells the pass to look at what is already done", () => {
     // The one instruction that stops a resumed pass redoing work it pushed.
     expect(buildResumePrompt(RESUMED)).toContain("git log");

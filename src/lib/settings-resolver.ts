@@ -531,11 +531,12 @@ export function resolveResumeBound(
   const key: SettingKey = "maxResumesPerAttempt";
   const spec = SETTINGS_FIELDS[key];
   const { envVar, value: envValue } = spec.envDefault(config);
+  // Through the field's own validator, and *its* answer is what is read: a
+  // stored value the vocabulary no longer accepts falls through to the
+  // environment rather than reaching a bound.
   const stored = overrides[key];
-  const override =
-    stored !== undefined && spec.normalize(stored, {}) !== null
-      ? Number(stored)
-      : null;
+  const normalized = stored === undefined ? null : spec.normalize(stored, {});
+  const override = normalized === null ? null : Number(normalized);
 
   return {
     key,

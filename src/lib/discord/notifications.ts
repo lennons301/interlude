@@ -701,6 +701,8 @@ export async function notifyAttemptsExhausted(
   channelId: string | null,
   payload: {
     issueRef: string;
+    /** Attempts *failed*, which is what the `attempts` reason counts down. The
+     * quota-pause reason (issue #169) does not read it: no attempt failed. */
     attempts: number;
     interruptions: number;
     /** Quota resumes spent, for the `quota-pauses` reason (issue #169) */
@@ -732,7 +734,7 @@ export async function notifyAttemptsExhausted(
       embed
         .setTitle(`Quota pauses spent — ${payload.issueRef} needs you`)
         .setDescription(
-          `Attempt ${payload.attempts} kept being refused by the account's quota ` +
+          `This attempt kept being refused by the account's quota ` +
             `(${payload.resumes ?? 0} resumes spent, ` +
             `$${payload.totalSpendUsd.toFixed(2)} autonomous spend). The ticket is ` +
             `now \`ready-for-human\` — but a quota pause spends no attempt, so ` +
