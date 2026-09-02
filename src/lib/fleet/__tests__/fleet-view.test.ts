@@ -30,6 +30,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     failingChecksByRun: null,
     quota: null,
     quotaLane: null,
+    quotaThresholdPercent: 90,
     ...overrides,
   };
 }
@@ -63,6 +64,7 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     ciRepairCount: 0,
     reviewVerdict: null,
     reviewResult: null,
+    resumeAfter: null,
     claimedAt: TODAY_9AM,
     startedAt: TODAY_9AM,
     finishedAt: null,
@@ -424,6 +426,79 @@ describe("buildFleetView — why pickup is paused", () => {
     expect(view.spend.capPaused).toBe(true);
     // The cap still raises its own needs-you card — the switch hides nothing
     expect(view.needsYou.map((i) => i.cause)).toContain("cap");
+  });
+
+  // The quota admission gate (issue #171). The banner reads the same pure gate
+  // `decideNext` refuses pickup with, against the same threshold, because the
+  // two surfaces disagreeing about whether work is being claimed is exactly
+  // the confusion this field exists to remove.
+  describe("the quota gate", () => {
+    const walled = (
+      overrides: Partial<NonNullable<FleetRows["quota"]>> = {}
+    ): NonNullable<FleetRows["quota"]> => ({
+      status: "allowed_warning",
+      rateLimitType: "five_hour",
+      utilization: 94,
+      resetsAt: new Date(NOW.getTime() + 60 * 60_000),
+      overageStatus: null,
+      overageResetsAt: null,
+      isUsingOverage: null,
+      overageInUse: null,
+      observedAt: new Date(NOW.getTime() - 60_000),
+      ...overrides,
+    });
+
+    it("names the quota gate, with both numbers, when the window is nearly spent", () => {
+      const view = buildFleetView(baseRows({ quota: walled() }));
+
+      expect(view.pickupPaused?.reason).toBe("quota-gate");
+      expect(view.pickupPaused?.body).toContain("94%");
+      expect(view.pickupPaused?.body).toContain("90%");
+      expect(view.pickupPaused?.body).toMatch(/5-hour window/);
+      // What is *not* held is the other half of the answer
+      expect(view.pickupPaused?.body).toMatch(/in flight continues/i);
+    });
+
+    it("words an outright rejection as the wall it is", () => {
+      const view = buildFleetView(
+        baseRows({ quota: walled({ status: "rejected", utilization: null }) })
+      );
+
+      expect(view.pickupPaused?.reason).toBe("quota-gate");
+      expect(view.pickupPaused?.body).toMatch(/being rejected/i);
+    });
+
+    it("holds nothing once the observed window has reset", () => {
+      const view = buildFleetView(
+        baseRows({
+          quota: walled({ resetsAt: new Date(NOW.getTime() - 1) }),
+        })
+      );
+
+      expect(view.pickupPaused).toBeNull();
+    });
+
+    it("follows the threshold in force, not a compiled-in one", () => {
+      expect(
+        buildFleetView(
+          baseRows({ quota: walled(), quotaThresholdPercent: 95 })
+        ).pickupPaused
+      ).toBeNull();
+    });
+
+    it("names the cap ahead of the gate when both hold", () => {
+      // Of the two self-lifting holds, the cap's ceiling is the one a human
+      // chose. The Quota tile keeps saying its own piece either way.
+      const view = buildFleetView(
+        baseRows({
+          quota: walled(),
+          runs: [makeRun({ id: "r1", totalCostUsd: 512 })],
+        })
+      );
+
+      expect(view.pickupPaused?.reason).toBe("daily-cap");
+      expect(view.quota?.utilization).toBe(94);
+    });
   });
 });
 
@@ -1283,6 +1358,7 @@ describe("buildFleetView — running", () => {
         turns: 4,
         startedAt: TODAY_9AM.toISOString(),
         spend: { usd: 7.8, budgetUsd: 20 },
+        paused: null,
       },
     ]);
   });
@@ -1301,6 +1377,107 @@ describe("buildFleetView — running", () => {
       { name: "merge", state: "todo" },
     ]);
     expect(view.running[0].mode).toBe("afk");
+  });
+
+  it("shows a quota-paused run in place, with when it resumes (issue #168)", () => {
+    // A run walled by the account's quota is still the fleet's work in
+    // progress — it holds its ticket and its branch — so it stays on the board
+    // rather than vanishing between the wall and the reset. The card carries
+    // the clock it is waiting on; the countdown is the client's.
+    const resumeAfter = new Date(2026, 7, 1, 17, 0, 0);
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "rate_limited",
+            resumeAfter,
+          }),
+        ],
+      })
+    );
+
+    expect(view.running).toHaveLength(1);
+    expect(view.running[0]).toMatchObject({
+      runId: "r1",
+      paused: { reason: "rate-limited", resumeAfter: resumeAfter.toISOString() },
+      // It resumes from where it stopped, which is the implement pass.
+      phases: [
+        { name: "implement", state: "current" },
+        { name: "review", state: "todo" },
+        { name: "merge", state: "todo" },
+      ],
+    });
+  });
+
+  it("never puts a quota-paused run in needs-you", () => {
+    // The deliberate omission: nobody has to do anything about a quota window,
+    // and "needs you" means a human decision is required. A paused run leaking
+    // in there would train the owner to ignore the section.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "rate_limited",
+            resumeAfter: new Date(2026, 7, 1, 17, 0, 0),
+          }),
+        ],
+      })
+    );
+
+    expect(view.needsYou).toEqual([]);
+  });
+
+  it("holds no slot while it is paused", () => {
+    // The pause tore the container down (a parked one holds memory without
+    // holding a slot — the 2026-08-04 wedge), so the run's task is terminal and
+    // occupancy is untouched. A paused card next to a used slot would be the
+    // dashboard reporting a container that no longer exists.
+    const view = buildFleetView(
+      baseRows({
+        slots: 2,
+        projects: [makeProject({ id: "p1" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "rate_limited",
+            resumeAfter: new Date(2026, 7, 1, 17, 0, 0),
+          }),
+        ],
+        tasks: [
+          makeTask({
+            id: "t1",
+            projectId: "p1",
+            runId: "r1",
+            kind: "implement",
+            status: "failed",
+            containerStatus: null,
+          }),
+        ],
+      })
+    );
+
+    expect(view.running).toHaveLength(1);
+    expect(view.slots.used).toBe(0);
+  });
+
+  it("shows no pause on a rate-limited row carrying no reset time", () => {
+    // Defensive: a row that says it is paused but names no clock is a run
+    // waiting on nothing, and the card refuses to claim otherwise.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", status: "rate_limited" })],
+      })
+    );
+
+    expect(view.running[0].paused).toBeNull();
   });
 
   it("marks a supervised run's mode chip", () => {
@@ -1346,6 +1523,7 @@ describe("buildFleetView — running", () => {
         turns: 3,
         startedAt: TODAY_9AM.toISOString(),
         spend: { usd: 1.23, budgetUsd: null },
+        paused: null,
       },
     ]);
   });
@@ -1676,6 +1854,7 @@ describe("buildFleetView — running", () => {
         turns: 1,
         startedAt: TODAY_9AM.toISOString(),
         spend: { usd: 0.8, budgetUsd: 2 },
+        paused: null,
       },
     ]);
   });

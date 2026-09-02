@@ -8,16 +8,15 @@ import { db } from "@/db";
 import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, eq, gte, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { getConfig } from "../config";
-import { getSettingsOverrides, isGlobalAutonomyPaused } from "../settings";
+import { getFleetSettings } from "../settings";
+import { resolveQuotaThreshold } from "../settings-resolver";
 import { getCapacity } from "../orchestrator/capacity";
 import { getBacklogByProject } from "./backlog";
 import { getNeedsHumanByProject } from "./needs-human";
 import { getFleetHealth } from "./health-store";
 import { getFailingChecks } from "./failing-checks";
 import { getQuotaObservation } from "../quota/quota-store";
-import { getLaneCatalog } from "../lanes/catalog";
-import { findLane } from "../lanes/lane-config";
-import { choosePrimaryLane } from "../lanes/resolve";
+import { currentPrimaryLane } from "../lanes/primary-lane";
 import type { FleetLaneRow } from "./fleet-view";
 import { DAILY_AUTONOMOUS_CAP_USD } from "../orchestrator/autonomy/budgets";
 import {
@@ -30,7 +29,19 @@ const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export async function loadFleetRows(now: Date): Promise<FleetRows> {
   const windowStart = new Date(now.getTime() - RECENT_WINDOW_MS);
-  const primaryLane = primaryLaneRow();
+  // One read of the settings row per view build, for every runtime flag it
+  // carries — the kill switch, the quota threshold override and the chosen
+  // execution lane — exactly as the sweep reads it each tick, so the dashboard
+  // reflects a change on its next SSE push with no restart.
+  const fleetSettings = getFleetSettings();
+  // The lane a pass would run on right now (issue #175): the quota row is
+  // keyed by lane, so the dashboard must read the same lane's observation the
+  // sweep's admission gate does — see `currentPrimaryLane`.
+  const primary = currentPrimaryLane(fleetSettings.overrides);
+  const primaryLane: FleetLaneRow | null =
+    primary === null
+      ? null
+      : { id: primary.id, label: primary.label, billing: primary.billing };
 
   // Slots come from the boot-time derivation; if the Docker daemon is
   // unreachable the dashboard should still render, so fall back to the
@@ -94,7 +105,7 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     dailyCapUsd: DAILY_AUTONOMOUS_CAP_USD,
     // Read on every view build, exactly as the sweep reads it each tick — the
     // dashboard reflects a flip on its next SSE push, with no restart.
-    globalAutonomyPaused: isGlobalAutonomyPaused(),
+    globalAutonomyPaused: fleetSettings.globalAutonomyPaused,
     // The env boot master (issue #148), from the same config the sweep gates
     // itself on: with it off no sweep ever starts, so the view must be able to
     // say so rather than rendering a fleet that reads healthy and claims nothing.
@@ -147,33 +158,16 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     // the database (issue #159).
     quota: getQuotaObservation(primaryLane?.id ?? null),
     quotaLane: primaryLane,
+    // The threshold that observation is judged against (issue #171), resolved
+    // from the same row and the same config the sweep reads — so the banner
+    // cannot say "claiming" while the reducer is refusing, or the reverse.
+    quotaThresholdPercent: resolveQuotaThreshold(
+      getConfig(),
+      fleetSettings.overrides
+    ).percent,
   };
 }
 
-/**
- * The lane a pass would run on right now (issue #175), or null when
- * `lanes.yaml` is unusable or names no lane.
- *
- * Resolved the same way a pass resolves it — the catalog, the environment
- * default, the stored override — because the dashboard reporting a *different*
- * lane's quota than the one the fleet is about to spend on would be worse than
- * reporting none. Deliberately `choosePrimaryLane` and not `resolveLane`: this
- * needs the lane's identity, not its credentials, and a lane whose secret is
- * missing still has a quota worth naming.
- */
-function primaryLaneRow(): FleetLaneRow | null {
-  const catalog = getLaneCatalog();
-  if (!catalog.ok) return null;
-  const choice = choosePrimaryLane({
-    catalog: catalog.catalog,
-    override: getSettingsOverrides().primaryLane ?? null,
-    envLane: getConfig().agentLane,
-    env: process.env,
-  });
-  const lane = findLane(catalog.catalog, choice.laneId);
-  if (!lane) return null;
-  return { id: lane.id, label: lane.label, billing: lane.billing };
-}
 
 export async function currentFleetView(now: Date): Promise<FleetView> {
   return buildFleetView(await loadFleetRows(now));

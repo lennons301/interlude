@@ -1,6 +1,7 @@
 import { Client, EmbedBuilder, TextChannel, type Message } from "discord.js";
 import { DIGEST_TITLE_PREFIX, type DigestContent } from "../fleet/digest";
 import { raceWithTimeout, TIMED_OUT } from "../timeout";
+import { describeRateLimitType } from "../quota/rate-limit-event";
 import {
   formatDuration,
   type OwedReviewStall,
@@ -736,6 +737,75 @@ export async function notifyAttemptsExhausted(
     await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send attempts-exhausted notification:`, err);
+  }
+}
+
+/**
+ * Announce (once per closed spell — the sweep tracks the flag) that the quota
+ * admission gate stopped new pickup (issue #171).
+ *
+ * Fleet-level by construction: this fires from the reducer's pickup gate, past
+ * the eligibility filter, so it says "the fleet is stalled on quota with N
+ * tickets armed and waiting" rather than "a run paused". That is the whole
+ * distinction the ticket draws — a per-run ping on a shared account would fire
+ * once per run for one wall.
+ *
+ * The embed states the two numbers the owner would otherwise go and look up
+ * (what the window is at, and the threshold it crossed) and, when the event
+ * carried one, when the window resets — which is when pickup resumes on its
+ * own, with nothing to press. No-op when no fleet channel is configured.
+ */
+export async function notifyQuotaGateClosed(
+  channelId: string | null,
+  payload: {
+    status: string;
+    rateLimitType: string | null;
+    utilization: number | null;
+    thresholdPercent: number;
+    reason: "rejected" | "utilization";
+    resetsAt: Date | null;
+    heldTickets: number;
+  }
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await fetchTextChannel(channelId);
+
+    const window =
+      payload.rateLimitType === null
+        ? "the quota window"
+        : `the ${describeRateLimitType(payload.rateLimitType)}`;
+    // Absent is not zero (#167): a window that reported no utilization is said
+    // as unreported rather than as a number nobody measured.
+    const used =
+      payload.utilization === null
+        ? `${window} reported no utilization`
+        : `${payload.utilization}% of ${window} is spent`;
+    const lead =
+      payload.reason === "rejected"
+        ? `The account is being rejected (\`${payload.status}\`) — ${used}.`
+        : `${used}, past the ${payload.thresholdPercent}% pickup threshold.`;
+    const resumes =
+      payload.resetsAt === null
+        ? "Pickup resumes once the window resets."
+        : `Pickup resumes when the window resets <t:${Math.floor(
+            payload.resetsAt.getTime() / 1000
+          )}:R>.`;
+
+    const embed = new EmbedBuilder()
+      .setTitle("Quota gate closed — no new tickets are being claimed")
+      .setDescription(
+        `${lead} ${payload.heldTickets} armed ticket(s) are waiting. ` +
+          `Work already in flight carries on and parked runs still resume; ` +
+          `only new pickup stops. ${resumes}`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send quota-gate notification:`, err);
   }
 }
 

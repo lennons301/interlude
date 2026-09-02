@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AppConfig } from "../config";
+import { DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT } from "../quota/quota-gate";
 import {
   MODEL_TIERS,
   TIER_MODEL_IDS,
@@ -14,6 +15,7 @@ import {
   describeModelTierSettings,
   parseSettingsPatch,
   resolveModelTier,
+  resolveQuotaThreshold,
   sanitizeOverrides,
   type SettingsOverrides,
 } from "../settings-resolver";
@@ -31,12 +33,14 @@ function cfg(models: {
   agentModelReview?: string | null;
   agentModelTriage?: string | null;
   agentLane?: string | null;
+  quotaPickupThresholdPercent?: string | null;
 } = {}): AppConfig {
   return {
     agentModel: models.agentModel ?? null,
     agentModelReview: models.agentModelReview ?? null,
     agentModelTriage: models.agentModelTriage ?? null,
     agentLane: models.agentLane ?? null,
+    quotaPickupThresholdPercent: models.quotaPickupThresholdPercent ?? null,
   } as AppConfig;
 }
 
@@ -263,6 +267,93 @@ describe("rejection — a bad value is refused, never silently clamped", () => {
       ok: true,
       patch: { modelTierReview: null },
     });
+  });
+});
+
+/**
+ * The quota admission threshold (issue #171) — a settable field with three
+ * fall-through steps rather than two: a model tier may resolve to "let the
+ * harness decide", but a gate needs a number.
+ */
+describe("the quota pickup threshold", () => {
+  it("falls through to its own default with nothing set anywhere", () => {
+    expect(resolveQuotaThreshold(cfg(), NONE)).toMatchObject({
+      percent: DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT,
+      source: "environment",
+      override: null,
+      envVar: "QUOTA_PICKUP_THRESHOLD_PERCENT",
+      envValue: null,
+    });
+  });
+
+  it("takes the environment when it is set, and says so", () => {
+    expect(
+      resolveQuotaThreshold(cfg({ quotaPickupThresholdPercent: "80" }), NONE)
+    ).toMatchObject({ percent: 80, source: "environment", envValue: "80" });
+  });
+
+  it("lets an override win, and still names what clearing it falls back to", () => {
+    expect(
+      resolveQuotaThreshold(cfg({ quotaPickupThresholdPercent: "80" }), {
+        quotaPickupThresholdPercent: "95",
+      })
+    ).toMatchObject({
+      percent: 95,
+      source: "override",
+      override: "95",
+      envValue: "80",
+    });
+  });
+
+  it("refuses an environment value outside the set, and still shows what was set", () => {
+    // Collapsing it to "unset" would read back on the screen as a variable
+    // nobody had set — the one surprise the provenance line exists to remove.
+    const resolved = resolveQuotaThreshold(
+      cfg({ quotaPickupThresholdPercent: "93" }),
+      NONE
+    );
+
+    expect(resolved.percent).toBe(DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT);
+    expect(resolved.envValue).toBe("93");
+  });
+
+  it("falls through rather than throwing on a stored value it cannot read", () => {
+    // The column is JSON an older build wrote, so a since-narrowed vocabulary
+    // must degrade to the environment rather than gate the fleet on nonsense.
+    expect(
+      resolveQuotaThreshold(cfg(), {
+        quotaPickupThresholdPercent: "ninety",
+      }).percent
+    ).toBe(DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT);
+    expect(
+      sanitizeOverrides({ quotaPickupThresholdPercent: "ninety" })
+    ).toEqual({});
+  });
+
+  it("refuses a value outside the offered set, listing what is accepted", () => {
+    const parsed = parseSettingsPatch({ quotaPickupThresholdPercent: "93" });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toContain("93");
+    expect(parsed.error).toContain("90");
+  });
+
+  it("refuses a nonsensical percentage rather than clamping it", () => {
+    // A clamp would turn "hold at 140%" into a gate the operator never chose.
+    expect(parseSettingsPatch({ quotaPickupThresholdPercent: "140" }).ok).toBe(
+      false
+    );
+    expect(parseSettingsPatch({ quotaPickupThresholdPercent: "-1" }).ok).toBe(
+      false
+    );
+  });
+
+  it("is settable, and named in the message that enumerates what is", () => {
+    const parsed = parseSettingsPatch({ agentModel: "heavy" });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toContain("quotaPickupThresholdPercent");
+    expect(SETTABLE_KEYS).toContain("quotaPickupThresholdPercent");
   });
 });
 

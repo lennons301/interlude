@@ -45,6 +45,15 @@ function shortDate(date: Date): string {
   return `${DAY_NAMES[date.getDay()]} ${date.getDate()} ${MONTH_NAMES[date.getMonth()]}`;
 }
 
+/** "Wed 2 Sep 03:02" — an instant in the fleet's own timezone, hand-rolled for
+ * the same reason shortDate is (locale formatting varies by ICU build). */
+function shortDateTime(iso: string): string {
+  const at = new Date(iso);
+  const hours = String(at.getHours()).padStart(2, "0");
+  const minutes = String(at.getMinutes()).padStart(2, "0");
+  return `${shortDate(at)} ${hours}:${minutes}`;
+}
+
 export interface DigestSection {
   heading: string;
   lines: string[];
@@ -106,6 +115,13 @@ function runningLine(card: RunningCard): string {
         : `${usd(card.spend.usd)} of ${usd(card.spend.budgetUsd)}`
     );
     if (card.mode === "supervised") parts.push("supervised");
+  }
+  // A paused run is listed with the others but never as one of them (issue
+  // #168): the digest reads the same `paused` field the dashboard does, so the
+  // two surfaces cannot disagree about whether a run is being worked. The reset
+  // is stated, not counted down — a digest is read hours after it is written.
+  if (card.paused) {
+    parts.push(`paused, quota resets ${shortDateTime(card.paused.resumeAfter)}`);
   }
   return parts.join(" · ");
 }
@@ -196,6 +212,15 @@ function pickupLines(view: FleetView, appBaseUrl: string): string[] {
         `⏸ Paused — yesterday's spend reached the ${usd(view.spend.capUsd)} ` +
           "daily cap, so pickup stopped for the rest of the day; the pause " +
           "lifted at midnight.",
+      ];
+    case "quota-gate":
+      // Said as it stands when the digest is written, like the switch and the
+      // master above it: the gate is computed from the latest observation and
+      // has no history, so a window that reset overnight leaves the covered day
+      // reading quiet. The view's own line already names both numbers.
+      return [
+        `⏸ Paused right now — ${view.pickupPaused?.body ?? "the quota gate is closed"}. ` +
+          "It lifts itself when the window resets; there is nothing to press.",
       ];
     case null:
       return [

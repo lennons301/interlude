@@ -31,6 +31,10 @@
  */
 
 import type { AgentPassKind, AppConfig } from "./config";
+import {
+  DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT,
+  QUOTA_THRESHOLD_OPTIONS,
+} from "./quota/quota-gate";
 import { isLaneIdShaped } from "./lanes/lane-id";
 import {
   MODEL_TIERS,
@@ -58,9 +62,12 @@ export type ModelTierSettingKey =
   | "modelTierInteractive";
 
 /** The settings a human may override from the UI. Later tickets in issue #164
- * (the quota admission threshold, the overflow daily cap, the per-attempt
- * pause bound) add members here and an entry to `SETTINGS_FIELDS`. */
-export type SettingKey = ModelTierSettingKey | "primaryLane";
+ * (the overflow daily cap, the per-attempt pause bound) add members here and an
+ * entry to `SETTINGS_FIELDS`. */
+export type SettingKey =
+  | ModelTierSettingKey
+  | "primaryLane"
+  | "quotaPickupThresholdPercent";
 
 /** What is stored on the settings row: a sparse map, because absent means
  * "fall through to the environment", which is a different thing from any
@@ -201,6 +208,30 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
         : "a lane id declared in lanes.yaml",
     envDefault: (config) => ({ envVar: "AGENT_LANE", value: config.agentLane }),
   },
+  quotaPickupThresholdPercent: {
+    key: "quotaPickupThresholdPercent",
+    label: "Quota pickup threshold",
+    help:
+      "How full the account's quota window may get before the fleet stops claiming new tickets. Work already in flight always finishes, and a parked run still resumes. At 100 the gate closes only when the account is already being rejected.",
+    // A fixed set rather than a free number: the spread offered is finer than
+    // the decision it feeds, so nothing useful is out of reach, and a value
+    // outside it is refused *with the list* rather than clamped.
+    options: QUOTA_THRESHOLD_OPTIONS,
+    normalize: (raw) => {
+      const value = raw.trim();
+      return (QUOTA_THRESHOLD_OPTIONS as readonly string[]).includes(value)
+        ? value
+        : null;
+    },
+    vocabulary: () => QUOTA_THRESHOLD_OPTIONS.join(", "),
+    envDefault: (config) => ({
+      envVar: "QUOTA_PICKUP_THRESHOLD_PERCENT",
+      // Verbatim, including a value this build refuses: the screen's job is to
+      // say what the deployment actually set, and a refused one shown beside
+      // the default now in force is how an operator finds their typo.
+      value: config.quotaPickupThresholdPercent,
+    }),
+  },
 };
 
 /** Display order for the model-tier panel. Kept beside the registry so a new
@@ -220,6 +251,7 @@ export const MODEL_TIER_FIELD_ORDER: readonly ModelTierSettingKey[] = [
 export const SETTABLE_KEYS: readonly SettingKey[] = [
   ...MODEL_TIER_FIELD_ORDER,
   "primaryLane",
+  "quotaPickupThresholdPercent",
 ];
 
 /**
@@ -441,6 +473,64 @@ export function resolveModelTierField(
     model: envTier !== null ? tierModels[envTier] : envValue,
     source: "environment",
     override: null,
+    envVar,
+    envValue,
+  };
+}
+
+/**
+ * The quota admission threshold in force (issue #171), and where it came from.
+ *
+ * Its own resolver and its own view, like the lane field's — it shares the
+ * registry (which is the allowlist, and so the mechanism that decides what is
+ * settable at all) but not the model-tier field view, because asking a
+ * percentage "what tier is in force?" is not a meaningful question.
+ *
+ * Three layers, where a tier has two: a stored override, then the environment
+ * variable, then the built-in default. The third is what makes this field
+ * different — a tier may resolve to "pass no `--model` and let the harness
+ * decide", but a gate needs a number. The environment is read through the same
+ * `normalize` an override is, so a typo there is refused rather than clamped
+ * and falls through here, while still being *shown* verbatim: a refused value
+ * collapsed to "unset" would read back on the screen as a variable nobody had
+ * set, which is the one surprise the provenance line exists to remove.
+ */
+export interface QuotaThresholdView {
+  /** The percentage in force — what the gate actually judges against. */
+  percent: number;
+  source: SettingSource;
+  /** The stored override, or null when the field falls through. */
+  override: string | null;
+  /** The values an override may take, in display order. */
+  options: readonly string[];
+  label: string;
+  help: string;
+  envVar: string;
+  /** The environment default, verbatim (null = unset). */
+  envValue: string | null;
+}
+
+export function resolveQuotaThreshold(
+  config: AppConfig,
+  overrides: SettingsOverrides
+): QuotaThresholdView {
+  const spec = SETTINGS_FIELDS.quotaPickupThresholdPercent;
+  const { envVar, value: envValue } = spec.envDefault(config);
+  const stored = overrides.quotaPickupThresholdPercent ?? null;
+  const override = stored === null ? null : spec.normalize(stored, {});
+  const fromEnv = envValue === null ? null : spec.normalize(envValue, {});
+  const inForce = override ?? fromEnv;
+
+  return {
+    percent:
+      inForce === null
+        ? DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT
+        : parseInt(inForce, 10),
+    source: override !== null ? "override" : "environment",
+    override,
+    options: spec.options ?? [],
+    label: spec.label,
+    help: spec.help,
     envVar,
     envValue,
   };

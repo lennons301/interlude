@@ -4,6 +4,7 @@ import { getFleetSettings, updateSettingsOverrides } from "@/lib/settings";
 import {
   describeModelTierSettings,
   parseSettingsPatch,
+  resolveQuotaThreshold,
   type SettingsOverrides,
   type TierModelIds,
 } from "@/lib/settings-resolver";
@@ -57,6 +58,11 @@ function state(overrides: SettingsOverrides, updatedAt: Date | null) {
     fields: describeModelTierSettings(getConfig(), overrides, tierModels),
     lanes,
     laneError,
+    // The quota admission threshold (issue #171) — its own view model beside
+    // the lane's, for the same reason: it shares the allowlist but not the
+    // model-tier field shape, since asking a percentage what tier is in force
+    // is not a meaningful question.
+    quota: resolveQuotaThreshold(getConfig(), overrides),
     updatedAt: updatedAt?.toISOString() ?? null,
   };
 }

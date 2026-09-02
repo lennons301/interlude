@@ -31,9 +31,10 @@ import type { QuotaObservation } from "@/lib/quota/rate-limit-event";
  * Both are verbatim, including the `system init` noise, deliberately: a fixture
  * somebody tidied is a fixture somebody could have tidied a fact out of.
  *
- * They started life asserting only what the *stream* contains. #167 now reads
- * the event, so the same bytes also pin what the orchestrator makes of it —
- * still without anything *acting* on it, which is #168's and #171's job.
+ * They started life asserting only what the *stream* contains. #167 read the
+ * event, so the same bytes pin what the orchestrator makes of it; #168 now
+ * *acts* on it, so they also pin the one decision it takes — pause this run,
+ * or let the turn take its ordinary path.
  */
 
 let testDb: ReturnType<typeof createTestDb>["db"];
@@ -47,6 +48,7 @@ vi.mock("@/db", () => ({
 const { createOutputHandler } = await import("../output-parser");
 const { createStreamRecorder } = await import("../stream-recorder");
 const { getQuotaObservation } = await import("@/lib/quota/quota-store");
+const { detectQuotaRejection } = await import("@/lib/quota/rate-limit-rejection");
 
 /** The parser writes messages as it goes, so every replay needs a task row to
  * hang them off. Same seeding as `output-parser.test.ts`. */
@@ -220,6 +222,31 @@ describe("captured stream: how a quota wall looks to the orchestrator today", ()
       terminal_reason: "completed",
       api_error_status: null,
     });
+  });
+});
+
+describe("captured stream: the pause decision (issue #168)", () => {
+  it("reads the rejection capture as a pause, with the window it waits on", () => {
+    // The end-to-end claim of this ticket, off captured bytes: the two signals
+    // the decision needs — the exit condition and the rate-limit event — both
+    // survive the parser, and together they say "refused, until 1788310954".
+    const { result } = replay(REJECTED, "task-rejected");
+
+    expect(detectQuotaRejection(result)).toEqual({
+      resumeAfter: new Date(1788310954 * 1000),
+      limitType: "five_hour",
+    });
+  });
+
+  it("reads the real-quota capture as no pause at all", () => {
+    // The other half, and the regression that would hurt most: an ordinary
+    // turn on a healthy account must never park its run on a clock. Note this
+    // capture *does* carry a rate_limit_event — it is the exit condition that
+    // separates the two.
+    const { result } = replay(ALLOWED, "task-allowed");
+
+    expect(result.rateLimit).not.toBeNull();
+    expect(detectQuotaRejection(result)).toBeNull();
   });
 });
 

@@ -181,7 +181,14 @@
       "idx": 25,
       "version": "6",
       "when": 1788552053826,
-      "tag": "0025_quota_state_per_lane",
+      "tag": "0025_run_rate_limited",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1788638453826,
+      "tag": "0026_quota_state_per_lane",
       "breakpoints": true
     }
   ]
