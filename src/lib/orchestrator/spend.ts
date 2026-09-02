@@ -85,6 +85,36 @@ export function recordMeteredSpend(
 }
 
 /**
+ * Book a task's new cumulative cost against the day, if that task's pass ran
+ * on a lane that bills per token (issues #174, #173).
+ *
+ * The rule is a fact about a *task* — what it has spent so far, and who was
+ * paying when it spent it — so it lives beside the ledger it writes rather
+ * than at the cost-writing call sites: a later third caller cannot forget it,
+ * and the rule can be exercised without a container.
+ *
+ * `laneBilling` is the pass's **effective** billing kind, which is why this
+ * needs no opinion about overage: the turn manager records `metered` for a
+ * pass an active overage is paying for (issue #173), so the dollars the card
+ * is really being charged reach the cap whether the lane declares itself
+ * metered or not. Nothing is exempt by kind — a chat session on a paid lane
+ * charges the same card an implement pass does.
+ */
+export function bookTaskCost(
+  taskId: string,
+  totalUsd: number,
+  now: Date = new Date()
+): void {
+  const before = db
+    .select({ total: tasks.totalCostUsd, billing: tasks.laneBilling })
+    .from(tasks)
+    .where(eq(tasks.id, taskId))
+    .get();
+  if (before?.billing !== "metered") return;
+  recordMeteredSpend(before.total ?? 0, totalUsd, now);
+}
+
+/**
  * Real money spent on the local day containing `now` — the figure both the
  * cash cap and the dashboard's second gauge read.
  *
