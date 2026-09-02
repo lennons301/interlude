@@ -447,6 +447,10 @@ async function awaitExecExit(
   return (await exec.inspect()).ExitCode ?? null;
 }
 
+/** What the read command exits with when the file is past the caller's ceiling
+ * — distinguished from an ordinary failure so the reason can be logged. */
+const OVERSIZE_EXIT_CODE = 3;
+
 /**
  * Read one file out of a container, verbatim (issue #169).
  *
@@ -471,20 +475,33 @@ async function awaitExecExit(
  *   failure the fallback exists to avoid. A truncated read loses the trailing
  *   size and fails the check.
  *
+ * `maxBytes` is refused **inside the container**, before a byte is emitted.
+ * The caller has a ceiling of its own, but enforcing it here would mean the
+ * base64 line, the JS string and the decoded buffer — roughly 3x the file —
+ * already materialised in the orchestrator's heap on a box with a documented
+ * OOM history. An over-size file is one more way of reading nothing.
+ *
  * The path travels in the environment rather than the command line, so nothing
  * in a session id can reach `bash` as syntax.
  */
 export async function readContainerFile(
   container: Docker.Container,
-  filePath: string
+  filePath: string,
+  maxBytes?: number
 ): Promise<Buffer | null> {
   const exec = await container.exec({
     Cmd: [
       "bash",
       "-c",
-      'base64 -w0 -- "$INTERLUDE_FILE" && printf "\n%s\n" "$(wc -c < "$INTERLUDE_FILE")"',
+      'size=$(wc -c < "$INTERLUDE_FILE") || exit 1; ' +
+        'if [ -n "$INTERLUDE_MAX" ] && [ "$size" -gt "$INTERLUDE_MAX" ]; then ' +
+        `printf "%s\n" "$size"; exit ${OVERSIZE_EXIT_CODE}; fi; ` +
+        'base64 -w0 -- "$INTERLUDE_FILE" && printf "\n%s\n" "$size"',
     ],
-    Env: [`INTERLUDE_FILE=${filePath}`],
+    Env: [
+      `INTERLUDE_FILE=${filePath}`,
+      `INTERLUDE_MAX=${maxBytes === undefined ? "" : maxBytes}`,
+    ],
     AttachStdout: true,
     AttachStderr: true,
     Tty: true,
@@ -504,6 +521,16 @@ export async function readContainerFile(
   );
   if (exitCode === TIMED_OUT) {
     console.warn(`[docker] Reading ${filePath} out of the container timed out`);
+    return null;
+  }
+  if (exitCode === OVERSIZE_EXIT_CODE) {
+    // The one exit worth naming: nothing was emitted, and the operator wants to
+    // know a transcript was dropped for its size rather than lost to a daemon.
+    const size = Buffer.concat(chunks).toString("utf8").trim();
+    console.warn(
+      `[docker] ${filePath} is ${size} bytes, past the ${maxBytes}-byte ` +
+        "ceiling — not copying it out"
+    );
     return null;
   }
   if (exitCode !== 0) return null;

@@ -267,6 +267,15 @@ export const tasks = sqliteTable("tasks", {
   containerId: text("container_id"),
   branch: text("branch"),
   sessionId: text("session_id"),
+  // The pass this one resumed off a quota pause (issue #169). A resume is a
+  // *new* task row for the same attempt, so lineage is what makes "the same
+  // pass, continued" a fact rather than a guess — and it is what the attempt's
+  // budget follows, so a resumed pass keeps spending the allowance its
+  // predecessor started on rather than being handed a fresh one. The run
+  // cannot answer this: it also owns review passes with their own allowance,
+  // and it may own two *distinct* repair passes, each entitled to its own.
+  // Null for every pass that is not a resume.
+  resumedFromTaskId: text("resumed_from_task_id"),
   containerStatus: text("container_status", {
     enum: ["setup", "running", "idle", "completing"],
   }),

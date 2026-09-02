@@ -23,13 +23,8 @@ import { parseReviewVerdict } from "./autonomy/verdict";
 import { parseTriageExit } from "./autonomy/triage";
 import { passProducedResult } from "./autonomy/pass-output";
 import { cancelOrphanedRunTasks } from "./autonomy/review-tasks";
-import {
-  DEFAULT_REPAIR_BUDGET_USD,
-  DEFAULT_REVIEW_BUDGET_USD,
-  DEFAULT_TRIAGE_BUDGET_USD,
-  MAX_ATTEMPTS,
-  TRIAGE_MAX_TURNS,
-} from "./autonomy/budgets";
+import { MAX_ATTEMPTS, TRIAGE_MAX_TURNS } from "./autonomy/budgets";
+import { resolvePassBudget, spendCarriedIntoPass } from "./pass-budget";
 import { scanPorts } from "./port-scanner";
 import {
   getConfig,
@@ -57,6 +52,7 @@ import {
 import { describeRateLimitType } from "../quota/rate-limit-event";
 import {
   containerTranscriptPath,
+  MAX_TRANSCRIPT_BYTES,
   readTranscript,
   saveTranscript,
 } from "../quota/session-transcript";
@@ -345,6 +341,37 @@ export async function startTask(taskId: string): Promise<void> {
     // every turn as `--effort` and recorded on the run row below.
     const passEffort = resolveAgentEffort(task.kind, getConfig(), run?.effort ?? null);
 
+    // What this attempt has already spent on *this* pass, across the quota
+    // pauses it was resumed from (issue #169) — zero for every pass that is not
+    // a resume. The allowance below is stated net of it, because a resume is a
+    // new task row for the same attempt and every budget control here is scoped
+    // to the row: left gross, one attempt's real ceiling would be
+    // `(1 + resumes) x run.budgetUsd`.
+    const carriedCostUsd = spendCarriedIntoPass(task);
+
+    // What this pass may spend: its kind's allowance, net of the above.
+    const passBudget = resolvePassBudget({
+      kind: task.kind,
+      attemptBudgetUsd: run?.budgetUsd ?? null,
+      carriedCostUsd,
+    });
+
+    // A resumed pass whose predecessors spent the whole allowance has nothing
+    // left to run on. Judged here, before the container is provisioned, because
+    // the alternative is ~2 GiB built to run a turn with no money in it. An
+    // implement pass cannot reach this — exhaustion is judged ahead of the
+    // pause, so an attempt already at its ceiling fails rather than parks — but
+    // a repair pass is never an attempt, so its chain can.
+    if (run && isImplementShaped && passBudget.remainingUsd !== null && passBudget.remainingUsd <= 0) {
+      await failImplementAttempt(
+        taskId,
+        run.id,
+        `budget exhausted ($${carriedCostUsd.toFixed(2)} of ` +
+          `$${(passBudget.allowanceUsd ?? 0).toFixed(2)} spent before this resume)`
+      );
+      return;
+    }
+
     // Update task status
     updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
     insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
@@ -480,19 +507,12 @@ export async function startTask(taskId: string): Promise<void> {
       ? await restoreSessionTranscript(task, running)
       : undefined;
 
-    // Run initial turn. An autonomous pass is one whole turn — an implement
-    // pass carries the run's per-attempt budget, a review pass its own
-    // smaller allowance, a triage pass the smallest of all plus a hard turn
-    // cap, never the interactive per-task default. Review and triage keep
-    // their raw stream: the structured exit is parsed from it.
+    // Run initial turn. An autonomous pass is one whole turn, carrying the
+    // allowance resolved above (net of anything a quota pause already spent on
+    // it). Review and triage keep their raw stream: the structured exit is
+    // parsed from it.
     const turnResult = await runTurn(taskId, running, prompt, resumeSessionId, {
-      maxBudgetUsd: isReviewPass
-        ? DEFAULT_REVIEW_BUDGET_USD
-        : isTriagePass
-          ? DEFAULT_TRIAGE_BUDGET_USD
-          : isRepairPass
-            ? DEFAULT_REPAIR_BUDGET_USD
-            : run?.budgetUsd,
+      maxBudgetUsd: passBudget.remainingUsd ?? undefined,
       maxTurns: isTriagePass
         ? TRIAGE_MAX_TURNS
         : isReviewPass || isRepairPass
@@ -557,7 +577,9 @@ export async function startTask(taskId: string): Promise<void> {
       // conflict check then escalates the still-CONFLICTING PR to a human,
       // rather than the repair burning a strike.
       if (isImplementPass) {
-        const exhaustion = run ? attemptExhaustion(run, turnResult.costUsd, turnResult.subtype) : null;
+        const exhaustion = run
+          ? attemptExhaustion(run, carriedCostUsd + turnResult.costUsd, turnResult.subtype)
+          : null;
         if (exhaustion) {
           await failImplementAttempt(taskId, run!.id, exhaustion);
           return;
@@ -769,7 +791,11 @@ async function preserveSessionTranscript(
   try {
     const transcript = await readContainerFile(
       container.container,
-      containerTranscriptPath(sessionId)
+      containerTranscriptPath(sessionId),
+      // The store's ceiling, handed to the container so an over-size transcript
+      // is refused before it is encoded rather than after it has been decoded
+      // into this process.
+      MAX_TRANSCRIPT_BYTES
     );
     if (transcript === null) {
       console.warn(
@@ -1008,18 +1034,22 @@ export async function processQueuedMessages(
       ? db.select().from(runs).where(eq(runs.id, task.runId)).get()
       : undefined;
     const budgetUsd = run?.budgetUsd ?? config.maxBudgetUsd;
-    if (task.totalCostUsd && task.totalCostUsd >= budgetUsd) {
+    // The attempt's spend on this pass, not the row's: a pass resumed off a
+    // quota pause carries what its predecessors spent (issue #169), so a
+    // fix-up turn cannot re-open a budget the attempt has already used up.
+    const spentUsd = spendCarriedIntoPass(task) + (task.totalCostUsd ?? 0);
+    if (spentUsd > 0 && spentUsd >= budgetUsd) {
       if (run) {
         await failImplementAttempt(
           taskId,
           run.id,
-          `budget exhausted ($${task.totalCostUsd.toFixed(2)} of $${budgetUsd.toFixed(2)})`
+          `budget exhausted ($${spentUsd.toFixed(2)} of $${budgetUsd.toFixed(2)})`
         );
         break;
       }
       insertSystemMessage(
         taskId,
-        `Budget limit reached ($${task.totalCostUsd.toFixed(2)} / $${budgetUsd.toFixed(2)})`
+        `Budget limit reached ($${spentUsd.toFixed(2)} / $${budgetUsd.toFixed(2)})`
       );
       await completeTask(taskId);
       break;
@@ -1115,7 +1145,7 @@ export async function processQueuedMessages(
       promptText,
       task.sessionId ?? undefined,
       {
-        maxBudgetUsd: run ? run.budgetUsd - (task.totalCostUsd ?? 0) : undefined,
+        maxBudgetUsd: run ? run.budgetUsd - spentUsd : undefined,
         maxTurns: run?.maxTurns ?? undefined,
         lane: passLane,
         effort: resolveAgentEffort(task.kind, config, run?.effort ?? null),
@@ -1145,7 +1175,7 @@ export async function processQueuedMessages(
       // attempt's remaining budget or turns fails the attempt through the
       // ledger — the branch is already pushed, the work survives.
       const exhaustion = run
-        ? attemptExhaustion(run, currentCost + turnResult.costUsd, turnResult.subtype)
+        ? attemptExhaustion(run, spentUsd + turnResult.costUsd, turnResult.subtype)
         : null;
       if (exhaustion) {
         await failImplementAttempt(taskId, run!.id, exhaustion);

@@ -2633,6 +2633,9 @@ async function executeEscalateStaleReview(
  *   than when the pass starts. A resume whose task never starts (a lane
  *   misconfiguration, a container that will not build) would otherwise be
  *   retried every sweep forever; counted here, the bound catches it.
+ * - The new row records the pass it resumed (`resumedFromTaskId`), which is
+ *   what carries the attempt's budget across the pause: what this pass may
+ *   spend is the allowance its predecessors started on, less what they spent.
  * - The run stays `rate_limited` until its pass actually starts, and keeps its
  *   `resumeAfter`. A restart in between then leaves a run that is still
  *   visibly paused rather than one pretending to be claimed, and the
@@ -2706,6 +2709,10 @@ async function executeResumeRun(
       githubIssue: action.issueRef,
       branch: paused.branch,
       sessionId,
+      // Lineage, and with it the attempt's budget: a resume is a new row, so
+      // without this the turn manager would hand the attempt its whole
+      // per-attempt allowance again, once per resume (issue #169).
+      resumedFromTaskId: paused.id,
       pullRequestNumber: paused.pullRequestNumber,
       pullRequestUrl: paused.pullRequestUrl,
       createdAt: now,

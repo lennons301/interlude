@@ -275,7 +275,6 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
   },
 };
 
-
 /** Display order for the model-tier panel. Kept beside the registry so a new
  * field is placed deliberately rather than wherever object iteration puts it.
  * The lane field is deliberately not here: it needs the lane catalog to render
