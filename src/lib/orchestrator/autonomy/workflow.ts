@@ -511,12 +511,15 @@ export function buildImplementPrompt(ticket: ImplementTicket): string {
 }
 
 /**
- * Where a resume preamble ends and the pass's own brief begins (issue #169).
+ * Where a resume preamble ends and the pass's own brief begins (issues #169,
+ * #176).
  *
- * A marker rather than a convention, because an attempt may be resumed several
- * times and each resume is built from the *last* pass's prompt: without
- * something to cut on, resume 3 would open with three stacked preambles
- * counting down from three different numbers.
+ * A marker rather than a convention, because an attempt may be continued
+ * several times — resumed past a window (#169) or moved to another lane
+ * (#176) — and each continuation is built from the *last* pass's prompt:
+ * without something to cut on, the third would open with three stacked
+ * preambles counting down from three different numbers. One marker for both,
+ * so the two kinds of continuation cannot stack either.
  */
 export const RESUME_PREAMBLE_END = "--- END RESUME NOTE ---";
 
@@ -574,6 +577,56 @@ export function buildResumePrompt(args: {
     ``,
     // The pass's own brief — with any earlier resume's preamble stripped, so a
     // third resume does not open with three countdowns.
+    stripResumePreamble(args.originalPrompt),
+  ].join("\n");
+}
+
+/**
+ * The prompt a pass moved onto another lane opens with (issue #176) — the
+ * move's own preamble followed by the pass's original prompt, verbatim.
+ *
+ * Both halves for the reason `buildResumePrompt` carries both. When the
+ * transcript survived, the harness replays the earlier conversation and this
+ * arrives as the next turn, so the preamble explains a gap the agent is about
+ * to notice: a turn that ended on a rate-limit line it did not write. When it
+ * did not survive, the brief below is the whole of what the pass needs.
+ *
+ * What it deliberately does **not** say is which model or provider it is now
+ * running on. A pass told "you are a different model now" has been handed a
+ * fact it can only misuse — the work has not changed, and the one thing that
+ * matters is the same thing a resume needs: read the branch before continuing,
+ * so nothing already pushed is done twice.
+ */
+export function buildLaneMovePrompt(args: {
+  /** The refused pass's own prompt — an implement or repair brief. */
+  originalPrompt: string;
+  /** The branch the work is on, already checked out in the fresh container. */
+  branch: string;
+  /** The lane it is continuing on, named as the human sees it. */
+  toLaneLabel: string;
+  /** Which continuation of this attempt the move is, and the bound it counts
+   * against — the same pair a resume states, so a pass being pushed around the
+   * fleet knows its own runway. */
+  move: number;
+  maxMoves: number;
+}): string {
+  return [
+    `This pass was refused mid-flight: the account's quota would not serve it ` +
+      `on the lane it was running on, so it is continuing on ${args.toLaneLabel} ` +
+      `instead of waiting the window out. It is resuming in a fresh container ` +
+      `on the same branch, ${args.branch}, with the work you had already ` +
+      `pushed. This is continuation ${args.move} of ${args.maxMoves} for this ` +
+      `attempt; past that the ticket goes to a human.`,
+    ``,
+    `Before you continue, look at what is already done — \`git log\`, \`git ` +
+      `status\` and the files themselves — and carry on from there rather than ` +
+      `starting the work again. The move cost the ticket no attempt, so ` +
+      `nothing about the brief below has changed.`,
+    ``,
+    RESUME_PREAMBLE_END,
+    ``,
+    // The pass's own brief — with any earlier continuation's preamble
+    // stripped, so a second move does not open with two countdowns.
     stripResumePreamble(args.originalPrompt),
   ].join("\n");
 }

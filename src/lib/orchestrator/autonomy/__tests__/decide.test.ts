@@ -245,6 +245,12 @@ function makePass(overrides: Partial<PassOutcome> = {}): PassOutcome {
     // The top of the ladder, so a degrade test has somewhere to step and a
     // pause test is not passing by accident (issue #170).
     tier: "heavy",
+    // No lane to move to, so a pause test is not passing by accident either
+    // (issue #176): a failover is decided ahead of the pause, and every case
+    // that wants one says so.
+    laneId: "claude-subscription",
+    laneFailover: null,
+    resumesMade: 0,
     ...overrides,
   };
 }

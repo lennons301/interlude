@@ -66,11 +66,29 @@ export type ModelTierSettingKey =
   | "modelTierTriage"
   | "modelTierInteractive";
 
+/**
+ * The **minimum lane** fields (issue #176), named as their own union for the
+ * reason the tier fields are: they share a resolver, and the question "which
+ * lane may this pass kind not run below?" is meaningful of all four and of
+ * nothing else.
+ *
+ * One field per pass kind because that is the whole control: triage and review
+ * read the work rather than doing it, so they are free to run on the cheapest
+ * lane available, while an implement pass on a hard ticket may be floored at a
+ * capable one.
+ */
+export type MinLaneSettingKey =
+  | "minLaneImplement"
+  | "minLaneReview"
+  | "minLaneTriage"
+  | "minLaneInteractive";
+
 /** The settings a human may override from the UI. Later tickets in issue #164
  * (the overflow daily cap) add members here and an entry to
  * `SETTINGS_FIELDS`. */
 export type SettingKey =
   | ModelTierSettingKey
+  | MinLaneSettingKey
   | "primaryLane"
   | "quotaPickupThresholdPercent"
   | "maxResumesPerAttempt"
@@ -145,6 +163,51 @@ function baseModelEnv(config: AppConfig): EnvDefault {
   return { envVar: "AGENT_MODEL", value: config.agentModel };
 }
 
+/** The variable supplying the deployment's own floor for every pass kind. One
+ * variable rather than four, because a floor is a statement about what the
+ * deployment will tolerate at all, and the per-kind refinement is what the
+ * settings screen is for. */
+export const MIN_LANE_ENV_VAR = "AGENT_MIN_LANE";
+
+/**
+ * One pass kind's minimum lane (issue #176) — a **capability floor**, not a
+ * choice of lane: cost routing may pick anything at or above it, which is why
+ * naming a metered lane here still allows the (free, first-party)
+ * subscription. Unset means no floor, so a fresh deployment routes on cost
+ * alone.
+ *
+ * Validated exactly as `primaryLane` is, through the same leaf shape check and
+ * the same runtime catalog, so an unknown lane id is refused *by name* rather
+ * than stored and quietly ignored at the next pass.
+ */
+function minLaneField(
+  key: MinLaneSettingKey,
+  label: string,
+  help: string
+): SettingSpec {
+  return {
+    key,
+    label,
+    help,
+    // No compiled-in options, for the lane field's reason: the vocabulary is a
+    // checked-in file read at runtime and arrives through `SettingsContext`.
+    normalize: (raw, context) => {
+      const value = raw.trim().toLowerCase();
+      if (!isLaneIdShaped(value)) return null;
+      if (context.laneIds && !context.laneIds.includes(value)) return null;
+      return value;
+    },
+    vocabulary: (context) =>
+      context.laneIds
+        ? `the declared lanes: ${context.laneIds.join(", ")}`
+        : "a lane id declared in lanes.yaml",
+    envDefault: (config) => ({
+      envVar: MIN_LANE_ENV_VAR,
+      value: config.agentMinLane,
+    }),
+  };
+}
+
 /** A read-heavy pass reads its own variable and falls back to the base, so the
  * row reports whichever actually supplied the value. With both unset it names
  * the row's own variable — the place to set one. */
@@ -197,6 +260,26 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
     "Interactive",
     "The tier a chat or generation session runs on — the work you are sitting in front of.",
     baseModelEnv
+  ),
+  minLaneImplement: minLaneField(
+    "minLaneImplement",
+    "Implement",
+    "The weakest lane an implement pass — and the repair pass that fixes up its PR — may be routed onto. Cost routing picks the cheapest lane at or above it; unset, it may pick the cheapest lane there is.",
+  ),
+  minLaneReview: minLaneField(
+    "minLaneReview",
+    "Review",
+    "The weakest lane a review pass may be routed onto. Reviewing reads the work rather than doing it, so it is the first thing worth running on the cheapest lane available.",
+  ),
+  minLaneTriage: minLaneField(
+    "minLaneTriage",
+    "Triage",
+    "The weakest lane a triage pass may be routed onto. Shaping the backlog must cost a fraction of implementing it.",
+  ),
+  minLaneInteractive: minLaneField(
+    "minLaneInteractive",
+    "Interactive",
+    "The weakest lane a chat or generation session may be routed onto — the work you are sitting in front of, and the only kind that crosses onto a paid lane while you watch.",
   ),
   meteredDailyCapUsd: {
     key: "meteredDailyCapUsd",
@@ -313,11 +396,21 @@ export const MODEL_TIER_FIELD_ORDER: readonly ModelTierSettingKey[] = [
   "modelTierInteractive",
 ];
 
+/** Display order for the minimum-lane panel — the same four kinds in the same
+ * order as the tier panel above, so the two read as one table. */
+export const MIN_LANE_FIELD_ORDER: readonly MinLaneSettingKey[] = [
+  "minLaneImplement",
+  "minLaneReview",
+  "minLaneTriage",
+  "minLaneInteractive",
+];
+
 /** Every settable key, for a rejection message that tells the operator what
  * *would* have been accepted. Derived, so a field added to the registry cannot
  * be left out of the message that is supposed to enumerate them. */
 export const SETTABLE_KEYS: readonly SettingKey[] = [
   ...MODEL_TIER_FIELD_ORDER,
+  ...MIN_LANE_FIELD_ORDER,
   "primaryLane",
   "quotaPickupThresholdPercent",
   "maxResumesPerAttempt",
@@ -517,6 +610,94 @@ export interface ResolvedModelTier {
   envVar: string;
   /** The environment default this field falls through to, verbatim. */
   envValue: string | null;
+}
+
+/**
+ * One pass kind's minimum lane, resolved (issue #176).
+ *
+ * Its own view rather than the tier field's, for the reason the threshold and
+ * the resume bound have their own: it shares the registry — the allowlist, and
+ * so the mechanism that decides what is settable at all — but asking a lane
+ * floor "what tier is in force?" is not a meaningful question.
+ *
+ * Two layers, not three: unlike a percentage or a count, "no floor" is a
+ * perfectly good answer and is what a fresh deployment means, so an unset
+ * override falling through to an unset variable resolves to null rather than
+ * to a built-in default. A floor is a restriction, and inventing one nobody
+ * asked for would quietly stop the fleet using a lane it was given.
+ */
+export interface MinLaneFieldView {
+  key: MinLaneSettingKey;
+  label: string;
+  help: string;
+  /** The floor in force, or null for none. */
+  laneId: string | null;
+  source: SettingSource;
+  /** The stored override, or null when the field falls through. */
+  override: string | null;
+  envVar: string;
+  /** The environment default, verbatim (null = unset). */
+  envValue: string | null;
+}
+
+/** Which field decides a pass kind's floor. `repair` reads the implement field
+ * for the reason it reads implement's tier: it is the same attempt continuing,
+ * not a kind of work with a cost profile of its own. */
+export const MIN_LANE_FIELD_BY_KIND: Readonly<
+  Record<AgentPassKind, MinLaneSettingKey>
+> = {
+  implement: "minLaneImplement",
+  repair: "minLaneImplement",
+  review: "minLaneReview",
+  triage: "minLaneTriage",
+  interactive: "minLaneInteractive",
+};
+
+export function resolveMinLaneField(
+  key: MinLaneSettingKey,
+  config: AppConfig,
+  overrides: SettingsOverrides
+): MinLaneFieldView {
+  const spec = SETTINGS_FIELDS[key];
+  const { envVar, value: envValue } = spec.envDefault(config);
+  // Both layers go through the field's own `normalize`, so a stored value an
+  // older build wrote — or a typo in the variable — falls through rather than
+  // reaching the ranking as a floor naming nothing. Shown verbatim either way:
+  // a refused value collapsed to "unset" would read back on the screen as a
+  // variable nobody had set.
+  const stored = overrides[key] ?? null;
+  const override = stored === null ? null : spec.normalize(stored, {});
+  const fromEnv = envValue === null ? null : spec.normalize(envValue, {});
+
+  return {
+    key,
+    label: spec.label,
+    help: spec.help,
+    laneId: override ?? fromEnv,
+    source: override !== null ? "override" : "environment",
+    override,
+    envVar,
+    envValue,
+  };
+}
+
+/** The floor in force for one pass kind — what cost routing is handed. */
+export function resolveMinLane(
+  kind: AgentPassKind,
+  config: AppConfig,
+  overrides: SettingsOverrides
+): MinLaneFieldView {
+  return resolveMinLaneField(MIN_LANE_FIELD_BY_KIND[kind], config, overrides);
+}
+
+/** Every floor, resolved for display, in the panel's own order. */
+export function describeMinLaneSettings(
+  config: AppConfig,
+  overrides: SettingsOverrides
+): MinLaneFieldView[] {
+  return MIN_LANE_FIELD_ORDER.map((key) =>
+    resolveMinLaneField(key, config, overrides)
+  );
 }
 
 /** Which field decides a pass's tier. `repair` is implement-shaped — it is the

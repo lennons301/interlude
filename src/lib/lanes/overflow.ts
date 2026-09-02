@@ -6,13 +6,18 @@
  * Two rules live here, and both are decided *before* a container is
  * provisioned:
  *
- * - **Interactive work overflows; autonomous work does not.** A human is
- *   sitting there waiting, so a walled subscription lane routes an interactive
- *   pass onto an available metered lane rather than failing it or leaving it
- *   queued. An autonomous pass takes no such route: it runs, is refused in
- *   about two seconds (#165's finding 5), and its run parks on the window's
- *   clock (#168/#169). That asymmetry is the whole point — unattended work
- *   never starts spending real money because a window closed.
+ * - **A walled lane is routed off, and only attended work is ever *held*.**
+ *   A human sitting there waiting is why an attended pass crosses onto a paid
+ *   lane; issue #176 extended the crossing itself to autonomous work, because
+ *   parking a run for five hours beside an idle lane costing a fortieth as
+ *   much is worse than paying for it — but every dollar of that still answers
+ *   to #174's cap and confirm-once press, so unattended work never *starts*
+ *   spending real money on its own. What stayed asymmetric is the refusal: an
+ *   attended pass that may not run is told why and held, where an autonomous
+ *   one is left on its lane to be refused in about two seconds (#165's
+ *   finding 5) and parked on the window's clock (#168/#169). Which lane any
+ *   pass runs on is `lane-selection.ts`'s answer now, cheapest-first — this
+ *   module owns what happens *because* of a wall, not the ranking.
  * - **An active overage is a paid lane.** Overage billing means the account is
  *   already being charged rather than drawing on quota, and an account with it
  *   enabled would otherwise never show a `rejected` at all: the wall would
@@ -36,38 +41,43 @@
  */
 
 import type { AgentPassKind, AppConfig } from "../config";
-import { quotaObservationIsSpent } from "../quota/quota-gate";
-import {
-  quotaSeverity,
-  type QuotaObservation,
-} from "../quota/rate-limit-event";
+import type { ModelTier } from "../model-tiers";
+import type { QuotaObservation } from "../quota/rate-limit-event";
 import type { SettingsOverrides } from "../settings-resolver";
 import {
   findLane,
   type LaneBilling,
-  type LaneCaps,
   type LaneCatalog,
-  type LaneDefinition,
 } from "./lane-config";
 import {
-  evaluateMeteredSpend,
-  resolveMeteredCap,
-  type MeteredSpendState,
-} from "./money";
+  selectLane,
+  type LaneCandidate,
+  type LaneSelection,
+} from "./lane-selection";
+import {
+  effectiveBilling,
+  laneIsWalled,
+  overageIsThePayer,
+  overagePaysNow,
+  type CrossingLane,
+} from "./lane-wall";
+import type { MeteredSpendState } from "./money";
 import { laneIsAvailable, laneMissingEnv, type LaneEnv } from "./resolve";
 
 /**
- * Just what the crossing needs to know about a lane: who it bills, and up to
- * how much. Structurally satisfied by both `ResolvedLane` (what a pass runs
- * on) and `LaneView` (what the screen shows), so neither caller has to
- * translate — and neither can pass a lane the other could not have.
+ * The four predicates that answer "can this lane serve the request, and whose
+ * money would it spend?" live in `lane-wall.ts` (issue #176), below this
+ * module, `money-state.ts` and `lane-selection.ts` — all three read them and
+ * all three have to agree. They are re-exported here because the *policy* they
+ * serve is still this module's, and because every existing caller names it.
  */
-export interface CrossingLane {
-  id: string;
-  label: string;
-  billing: LaneBilling;
-  caps: LaneCaps;
-}
+export {
+  effectiveBilling,
+  laneIsWalled,
+  overageIsThePayer,
+  overagePaysNow,
+  type CrossingLane,
+} from "./lane-wall";
 
 /** Why a pass may not start. Not a money hold on its own — `cap-reached` and
  * `unconfirmed` are #174's two holds arriving at an attended session, and
@@ -125,9 +135,39 @@ export interface LaneCrossingInput {
   /** The orchestrator's environment — read for availability only, never for a
    * secret's value. */
   env: LaneEnv;
-  /** The fleet's last quota observation (#167), or null when no pass has
-   * reported one. */
+  /** The lane in force's last quota observation (#167, per-lane since #175),
+   * or null when no pass on it has reported one. */
   observation: QuotaObservation | null;
+  /**
+   * Every lane's last observation, keyed by lane id — what cost routing needs
+   * to know which lanes can serve a request (issue #176). The lane in force's
+   * own entry is overlaid from `observation` above, so the wall this module
+   * writes a sentence about and the wall the ranking excludes a lane for are
+   * one reading of one row.
+   *
+   * Optional because most lanes never have one: a metered provider gives no
+   * quota telemetry at all (#165's finding 6), and #171's rule that silence is
+   * not a closed gate is exactly what lets an absent entry mean "admitted on
+   * spend instead".
+   */
+  observations?: Readonly<Record<string, QuotaObservation | null>>;
+  /**
+   * The lane an operator has explicitly chosen — the settings screen's
+   * `primaryLane`, or `AGENT_LANE` — which **pins the fleet and turns cost
+   * routing off** (issue #176). Null when that choice falls through the file's
+   * preference order, which is the state a fresh deployment is in and the one
+   * routing decides.
+   *
+   * Deliberately not a new setting: #172 already distinguishes an explicit
+   * choice (honoured even when broken) from the unset default, and cost
+   * routing replaces only the latter.
+   */
+  pinnedLaneId?: string | null;
+  /** The capability floor for this pass kind (issue #176), or null for none. */
+  minLaneId?: string | null;
+  /** The tier this pass resolved to — the row of each lane's price table the
+   * ranking reads. Null when a raw model id is pinned. */
+  tier?: ModelTier | null;
   config: AppConfig;
   overrides: SettingsOverrides;
   /** Real money already spent through metered lanes today (#174's ledger). */
@@ -137,122 +177,15 @@ export interface LaneCrossingInput {
   now: Date;
 }
 
-/**
- * Is the account already paying cash for work on its subscription lane?
- *
- * Read from the overage fields the CLI puts on `rate_limit_event` — which #167
- * stores precisely because this ticket needs them — under the same
- * spent-observation rule the admission gate uses: telemetry that no longer
- * describes the account now decides nothing, and the next pass re-observes
- * within seconds.
- *
- * Two shapes count, and the second is why `isUsingOverage` alone will not do:
- *
- * - `isUsingOverage` — the request drew on overage. Definitive.
- * - the subscription window has **refused** while the overage window has not.
- *   That is the state `scripts/rate-limit-stub.mjs --scenario overage-active`
- *   reproduces (`status: rejected`, `overage-status: allowed`, HTTP 200): the
- *   wall is up, the request succeeded anyway, and the card paid for it.
- *
- * What deliberately does *not* count is `overageInUse` on its own. The real
- * captured event from a healthy account carries `overageInUse: true` with
- * `status: allowed` and `isUsingOverage: false` — overage billing is merely
- * *available* there — so keying off it would classify an ordinary
- * subscription day as cash and hold the fleet for a confirmation nobody owed.
- */
-export function overagePaysNow(
-  observation: QuotaObservation | null,
-  now: Date
-): boolean {
-  if (observation === null) return false;
-  if (quotaObservationIsSpent(observation, now)) return false;
-  if (observation.isUsingOverage === true) return true;
-  return observation.status === "rejected" && overageIsServing(observation);
-}
-
-/**
- * Whether the event reports an overage window that can still serve a request.
- *
- * Judged through the shared severity map rather than a second list of status
- * words, so a member a later CLI adds reads as `unknown` and **decides
- * nothing** — #171's rule, and this is the one place it would have been easy
- * to break: an unknown status read as "overage is serving" would suppress the
- * wall, and the attended session would stay on the walled lane instead of
- * crossing off it. Deciding nothing leaves the wall standing, the session
- * crosses onto a metered lane, and the money guards still hold the first cash
- * of the day — the safe direction on both counts.
- */
-function overageIsServing(observation: QuotaObservation): boolean {
-  if (observation.overageStatus === null) return false;
-  const severity = quotaSeverity(observation.overageStatus);
-  return severity === "ok" || severity === "warning";
-}
-
-/**
- * Whether the primary lane's window has refused work outright and nothing is
- * covering it — the trigger for an interactive overflow.
- *
- * Only ever true of a subscription lane: the unified-window machinery is
- * subscription-only (#165's finding 6), so a metered lane reports no quota and
- * an observation left over from a subscription lane says nothing about it. An
- * *unavailable* lane is deliberately not a wall either — a missing credential
- * is reported by #172 and routing around an operator's explicit choice is what
- * that ticket exists to refuse. A wall is different in kind: the operator's
- * choice is intact and simply cannot serve the request.
- */
-export function laneIsWalled(
-  primary: CrossingLane | null,
-  observation: QuotaObservation | null,
-  now: Date
-): boolean {
-  if (primary === null || primary.billing !== "subscription") return false;
-  if (observation === null) return false;
-  if (quotaObservationIsSpent(observation, now)) return false;
-  if (observation.status !== "rejected") return false;
-  // Paying for it is not being refused it: the pass runs on this very lane and
-  // the only thing that changed is who is paying.
-  return !overagePaysNow(observation, now);
-}
-
-/**
- * The lanes an interactive pass may overflow onto, best first.
- *
- * Preference order first, then declaration order: the file's `primary` list is
- * the deployment's own stated ranking of who it would rather pay (Anthropic
- * direct before a third party, in the shipped file), and honouring it here
- * means the overflow target is a reviewed decision rather than whichever lane
- * happens to be declared first.
- */
-export function meteredOverflowCandidates(
-  catalog: LaneCatalog | null,
-  env: LaneEnv,
-  excludeLaneId: string | null
-): LaneDefinition[] {
-  if (catalog === null) return [];
-  const preferred = catalog.preference
-    .map((id) => findLane(catalog, id))
-    .filter((lane): lane is LaneDefinition => lane !== null);
-  const ordered = [...preferred, ...catalog.lanes];
-
-  const seen = new Set<string>();
-  const candidates: LaneDefinition[] = [];
-  for (const lane of ordered) {
-    if (lane.id === excludeLaneId || seen.has(lane.id)) continue;
-    seen.add(lane.id);
-    if (lane.billing !== "metered") continue;
-    if (!laneIsAvailable(lane, env)) continue;
-    candidates.push(lane);
-  }
-  return candidates;
-}
-
-/** Every declared metered lane and the variables it is missing — the "told
- * why" half of refusing an overflow with nowhere to go. Reached only when no
- * candidate resolved, so a lane with nothing missing is (by construction) the
- * lane already in force. */
+/** Why there was nowhere to send a walled attended pass — the "told why" half
+ * of refusing an overflow with nowhere to go. Reached only when the ranking
+ * found nothing eligible and nothing a press would free, so every metered lane
+ * is missing a credential, excluded by the pass kind's floor, or is the walled
+ * lane itself. */
 function describeUnavailableMeteredLanes(
   catalog: LaneCatalog | null,
-  env: LaneEnv
+  env: LaneEnv,
+  selection: LaneSelection
 ): string {
   const metered = (catalog?.lanes ?? []).filter(
     (lane) => lane.billing === "metered"
@@ -260,17 +193,31 @@ function describeUnavailableMeteredLanes(
   if (metered.length === 0) {
     return "no lane in lanes.yaml bills per token";
   }
+  const clauses: string[] = [];
   // `laneMissingEnv` rather than a second reading of `auth`: what makes a lane
   // unavailable is answered in exactly one place (issue #172).
-  const unavailable = metered
-    .map((lane) => ({ id: lane.id, missing: laneMissingEnv(lane, env) }))
-    .filter((lane) => lane.missing.length > 0);
-  if (unavailable.length === 0) {
+  for (const lane of metered) {
+    const missing = laneMissingEnv(lane, env);
+    if (missing.length > 0) clauses.push(`${lane.id} needs ${missing.join(", ")}`);
+  }
+  // The floor is an operator's own setting, so a pass held by one must say so
+  // rather than read as a broken deployment (issue #176).
+  const belowFloor = selection.candidates
+    .filter((lane) => lane.ineligible === "below-floor")
+    .map((lane) => lane.id);
+  if (belowFloor.length > 0 && selection.minLaneId !== null) {
+    clauses.push(
+      `${belowFloor.join(", ")} ${belowFloor.length === 1 ? "is" : "are"} below ` +
+        `this pass kind's minimum lane (${selection.minLaneId})`
+    );
+  }
+  if (selection.pinnedLaneId !== null) {
+    clauses.push(`the fleet is pinned to ${selection.pinnedLaneId}`);
+  }
+  if (clauses.length === 0) {
     return "the only lane that bills per token is the one already in force";
   }
-  return unavailable
-    .map((lane) => `${lane.id} needs ${lane.missing.join(", ")}`)
-    .join("; ");
+  return clauses.join("; ");
 }
 
 /** `$12.34` — the same shape the dashboard's money reads in, written here so a
@@ -303,32 +250,6 @@ function wallSentence(
 }
 
 /**
- * Whether an **overage** — rather than the lane itself — is what is being
- * billed. One predicate because three surfaces write a sentence about it (the
- * feed note here, the dashboard's cards, the settings panel), and a *metered*
- * lane observed while an overage happens to be active must not be described as
- * an overage: it bills per token on its own account. Getting that condition
- * wrong on one surface is how a fleet ends up accusing a subscription lane of
- * billing per token, or the reverse.
- */
-export function overageIsThePayer(
-  billing: LaneBilling | null,
-  overagePaying: boolean
-): boolean {
-  return overagePaying && billing === "subscription";
-}
-
-/** Neither the lane's kind nor an overage alone decides who paid — both do.
- * One function because the pass that spends the money and the guards that
- * measure it must agree, and #174 keys entirely off this value. */
-export function effectiveBilling(
-  billing: LaneBilling,
-  overagePaying: boolean
-): LaneBilling {
-  return billing === "metered" || overagePaying ? "metered" : "subscription";
-}
-
-/**
  * Whether a pass's payer differs from what its task last recorded — what makes
  * a crossing *news* rather than a line repeated on every turn.
  *
@@ -356,6 +277,13 @@ function isAttendedPass(kind: AgentPassKind): boolean {
 /**
  * The crossing for one pass: which lane it runs on, how its spend is booked,
  * and whether it may start at all.
+ *
+ * Which lane is the cost ranking's answer (issue #176) rather than a fixed
+ * setting: the cheapest lane that is available, permitted and at or above the
+ * pass kind's floor, with a walled lane excluded however cheap it is. In the
+ * shipped configuration that is a no-op until a wall — a subscription's quota
+ * is already bought, so nothing is cheaper — which is exactly the property
+ * that made cost routing safe to make the default.
  */
 export function decideLaneCrossing({
   kind,
@@ -363,6 +291,10 @@ export function decideLaneCrossing({
   catalog,
   env,
   observation,
+  observations = {},
+  pinnedLaneId = null,
+  minLaneId = null,
+  tier = null,
   config,
   overrides,
   spentTodayUsd,
@@ -384,68 +316,133 @@ export function decideLaneCrossing({
     notice: null,
   };
 
-  // An autonomous pass is routed, never held: #168 parks its run on the
-  // window's clock, and #174's guards hold the *pickup* that starts one rather
-  // than a pass already under way. All this decides for it is who pays, so an
-  // overage-funded pass books its dollars as the cash they are.
-  if (primary === null || !isAttendedPass(kind)) return base;
+  if (primary === null) return base;
 
-  // Overflow: a walled subscription lane hands an attended pass to the best
-  // available metered lane. With none available there is nothing to hand it
-  // to, and saying so beats provisioning a container to be refused in two
-  // seconds.
-  let lane: CrossingLane = primary;
-  let overflowedFrom: string | null = null;
-  if (walled) {
-    const [target] = meteredOverflowCandidates(catalog, env, primary.id);
-    if (target === undefined) {
-      return {
-        ...base,
-        refusal: {
-          reason: "no-metered-lane",
-          message:
-            `${wallSentence(primary, observation)} and there is no paid lane to ` +
-            `overflow onto — ${describeUnavailableMeteredLanes(catalog, env)}.`,
-        },
-      };
-    }
-    lane = target;
-    overflowedFrom = primary.id;
-  }
+  // An **unavailable** lane in force is not something to route around. A
+  // missing credential is #172's report, and papering over a misconfiguration
+  // by quietly spending money at another provider is the exact failure that
+  // ticket exists to refuse — where a wall is different in kind, because the
+  // operator's choice is intact and simply cannot serve the request. So the
+  // pass stays where it was sent and dies with the variables named, as before.
+  const inForce = catalog === null ? null : findLane(catalog, primary.id);
+  if (inForce === null || !laneIsAvailable(inForce, env)) return base;
 
-  const billing = effectiveBilling(lane.billing, overage);
-  if (billing === "subscription") {
-    // Nothing here costs money, so nothing here is guarded: subscription-lane
-    // interactive work is exactly as exempt from the cash cap as it was.
-    return { ...base, laneId: lane.id, billing };
-  }
-
-  // From here the pass spends real money, however it got there — an overflow,
-  // an overage, or a metered lane the operator made primary. #174's guards
-  // decide, over its own cap resolution, so the sentence this pass shows the
-  // human quotes the same numbers the settings panel does.
-  const cap = resolveMeteredCap(config, overrides, lane.caps.dailyBudgetUsd);
-  const money = evaluateMeteredSpend({
-    billing,
-    spentUsd: spentTodayUsd,
-    capUsd: cap.capUsd,
+  const selection = selectLane({
+    catalog,
+    env,
+    kind,
+    tier,
+    pinnedLaneId,
+    minLaneId,
+    // One reading of the lane in force's row: whatever the caller passed for
+    // every other lane, this module's own `observation` decides for the
+    // primary, so the wall it writes a sentence about and the wall the ranking
+    // excludes it for cannot differ.
+    observations: { ...observations, [primary.id]: observation },
+    config,
+    overrides,
+    spentTodayUsd,
     confirmedAt,
     now,
   });
 
-  const crossed: LaneCrossing = {
+  const target = selection.chosen;
+  if (target === null) return refusedCrossing(base, selection, {
+    kind,
+    primary,
+    catalog,
+    env,
+    observation,
+    overage,
+    walled,
+  });
+
+  const billing = target.effectiveBilling;
+  const overflowedFrom = target.id === primary.id ? null : primary.id;
+  if (billing === "subscription") {
+    // Nothing here costs money, so nothing here is guarded: subscription-lane
+    // work is exactly as exempt from the cash cap as it was.
+    return { ...base, laneId: target.id, billing, overflowedFrom };
+  }
+
+  // From here the pass spends real money, however it got there — a failover, an
+  // overflow, an overage, or a metered lane the operator made primary. #174's
+  // guards decided it, inside the ranking and over that lane's own cap, so the
+  // sentence this pass shows the human quotes the same numbers the settings
+  // panel does.
+  return {
     ...base,
-    laneId: lane.id,
+    laneId: target.id,
     billing,
     overflowedFrom,
+    money: target.money,
+    notice: noticeFor(
+      target,
+      primary,
+      observation,
+      overflowedFrom,
+      overage,
+      target.money!
+    ),
+  };
+}
+
+/**
+ * What to say when no lane may serve this pass.
+ *
+ * An **attended** pass is held and told why, because the two things holding it
+ * are a press away and a midnight away. An autonomous one is not: refusing it
+ * here would stop work the reducer has already decided to run, and #174's
+ * guards hold *pickup* rather than a pass under way — so it is left on the
+ * lane it was sent to, refused there in about two seconds, and parked on the
+ * window's clock by #168 (or moved by #176's failover, which asks this same
+ * ranking where to go).
+ */
+function refusedCrossing(
+  base: LaneCrossing,
+  selection: LaneSelection,
+  at: {
+    kind: AgentPassKind;
+    primary: CrossingLane;
+    catalog: LaneCatalog | null;
+    env: LaneEnv;
+    observation: QuotaObservation | null;
+    overage: boolean;
+    walled: boolean;
+  }
+): LaneCrossing {
+  if (!isAttendedPass(at.kind)) return base;
+
+  const held = selection.heldForMoney;
+  if (held === null) {
+    // Nothing was held for money, so nothing is a press away. Only a wall is
+    // worth a refusal here: any other reason a lane could not serve the pass
+    // is #172's to report as the pass starts, and inventing a hold on top
+    // would only hide it.
+    if (!at.walled) return base;
+    return {
+      ...base,
+      refusal: {
+        reason: "no-metered-lane",
+        message:
+          `${wallSentence(at.primary, at.observation)} and there is no paid lane to ` +
+          `overflow onto — ${describeUnavailableMeteredLanes(at.catalog, at.env, selection)}.`,
+      },
+    };
+  }
+
+  const money = held.money!;
+  const crossed: LaneCrossing = {
+    ...base,
+    laneId: held.id,
+    billing: held.effectiveBilling,
+    overflowedFrom: held.id === at.primary.id ? null : at.primary.id,
     money,
-    notice: noticeFor(lane, primary, observation, overflowedFrom, overage, money),
   };
 
   if (money.hold === "cap-reached") {
     return {
       ...crossed,
-      notice: null,
       refusal: {
         reason: "cap-reached",
         message:
@@ -457,33 +454,30 @@ export function decideLaneCrossing({
     };
   }
 
-  if (money.hold === "unconfirmed") {
-    const lead =
-      overflowedFrom === null
-        ? whyPaid(lane, primary, observation, overage)
-        : `${wallSentence(primary, observation)}, so this session would ` +
-          `continue on ${lane.label} — which bills per token`;
-    return {
-      ...crossed,
-      notice: null,
-      refusal: {
-        reason: "unconfirmed",
-        message:
-          `${lead}. ` +
-          `Real money: ${usd(money.spentUsd)} of ${usd(money.capUsd)} spent today. ` +
-          `Confirm real-money spend to continue; the rest of today's spend then ` +
-          `runs without asking, up to the cap.`,
-      },
-    };
-  }
-
-  return crossed;
+  // The lead names the cause the human is looking at: a wall they can see on
+  // the dashboard, or — with the lane in force still serving — why the work in
+  // front of them costs money at all.
+  const lead = at.walled
+    ? `${wallSentence(at.primary, at.observation)}, so this session would ` +
+      `continue on ${held.label} — which bills per token`
+    : whyPaid(held, at.primary, at.observation, at.overage);
+  return {
+    ...crossed,
+    refusal: {
+      reason: "unconfirmed",
+      message:
+        `${lead}. ` +
+        `Real money: ${usd(money.spentUsd)} of ${usd(money.capUsd)} spent today. ` +
+        `Confirm real-money spend to continue; the rest of today's spend then ` +
+        `runs without asking, up to the cap.`,
+    },
+  };
 }
 
 /** Why this pass costs money when it is not an overflow: an overage on the
  * lane in force, or a lane that simply bills per token. */
 function whyPaid(
-  lane: CrossingLane,
+  lane: Pick<CrossingLane, "label" | "billing">,
   primary: CrossingLane,
   observation: QuotaObservation | null,
   overage: boolean
@@ -500,7 +494,7 @@ function whyPaid(
 /** The line a permitted crossing puts on the task's feed. Written for someone
  * who was mid-conversation and is about to see the same session cost money. */
 function noticeFor(
-  lane: CrossingLane,
+  lane: Pick<CrossingLane, "label" | "billing">,
   primary: CrossingLane,
   observation: QuotaObservation | null,
   overflowedFrom: string | null,

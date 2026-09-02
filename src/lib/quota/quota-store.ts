@@ -119,3 +119,31 @@ export function getQuotaObservation(
     return null;
   }
 }
+
+/**
+ * Every lane's last observation, keyed by lane id — what cost routing reads
+ * (issue #176), because "which lanes can serve a request right now?" is a
+ * question about all of them at once and asking it lane by lane would make
+ * each caller decide which lanes to ask about.
+ *
+ * A lane with no row is **absent from the map**, which reads as null at every
+ * caller and is the truth: it has reported nothing, which is the permanent
+ * state of a metered lane and must never read as a closed door (#171's rule).
+ * One query rather than one per lane, and a row this build cannot parse is
+ * dropped exactly as the single-lane read drops it.
+ */
+export function getQuotaObservations(): Record<string, QuotaObservation> {
+  const observations: Record<string, QuotaObservation> = {};
+  try {
+    for (const row of db.select().from(quotaState).all()) {
+      const parsed = parseRateLimitEvent(
+        { type: "rate_limit_event", rate_limit_info: row.observation },
+        row.observedAt
+      );
+      if (parsed !== null) observations[row.lane] = parsed;
+    }
+  } catch (err) {
+    console.error("[quota] failed to read observations:", err);
+  }
+  return observations;
+}

@@ -31,11 +31,12 @@ import {
   resolveAgentEffort,
   type AgentPassKind,
 } from "../config";
-import { getSettingsOverrides } from "../settings";
+import { getFleetSettings, getSettingsOverrides } from "../settings";
+import { resolveResumeBound } from "../settings-resolver";
 import { getLaneCatalog } from "../lanes/catalog";
 import { bookTaskCost } from "./spend";
 import { resolveLane, type ResolvedLane } from "../lanes/resolve";
-import { readLaneCrossing } from "../lanes/overflow-state";
+import { readLaneCrossing, readLaneFailover } from "../lanes/overflow-state";
 import { payerChanged, type LaneCrossing } from "../lanes/overflow";
 import type { LaneBilling } from "../lanes/lane-config";
 import { noteOnceOnFeed } from "../tasks/feed-note";
@@ -52,6 +53,7 @@ import { parseRepoFromGitUrl } from "../github/repo";
 import { createDraftPr, markPrReady, shouldOpenDraftPr } from "../github/pull-requests";
 import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed, notifyTaskIdle, notifyRunBlocked } from "../discord/notifications";
 import { decideNext, passOutcomeSnapshot, type Action } from "./autonomy/decide";
+import { buildLaneMovePrompt } from "./autonomy/workflow";
 import { composeSeed, composeSessionTurn } from "../sessions/seed";
 import { processSingleton } from "../process-singleton";
 import { storedTaskStatus, taskIsFinished } from "../tasks/stored-status";
@@ -332,7 +334,11 @@ export async function startTask(taskId: string): Promise<void> {
   // between that check and this one. Read once and handed to the resolver
   // below, so the lane a pass runs on and the reason it was held cannot come
   // from two different readings of the fleet.
-  const crossing = readLaneCrossing(task.kind);
+  // The run's `model:` directive rides along, because the lane a pass is routed
+  // onto is ranked at the *tier* that pass would run (issue #176): a heavy
+  // implement pass and a light triage pass read different rows of the same
+  // lane's price table.
+  const crossing = readLaneCrossing(task.kind, run?.model ?? null);
   if (crossingHoldsPass(taskId, crossing)) return;
 
   // Everything from here is inside the failure path. Lane resolution
@@ -1025,7 +1031,7 @@ function laneForFollowUp(
   // the reason on the feed, exactly as a misconfigured lane does — the queued
   // message is still undelivered, so the owner's turn is not burnt and it runs
   // on the poll after the press (issue #173).
-  const crossing = readLaneCrossing(kind);
+  const crossing = readLaneCrossing(kind, ticketModel);
   if (crossingHoldsPass(taskId, crossing)) return null;
   try {
     return requirePassLane(kind, ticketModel, crossing);
@@ -1932,7 +1938,14 @@ function lastAgentTextMessage(taskId: string): string | null {
  * Everything but `proceed` is fully handled inside `evaluatePassOutcome`; only
  * `proceed` leaves anything for the caller.
  */
-type PassDecision = "blocked" | "degraded" | "finalized" | "paused" | "proceed";
+type PassDecision =
+  | "blocked"
+  | "degraded"
+  /** Moved to another lane and retried there (issue #176) */
+  | "failed-over"
+  | "finalized"
+  | "paused"
+  | "proceed";
 
 /**
  * Park-or-proceed for an implement pass whose turn just ended (issue #19):
@@ -1968,30 +1981,64 @@ export async function evaluatePassOutcome(
   const producedPr =
     task.kind !== "implement" || task.pullRequestNumber != null;
 
+  const now = new Date();
+  const rateLimited = detectQuotaRejection(turn);
+  const settings = getFleetSettings();
+  const tier = normalizeModelTier(run?.model ?? null);
+
   const actions = decideNext(
-    passOutcomeSnapshot(new Date(), {
-      runId: task.runId,
-      taskId,
-      issueRef: task.githubIssue,
-      finalMessage: turn.finalMessage,
-      producedPr,
-      // Read from this turn's own result, at the one seam that has it: whether
-      // the account refused the pass is not recoverable from the task row
-      // afterwards (issue #168).
-      rateLimited: detectQuotaRejection(turn),
-      // The ladder's starting rung (issue #170). `runs.model` is where the tier
-      // a pass ran at is recorded — written when the implement pass starts —
-      // and it is read back through the same normaliser every other reader of
-      // that column uses, so a legacy alias resolves and a pinned raw model id
-      // arrives as the null it is.
-      tier: normalizeModelTier(run?.model ?? null),
-    })
+    passOutcomeSnapshot(
+      now,
+      {
+        runId: task.runId,
+        taskId,
+        issueRef: task.githubIssue,
+        finalMessage: turn.finalMessage,
+        producedPr,
+        // Read from this turn's own result, at the one seam that has it: whether
+        // the account refused the pass is not recoverable from the task row
+        // afterwards (issue #168).
+        rateLimited,
+        // The ladder's starting rung (issue #170). `runs.model` is where the tier
+        // a pass ran at is recorded — written when the implement pass starts —
+        // and it is read back through the same normaliser every other reader of
+        // that column uses, so a legacy alias resolves and a pinned raw model id
+        // arrives as the null it is.
+        tier,
+        // The lane it ran on, off the task row (#174's ledger entry), which is
+        // the only honest source: the primary may since have changed, and cost
+        // routing may have sent this pass elsewhere to begin with.
+        laneId: task.lane,
+        // Where it could go instead of pausing (issue #176) — the shared
+        // ranking, with this lane excluded, asked only when there is a wall to
+        // answer, since it reads the lane file, the environment, every lane's
+        // quota row and the day's cash.
+        laneFailover:
+          rateLimited === null
+            ? null
+            : readLaneFailover(
+                task.kind,
+                run?.model ?? null,
+                task.lane,
+                now,
+                settings
+              ),
+        resumesMade: run?.resumeCount ?? 0,
+      },
+      // A lane move counts against the same bound a resume does (issue #169),
+      // read fresh from the settings row like every other runtime setting.
+      resolveResumeBound(getConfig(), settings.overrides).resumes
+    )
   );
 
   for (const action of actions) {
     if (action.type === "degradeRunTier") {
       await degradeRunTier(action, task);
       return "degraded";
+    }
+    if (action.type === "failOverRunLane") {
+      await failOverRunLane(action, task);
+      return "failed-over";
     }
     if (action.type === "pauseRunOnRateLimit") {
       await pauseRunOnRateLimit(action);
@@ -2095,8 +2142,12 @@ async function endRefusedPass(args: {
   note: (preserved: boolean) => string;
   /** What the run records instead of a spent attempt */
   runPatch: Partial<typeof runs.$inferInsert>;
-  /** The pass queued to take this one's place, if any */
-  queueNext?: () => void;
+  /** The pass queued to take this one's place, if any. Takes whether the
+   *  conversation survived the teardown, because a replacement that continues
+   *  it (issue #176's lane move) may only carry the session id when the
+   *  transcript is actually on disk — `--resume` against a session the fresh
+   *  container has never heard of fails the pass outright. */
+  queueNext?: (preserved: boolean) => void;
 }): Promise<boolean> {
   const container = activeTasks.get(args.taskId)?.container ?? null;
 
@@ -2114,7 +2165,7 @@ async function endRefusedPass(args: {
   updateTask(args.taskId, { status: "failed", containerStatus: null });
   syncRunCost(args.runId);
   db.update(runs).set(args.runPatch).where(eq(runs.id, args.runId)).run();
-  args.queueNext?.();
+  args.queueNext?.(preserved);
 
   await removeTaskContainer(args.taskId, container);
   return preserved;
@@ -2199,6 +2250,142 @@ async function degradeRunTier(
           // allowance again on top of whatever the refused pass spent. A
           // refused pass usually spends ~nothing, but a wall hit deep into a
           // long turn does not, and one attempt must not cost two budgets.
+          resumedFromTaskId: task.id,
+          pullRequestNumber: task.pullRequestNumber,
+          pullRequestUrl: task.pullRequestUrl,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .run(),
+  });
+}
+
+/**
+ * Move a refused run onto another lane and retry it there (issue #176).
+ *
+ * The wall this answers is one the pass's own lane cannot get past — account
+ * wide, or the bottom of its tier ladder — so #170's step-down has already
+ * been asked and declined. Before this ticket the only remaining answer was
+ * #168's pause: park for up to five hours, or up to seven days, beside a lane
+ * that could have run the work for a fortieth of the price. Now the run moves.
+ *
+ * Shaped as the degrade is, and deliberately so — a fresh pass of the **same
+ * kind** under the same run, carrying the same prompt, branch and PR, queued
+ * for the ordinary poll — with two differences, both of which are the ticket:
+ *
+ *  - **The session goes with it.** A lane move is lossless in exactly the way
+ *    #169's resume is: the transcript is copied out before the teardown and
+ *    the replacement carries the session id, so the pass continues its own
+ *    conversation on a different provider rather than re-orienting from the
+ *    branch. Only when the transcript actually landed, though — `--resume`
+ *    against a session the fresh container has never heard of would fail the
+ *    pass outright, where the declared fallback is a pass that starts again on
+ *    the same branch with the work pushed. That is why `queueNext` is handed
+ *    `preserved`.
+ *  - **It counts.** `resumeCount` is bumped, so a move answers to the same
+ *    bound a resume does. A run that keeps being refused therefore walks its
+ *    lanes and then pauses, and #169's exhaustion hands the ticket to a human
+ *    — no second counter, and no way to thrash between two lanes forever.
+ *
+ * What it does *not* write is the lane. `runs.lane`/`tasks.lane` are written
+ * when a pass **starts**, by `startTask`, from the same ranking that decided
+ * this move — so the ledger records where the work really ran, and a wall that
+ * lifted in the half-minute before the replacement started sends it back to
+ * the cheaper lane rather than honouring a stale decision. The target named
+ * here is what the human is told, not a pin.
+ *
+ * Neither `attempt` nor `interruptionCount` moves, and the run's status is
+ * left alone: an `implementing` run with a queued task is a state the sweep
+ * already reads correctly. The ending itself — the ordering, the teardown, the
+ * two counters left alone — is `endRefusedPass`'s.
+ */
+async function failOverRunLane(
+  move: Extract<Action, { type: "failOverRunLane" }>,
+  task: typeof tasks.$inferSelect
+): Promise<void> {
+  const run = db.select().from(runs).where(eq(runs.id, move.runId)).get();
+
+  const window = move.limitType
+    ? `the ${describeRateLimitType(move.limitType)}`
+    : "the account's rate limit";
+  const from = move.fromLaneId ?? "its lane";
+  const cost =
+    move.toLaneBilling === "metered"
+      ? " That lane bills per token, within today's confirmed real-money cap."
+      : "";
+  const retryId = newId();
+
+  console.log(
+    `[autonomy] Run ${move.runId} (${run?.githubIssue ?? "?"}) moving lane ` +
+      `${from} -> ${move.toLaneId} on ${window} (move ${move.move}/${move.maxMoves}) ` +
+      `— retrying as task ${retryId}, no attempt consumed`
+  );
+
+  if (task.githubIssue) {
+    // Fire-and-forget, as the pause and degrade paths' comments are: one call
+    // site awaits this from inside startTask's try, and a rejected comment
+    // must not throw back into the catch and re-run the whole move.
+    commentOnIssue(
+      task.githubIssue,
+      `Moved execution lane (attempt ${run?.attempt ?? "?"}): ${window} refused ` +
+        `this pass on \`${from}\`, so the run continues on **${move.toLaneLabel}** ` +
+        `rather than waiting the window out (move ${move.move}/${move.maxMoves}).` +
+        `${cost} A lane move consumes neither an attempt nor an interruption — ` +
+        `work so far is pushed to \`${task.branch}\`.`
+    ).catch(console.error);
+  }
+
+  await endRefusedPass({
+    taskId: move.taskId,
+    runId: move.runId,
+    // Carried, unlike the degrade's: the pass that continues here is the same
+    // pass doing the same work, and losing its conversation to a provider
+    // change would make the move cost what the pause was protecting.
+    sessionId: task.sessionId,
+    note: (preserved) =>
+      `${window} refused this pass on ${from} — moving to ${move.toLaneLabel} ` +
+      `and retrying there (move ${move.move}/${move.maxMoves}); no attempt or ` +
+      `interruption was consumed.` +
+      (preserved
+        ? " The session was copied out, so the retry continues this conversation."
+        : " The session could not be copied out, so the retry starts again on" +
+          " the same branch."),
+    runPatch: {
+      // A move is a continuation of this attempt, counted where a resume is
+      // counted (issue #169) so one bound holds both. Deliberately not
+      // `status`: the run carries on, with a queued task the sweep reads
+      // correctly and boot leaves alone because it still owns live work.
+      resumeCount: (run?.resumeCount ?? 0) + 1,
+    },
+    queueNext: (preserved) =>
+      db
+        .insert(tasks)
+        .values({
+          id: retryId,
+          projectId: task.projectId,
+          title: task.title,
+          // The same prompt, verbatim, behind the move's own preamble: the
+          // work has not changed, only who is running it. A repair pass's PR
+          // context rides along for the same reason a degrade's does — a
+          // repair moves as a repair.
+          description: buildLaneMovePrompt({
+            originalPrompt: task.description,
+            branch: task.branch ?? "the attempt's branch",
+            toLaneLabel: move.toLaneLabel,
+            move: move.move,
+            maxMoves: move.maxMoves,
+          }),
+          status: "queued",
+          kind: task.kind,
+          runId: move.runId,
+          githubIssue: task.githubIssue,
+          branch: task.branch,
+          // Only when the transcript is actually on disk — see the note above.
+          sessionId: preserved ? task.sessionId : null,
+          // Lineage, and with it the attempt's budget (issues #169, #170): a
+          // moved pass is a new row for the same attempt, and every budget
+          // control here is scoped to the row, so without this the turn
+          // manager would hand it the whole per-attempt allowance again.
           resumedFromTaskId: task.id,
           pullRequestNumber: task.pullRequestNumber,
           pullRequestUrl: task.pullRequestUrl,

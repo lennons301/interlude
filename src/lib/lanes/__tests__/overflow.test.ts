@@ -9,7 +9,6 @@ import {
   laneIsWalled,
   overageIsThePayer,
   payerChanged,
-  meteredOverflowCandidates,
   overagePaysNow,
   type CrossingLane,
   type LaneCrossingInput,
@@ -61,6 +60,8 @@ lanes:
       heavy: anthropic/claude-opus-4.1
       standard: anthropic/claude-sonnet-4.5
       light: anthropic/claude-haiku-4.5
+    caps:
+      daily_budget_usd: 20
 `;
 
 const catalog: LaneCatalog = (() => {
@@ -222,21 +223,50 @@ describe("what counts as walled", () => {
   });
 });
 
-describe("autonomous passes never overflow", () => {
+describe("autonomous passes are routed too, but never held (issue #176)", () => {
   it.each(["implement", "review", "triage", "repair"] as const)(
-    "leaves a %s pass on the walled lane, to be paused by #168",
+    "moves a %s pass off the walled lane once the day's cash is confirmed",
     (kind) => {
+      // #173 left autonomous work on the walled lane to be paused by #168.
+      // #176 routes it, because parking for five hours beside a lane that can
+      // run the work is worse than paying for it — bounded by the very guards
+      // below, never exempted from them.
       const decision = crossing({ kind });
 
-      expect(decision.laneId).toBe("subscription");
-      expect(decision.overflowedFrom).toBeNull();
-      expect(decision.billing).toBe("subscription");
+      expect(decision.laneId).toBe("direct-api");
+      expect(decision.overflowedFrom).toBe("subscription");
+      expect(decision.billing).toBe("metered");
       expect(decision.refusal).toBeNull();
       // The wall is still reported — it is a fact about the fleet, not a
       // decision about this pass.
       expect(decision.walled).toBe(true);
     }
   );
+
+  it.each(["implement", "review", "triage", "repair"] as const)(
+    "leaves a %s pass on the walled lane while the day's cash is unconfirmed",
+    (kind) => {
+      // The #168 path, preserved exactly: with no lane the fleet is permitted
+      // to spend on, the pass runs where it was sent, is refused in ~2s, and
+      // its run parks on the window's clock. An autonomous pass is never
+      // *held* here — #174's guards hold pickup, not a pass under way — so
+      // there is no refusal to answer either.
+      const decision = crossing({ kind, confirmedAt: null });
+
+      expect(decision.laneId).toBe("subscription");
+      expect(decision.overflowedFrom).toBeNull();
+      expect(decision.billing).toBe("subscription");
+      expect(decision.refusal).toBeNull();
+      expect(decision.walled).toBe(true);
+    }
+  );
+
+  it("leaves a walled autonomous pass in place once the cash cap is spent", () => {
+    const decision = crossing({ kind: "implement", spentTodayUsd: 20 });
+
+    expect(decision.laneId).toBe("subscription");
+    expect(decision.refusal).toBeNull();
+  });
 
   it("still books an autonomous pass's overage spend as the cash it is", () => {
     const decision = crossing({
@@ -290,9 +320,11 @@ describe("interactive work overflows to a metered lane", () => {
     expect(decision.laneId).toBe("subscription");
   });
 
-  it("does not overflow off a lane that is merely unavailable", () => {
-    // A missing credential is #172's report, not a wall: routing around an
-    // operator's explicit choice is what that ticket exists to refuse.
+  it("does not route off a lane that is merely unavailable", () => {
+    // A missing credential is #172's report, not a wall, and cost routing may
+    // not paper over a misconfiguration by spending money at another provider
+    // (issue #176) — the pass stays where it was sent and dies naming the
+    // variable.
     const decision = crossing({
       observation: null,
       env: { ANTHROPIC_API_KEY: "sk-ant" },
@@ -340,6 +372,10 @@ describe("the at-the-keyboard confirmation", () => {
     // than off having overflowed, exactly as that ticket's guards do.
     const decision = crossing({
       primary: METERED_PRIMARY,
+      // Pinned, which is one of only two ways a metered lane is primary — the
+      // other being a subscription credential the deployment does not have,
+      // and in both cost routing leaves the choice alone (issue #176).
+      pinnedLaneId: "direct-api",
       observation: null,
       confirmedAt: null,
     });
@@ -403,23 +439,9 @@ describe("the cap", () => {
 });
 
 describe("the pieces the callers share", () => {
-  it("orders overflow candidates by the file's own preference", () => {
-    const ids = meteredOverflowCandidates(catalog, FULL_ENV, "subscription").map(
-      (lane) => lane.id
-    );
-    expect(ids).toEqual(["direct-api", "openrouter"]);
-  });
-
-  it("never offers the lane being overflowed off", () => {
-    const ids = meteredOverflowCandidates(catalog, FULL_ENV, "direct-api").map(
-      (lane) => lane.id
-    );
-    expect(ids).toEqual(["openrouter"]);
-  });
-
-  it("has no candidates without a catalog to read", () => {
-    expect(meteredOverflowCandidates(null, FULL_ENV, null)).toEqual([]);
-  });
+  // Which lane a crossing lands on is `lane-selection.ts`'s ranking since
+  // issue #176 — ordering, exclusion and the empty-catalog case are tested
+  // there, against the cost rules that decide them.
 
   it("makes cash of a metered lane or an overage, and nothing else", () => {
     expect(effectiveBilling("subscription", false)).toBe("subscription");
