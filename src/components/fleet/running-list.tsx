@@ -87,6 +87,16 @@ function RunCard({ card, now }: { card: RunningCard; now: number }) {
 
       {card.paused && <PausedLine resumeAfter={card.paused.resumeAfter} now={now} />}
 
+      {/* A run the quota ladder stepped down (issue #170). Stated where the
+          work is, quietly: nothing is asked of anyone, but the result came from
+          a cheaper model than the one this run was asked to use, and that is
+          not recoverable from the card otherwise. */}
+      {card.degraded && (
+        <p className="font-plex-mono text-[11px] text-fl-ink-3">
+          running at {card.degraded.to} — stepped down from {card.degraded.from}
+        </p>
+      )}
+
       {card.phases && (
         <div className="flex items-center gap-1.5 font-plex-mono text-[11px]">
           {card.phases.map((phase, i) => (

@@ -76,6 +76,8 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     reviewVerdict: null,
     reviewResult: null,
     resumeAfter: null,
+    model: null,
+    degradedFrom: null,
     claimedAt: aug(1, 9),
     startedAt: aug(1, 9),
     finishedAt: null,

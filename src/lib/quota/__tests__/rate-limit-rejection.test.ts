@@ -64,9 +64,11 @@ describe("detectQuotaRejection — the wall", () => {
     });
   });
 
-  it("pauses on a weekly window as readily as the five-hour one", () => {
-    // Every unified window is account-wide; a run walled on the weekly limit is
-    // no more the ticket's fault than one walled on the session limit.
+  it("reads a tier-scoped weekly window as readily as the five-hour one", () => {
+    // The window is reported verbatim and judged nowhere here: what a
+    // tier-scoped one *means* — step down the ladder rather than pause (issue
+    // #170) — is the reducer's decision, and this module's job is only to say
+    // that the account refused the pass and on which window.
     expect(
       detectQuotaRejection({
         terminalResult: REFUSED_EXIT,
@@ -106,6 +108,19 @@ describe("detectQuotaRejection — the wall", () => {
     ).toEqual({ resumeAfter: new Date(RESETS_AT_EPOCH * 1000), limitType: null });
   });
 
+  it("reports a rejection that named no reset time, rather than hiding it", () => {
+    // Withheld until #170, when pausing was a wall's only possible consequence
+    // and a run parked on an invented clock would have been stranded. A
+    // tier-scoped wall now degrades and retries, which waits on no clock, so
+    // both facts go to the reducer and it declines the pause itself.
+    expect(
+      detectQuotaRejection({
+        terminalResult: REFUSED_EXIT,
+        rateLimit: observation({ status: "rejected", rateLimitType: "five_hour" }),
+      })
+    ).toEqual({ resumeAfter: null, limitType: "five_hour" });
+  });
+
   it("still reads the wall when the CLI stops echoing the HTTP status", () => {
     // Either field is enough beside `is_error`, so a renamed or dropped field
     // does not silently take the fleet back to spending attempts on quota.
@@ -137,18 +152,6 @@ describe("detectQuotaRejection — everything that is not the wall", () => {
           utilization: 99,
           resetsAt: RESETS_AT_EPOCH,
         }),
-      })
-    ).toBeNull();
-  });
-
-  it("does not pause a rejection with no reset time to wait for", () => {
-    // There would be no clock to resume from, and a run paused on an unknown
-    // window is stranded where no later ticket can find it. Better to take the
-    // ordinary path and spend the attempt, exactly as before this ticket.
-    expect(
-      detectQuotaRejection({
-        terminalResult: REFUSED_EXIT,
-        rateLimit: observation({ status: "rejected", rateLimitType: "five_hour" }),
       })
     ).toBeNull();
   });

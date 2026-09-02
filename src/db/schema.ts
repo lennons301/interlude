@@ -151,6 +151,17 @@ export const runs = sqliteTable("runs", {
   // pass starts. Null means AGENT_EFFORT was unset (no directive) and the CLI
   // resolved its own default.
   effort: text("effort"),
+  // The tier this run was *asked* for, once the quota degrade ladder has moved
+  // it off that tier (issue #170). Null on every run still running at the tier
+  // it was given, which is what makes "is this run degraded?" one non-null
+  // check; set on the first step down and never rewritten, so a run that has
+  // walked heavy -> standard -> light still reads as "asked for heavy".
+  //
+  // Two columns rather than one because `model` has to keep meaning "the tier
+  // that actually ran" — it is what the run's spend is read against, and what
+  // every later pass of the same attempt resolves through — so the requested
+  // tier needs somewhere of its own to live rather than overwriting it.
+  degradedFrom: text("degraded_from"),
   // Resolved version of the mattpocock-skills plugin the container installed at
   // start (issue #60) — the forensic trail for "what skill version ran?".
   // Recorded when the run's first pass sets up; null for a run whose container

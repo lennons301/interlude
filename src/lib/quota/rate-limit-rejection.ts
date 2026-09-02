@@ -50,18 +50,26 @@ const API_ERROR_REASON = "api_error";
 export interface QuotaRejection {
   /**
    * When the window the account was refused on resets — the earliest moment a
-   * paused run could be tried again.
+   * paused run could be tried again — or null when the event named none.
    *
    * Taken verbatim from the event rather than computed from a window length,
    * because this build does not know how long "five_hour" is for an account
    * on overage, and a resume time the fleet invented would be wrong in the
    * direction that costs a real attempt.
+   *
+   * Null is a real answer rather than a refusal to report (issue #170): a
+   * *pause* needs a clock and so still declines a reset-less wall, but a
+   * **degrade** needs none — it steps down a tier and retries now — so the
+   * decision about what a missing reset means belongs to the reducer, which
+   * knows which of the two it is choosing between, and not here.
    */
-  resumeAfter: Date;
-  /** Which window refused it — `five_hour`, `seven_day`, … — verbatim, or null
-   * when the event named none. Said on the issue and the card, never branched
-   * on: every unified window is account-wide, and a member this build has
-   * never heard of must pause the run exactly as a known one does. */
+  resumeAfter: Date | null;
+  /** Which window refused it — `five_hour`, `seven_day`, `seven_day_opus`, … —
+   * verbatim, or null when the event named none. Read for exactly one
+   * distinction (issue #170): whether it names a *tier*, which the run can
+   * step down from, or the account, which it can only wait out. A member this
+   * build has never heard of names no tier, and so pauses the run exactly as
+   * `five_hour` does. */
   limitType: string | null;
 }
 
@@ -103,19 +111,22 @@ function exitedOnApiError(terminal: Record<string, unknown> | null): boolean {
 /**
  * The quota wall this turn hit, or null when it hit none.
  *
- * Null covers every ordinary case, including two worth naming: a metered
- * (API-key) lane, where the unified-window machinery emits no event at all so
- * there is never anything to read (#165, finding 6); and a rejection whose
- * event carried no reset time, where there is no clock to wait on — pausing
- * indefinitely on an unknown window would strand the run somewhere no later
- * ticket can find it, so the pass takes its ordinary path and the attempt is
- * spent, exactly as before this ticket.
+ * Null covers every ordinary case, including one worth naming: a metered
+ * (API-key) lane, where the unified-window machinery emits no event at all, so
+ * there is never anything to read (#165, finding 6) and a 429 there arrives
+ * with nothing to date a resume from.
+ *
+ * A rejection carrying no reset time is *reported*, not withheld (issue #170).
+ * It was withheld while pausing was the only consequence a wall could have —
+ * a run paused on an unknown window is stranded where no later ticket can find
+ * it, so spending the attempt was the lesser harm. Now a tier-scoped wall
+ * degrades and retries instead, which waits on no clock at all, so the
+ * reducer is given both facts and declines the pause itself.
  */
 export function detectQuotaRejection(turn: TurnQuotaSignals): QuotaRejection | null {
   const observed = turn.rateLimit;
   if (observed === null || observed.status !== REJECTED_STATUS) return null;
   if (!exitedOnApiError(turn.terminalResult)) return null;
-  if (observed.resetsAt === null) return null;
 
   return { resumeAfter: observed.resetsAt, limitType: observed.rateLimitType };
 }

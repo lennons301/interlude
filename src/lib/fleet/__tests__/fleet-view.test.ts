@@ -63,6 +63,8 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     reviewVerdict: null,
     reviewResult: null,
     resumeAfter: null,
+    model: null,
+    degradedFrom: null,
     claimedAt: TODAY_9AM,
     startedAt: TODAY_9AM,
     finishedAt: null,
@@ -1284,6 +1286,7 @@ describe("buildFleetView — running", () => {
         startedAt: TODAY_9AM.toISOString(),
         spend: { usd: 7.8, budgetUsd: 20 },
         paused: null,
+        degraded: null,
       },
     ]);
   });
@@ -1449,6 +1452,7 @@ describe("buildFleetView — running", () => {
         startedAt: TODAY_9AM.toISOString(),
         spend: { usd: 1.23, budgetUsd: null },
         paused: null,
+        degraded: null,
       },
     ]);
   });
@@ -1780,6 +1784,7 @@ describe("buildFleetView — running", () => {
         startedAt: TODAY_9AM.toISOString(),
         spend: { usd: 0.8, budgetUsd: 2 },
         paused: null,
+        degraded: null,
       },
     ]);
   });

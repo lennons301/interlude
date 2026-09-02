@@ -53,6 +53,7 @@ import {
   type TurnQuotaSignals,
 } from "../quota/rate-limit-rejection";
 import { describeRateLimitType } from "../quota/rate-limit-event";
+import { normalizeModelTier } from "../model-tiers";
 
 /**
  * Track all active task containers for cancellation and idle polling.
@@ -1542,6 +1543,8 @@ function lastAgentTextMessage(taskId: string): string | null {
 
 /**
  * What the reducer decided about an implement pass whose turn just ended:
+ * - `degraded`  — a tier's allowance refused the pass, so the run steps down
+ *                 the ladder and a fresh pass is queued (issue #170)
  * - `paused`    — the account's quota refused the pass, so the run waits on the
  *                 window's reset; container torn down (issue #168)
  * - `blocked`   — parked on a question (issue #19); container preserved (#93)
@@ -1550,10 +1553,10 @@ function lastAgentTextMessage(taskId: string): string | null {
  * - `proceed`   — healthy; the caller finishes the pass (park awaiting review,
  *                 or complete the task when there is a PR to hand over)
  *
- * The first three are fully handled inside `evaluatePassOutcome`; only
+ * Everything but `proceed` is fully handled inside `evaluatePassOutcome`; only
  * `proceed` leaves anything for the caller.
  */
-type PassDecision = "blocked" | "finalized" | "paused" | "proceed";
+type PassDecision = "blocked" | "degraded" | "finalized" | "paused" | "proceed";
 
 /**
  * Park-or-proceed for an implement pass whose turn just ended (issue #19):
@@ -1580,6 +1583,7 @@ export async function evaluatePassOutcome(
 ): Promise<PassDecision> {
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
   if (!task?.runId || !task.githubIssue) return "proceed";
+  const run = db.select().from(runs).where(eq(runs.id, task.runId)).get();
 
   // Only a genuine implement pass can be "empty" in the #106 sense: a repair
   // pass (issue #54) always operates on an existing PR and is never an
@@ -1599,10 +1603,20 @@ export async function evaluatePassOutcome(
       // the account refused the pass is not recoverable from the task row
       // afterwards (issue #168).
       rateLimited: detectQuotaRejection(turn),
+      // The ladder's starting rung (issue #170). `runs.model` is where the tier
+      // a pass ran at is recorded — written when the implement pass starts —
+      // and it is read back through the same normaliser every other reader of
+      // that column uses, so a legacy alias resolves and a pinned raw model id
+      // arrives as the null it is.
+      tier: normalizeModelTier(run?.model ?? null),
     })
   );
 
   for (const action of actions) {
+    if (action.type === "degradeRunTier") {
+      await degradeRunTier(action, task);
+      return "degraded";
+    }
     if (action.type === "pauseRunOnRateLimit") {
       await pauseRunOnRateLimit(action);
       return "paused";
@@ -1625,6 +1639,119 @@ export async function evaluatePassOutcome(
     }
   }
   return "proceed";
+}
+
+/**
+ * Step a run down the tier ladder and retry it (issue #170).
+ *
+ * The account still has quota — just not for the tier this pass asked for — so
+ * stopping the run would be leaving work on the table for up to seven days.
+ * Instead the refused pass ends, the run records the tier it is dropping to,
+ * and a fresh pass of the **same kind** is queued under the same run: an
+ * implement pass retries as an implement pass, a repair as a repair, carrying
+ * the same prompt, branch and PR. The queue picks it up on the next poll like
+ * any other queued task, and `startTask` resolves the lane through
+ * `runs.model`, which is where the new tier now sits.
+ *
+ * Nothing is charged for it, for the same reason a pause charges nothing: the
+ * work was never tried. Neither `attempt` nor `interruptionCount` moves, and
+ * the run's status is deliberately left exactly as it was — a degraded
+ * implement pass leaves the run `implementing` with a queued task, which is a
+ * state the sweep already reads correctly (its gate evaluation waits on a
+ * settled working pass, and a queued one is not settled).
+ *
+ * The ladder bounds itself: `runs.model` only ever moves downward, so a run can
+ * degrade at most twice before it is at the bottom and the next wall pauses it.
+ *
+ * `degradedFrom` is written **once** — the first step's `from` — so the ledger
+ * keeps the tier the run was asked to run at, however far down it has since
+ * walked. Rewriting it on every step would make a heavy run that reached light
+ * read as a standard one that slipped a rung.
+ *
+ * The container is torn down rather than parked, exactly as a pause tears it
+ * down and for the same 2026-08-04 reason; the retry provisions its own. The
+ * teardown is awaited last, after the retry is durably queued, so a crash
+ * mid-degrade leaves a run that still owns live work rather than a ghost for
+ * boot to finalize.
+ */
+async function degradeRunTier(
+  step: Extract<Action, { type: "degradeRunTier" }>,
+  task: typeof tasks.$inferSelect
+): Promise<void> {
+  const taskId = step.taskId;
+  const run = db.select().from(runs).where(eq(runs.id, step.runId)).get();
+
+  // Taken before the status goes terminal, for the reason failImplementAttempt
+  // states: from that write on the queue's poll may drop the session entry
+  // (issue #159), and reading the map afterwards would leak the container.
+  const container = activeTasks.get(taskId)?.container ?? null;
+
+  const window = `the ${describeRateLimitType(step.limitType)} allowance`;
+  const resets = step.resumeAfter
+    ? ` (it resets at ${step.resumeAfter.toUTCString()})`
+    : "";
+
+  insertSystemMessage(
+    taskId,
+    `Stepping down from the ${step.from} tier to ${step.to} — ${window} ` +
+      `refused this pass${resets}. The run retries at ${step.to}; ` +
+      `no attempt or interruption was consumed.`
+  );
+  updateTask(taskId, { status: "failed", containerStatus: null });
+  syncRunCost(step.runId);
+  db.update(runs)
+    .set({
+      model: step.to,
+      // Only the first step records where the run started; a second step is
+      // still a run that was asked for `from` of the first.
+      degradedFrom: run?.degradedFrom ?? step.from,
+    })
+    .where(eq(runs.id, step.runId))
+    .run();
+
+  const now = new Date();
+  const retryId = newId();
+  db.insert(tasks)
+    .values({
+      id: retryId,
+      projectId: task.projectId,
+      title: task.title,
+      // The same prompt, verbatim: the work has not changed, only the tier it
+      // runs on. A repair pass's PR context rides along for the same reason.
+      description: task.description,
+      status: "queued",
+      kind: task.kind,
+      runId: step.runId,
+      githubIssue: task.githubIssue,
+      branch: task.branch,
+      pullRequestNumber: task.pullRequestNumber,
+      pullRequestUrl: task.pullRequestUrl,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .run();
+
+  console.log(
+    `[autonomy] Run ${step.runId} (${run?.githubIssue ?? "?"}) stepped down ` +
+      `${step.from} -> ${step.to} on ${step.limitType} — retrying as task ` +
+      `${retryId}, no attempt consumed`
+  );
+
+  if (task.githubIssue) {
+    // Fire-and-forget, as the pause path's comment is: one call site awaits
+    // this from inside startTask's try, and a rejected comment must not throw
+    // back into the catch and re-run the whole step.
+    commentOnIssue(
+      task.githubIssue,
+      `Stepped down a model tier (attempt ${run?.attempt ?? "?"}): ${window} ` +
+        `refused this pass${resets}, so the run continues at \`${step.to}\` ` +
+        `instead of \`${step.from}\` rather than waiting the window out. ` +
+        `A tier step consumes neither an attempt nor an interruption — ` +
+        `work so far is pushed to \`${task.branch}\`.`
+    ).catch(console.error);
+  }
+
+  await removeTaskContainer(taskId, container);
 }
 
 /**

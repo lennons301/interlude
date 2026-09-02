@@ -189,6 +189,9 @@ function makePass(overrides: Partial<PassOutcome> = {}): PassOutcome {
     finalMessage: "Implemented the frobnicator; tests and lint pass.",
     producedPr: true,
     rateLimited: null,
+    // The top of the ladder, so a degrade test has somewhere to step and a
+    // pause test is not passing by accident (issue #170).
+    tier: "heavy",
     ...overrides,
   };
 }

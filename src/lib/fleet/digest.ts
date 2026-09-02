@@ -123,6 +123,12 @@ function runningLine(card: RunningCard): string {
   if (card.paused) {
     parts.push(`paused, quota resets ${shortDateTime(card.paused.resumeAfter)}`);
   }
+  // Same argument, one ticket later (issue #170): the digest reads the same
+  // `degraded` field the dashboard does, so neither can claim a run is on a
+  // tier the other says it left.
+  if (card.degraded) {
+    parts.push(`at ${card.degraded.to}, stepped down from ${card.degraded.from}`);
+  }
   return parts.join(" · ");
 }
 
