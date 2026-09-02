@@ -458,6 +458,43 @@ describe("renderDailyDigest — in flight", () => {
     ]);
   });
 
+  it("says a run is working below the tier it was asked for (#170)", () => {
+    // Same argument one ticket later: the digest reads the same `degraded`
+    // field the dashboard does, so neither can claim a run is on a tier the
+    // other says it left.
+    const content = render({
+      projects: [makeProject({ id: "p1", name: "lemons" })],
+      runs: [
+        makeRun({
+          id: "r1",
+          projectId: "p1",
+          attempt: 2,
+          status: "implementing",
+          model: "standard",
+          degradedFrom: "heavy",
+          totalCostUsd: 7.8,
+          budgetUsd: 20,
+        }),
+      ],
+      tasks: [
+        makeTask({
+          id: "t-impl",
+          projectId: "p1",
+          runId: "r1",
+          kind: "implement",
+          title: "Add pagination to the list",
+          status: "running",
+          containerStatus: "running",
+        }),
+      ],
+    });
+
+    expect(section(content, "In flight")).toEqual([
+      "lemons #34 · Add pagination to the list · attempt 2/3 · $7.80 of $20.00 · " +
+        "at standard, stepped down from heavy",
+    ]);
+  });
+
   it("says so when nothing is running", () => {
     const content = render();
 

@@ -40,6 +40,12 @@ const PAUSED: RunningCard = {
   paused: { reason: "rate-limited", resumeAfter: "2026-09-01T14:30:00.000Z" },
 };
 
+/** A run the tier ladder stepped down (issue #170) — working, not waiting. */
+const DEGRADED: RunningCard = {
+  ...WORKING,
+  degraded: { from: "heavy", to: "standard" },
+};
+
 function render(cards: RunningCard[]): string {
   return renderToStaticMarkup(
     <RunningList view={{ running: cards } as FleetView} now={NOW} />
@@ -80,5 +86,26 @@ describe("running list", () => {
     expect(html).toContain("afk");
     expect(html).not.toContain("paused");
     expect(html).not.toContain("rate limited");
+    expect(html).not.toContain("stepped down");
+  });
+
+  it("says a degraded run is running below the tier it was asked for", () => {
+    // Both tiers, because "degraded" alone does not tell an operator whether
+    // the result in front of them came from the model they chose (issue #170).
+    const html = render([DEGRADED]);
+
+    expect(html).toContain("running at standard");
+    expect(html).toContain("stepped down from heavy");
+  });
+
+  it("still reads a degraded run as work in progress", () => {
+    // The distinction the card has to carry: a stepped-down run is being
+    // worked, so it keeps its mode chip and its green phase — unlike a paused
+    // one, which is waiting on a clock.
+    const html = render([DEGRADED]);
+
+    expect(html).toContain(">afk<");
+    expect(html).toContain("text-fl-green");
+    expect(html).not.toContain("paused");
   });
 });
