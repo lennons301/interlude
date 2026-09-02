@@ -285,7 +285,10 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
     queued under the same run, the new tier is recorded on `runs.model`, and the
     tier it was asked for on `runs.degraded_from`. Nothing to do — the issue
     gets a comment saying which tier it dropped to. A run can step down at most
-    twice before it is at the bottom.
+    twice before it is at the bottom, and the step is **one-way**: nothing puts
+    the tier back, so the rest of that run stays a rung down even after the
+    window resets. A *later* attempt at the same ticket is a fresh run and
+    starts at the configured tier again.
   - An **account-wide** window (`five_hour`, `seven_day`, `overage`), or a wall
     at the bottom of the ladder, pauses instead: the run goes `rate_limited`
     with a `resumeAfter` taken from the limit event's own reset time, and its

@@ -156,7 +156,7 @@ export interface PassOutcome {
    * would charge the account's quota to the ticket's attempt budget.
    *
    * It does not say *which* consequence follows — a tier-scoped window steps
-   * the run down the ladder and a account-wide one parks it (issue #170) —
+   * the run down the ladder and an account-wide one parks it (issue #170) —
    * because that is the reducer's decision to make, from this and `tier`.
    */
   rateLimited: QuotaRejection | null;
@@ -843,21 +843,22 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       // account-wide window — or the bottom of the ladder, where there is
       // nowhere left to step — actually stops the run.
       const { limitType, resumeAfter } = pass.rateLimited;
-      const degrade =
-        limitType === null ? null : planTierDegrade(pass.tier, limitType);
-      if (degrade !== null && limitType !== null) {
-        parkedRunIds.add(pass.runId);
-        actions.push({
-          type: "degradeRunTier",
-          runId: pass.runId,
-          taskId: pass.taskId,
-          issueRef: pass.issueRef,
-          from: degrade.from,
-          to: degrade.to,
-          limitType,
-          resumeAfter,
-        });
-        continue;
+      if (limitType !== null) {
+        const degrade = planTierDegrade(pass.tier, limitType);
+        if (degrade !== null) {
+          parkedRunIds.add(pass.runId);
+          actions.push({
+            type: "degradeRunTier",
+            runId: pass.runId,
+            taskId: pass.taskId,
+            issueRef: pass.issueRef,
+            from: degrade.from,
+            to: degrade.to,
+            limitType,
+            resumeAfter,
+          });
+          continue;
+        }
       }
       // A pause needs a clock, and a rejection that named no reset time gives
       // it none. Pausing on an invented one would strand the run where no
