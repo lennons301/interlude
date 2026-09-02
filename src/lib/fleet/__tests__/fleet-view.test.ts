@@ -1231,6 +1231,16 @@ describe("buildFleetView — needs you", () => {
             remedy: "Check the orchestrator.",
           },
           queueStale: { staleForMs: 3 * 60_000 },
+          undeliveredAnswers: [
+            {
+              taskId: "t-3",
+              label: "o/r #3",
+              issueRef: "o/r#3",
+              taskUrl: "/tasks/t-3",
+              queuedAtMs: 0,
+              undeliveredForMs: 20 * 60_000,
+            },
+          ],
         },
         projects: [
           makeProject({
@@ -1274,6 +1284,7 @@ describe("buildFleetView — needs you", () => {
       "cap",
       "queue-stale",
       "pickup-wedged",
+      "answer-undelivered",
       "review-stalled",
       "blocked",
       "signoff",
@@ -1296,6 +1307,7 @@ describe("buildFleetView — fleet health (#126)", () => {
           owedReviewStalls: [],
           pickupWedged: null,
           queueStale: { staleForMs: 3 * 60_000 },
+          undeliveredAnswers: [],
         },
       })
     );
@@ -1322,6 +1334,7 @@ describe("buildFleetView — fleet health (#126)", () => {
             remedy: "Check the orchestrator (a hung Docker daemon).",
           },
           queueStale: null,
+          undeliveredAnswers: [],
         },
       })
     );
@@ -1354,6 +1367,7 @@ describe("buildFleetView — fleet health (#126)", () => {
               "The slot count is held in orchestrator memory with nothing behind it — restart the app to clear it.",
           },
           queueStale: null,
+          undeliveredAnswers: [],
         },
       })
     );
@@ -1377,6 +1391,7 @@ describe("buildFleetView — fleet health (#126)", () => {
           ],
           pickupWedged: null,
           queueStale: null,
+          undeliveredAnswers: [],
         },
       })
     );
@@ -1410,6 +1425,7 @@ describe("buildFleetView — fleet health (#126)", () => {
           ],
           pickupWedged: null,
           queueStale: null,
+          undeliveredAnswers: [],
         },
       })
     );
@@ -1430,6 +1446,7 @@ describe("buildFleetView — fleet health (#126)", () => {
           ],
           pickupWedged: null,
           queueStale: null,
+          undeliveredAnswers: [],
         },
       })
     );
@@ -2457,5 +2474,39 @@ describe("the quota's lane (issue #175)", () => {
 
     expect(view.quota).toBeNull();
     expect(view.quotaLane?.id).toBe("openrouter-glm");
+  });
+
+  it("raises an undelivered-answer card pointing at the session (#136)", () => {
+    const view = buildFleetView(
+      baseRows({
+        fleetHealth: {
+          owedReviewStalls: [],
+          pickupWedged: null,
+          queueStale: null,
+          undeliveredAnswers: [
+            {
+              taskId: "t-62",
+              label: "moontide #62",
+              issueRef: "lennons301/moontide#62",
+              taskUrl: "/tasks/t-62",
+              queuedAtMs: 0,
+              undeliveredForMs: 95 * 60_000,
+            },
+          ],
+        },
+      })
+    );
+
+    expect(view.needsYou).toEqual([
+      {
+        cause: "answer-undelivered",
+        severity: "red",
+        context: "moontide #62",
+        body:
+          "Your answer has sat undelivered for 1h 35m — the agent never received it. " +
+          "The parked session is not resuming; restart the app to re-adopt it.",
+        action: { label: "Open session", href: "/tasks/t-62" },
+      },
+    ]);
   });
 });

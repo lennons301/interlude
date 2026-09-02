@@ -15,6 +15,7 @@ const CAUSE_LABEL: Record<NeedsYouItem["cause"], string> = {
   "review-stalled": "review stalled",
   "pickup-wedged": "pickup wedged",
   "queue-stale": "queue stalled",
+  "answer-undelivered": "answer stuck",
 };
 
 const CAUSE_TONE: Record<NeedsYouItem["cause"], "amber" | "red"> = {
@@ -31,6 +32,7 @@ const CAUSE_TONE: Record<NeedsYouItem["cause"], "amber" | "red"> = {
   "review-stalled": "red",
   "pickup-wedged": "red",
   "queue-stale": "red",
+  "answer-undelivered": "red",
 };
 
 /**

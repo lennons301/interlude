@@ -3,6 +3,7 @@ import {
   DEFAULT_ATTEMPT_BUDGET_USD,
   DEFAULT_METERED_DAILY_CAP_USD,
   DEFAULT_OCCUPANCY_DIVERGED_MS,
+  DEFAULT_UNDELIVERED_ANSWER_MS,
   DEFAULT_OWED_REVIEW_STALL_MS,
   DEFAULT_PICKUP_WEDGED_MS,
   DEFAULT_QUEUE_HEARTBEAT_STALE_MS,
@@ -305,6 +306,10 @@ export function getConfig(): AppConfig {
       occupancyDivergedMs: minutesEnvMs(
         process.env.OCCUPANCY_DIVERGED_MINUTES,
         DEFAULT_OCCUPANCY_DIVERGED_MS
+      ),
+      undeliveredAnswerMs: minutesEnvMs(
+        process.env.UNDELIVERED_ANSWER_MINUTES,
+        DEFAULT_UNDELIVERED_ANSWER_MS
       ),
     },
     quotaPickupThresholdPercent:

@@ -6,6 +6,7 @@ import {
   type FleetHealthState,
   type FleetHealthThresholds,
   type OwedReviewObservation,
+  type UndeliveredAnswerObservation,
 } from "../health";
 
 const THRESHOLDS: FleetHealthThresholds = {
@@ -13,6 +14,7 @@ const THRESHOLDS: FleetHealthThresholds = {
   pickupWedgedMs: 3 * 60_000,
   heartbeatStaleMs: 2 * 60_000,
   occupancyDivergedMs: 20 * 60_000,
+  undeliveredAnswerMs: 10 * 60_000,
 };
 
 const T0 = new Date(2026, 7, 1, 12, 0, 0).getTime();
@@ -28,6 +30,7 @@ function baseInput(overrides: Partial<FleetHealthInput> = {}): FleetHealthInput 
     agentContainers: null,
     queueRunning: true,
     queueLastProgressMs: T0,
+    undeliveredAnswers: [],
     ...overrides,
   };
   // Unless a test says otherwise, the daemon corroborates the slot count — so
@@ -521,5 +524,65 @@ describe("evaluateFleetHealth — stale queue heartbeat", () => {
       baseInput({ nowMs: T0 + min(10), queueRunning: true, queueLastProgressMs: null })
     );
     expect(signals.queueStale).toBeNull();
+  });
+});
+
+describe("undelivered answer (issue #136)", () => {
+  const answer = (overrides: Partial<UndeliveredAnswerObservation> = {}) => ({
+    taskId: "task-1",
+    label: "moontide #62",
+    issueRef: "lennons301/moontide#62",
+    taskUrl: "/tasks/task-1",
+    queuedAtMs: T0,
+    ...overrides,
+  });
+
+  it("stays quiet while the answer is younger than the threshold", () => {
+    const { signals, announce } = evaluate(
+      baseInput({ nowMs: T0 + min(9), undeliveredAnswers: [answer()] })
+    );
+    expect(signals.undeliveredAnswers).toEqual([]);
+    expect(announce.undeliveredAnswers).toEqual([]);
+  });
+
+  it("raises one card once the answer has sat undelivered past the threshold", () => {
+    const { signals, announce } = evaluate(
+      baseInput({ nowMs: T0 + min(11), undeliveredAnswers: [answer()] })
+    );
+    expect(signals.undeliveredAnswers).toEqual([
+      { ...answer(), undeliveredForMs: min(11) },
+    ]);
+    expect(announce.undeliveredAnswers).toEqual(signals.undeliveredAnswers);
+  });
+
+  it("pings once per occurrence, not once per sweep", () => {
+    const s1 = evaluate(baseInput({ nowMs: T0 + min(11), undeliveredAnswers: [answer()] }));
+    expect(s1.announce.undeliveredAnswers).toHaveLength(1);
+
+    const s2 = evaluate(
+      baseInput({ nowMs: T0 + min(12), undeliveredAnswers: [answer()] }),
+      s1.state
+    );
+    expect(s2.signals.undeliveredAnswers).toHaveLength(1);
+    expect(s2.announce.undeliveredAnswers).toEqual([]);
+  });
+
+  it("clears the card and re-arms the ping once the answer is delivered", () => {
+    const s1 = evaluate(baseInput({ nowMs: T0 + min(11), undeliveredAnswers: [answer()] }));
+    const delivered = evaluate(
+      baseInput({ nowMs: T0 + min(12), undeliveredAnswers: [] }),
+      s1.state
+    );
+    expect(delivered.signals.undeliveredAnswers).toEqual([]);
+    expect(delivered.state.undeliveredAnswerAnnounced).toEqual([]);
+
+    const again = evaluate(
+      baseInput({
+        nowMs: T0 + min(30),
+        undeliveredAnswers: [answer({ queuedAtMs: T0 + min(13) })],
+      }),
+      delivered.state
+    );
+    expect(again.announce.undeliveredAnswers).toHaveLength(1);
   });
 });

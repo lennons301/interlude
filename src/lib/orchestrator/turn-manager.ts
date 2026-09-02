@@ -55,6 +55,7 @@ import { decideNext, passOutcomeSnapshot, type Action } from "./autonomy/decide"
 import { composeSeed, composeSessionTurn } from "../sessions/seed";
 import { processSingleton } from "../process-singleton";
 import { storedTaskStatus, taskIsFinished } from "../tasks/stored-status";
+import type { ParkedAdoption } from "./parked-adoption";
 import {
   detectQuotaRejection,
   type TurnQuotaSignals,
@@ -95,6 +96,47 @@ const activeTasks = processSingleton(
 
 export function getActiveTasks() {
   return activeTasks;
+}
+
+/**
+ * Put a parked container back in `activeTasks` as idle, after a restart lost
+ * the map (issue #136).
+ *
+ * `activeTasks` lives only in this process's memory and `startTask` was its
+ * only writer, so an orchestrator restart while a run sat `blocked` severed the
+ * one route from the owner's answer to the container: queue step 2 iterates
+ * this map and nothing else, boot recovery deliberately leaves a blocked run
+ * alone (it waits on a human, not on a lost turn), and the reaper deliberately
+ * preserves its container. Correct in isolation, and in combination it stranded
+ * the run permanently — the answer landing in `messages` with `deliveredAt`
+ * null, forever, and no human action able to clear the card.
+ *
+ * The handle is reconstructed from the task row, exactly as `completeTask` has
+ * always reconstructed one when it finds no entry. `checkout: "existing"` says
+ * the container is already on its branch, and the entry goes in as `idle` with
+ * its real kind, which is what makes it *parked* — so it holds no slot, just as
+ * it held none before the restart, and the existing delivery path resumes it on
+ * the next poll with no further changes.
+ *
+ * The caller owns deciding *whether* to adopt (see `planParkedAdoption`); this
+ * only does it, and refuses to overwrite a live entry so a second boot pass, or
+ * a task that has meanwhile started for real, cannot lose a handle.
+ */
+export function adoptParkedContainer(adoption: ParkedAdoption): boolean {
+  if (activeTasks.has(adoption.taskId)) return false;
+
+  activeTasks.set(adoption.taskId, {
+    container: {
+      container: getDocker().getContainer(adoption.containerName),
+      id: adoption.containerId,
+      name: adoption.containerName,
+      previewSubdomain: adoption.previewSubdomain,
+      checkout: "existing",
+    },
+    state: "idle",
+    kind: adoption.kind,
+  });
+  return true;
 }
 
 /**

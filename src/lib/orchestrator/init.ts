@@ -1,9 +1,17 @@
 import { db } from "@/db";
 import { tasks, messages, runs } from "@/db/schema";
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, or } from "drizzle-orm";
 import { newId } from "../ulid";
 import { getDocker, isDockerAvailable } from "../docker/client";
 import { AGENT_CONTAINER_NAME_PREFIX } from "../docker/agent-containers";
+import { observeContainerAbsent } from "../docker/container-manager";
+import { adoptParkedContainer, getActiveTasks } from "./turn-manager";
+import {
+  planParkedAdoption,
+  type ContainerPresence,
+  type OrphanedParkedTask,
+} from "./parked-adoption";
+import { commentOnIssue } from "../github/issues";
 import { startQueue } from "./queue";
 import { getCapacity } from "./capacity";
 import { startAutonomySweeps } from "./autonomy/sweep";
@@ -178,6 +186,198 @@ function pruneStoredTranscripts(): void {
   }
 }
 
+/**
+ * Re-adopt the containers of parked, blocked runs (issue #136).
+ *
+ * `activeTasks` is process memory with one writer (`startTask`), and queue step
+ * 2 — the only thing that delivers a queued user message — iterates it and
+ * nothing else. Every other layer then deliberately leaves a blocked run alone:
+ * recovery skips it (it waits on a human, not a lost turn), and the reaper
+ * preserves its container. Each of those is right on its own, and together they
+ * meant a restart while a run was `blocked` stranded it forever: the owner's
+ * answer landed in `messages` with `deliveredAt` null, no poll could ever see
+ * it, and no label, cancel or container action could clear the card.
+ *
+ * So boot puts the entry back. What it decides is `planParkedAdoption`'s; this
+ * gathers the rows, asks the daemon about each container, and executes the
+ * plan:
+ *
+ * - **adopt** — the container is still there, so the entry goes back as parked
+ *   and idle. It holds no slot (exactly as it held none before the restart) and
+ *   the existing delivery path resumes it on the next 2s poll, on the same
+ *   attempt, with the session's own conversation.
+ * - **orphaned** — the container is gone, so there is nothing to answer into.
+ *   The run must not stay `blocked` forever, so it takes the #24 interruption
+ *   path: `interrupted` consumes no attempt and is bounded separately by
+ *   `MAX_INTERRUPTIONS_PER_TICKET`, past which pickup routes the ticket
+ *   `ready-for-human` like exhaustion. The question and any answer already
+ *   given are carried onto the issue, so the owner's words outlive the
+ *   container that was going to receive them.
+ * - **deferred** — the daemon did not answer. Unknown decides nothing in
+ *   either direction (the doctrine of #152/#159): the run stays blocked and the
+ *   next boot asks again. Meanwhile the undelivered-answer health signal is
+ *   what makes the wait visible rather than silent.
+ *
+ * Runs before `startQueue`, so an adopted entry is in the map before the first
+ * poll, and before the reaper, so an orphaned task's row is already terminal
+ * when cleanup looks at it.
+ *
+ * Exported as the seam it is: "an answer given before the restart is delivered
+ * after it" is the whole of this ticket, and it is only observable across this
+ * function and the queue's own poll.
+ */
+export async function adoptParkedContainers(): Promise<void> {
+  const parked = await db
+    .select({
+      taskId: tasks.id,
+      runId: tasks.runId,
+      status: tasks.status,
+      kind: tasks.kind,
+      containerName: tasks.containerName,
+      containerId: tasks.containerId,
+      previewSubdomain: tasks.previewSubdomain,
+    })
+    .from(tasks)
+    .where(eq(tasks.status, "blocked"));
+
+  if (parked.length === 0) return;
+
+  // One probe per container, up front, so the planner stays pure and sync.
+  const seen = new Map<string, ContainerPresence>();
+  for (const row of parked) {
+    if (!row.containerName || seen.has(row.containerName)) continue;
+    const absent = await observeContainerAbsent(row.containerName);
+    seen.set(
+      row.containerName,
+      absent === true ? "absent" : absent === false ? "present" : "unknown"
+    );
+  }
+
+  const plan = planParkedAdoption(
+    parked,
+    (name) => seen.get(name) ?? "unknown",
+    getActiveTasks().keys()
+  );
+
+  for (const adoption of plan.adopt) {
+    if (!adoptParkedContainer(adoption)) continue;
+    console.log(
+      `[orchestrator] Re-adopted parked container for blocked task ${adoption.taskId} — ` +
+        `a queued answer will be delivered on the next poll`
+    );
+  }
+
+  for (const taskId of plan.deferred) {
+    console.warn(
+      `[orchestrator] Blocked task ${taskId}: the daemon could not say whether its ` +
+        `container is there — left parked, and re-checked on the next boot`
+    );
+  }
+
+  for (const orphan of plan.orphaned) {
+    await interruptOrphanedParkedTask(orphan);
+  }
+}
+
+/**
+ * A blocked task whose container is gone: end the pass, interrupt the run, and
+ * carry the conversation's unfinished business onto the issue (issue #136).
+ *
+ * The ordering matters in one place only — the issue comment is gathered from
+ * the message rows *before* the task is failed, because it is the last chance
+ * to read what the owner said to a container that no longer exists. Everything
+ * else is the #24 interruption path unchanged: no attempt is consumed, the
+ * interruption bound is what limits the retries, and the branch was pushed
+ * after each turn so the work itself survives.
+ */
+async function interruptOrphanedParkedTask(orphan: OrphanedParkedTask): Promise<void> {
+  const now = new Date();
+  const task = await db
+    .select()
+    .from(tasks)
+    .where(eq(tasks.id, orphan.taskId))
+    .get();
+  const run = orphan.runId
+    ? await db.select().from(runs).where(eq(runs.id, orphan.runId)).get()
+    : undefined;
+
+  const answers = await db
+    .select({ content: messages.content })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.taskId, orphan.taskId),
+        eq(messages.role, "user"),
+        isNull(messages.deliveredAt)
+      )
+    )
+    .orderBy(asc(messages.createdAt));
+
+  await db
+    .update(tasks)
+    .set({ status: "failed", containerId: null, containerStatus: null, updatedAt: now })
+    .where(eq(tasks.id, orphan.taskId));
+
+  await db.insert(messages).values({
+    id: newId(),
+    taskId: orphan.taskId,
+    role: "system",
+    content:
+      "This pass's container is gone, so the question it was waiting on can no " +
+      "longer be answered here. The ticket is re-claimed without consuming an " +
+      "attempt, and the question — with anything you had already said — is on the issue.",
+    type: "system",
+    createdAt: now,
+  });
+
+  if (run) {
+    await db
+      .update(runs)
+      .set({
+        status: "interrupted",
+        interruptionCount: run.interruptionCount + 1,
+        finishedAt: now,
+      })
+      .where(eq(runs.id, run.id));
+    console.log(
+      `[orchestrator] Blocked run ${run.id} (${run.githubIssue}) lost its container — ` +
+        `interrupted, so the sweep re-claims without consuming an attempt`
+    );
+  }
+
+  if (!task?.githubIssue) return;
+
+  const said = answers
+    .map((m) => messageText(m.content))
+    .filter((text): text is string => text != null && text.length > 0);
+
+  await commentOnIssue(
+    task.githubIssue,
+    `A blocked attempt's container was lost before its question could be answered, ` +
+      `so the ticket is re-claimed without consuming an attempt. Nothing is lost from ` +
+      `the branch \`${task.branch}\` — but the exchange only lived in that container, ` +
+      `so it is recorded here for the next attempt.\n\n` +
+      `**The agent asked:**\n\n> ${run?.blockedQuestion ?? "(no question recorded)"}\n\n` +
+      (said.length > 0
+        ? `**Already answered** (never delivered):\n\n${said
+            .map((text) => `> ${text.replace(/\n/g, "\n> ")}`)
+            .join("\n\n")}`
+        : `No answer had been given yet.`)
+  ).catch((err) =>
+    console.error(`[orchestrator] Failed to carry a lost question onto the issue:`, err)
+  );
+}
+
+/** A message row's text, however the row was shaped. */
+function messageText(content: string): string | null {
+  try {
+    const parsed = JSON.parse(content) as { text?: unknown };
+    return typeof parsed.text === "string" ? parsed.text : null;
+  } catch {
+    return content;
+  }
+}
+
 async function recoverOrphanedTasks(): Promise<void> {
   const orphaned = await db
     .select({ id: tasks.id, containerName: tasks.containerName, runId: tasks.runId })
@@ -318,6 +518,7 @@ export async function initOrchestrator(): Promise<void> {
     await markInterruptedRuns();
     await finalizeDanglingRuns();
     await recoverOrphanedTasks();
+    await adoptParkedContainers();
     await reapStaleContainers();
     pruneStoredTranscripts();
     startQueue();

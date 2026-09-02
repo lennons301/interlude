@@ -136,7 +136,8 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
   daily-cap pause, failing preflights, and the fleet-health watchdog's stall
   signals (issue #126: an owed review that never started, a wedged pickup, a
   stale queue heartbeat; issue #152: a slot count no real container
-  corroborates), each with a link where one applies.
+  corroborates; issue #136: an answer you gave that never reached the agent),
+  each with a link where one applies.
 - **running** — each active run's ticket, attempt (n/3), turn, spend vs budget,
   and phase (implement ▸ review ▸ merge). A run the account's quota refused sits
   here too, labelled **paused** with when its window resets (issue #168) — it is
@@ -151,8 +152,8 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
 
 Discord is **push-only**: it tells you *when to look* (claimed, blocked question,
 sign-off needed, attempts exhausted, cap pause, slots saturated, a fleet-health
-stall — owed review / wedged pickup / stale queue / phantom slot — daily
-digest).
+stall — owed review / wedged pickup / stale queue / phantom slot / an answer
+that never got through — daily digest).
 Each stall pings once per occurrence, not every sweep. Autonomous success is
 deliberately silent — it shows on the dashboard. There is no `!status` command;
 the dashboard answers "what's happening".
@@ -252,14 +253,25 @@ chat/preview is never affected.
 When an agent hits a decision the ticket doesn't settle, it emits
 `BLOCKED: <question>` on its own line (a short lead-in above it is fine — the
 detector scans every line, not just the first). The orchestrator parks the
-run (status `blocked`, container kept alive but **holding no slot**) and posts the
-question to the project's linked Discord channel — or, if the project has none, to
-the fleet channel (`DISCORD_FLEET_CHANNEL_ID`).
+run (status `blocked`, its container stopped to free memory but preserved, and
+**holding no slot**) and posts the question to the project's linked Discord
+channel — or, if the project has none, to the fleet channel
+(`DISCORD_FLEET_CHANNEL_ID`).
 
 **Reply to that Discord message.** Your reply becomes the run's next turn (the
-Phase 4 idle-and-reply plumbing carries it): the run un-parks and continues. If
-the project has no Discord channel and no fleet channel is configured, the
-question still appears on the task's chat page in the UI, where you can answer it.
+Phase 4 idle-and-reply plumbing carries it): the container restarts in ~1s and
+the run continues on the same attempt, with its own conversation. If the project
+has no Discord channel and no fleet channel is configured, the question still
+appears on the task's chat page in the UI, where you can answer it.
+
+A blocked run **survives a restart** (issue #136): boot re-adopts its parked
+container, so an answer given before or after the restart is delivered on the
+next poll. If the container did not survive (a host OOM, a manual `docker rm`),
+the run is marked `interrupted` instead — the ticket is re-claimed without
+consuming an attempt, and the question plus anything you had already said is
+posted to the issue so the next attempt reads it. Either way, an answer left
+undelivered for 10 minutes raises an **answer stuck** card and one Discord ping,
+so a stuck answer is never silent.
 
 ### 5. Find PRs waiting for sign-off
 
@@ -543,6 +555,7 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 | `CAPACITY_SLOTS`, `AGENT_MEMORY_MB` | Override derived capacity — only when the derivation is wrong. |
 | `OWED_REVIEW_STALL_MINUTES`, `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES` | Fleet-health watchdog thresholds in minutes (issue #126). Defaults 30 / 3 / 2. |
 | `QUOTA_PICKUP_THRESHOLD_PERCENT` | Quota utilization at or above which no new ticket is claimed (issue #171). One of 50/70/80/85/90/95/100; default 90. The fall-through for Settings → Quota when that row is left on `environment`. |
+| `UNDELIVERED_ANSWER_MINUTES` | How long an answer you gave may sit undelivered before the fleet says so (issue #136). Default 10 — delivery is one 2s poll away, so this cannot fire on a healthy resume. It catches a parked session that is not resuming (memory admission deferring it repeatedly), which from your side looks exactly like an agent still thinking. |
 | `OCCUPANCY_DIVERGED_MINUTES` | How long occupancy may go uncorroborated by real agent containers before it reads as a phantom slot (issue #152). Default 20 — far longer than the pickup debounce because a task provisioning its container is legitimately uncorroborated until the container exists, and a cold agent-image build happens inside that window. The card's remedy is a restart, so a false positive is expensive. |
 
 ### Labels
@@ -568,5 +581,12 @@ trigger) · `workflow:<skill>` (per-ticket workflow selector).
 - **Preflight won't pass.** Read `preflightReason` — it names the missing piece.
   "no branch protection" can also mean the App lacks *Administration: read*; "not a
   collaborator" can mean `REVIEWER_GH_TOKEN` is unset or its account isn't on the repo.
+- **I answered a blocked agent and nothing happened.** The dashboard says so
+  itself after 10 minutes — an **answer stuck** card, plus one Discord ping
+  (issue #136). Delivery needs the orchestrator to hold the parked container's
+  handle, which boot restores, so the usual cause left is memory: a parked
+  container is only resumed when the box has headroom. Check free memory, and
+  restart the app to force a fresh re-adopt. Repeating the answer does not help
+  — the *oldest* undelivered message is the one that gets delivered.
 - **A gated PR never merges.** That's by design — `human-signoff` means it waits
   for you. Merge it yourself.

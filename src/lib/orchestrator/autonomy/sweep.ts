@@ -7,7 +7,7 @@
 
 import { db } from "@/db";
 import { messages, projects, runs, tasks } from "@/db/schema";
-import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { newId } from "../../ulid";
 import { processSingleton } from "../../process-singleton";
 import { getConfig, PLATFORM_REPO_URL } from "../../config";
@@ -49,6 +49,7 @@ import {
   notifyOwedReviewStalled,
   notifyPickupWedged,
   notifyQueueStale,
+  notifyUndeliveredAnswer,
   notifyQuotaGateClosed,
   notifyReviewBlocked,
   notifySlotsSaturated,
@@ -64,6 +65,7 @@ import {
   EMPTY_FLEET_HEALTH_STATE,
   evaluateFleetHealth,
   type FleetHealthInput,
+  type UndeliveredAnswerObservation,
   type FleetHealthState,
   type QueuedTaskObservation,
 } from "../../fleet/health";
@@ -337,6 +339,13 @@ async function evaluateFleetHealthSignals(
     );
     await notifyPickupWedged(channelId, announce.pickupWedged);
   }
+  for (const answer of announce.undeliveredAnswers) {
+    console.warn(
+      `[autonomy] Answer undelivered: ${answer.label} — queued ` +
+        `~${Math.round(answer.undeliveredForMs / 60_000)}m ago and never delivered`
+    );
+    await notifyUndeliveredAnswer(channelId, answer);
+  }
   if (announce.queueStale) {
     console.warn(
       `[autonomy] Queue heartbeat stale: no progress for ` +
@@ -414,7 +423,60 @@ async function gatherFleetHealthInput(
     agentContainers: await observeAgentContainers(),
     queueRunning: isQueueRunning(),
     queueLastProgressMs: getQueueLastProgress()?.getTime() ?? null,
+    // An answer the owner already gave that the agent never received (issue
+    // #136) — the one health signal whose clock is a DB row rather than a
+    // since-timer, because the failure it detects is a restart.
+    undeliveredAnswers: gatherUndeliveredAnswers(),
   };
+}
+
+/**
+ * Answers queued against a live task and not yet delivered (issue #136).
+ *
+ * Only a live task counts: a terminal one's leftover undelivered message is
+ * history, not a wait — nobody is going to answer into a completed session, and
+ * surfacing those would put a permanent card on the dashboard for every session
+ * ever closed mid-sentence.
+ *
+ * The oldest undelivered message per task is the one timed, so a card reports
+ * how long the owner has actually been waiting rather than resetting each time
+ * they repeat themselves — which is exactly what an owner does when nothing
+ * happens (the #136 incident had the same answer sent twice, once in the UI and
+ * once through Discord).
+ */
+function gatherUndeliveredAnswers(): UndeliveredAnswerObservation[] {
+  const rows = db
+    .select({
+      taskId: messages.taskId,
+      createdAt: messages.createdAt,
+      title: tasks.title,
+      kind: tasks.kind,
+      githubIssue: tasks.githubIssue,
+    })
+    .from(messages)
+    .innerJoin(tasks, eq(tasks.id, messages.taskId))
+    .where(
+      and(
+        eq(messages.role, "user"),
+        isNull(messages.deliveredAt),
+        inArray(tasks.status, ["queued", "running", "blocked"])
+      )
+    )
+    .orderBy(asc(messages.createdAt))
+    .all();
+
+  const oldest = new Map<string, UndeliveredAnswerObservation>();
+  for (const row of rows) {
+    if (oldest.has(row.taskId)) continue;
+    oldest.set(row.taskId, {
+      taskId: row.taskId,
+      label: `${row.kind}: ${row.githubIssue ?? row.title}`,
+      issueRef: row.githubIssue,
+      taskUrl: `/tasks/${row.taskId}`,
+      queuedAtMs: row.createdAt.getTime(),
+    });
+  }
+  return [...oldest.values()];
 }
 
 /** Why an owed review can't run right now, for the stalled-review card body. */

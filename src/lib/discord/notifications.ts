@@ -7,6 +7,7 @@ import {
   type OwedReviewStall,
   type PickupWedge,
   type QueueStale,
+  type UndeliveredAnswer,
 } from "../fleet/health";
 
 // The bot client is set once, in the instrumentation/orchestrator context where
@@ -347,6 +348,39 @@ export async function notifyPickupWedged(
     await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send pickup-wedged notification:`, err);
+  }
+}
+
+/**
+ * An answer the owner gave that the agent never received (issue #136). Sent
+ * once per occurrence — this is the fleet noticing on the owner's behalf, since
+ * from their side a stuck answer is indistinguishable from an agent still
+ * thinking about it. No-op when no fleet channel is configured: the sweep
+ * already logged it, and the dashboard card stands either way.
+ */
+export async function notifyUndeliveredAnswer(
+  channelId: string | null,
+  payload: UndeliveredAnswer
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await fetchTextChannel(channelId);
+
+    const embed = new EmbedBuilder()
+      .setTitle("Your answer never reached the agent")
+      .setDescription(
+        `**${payload.label}** — queued ~${formatDuration(
+          payload.undeliveredForMs
+        )} ago and still undelivered. The parked session is not resuming; ` +
+        `restart the app to re-adopt it.`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send undelivered-answer notification:`, err);
   }
 }
 
