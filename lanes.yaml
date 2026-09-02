@@ -75,11 +75,14 @@ lanes:
       # lower of the two always winning. Both guards hold **new autonomous
       # pickup** — a claim or a triage pass — so the fleet never starts
       # unattended work on this lane until the day's spend has been confirmed
-      # once, and stops claiming when the cap is spent. In-flight runs,
-      # follow-up turns and interactive sessions are not held (an interactive
-      # dispatch is attended, and its own confirmation UX is issue #173's);
-      # their spend still counts against the cap. Applies whether this lane is
-      # primary, an overflow target (#173) or reached by failover (#176).
+      # once, and stops claiming when the cap is spent. Since issue #173 they
+      # also hold an *interactive* session's crossing onto a paid lane: it is
+      # attended, so the same once-a-day confirmation is asked for in the
+      # session itself, and at the cap the session is told it is capped rather
+      # than spending past it. In-flight runs and a run's follow-up turns are
+      # never held; their spend still counts against the cap. Applies whether
+      # this lane is primary, the target a walled subscription window overflows
+      # onto (#173) or reached by failover (#176).
       daily_budget_usd: 20
 
   - id: openrouter
@@ -105,6 +108,6 @@ lanes:
       standard: anthropic/claude-sonnet-4.5
       light: anthropic/claude-haiku-4.5
     caps:
-      # Enforced as above (issue #174) — the lower of this and the operator's
-      # own real-money cap binds.
+      # Enforced as above (issue #174, #173) — the lower of this and the
+      # operator's own real-money cap binds.
       daily_budget_usd: 20
