@@ -117,6 +117,13 @@ export interface AppConfig {
    */
   agentLane: string | null;
   /**
+   * The deployment's own **minimum lane** (issue #176) — the id of a lane
+   * declared in `lanes.yaml`, below which cost routing may not send a pass.
+   * Null = no floor, so routing picks purely on cost, which is the state a
+   * fresh deployment is in. The settings screen refines it per pass kind.
+   */
+  agentMinLane: string | null;
+  /**
    * Reasoning-effort level the CLI runs an implement pass at — and the base
    * every other pass falls back to (issue #81). The headless CLI exposes this
    * as a first-class `--effort` flag (levels low | medium | high | xhigh |
@@ -250,6 +257,7 @@ export function getConfig(): AppConfig {
     // `AGENT_LANE=OpenRouter` that read as a dangling choice rather than the
     // lane would be an unhelpful way to learn that ids are slugs (issue #172).
     agentLane: normalizeLaneId(process.env.AGENT_LANE),
+    agentMinLane: normalizeLaneId(process.env.AGENT_MIN_LANE),
     agentEffort: normalizeEffort(process.env.AGENT_EFFORT),
     agentEffortReview: normalizeEffort(process.env.AGENT_EFFORT_REVIEW),
     agentEffortTriage: normalizeEffort(process.env.AGENT_EFFORT_TRIAGE),
@@ -324,13 +332,19 @@ export function resetConfig(): void {
   _config = null;
 }
 
-/** The pass kinds a Claude turn can run as (mirrors `tasks.kind`). */
-export type AgentPassKind =
-  | "interactive"
-  | "implement"
-  | "review"
-  | "triage"
-  | "repair";
+/** The pass kinds a Claude turn can run as (mirrors `tasks.kind`). Declared as
+ * a list so a caller that has to iterate them — the settings screen showing
+ * what each kind would be routed onto (issue #176) — cannot fall out of step
+ * with the union derived from it. */
+export const AGENT_PASS_KINDS = [
+  "interactive",
+  "implement",
+  "review",
+  "triage",
+  "repair",
+] as const;
+
+export type AgentPassKind = (typeof AGENT_PASS_KINDS)[number];
 
 /** Whether a pass carries the *ticket's own* work, and so answers to a ticket
  * directive. Review and triage do not: they read the work rather than doing

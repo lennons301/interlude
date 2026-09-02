@@ -245,6 +245,12 @@ function makePass(overrides: Partial<PassOutcome> = {}): PassOutcome {
     // The top of the ladder, so a degrade test has somewhere to step and a
     // pause test is not passing by accident (issue #170).
     tier: "heavy",
+    // No lane to move to, so a pause test is not passing by accident either
+    // (issue #176): a failover is decided ahead of the pause, and every case
+    // that wants one says so.
+    laneId: "claude-subscription",
+    laneFailover: null,
+    resumesMade: 0,
     ...overrides,
   };
 }
@@ -4116,5 +4122,212 @@ describe("decideNext — resuming a paused run (issue #169)", () => {
     expect(claims(held)).toEqual([]);
     expect(resumes(capped)).toHaveLength(1);
     expect(claims(capped)).toEqual([]);
+  });
+});
+
+describe("decideNext — cross-lane failover (issue #176)", () => {
+  const RESUME_AFTER = new Date(2026, 7, 1, 17, 0, 0);
+  const CHEAPER = {
+    toLaneId: "openrouter-glm",
+    toLaneLabel: "OpenRouter (GLM open weights)",
+    billing: "metered" as const,
+    rateUsdPerMTok: 0.03875,
+  };
+
+  function moves(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "failOverRunLane");
+  }
+  function pauses(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "pauseRunOnRateLimit");
+  }
+  function degrades(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "degradeRunTier");
+  }
+
+  /** One refused pass, decided at the seam the turn manager decides it, with
+   * the resume/lane-move bound the settings row would supply. */
+  function decide(
+    pass: Partial<PassOutcome>,
+    maxResumes = 2
+  ): ReturnType<typeof decideNext> {
+    return decideNext(
+      passOutcomeSnapshot(
+        NOW,
+        makePass({
+          tier: "light",
+          laneId: "claude-subscription",
+          laneFailover: CHEAPER,
+          rateLimited: { resumeAfter: RESUME_AFTER, limitType: "five_hour" },
+          ...pass,
+        }),
+        maxResumes
+      )
+    );
+  }
+
+  it("moves lanes rather than pausing when another lane can serve the pass", () => {
+    expect(moves(decide({}))).toEqual([
+      {
+        type: "failOverRunLane",
+        runId: "run-1",
+        taskId: "task-1",
+        issueRef: "acme/widgets#7",
+        fromLaneId: "claude-subscription",
+        toLaneId: "openrouter-glm",
+        toLaneLabel: "OpenRouter (GLM open weights)",
+        toLaneBilling: "metered",
+        limitType: "five_hour",
+        resumeAfter: RESUME_AFTER,
+        move: 1,
+        maxMoves: 2,
+      },
+    ]);
+    expect(pauses(decide({}))).toEqual([]);
+  });
+
+  it("steps the tier ladder first — a rung down is free, a lane move is not", () => {
+    // #170's step stays within the lane the account still has quota on, so it
+    // is asked before a move that may cost real money and will certainly cost
+    // a fresh conversation's worth of orientation.
+    const actions = decide({
+      tier: "heavy",
+      rateLimited: { resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" },
+    });
+
+    expect(degrades(actions)).toHaveLength(1);
+    expect(moves(actions)).toEqual([]);
+  });
+
+  it("moves off the bottom of the ladder, where a step down has nowhere to go", () => {
+    const actions = decide({
+      tier: "light",
+      rateLimited: { resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" },
+    });
+
+    expect(degrades(actions)).toEqual([]);
+    expect(moves(actions)).toHaveLength(1);
+  });
+
+  it("pauses when no lane is both available and permitted", () => {
+    // The fallback, unchanged: the ranking found nowhere to go — every lane
+    // unavailable, below the floor, or held by #174's cap or confirmation — so
+    // the run parks on the window's clock exactly as it did before.
+    expect(pauses(decide({ laneFailover: null }))).toHaveLength(1);
+    expect(moves(decide({ laneFailover: null }))).toEqual([]);
+  });
+
+  it("moves on a reset-less wall, which could not pause and used to cost an attempt", () => {
+    // The case this ticket helps most. A pause needs a clock and this wall
+    // named none, so before #176 such a pass took its ordinary path and spent
+    // one of the ticket's three attempts.
+    const actions = decide({
+      producedPr: false,
+      rateLimited: { resumeAfter: null, limitType: "five_hour" },
+    });
+
+    expect(moves(actions)).toHaveLength(1);
+    expect(actions.map((a) => a.type)).toEqual(["failOverRunLane"]);
+  });
+
+  it("is bounded by the resume counter, so a run cannot thrash between lanes", () => {
+    // The same number a resume answers to (#169): at the bound the run pauses,
+    // and that ticket's exhaustion hands the ticket to a human.
+    expect(moves(decide({ resumesMade: 1 }, 2))).toHaveLength(1);
+    expect(moves(decide({ resumesMade: 2 }, 2))).toEqual([]);
+    expect(pauses(decide({ resumesMade: 2 }, 2))).toHaveLength(1);
+  });
+
+  it("never moves when continuations are switched off entirely", () => {
+    // A bound of zero means no continuation of any kind, so a refused pass
+    // behaves exactly as it did before #169 and #176 existed.
+    expect(moves(decide({}, 0))).toEqual([]);
+    expect(pauses(decide({}, 0))).toHaveLength(1);
+  });
+
+  it("outranks the blocked-marker and empty-pass readings of the same turn", () => {
+    // The argument the pause and the degrade both make: a refused turn never
+    // reached the model, so its "final message" is the CLI's own session-limit
+    // line and its empty diff is the wall's, not the work's.
+    const actions = decide({
+      producedPr: false,
+      finalMessage: "BLOCKED: which database?",
+    });
+
+    expect(actions.map((a) => a.type)).toEqual(["failOverRunLane"]);
+  });
+
+  it("never becomes a route around a human's stop", () => {
+    // Routing decides *where* work runs, never *whether*: the kill switch and
+    // the per-project toggle gate pickup exactly as they did, and a run moving
+    // lanes must not read as a claim they would have refused.
+    const held = decideNext(
+      makeSnapshot({
+        globalPaused: true,
+        maxResumesPerAttempt: 2,
+        completedPasses: [
+          makePass({
+            tier: "light",
+            laneId: "claude-subscription",
+            laneFailover: CHEAPER,
+            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "five_hour" },
+          }),
+        ],
+        candidates: [makeCandidate()],
+      })
+    );
+
+    expect(moves(held)).toHaveLength(1);
+    expect(claims(held)).toEqual([]);
+    expect(held).toContainEqual({ type: "pausePickup", reason: "kill-switch" });
+
+    const off = decideNext(
+      makeSnapshot({
+        maxResumesPerAttempt: 2,
+        projects: [makeProject({ autonomyEnabled: false })],
+        completedPasses: [
+          makePass({
+            tier: "light",
+            laneId: "claude-subscription",
+            laneFailover: CHEAPER,
+            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "five_hour" },
+          }),
+        ],
+        candidates: [makeCandidate()],
+      })
+    );
+
+    expect(moves(off)).toHaveLength(1);
+    expect(claims(off)).toEqual([]);
+    expect(off).toContainEqual({
+      type: "pausePickup",
+      reason: "autonomy-off-project",
+      detail: "acme/widgets",
+    });
+  });
+
+  it("leaves the ticket's attempt and interruption accounting untouched", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        maxResumesPerAttempt: 2,
+        completedPasses: [
+          makePass({
+            tier: "light",
+            laneId: "claude-subscription",
+            laneFailover: CHEAPER,
+            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "five_hour" },
+          }),
+        ],
+        candidates: [
+          makeCandidate({ attemptsMade: 2, interruptionsMade: 4, hasActiveRun: true }),
+        ],
+      })
+    );
+
+    expect(moves(actions)).toHaveLength(1);
+    // No second claim over the run now retrying, and no route to a human: the
+    // ticket is at attempt 2 with four interruptions already, and neither
+    // counter moved.
+    expect(claims(actions)).toEqual([]);
+    expect(actions.filter((a) => a.type === "escalate")).toEqual([]);
   });
 });

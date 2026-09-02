@@ -8,13 +8,17 @@ import {
 } from "../model-tiers";
 import {
   FIXED_CEILINGS,
+  MIN_LANE_ENV_VAR,
+  MIN_LANE_FIELD_ORDER,
   MODEL_TIER_FIELD_ORDER,
   RESUME_BOUND_OPTIONS,
   SETTINGS_FIELDS,
   SETTABLE_KEYS,
   applySettingsPatch,
+  describeMinLaneSettings,
   describeModelTierSettings,
   parseSettingsPatch,
+  resolveMinLane,
   resolveModelTier,
   resolveQuotaThreshold,
   resolveResumeBound,
@@ -39,6 +43,7 @@ function cfg(models: {
   agentModelReview?: string | null;
   agentModelTriage?: string | null;
   agentLane?: string | null;
+  agentMinLane?: string | null;
   quotaPickupThresholdPercent?: string | null;
 } = {}): AppConfig {
   return {
@@ -46,6 +51,7 @@ function cfg(models: {
     agentModelReview: models.agentModelReview ?? null,
     agentModelTriage: models.agentModelTriage ?? null,
     agentLane: models.agentLane ?? null,
+    agentMinLane: models.agentMinLane ?? null,
     quotaPickupThresholdPercent: models.quotaPickupThresholdPercent ?? null,
   } as AppConfig;
 }
@@ -634,5 +640,98 @@ describe("the quota resume bound (issue #169)", () => {
     expect(
       resolveResumeBound(boundCfg(1), { maxResumesPerAttempt: "99" }).resumes
     ).toBe(1);
+  });
+});
+
+describe("a pass kind's minimum lane (issue #176)", () => {
+  const LANES = { laneIds: ["claude-subscription", "openrouter-glm"] };
+
+  it("has no floor until one is set — cost routing decides alone", () => {
+    // A floor is a *restriction*, so unlike a percentage or a count there is
+    // no built-in default: inventing one nobody asked for would quietly stop
+    // the fleet using a lane it was given.
+    const field = resolveMinLane("implement", cfg(), NONE);
+    expect(field.laneId).toBeNull();
+    expect(field.source).toBe("environment");
+    expect(field.envVar).toBe(MIN_LANE_ENV_VAR);
+  });
+
+  it("falls through to AGENT_MIN_LANE, and names it", () => {
+    const field = resolveMinLane(
+      "review",
+      cfg({ agentMinLane: "openrouter-glm" }),
+      NONE
+    );
+    expect(field.laneId).toBe("openrouter-glm");
+    expect(field.envValue).toBe("openrouter-glm");
+  });
+
+  it("lets an override beat the deployment's own floor, and says so", () => {
+    const field = resolveMinLane("implement", cfg({ agentMinLane: "openrouter-glm" }), {
+      minLaneImplement: "claude-subscription",
+    });
+    expect(field.laneId).toBe("claude-subscription");
+    expect(field.source).toBe("override");
+    // Still shown verbatim, so an operator can see what clearing would give.
+    expect(field.envValue).toBe("openrouter-glm");
+  });
+
+  it("sets one pass kind's floor without touching another's", () => {
+    const overrides: SettingsOverrides = { minLaneImplement: "openrouter-glm" };
+    expect(resolveMinLane("implement", cfg(), overrides).laneId).toBe(
+      "openrouter-glm"
+    );
+    expect(resolveMinLane("review", cfg(), overrides).laneId).toBeNull();
+    expect(resolveMinLane("triage", cfg(), overrides).laneId).toBeNull();
+    expect(resolveMinLane("interactive", cfg(), overrides).laneId).toBeNull();
+  });
+
+  it("reads the implement floor for a repair pass — the same attempt continuing", () => {
+    const overrides: SettingsOverrides = { minLaneImplement: "openrouter-glm" };
+    expect(resolveMinLane("repair", cfg(), overrides).laneId).toBe(
+      "openrouter-glm"
+    );
+  });
+
+  it("refuses a lane that is not declared, listing the ones that are", () => {
+    const parsed = parseSettingsPatch({ minLaneReview: "kimi" }, LANES);
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toContain("kimi");
+    expect(parsed.error).toContain("claude-subscription, openrouter-glm");
+  });
+
+  it("refuses a value that is not even lane-shaped", () => {
+    expect(parseSettingsPatch({ minLaneImplement: "../../etc/passwd" }).ok).toBe(
+      false
+    );
+    expect(parseSettingsPatch({ minLaneTriage: "Bearer sk-x" }).ok).toBe(false);
+  });
+
+  it("clears back to no floor like any other field", () => {
+    expect(
+      applySettingsPatch({ minLaneImplement: "openrouter-glm" }, {
+        minLaneImplement: null,
+      })
+    ).toEqual({});
+  });
+
+  it("ignores a stored value a since-narrowed vocabulary refuses", () => {
+    // The defensive read path's rule, inherited: a floor naming nothing falls
+    // through to no floor rather than reaching the ranking as a lane id.
+    const field = resolveMinLane("implement", cfg(), {
+      minLaneImplement: "Bearer sk-x",
+    });
+    expect(field.laneId).toBeNull();
+  });
+
+  it("is settable, and describes every kind in the panel's own order", () => {
+    for (const key of MIN_LANE_FIELD_ORDER) {
+      expect(SETTABLE_KEYS).toContain(key);
+      expect(SETTINGS_FIELDS[key]).toBeDefined();
+    }
+    expect(describeMinLaneSettings(cfg(), NONE).map((f) => f.key)).toEqual([
+      ...MIN_LANE_FIELD_ORDER,
+    ]);
   });
 });

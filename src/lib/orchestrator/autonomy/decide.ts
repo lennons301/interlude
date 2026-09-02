@@ -11,6 +11,7 @@
 
 import type { FailedCheck } from "../../github/pull-requests";
 import type { LaneBilling } from "../../lanes/lane-config";
+import type { LaneFailoverOption } from "../../lanes/lane-selection";
 import { evaluateMeteredSpend } from "../../lanes/money";
 import { evaluateQuotaGate } from "../../quota/quota-gate";
 import type { QuotaObservation } from "../../quota/rate-limit-event";
@@ -177,6 +178,37 @@ export interface PassOutcome {
    * the pause exactly as it did before this ticket.
    */
   tier: ModelTier | null;
+  /**
+   * The execution lane this pass actually ran on (issue #176), read off the
+   * task row — the ledger entry #174 writes at pass start. Null on a pass that
+   * recorded none (a row written before lanes existed).
+   *
+   * The lane a failover must not send it back to, and the only honest source
+   * for it: the *primary* lane may since have changed, and cost routing may
+   * have sent this pass somewhere else in the first place.
+   */
+  laneId: string | null;
+  /**
+   * Where this pass could move to instead of pausing (issue #176) — the
+   * cheapest lane other than the one that refused it that is available,
+   * permitted and at or above this pass kind's floor, as `selectLane` ranks
+   * them. Null when there is none, which is when a pause is still the answer.
+   *
+   * Handed in already ranked rather than decided here for the reason `tier`
+   * is: the ranking needs the lane file, the environment, every lane's quota
+   * row and the day's cash, and the reducer's job is the *ordering* — the tier
+   * ladder first, a lane move next, the clock last — plus the bound below.
+   */
+  laneFailover: LaneFailoverOption | null;
+  /**
+   * Continuations this attempt has already had (`runs.resumeCount`), which is
+   * what bounds a lane move: a move is a continuation of the same attempt
+   * exactly as a resume is, so it counts against the same number rather than
+   * getting a second one nobody would keep true. Past the bound the run pauses
+   * (and #169's own bound then hands the ticket to a human), which is what
+   * stops a run thrashing across lanes forever.
+   */
+  resumesMade: number;
 }
 
 /**
@@ -819,6 +851,42 @@ export type Action =
       resumeAfter: Date | null;
     }
   | {
+      // A pass refused on a window its own lane cannot get past — the bottom of
+      // the tier ladder, or an account-wide wall — where **another lane can
+      // serve it** (issue #176). The run moves lanes and retries rather than
+      // parking for hours beside an idle lane costing a fraction as much.
+      //
+      // Like a pause and a degrade it consumes neither an attempt nor an
+      // interruption, since the work was never tried; unlike a degrade it
+      // carries the refused pass's session, so the move is lossless in exactly
+      // the way #169's resume is. The target lane is advisory: the replacement
+      // pass re-asks the same ranking when it starts, so a wall that lifted in
+      // between sends it back to the cheaper lane rather than honouring a
+      // stale decision.
+      type: "failOverRunLane";
+      runId: string;
+      taskId: string;
+      /** "owner/repo#n" */
+      issueRef: string;
+      /** The lane that refused the pass; null when the pass recorded none */
+      fromLaneId: string | null;
+      toLaneId: string;
+      toLaneLabel: string;
+      /** What running there will cost — `metered` means real money, already
+       * checked against #174's cap and confirm-once press by the ranking */
+      toLaneBilling: LaneBilling;
+      /** The window that refused it, verbatim, or null when it named none */
+      limitType: string | null;
+      /** When that window resets, or null when the event named none. Said for
+       * context only — a lane move waits on no clock, which is why a
+       * reset-less wall can move where it could not pause */
+      resumeAfter: Date | null;
+      /** Which continuation of this attempt the move is, and the bound it
+       * counts against — the same pair a resume reports (issue #169) */
+      move: number;
+      maxMoves: number;
+    }
+  | {
       // A paused run whose window has reset (issue #169): queue its pass again
       // in a fresh container, on the same branch, continuing the same
       // conversation where the transcript survived the teardown. Consumes no
@@ -912,7 +980,14 @@ export type Action =
  * outside a sweep: every pickup, gating, review and saturation input is
  * inert, so the only possible decision is about the pass itself.
  */
-export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnapshot {
+export function passOutcomeSnapshot(
+  now: Date,
+  pass: PassOutcome,
+  /** The resume/lane-move bound in force (issue #169's setting), which #176's
+   * failover counts against. Zero — the default — means no continuation of any
+   * kind, so a refused pass pauses exactly as it did before that ticket. */
+  maxResumesPerAttempt = 0
+): AutonomySnapshot {
   return {
     now,
     autonomyEnabledGlobal: true,
@@ -977,7 +1052,10 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     // A pass that just ended is not a paused run: the run it belongs to may be
     // *about* to become one, decided below from this very outcome.
     pausedRuns: [],
-    maxResumesPerAttempt: 0,
+    // The one bound this path does consult (issue #176): a lane move is a
+    // continuation of the attempt, counted against the same number a resume
+    // is, so the caller passes the resolved bound rather than an inert zero.
+    maxResumesPerAttempt: maxResumesPerAttempt,
     resumeJitterMs: 0,
   };
 }
@@ -1046,6 +1124,43 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
           });
           continue;
         }
+      }
+      // Then across lanes (issue #176). The ladder above steps *within* one
+      // lane, and it has been asked first because a tier step is free — the
+      // account still has quota — where a lane move may cost real money and
+      // will certainly cost a fresh conversation's worth of orientation. What
+      // is left here is a wall this lane cannot get past: account-wide, or the
+      // bottom of its ladder. If another lane can serve the pass, moving beats
+      // parking for hours beside it.
+      //
+      // A move waits on no clock, so — like a degrade, and unlike a pause — a
+      // rejection that named no reset time can still take it. That is the case
+      // this ticket helps most: before it, such a wall spent one of the
+      // ticket's three attempts.
+      if (
+        pass.laneFailover !== null &&
+        // The same counter a resume answers to (issue #169). At the bound the
+        // run pauses instead, and that ticket's own exhaustion hands it to a
+        // human — so a run cannot thrash across lanes forever, and needs no
+        // second counter to say so.
+        pass.resumesMade < snapshot.maxResumesPerAttempt
+      ) {
+        parkedRunIds.add(pass.runId);
+        actions.push({
+          type: "failOverRunLane",
+          runId: pass.runId,
+          taskId: pass.taskId,
+          issueRef: pass.issueRef,
+          fromLaneId: pass.laneId,
+          toLaneId: pass.laneFailover.toLaneId,
+          toLaneLabel: pass.laneFailover.toLaneLabel,
+          toLaneBilling: pass.laneFailover.billing,
+          limitType,
+          resumeAfter,
+          move: pass.resumesMade + 1,
+          maxMoves: snapshot.maxResumesPerAttempt,
+        });
+        continue;
       }
       // A pause needs a clock, and a rejection that named no reset time gives
       // it none. Pausing on an invented one would strand the run where no

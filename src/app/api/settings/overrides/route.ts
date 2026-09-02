@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getConfig } from "@/lib/config";
 import { getFleetSettings, updateSettingsOverrides } from "@/lib/settings";
 import {
+  describeMinLaneSettings,
   describeModelTierSettings,
   parseSettingsPatch,
   resolveQuotaThreshold,
@@ -9,6 +10,9 @@ import {
   type SettingsOverrides,
   type TierModelIds,
 } from "@/lib/settings-resolver";
+import { AGENT_PASS_KINDS } from "@/lib/config";
+import { readLaneSelection } from "@/lib/lanes/overflow-state";
+import { getFleetSettings as readFleetSettings } from "@/lib/settings";
 import type { ModelTier } from "@/lib/model-tiers";
 import { getLaneCatalog } from "@/lib/lanes/catalog";
 import { laneCatalogContext } from "@/lib/lanes/settings-context";
@@ -71,6 +75,49 @@ function laneState(overrides: SettingsOverrides): {
   };
 }
 
+/**
+ * What cost routing would pick for each pass kind right now (issue #176) —
+ * the lane, and what it charges per million tokens of a representative pass.
+ *
+ * Read through the same `selectLane` a pass is routed by, for the #148 reason:
+ * the row that says "an implement pass will run on X" has to be the answer the
+ * pass gets, or the minimum-lane control above it would be adjusting something
+ * the screen cannot show.
+ *
+ * `repair` is deliberately absent: it reads the implement floor and would
+ * render as a duplicate row of it.
+ */
+function routingState(now: Date) {
+  const settings = readFleetSettings();
+  return AGENT_PASS_KINDS.filter((kind) => kind !== "repair").map((kind) => {
+    const selection = readLaneSelection(kind, null, now, settings);
+    // The lane the pass would run on — the ranking's pick, or the lane in
+    // force it falls back to, which is what the crossing does. Reporting "no
+    // lane" for the fall-back would leave this row claiming a pass would be
+    // refused while it ran perfectly well, which is the disagreement the
+    // shared ranking exists to prevent.
+    const lane = selection.chosen ?? selection.inForce;
+    return {
+      kind,
+      laneId: lane?.id ?? null,
+      label: lane?.label ?? null,
+      billing: lane?.effectiveBilling ?? null,
+      rateUsdPerMTok: lane?.rateUsdPerMTok ?? null,
+      /** Whether the ranking chose it, or it is the fall-back — where the pass
+       * runs, but only because nothing qualified. */
+      chosen: selection.chosen !== null,
+      /** Every lane it passed over and why — the cost case, in order. */
+      passedOver: selection.candidates
+        .filter((candidate) => candidate.ineligible !== null)
+        .map((candidate) => ({
+          id: candidate.id,
+          reason: candidate.ineligible,
+          rateUsdPerMTok: candidate.rateUsdPerMTok,
+        })),
+    };
+  });
+}
+
 function state(overrides: SettingsOverrides, updatedAt: Date | null) {
   const { tierModels, fallbackTier, lanes, laneError } = laneState(overrides);
   return {
@@ -82,6 +129,12 @@ function state(overrides: SettingsOverrides, updatedAt: Date | null) {
     ),
     lanes,
     laneError,
+    // The lane floors (issue #176), beside the lane panel they restrict: one
+    // per pass kind, in the same order the tier rows are, so the two read as
+    // one table.
+    minLanes: describeMinLaneSettings(getConfig(), overrides),
+    /** What cost routing would pick for each kind right now. */
+    routing: routingState(new Date()),
     // The quota admission threshold (issue #171) — its own view model beside
     // the lane's, for the same reason: it shares the allowlist but not the
     // model-tier field shape, since asking a percentage what tier is in force

@@ -4,10 +4,17 @@ import { useState } from "react";
 import { Eyebrow, LoadFailure, PANEL_PLAIN } from "@/components/fleet/fleet-bits";
 import { ModelTierPanel } from "@/components/model-tier-settings";
 import { ExecutionLanePanel } from "@/components/execution-lane-settings";
+import {
+  LaneRoutingPanel,
+  type LaneRoutingRow,
+} from "@/components/lane-routing-settings";
 import { QuotaGatePanel } from "@/components/quota-gate-settings";
 import { QuotaResumePanel } from "@/components/quota-resume-settings";
 import { useLoad } from "@/lib/use-load";
-import type { SettingFieldView } from "@/lib/settings-resolver";
+import type {
+  MinLaneFieldView,
+  SettingFieldView,
+} from "@/lib/settings-resolver";
 import type { LaneSettingsView } from "@/lib/lanes/resolve";
 import type {
   QuotaThresholdView,
@@ -15,10 +22,10 @@ import type {
 } from "@/lib/settings-resolver";
 
 /**
- * The UI-editable settings (issues #166, #172, #171, #169): which tier each
- * kind of pass runs at, which execution lane it runs on, how full the
- * account's quota may get before the fleet stops claiming, and how far a
- * paused run may keep riding that quota.
+ * The UI-editable settings (issues #166, #172, #176, #171, #169): which tier
+ * each kind of pass runs at, which execution lane it runs on and how far below
+ * it cost routing may go, how full the account's quota may get before the
+ * fleet stops claiming, and how far a paused run may keep riding that quota.
  *
  * Panels, **one** piece of state, deliberately. The first two are not
  * independent: a tier's model identifier is whatever the primary lane says it
@@ -36,6 +43,11 @@ interface OverridesState {
   lanes: LaneSettingsView | null;
   /** Why the lane file could not be read, when it could not be. */
   laneError: string | null;
+  /** The per-pass-kind lane floors cost routing is bounded by (#176). */
+  minLanes: MinLaneFieldView[];
+  /** What routing would pick for each kind right now — the same ranking a
+   * pass is routed by, so the row cannot claim a lane it would not run on. */
+  routing: LaneRoutingRow[];
   quota: QuotaThresholdView;
   /** How many times one attempt may pause on the quota and resume (#169) —
    * the other half of what "quota" means on this screen. */
@@ -46,6 +58,13 @@ interface OverridesState {
 
 /** The one field the lane panel owns. */
 const LANE_KEY = "primaryLane";
+/** The four fields the lane-routing panel owns (#176). */
+const MIN_LANE_KEYS = [
+  "minLaneImplement",
+  "minLaneReview",
+  "minLaneTriage",
+  "minLaneInteractive",
+];
 /** The one field the quota-gate panel owns. */
 const QUOTA_KEY = "quotaPickupThresholdPercent";
 /** The one field the resume-bound panel owns. */
@@ -54,17 +73,19 @@ const RESUME_BOUND_KEY = "maxResumesPerAttempt";
 /** The save error, shown only by the panel that owns the field it failed on. */
 export function errorFor(
   error: { key: string; message: string } | null,
-  panel: "lane" | "tiers" | "quota" | "resume-bound"
+  panel: "lane" | "routing" | "tiers" | "quota" | "resume-bound"
 ): string | null {
   if (error === null) return null;
   const owner =
     error.key === LANE_KEY
       ? "lane"
-      : error.key === QUOTA_KEY
-        ? "quota"
-        : error.key === RESUME_BOUND_KEY
-          ? "resume-bound"
-          : "tiers";
+      : MIN_LANE_KEYS.includes(error.key)
+        ? "routing"
+        : error.key === QUOTA_KEY
+          ? "quota"
+          : error.key === RESUME_BOUND_KEY
+            ? "resume-bound"
+            : "tiers";
   return owner === panel ? error.message : null;
 }
 
@@ -148,14 +169,25 @@ export function SettingsOverrides() {
         saveError={errorFor(saveError, "tiers")}
         onChoose={choose}
       />
-      <ExecutionLanePanel
-        lanes={state.lanes}
-        laneError={state.laneError}
-        busy={busyKey === LANE_KEY}
-        disabled={busyKey !== null}
-        saveError={errorFor(saveError, "lane")}
-        onChoose={(choice) => choose(LANE_KEY, choice)}
-      />
+      <>
+        <ExecutionLanePanel
+          lanes={state.lanes}
+          laneError={state.laneError}
+          busy={busyKey === LANE_KEY}
+          disabled={busyKey !== null}
+          saveError={errorFor(saveError, "lane")}
+          onChoose={(choice) => choose(LANE_KEY, choice)}
+        />
+        <LaneRoutingPanel
+          fields={state.minLanes}
+          routing={state.routing}
+          lanes={state.lanes}
+          busyKey={busyKey}
+          disabled={busyKey !== null}
+          saveError={errorFor(saveError, "routing")}
+          onChoose={choose}
+        />
+      </>
       <>
         <QuotaGatePanel
           quota={state.quota}
@@ -190,6 +222,8 @@ function Sections({
         <Eyebrow>Models</Eyebrow>
         {models}
       </section>
+      {/* Two controls, one section: which lane the fleet is on (issue #172),
+          and how far below it cost routing may go per pass kind (#176). */}
       <section aria-label="Execution lane" className="space-y-3">
         <Eyebrow>Execution lane</Eyebrow>
         {lanes}

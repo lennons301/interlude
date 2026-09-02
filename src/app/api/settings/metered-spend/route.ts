@@ -42,7 +42,7 @@ function state() {
     readMoneyGuards(now, settings);
   // The same pure decision the turn manager routes a pass with and the queue
   // loop declines to start one with — never a second opinion about it.
-  const crossing = readLaneCrossing("interactive", now, settings);
+  const crossing = readLaneCrossing("interactive", null, now, settings);
 
   return {
     lane:

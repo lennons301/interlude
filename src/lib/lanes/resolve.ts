@@ -394,7 +394,41 @@ export const LANE_ENV_VAR = "AGENT_LANE";
  * screen, the sweep and the dashboard.
  */
 export function primaryLaneOf(input: LaneSettingsInput): LaneView | null {
-  return describeLanes(input).lanes.find((lane) => lane.primary) ?? null;
+  return primaryLaneInForce(input).lane;
+}
+
+/**
+ * The lane in force *and* whether it is an operator's explicit choice
+ * (issue #176).
+ *
+ * Cost routing needs the second half, and it is not a new setting: #172
+ * already draws the line between an explicit choice — honoured even when it is
+ * broken, because routing around an operator's decision is how a fleet spends
+ * money nobody authorised — and the *unset* default that walks the file's
+ * preference order. Cost routing replaces that walk and only that walk, so an
+ * explicit choice **pins the fleet** and turns the ranking off. That is what
+ * makes "pinning the fleet to one lane stays expressible in settings" true
+ * without a second control to keep in step with the first.
+ *
+ * Derived from the same `describeLanes` the screen reads, so which lane is
+ * primary and whether it is pinned are one answer rather than two.
+ */
+export function primaryLaneInForce(input: LaneSettingsInput): {
+  lane: LaneView | null;
+  source: LaneChoiceSource;
+  /** The lane cost routing may not move off, or null when the choice falls
+   * through and the ranking decides. */
+  pinnedLaneId: string | null;
+} {
+  const view = describeLanes(input);
+  const lane = view.lanes.find((candidate) => candidate.primary) ?? null;
+  return {
+    lane,
+    source: view.source,
+    // A preference-order answer is a default, not a decision. Anything else is
+    // a human's, and is honoured verbatim.
+    pinnedLaneId: view.source === "preference" ? null : view.primaryLaneId,
+  };
 }
 
 export function describeLanes(input: LaneSettingsInput): LaneSettingsView {

@@ -35,11 +35,19 @@ import {
   type MeteredCap,
   type MeteredSpendState,
 } from "./money";
-import { primaryLaneOf, type LaneView } from "./resolve";
+import { primaryLaneInForce, type LaneView } from "./resolve";
 
 export interface MoneyGuards {
   /** The lane work would run on; null = none resolves. */
   lane: LaneView | null;
+  /**
+   * The lane an operator's explicit choice pins the fleet to (issue #176), or
+   * null when the choice falls through the file's preference order and cost
+   * routing decides. Read here because it comes off the same single resolution
+   * as `lane` above — asked separately, the screen could report a pin the
+   * routing was not honouring.
+   */
+  pinnedLaneId: string | null;
   /**
    * How that lane must be billed *now* (issue #173) — its declared kind, or
    * `metered` when an active overage means the account is already paying cash
@@ -84,14 +92,15 @@ export function readMoneyGuards(
 ): MoneyGuards {
   const config = getConfig();
   const catalog = getLaneCatalog();
-  const lane = catalog.ok
-    ? primaryLaneOf({
+  const inForce = catalog.ok
+    ? primaryLaneInForce({
         catalog: catalog.catalog,
         config,
         overrides: settings.overrides,
         env: process.env,
       })
     : null;
+  const lane = inForce?.lane ?? null;
   const cap = resolveMeteredCap(
     config,
     settings.overrides,
@@ -109,6 +118,7 @@ export function readMoneyGuards(
 
   return {
     lane,
+    pinnedLaneId: inForce?.pinnedLaneId ?? null,
     billing,
     overagePaying,
     laneError: catalog.ok ? null : catalog.reason,
