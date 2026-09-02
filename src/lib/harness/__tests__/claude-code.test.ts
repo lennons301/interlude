@@ -190,6 +190,41 @@ describe("buildClaudeTurnCommand", () => {
     expect(cmd).toContain("--max-budget-usd 75");
   });
 
+  it("gives no spend ceiling to a lane whose prices the CLI does not know", () => {
+    // Issue #175: `--max-budget-usd` is enforced against the CLI's own cost
+    // figure, which off an Anthropic-direct endpoint is Anthropic list prices
+    // applied to a model that was never billed at them — measured at 67x the
+    // lane's real price. A $20 ceiling would stop the turn at about $0.30 of
+    // real spend, mid-work, and the orchestrator would park the pass as
+    // finished because a budget stop is not `error_max_turns`.
+    const cmd = buildClaudeTurnCommand({
+      maxBudgetUsd: 20,
+      lane: lane({
+        id: "openrouter-glm",
+        model: "z-ai/glm-5.3-flash",
+        prices: {
+          inputPerMTok: 0.075,
+          outputPerMTok: 0.25,
+          cacheReadPerMTok: 0.015,
+          cacheWritePerMTok: null,
+        },
+      }),
+    });
+
+    expect(cmd).not.toContain("--max-budget-usd");
+    // What still bounds the turn: the turn ceiling here, and the fleet's own
+    // accounting between turns, which charges the lane's real prices.
+    expect(cmd).toContain("--max-turns 50");
+  });
+
+  it("keeps the ceiling on a lane whose reported cost is its own list price", () => {
+    // The live path is untouched: the subscription lane declares no prices,
+    // so the CLI's figure is correct there and the flag still guards a turn.
+    const cmd = buildClaudeTurnCommand({ maxBudgetUsd: 20, lane: lane() });
+
+    expect(cmd).toContain("--max-budget-usd 20");
+  });
+
   it("omits --model entirely when the lane resolved none (issue #74)", () => {
     expect(buildClaudeTurnCommand({ lane: lane({ model: null }) })).not.toContain(
       "--model"

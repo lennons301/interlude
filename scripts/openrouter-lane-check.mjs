@@ -58,17 +58,28 @@ function parseArgs(argv) {
     check: "all",
     envVar: "OPENROUTER_API_KEY",
   };
-  for (let i = 0; i < argv.length; i += 2) {
+  const takesValue = new Set(["--base-url", "--model", "--check", "--env-var"]);
+  const keys = {
+    "--base-url": "baseUrl",
+    "--model": "model",
+    "--check": "check",
+    "--env-var": "envVar",
+  };
+  for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
-    const value = argv[i + 1];
-    if (flag === "--base-url") args.baseUrl = value;
-    else if (flag === "--model") args.model = value;
-    else if (flag === "--check") args.check = value;
-    else if (flag === "--env-var") args.envVar = value;
-    else {
+    if (!takesValue.has(flag)) {
       console.error(`unknown flag ${flag}`);
       process.exit(2);
     }
+    // Advance one at a time, so a flag left without a value is reported rather
+    // than swallowing the next flag as its argument.
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith("--")) {
+      console.error(`${flag} needs a value`);
+      process.exit(2);
+    }
+    args[keys[flag]] = value;
+    i += 1;
   }
   return args;
 }
@@ -177,7 +188,9 @@ async function checkCache(args, key) {
           : "  -> NO cache read on an identical prefix. Every turn re-pays full " +
               "input price for the whole context, which dominates a long pass."
       );
-      if (usage.cache_creation_input_tokens === null) {
+      // Null on OpenRouter today; undefined on a provider that omits the field
+      // entirely. Both mean the same thing: no cache-write count to price.
+      if (usage.cache_creation_input_tokens == null) {
         console.log(
           "  -> cache *writes* are not reported (null, not a count). They arrive " +
             "as ordinary input tokens, which is how the lane prices them."

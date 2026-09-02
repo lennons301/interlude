@@ -782,8 +782,10 @@ async function observeExecExitCode(exec: {
  * prices applied to the reported token counts where the lane declares them,
  * and the harness's figure only where it does not (issue #175). Every caller
  * means "what did this turn cost", so the substitution happens once, here,
- * rather than at each budget check; `charge` carries both numbers and which
- * basis was used, for the record.
+ * rather than at each budget check. The harness's own figure is not returned
+ * beside it: it is written to the feed where a surprised operator will look
+ * for it, and a second cost on this type would only invite a caller to charge
+ * the wrong one.
  */
 async function runTurn(
   taskId: string,
@@ -798,7 +800,7 @@ async function runTurn(
     effort?: string | null;
     isGenerationSession?: boolean;
   }
-): Promise<TurnResult & { raw?: string; charge: TurnCharge }> {
+): Promise<TurnResult & { raw?: string }> {
   const adapter = getHarnessAdapter(opts.lane.adapter);
   const handler = adapter.createOutputHandler(taskId, opts.lane);
   const rawChunks: Buffer[] = [];
@@ -863,7 +865,7 @@ async function runTurn(
 
   const charge = chargeForTurn(opts.lane, result);
   noteLaneCharge(taskId, opts.lane, charge);
-  const charged = { ...result, costUsd: charge.usd, charge };
+  const charged = { ...result, costUsd: charge.usd };
 
   if (!opts.captureRaw) return charged;
   return { ...charged, raw: Buffer.concat(rawChunks).toString() };
@@ -873,13 +875,14 @@ async function runTurn(
  * Say, once per turn, when the lane's price differs from the harness's claim
  * (issue #175).
  *
- * Not noise, and not a correction buried in the ledger: on a third-party lane
- * the CLI prices an open-weights model at Anthropic list rates, so the feed's
- * own "Turn complete (cost: ...)" line is out by an order of magnitude or more
- * (16.7x, measured). Leaving that line as the only thing an operator sees
- * would make a lane that is working look like one that is bankrupting them —
- * the exact conclusion the lane exists to disprove. Written only when the two
- * figures actually differ, so a lane on which they agree stays silent.
+ * Not noise, and not a correction buried in the ledger: the feed's own "Turn
+ * complete (cost: ...)" line carries the *harness's* figure, which on a lane
+ * that declares prices is out by an order of magnitude or more (16.7x,
+ * measured against OpenRouter). Leaving that line as the only thing an
+ * operator sees would make a lane that is working look like one that is
+ * bankrupting them — the exact conclusion the lane exists to disprove. Written
+ * only when the two figures actually differ, so a lane on which they agree
+ * stays silent.
  */
 function noteLaneCharge(
   taskId: string,
@@ -891,13 +894,17 @@ function noteLaneCharge(
 
   const factor = costOverstatement(charge);
   const comparison =
-    factor === null ? "" : ` — ${factor.toFixed(1)}x the lane's own price`;
+    factor === null ? "" : `, ${factor.toFixed(1)}x this lane's price`;
+  // Deliberately says nothing about *why* the harness's figure differs: which
+  // prices a harness computes against is the harness's business, and this
+  // function sits in orchestration that names no vendor. The lane's declared
+  // prices are the fleet's authority either way.
   insertSystemMessage(
     taskId,
-    `Charged $${charge.usd.toFixed(4)} on lane ${lane.label}` +
+    `Charged $${charge.usd.toFixed(4)} at lane prices on ${lane.label}` +
       ` (${lane.model ?? "harness default"}). The harness reported ` +
-      `$${charge.reportedUsd.toFixed(4)}${comparison}: it prices every model at ` +
-      `Anthropic list rates, so only the lane's own prices are meaningful here.`
+      `$${charge.reportedUsd.toFixed(4)}${comparison}, which is not this ` +
+      `lane's price basis and is not what the fleet charges.`
   );
 }
 

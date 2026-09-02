@@ -2,20 +2,25 @@ import fs from "fs";
 import path from "path";
 import { describe, expect, it } from "vitest";
 import { readTurnUsage } from "../output-parser";
-import { chargeForTurn, priceTokens } from "@/lib/lanes/lane-cost";
+import {
+  chargeForTurn,
+  costOverstatement,
+  priceTokens,
+} from "@/lib/lanes/lane-cost";
 import type { TokenPrices } from "@/lib/lanes/lane-config";
 
 /**
  * The evidence behind issue #175's cost rule, kept as the wire actually sent it.
  *
- * Two `result` events captured on 2026-09-02 by running the real Claude Code
- * harness twice — once against Anthropic direct on the subscription lane, once
- * against OpenRouter's Anthropic-compatible endpoint — and nothing else about
- * either was changed but the session id and the final text.
+ * Four `result` events captured on 2026-09-02 by running the real Claude Code
+ * harness — once against Anthropic direct on the subscription lane, once
+ * against OpenRouter's Anthropic-compatible endpoint, and then twice more
+ * through OpenRouter with an identical prompt to catch the prompt cache warm.
+ * Nothing about any of them was changed but the session id and the final text.
  *
- * They are here because the ticket's central claim is a claim about a specific
- * observation, and a paraphrase of it in a comment is not a thing a later
- * change can contradict. Together they pin three facts:
+ * They are here because the ticket's central claims are claims about specific
+ * observations, and a paraphrase of one in a comment is not a thing a later
+ * change can contradict. Together they pin four facts:
  *
  *  1. `modelUsage`, not the sibling `usage`, is the aggregate the CLI charges
  *     from. The subscription turn reports `usage.input_tokens: 10` beside
@@ -28,9 +33,19 @@ import type { TokenPrices } from "@/lib/lanes/lane-config";
  *     rather than mechanism — the fleet charges from the lane's own declared
  *     prices, which is a fact it controls, not an undocumented field it does
  *     not.
+ *  4. Prompt caching survives the skin: the second of the two identical turns
+ *     read 21051 tokens from cache and sent 210 fresh, an 8.8x drop. Cache
+ *     *writes* are never counted (0, and `null` on the raw API), so they arrive
+ *     as ordinary input tokens — which is why an unpriced cache column is
+ *     charged at the input rate rather than at zero.
  */
 
-const [OPENROUTER_RESULT, SUBSCRIPTION_RESULT] = fs
+const [
+  OPENROUTER_RESULT,
+  SUBSCRIPTION_RESULT,
+  CACHE_COLD_RESULT,
+  CACHE_WARM_RESULT,
+] = fs
   .readFileSync(
     path.join(__dirname, "lane-cost-fixture.ndjson"),
     "utf8"
@@ -83,21 +98,67 @@ describe("token counts, as the harness reports them", () => {
     );
   });
 
-  it("falls back to `usage` for a result that carries no modelUsage", () => {
-    // Not a shape either capture has, but one a differently-versioned harness
-    // could: better a slightly coarser count than no charge at all.
+  it("refuses to charge against `usage`, however tempting a fallback it looks", () => {
+    // The trap: `usage` is present on every result and would price *something*,
+    // but the fixture above proves it is the last API iteration rather than the
+    // turn. Charging a lane's prices against it undercharges by ~90x while
+    // looking entirely correct — so a result with no `modelUsage` reports
+    // nothing, and the harness's own (over-stating) figure stands instead.
     expect(
       readTurnUsage({ usage: { input_tokens: 5, output_tokens: 7 } })
+    ).toBeNull();
+  });
+
+  it("reads a result with no counts anywhere as null, not as a free turn", () => {
+    expect(readTurnUsage({ type: "result", subtype: "success" })).toBeNull();
+  });
+
+  it("reads a shape carrying the field names but no numbers as null", () => {
+    // The dangerous near-miss: fields present, values missing. Totalled as
+    // zeroes it would look like a legitimate free turn, and a priced lane would
+    // charge nothing for a pass that really spent.
+    expect(readTurnUsage({ modelUsage: { "some/model": {} } })).toBeNull();
+  });
+
+  it("keeps a genuine zero, which is reported as a number", () => {
+    // Absent and zero are different facts and only one of them is a price: a
+    // turn that really consumed nothing on a column still charges for the rest.
+    expect(
+      readTurnUsage({ modelUsage: { "m": { inputTokens: 0, outputTokens: 4 } } })
     ).toEqual({
-      inputTokens: 5,
-      outputTokens: 7,
+      inputTokens: 0,
+      outputTokens: 4,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
     });
   });
 
-  it("reads a result with no counts anywhere as null, not as a free turn", () => {
-    expect(readTurnUsage({ type: "result", subtype: "success" })).toBeNull();
+  it("sums every model a turn billed, since subagents bill their own", () => {
+    expect(
+      readTurnUsage({
+        modelUsage: {
+          "a": { inputTokens: 10, outputTokens: 1, cacheReadInputTokens: 100 },
+          "b": { inputTokens: 20, outputTokens: 2 },
+        },
+      })
+    ).toEqual({
+      inputTokens: 30,
+      outputTokens: 3,
+      cacheReadTokens: 100,
+      cacheWriteTokens: 0,
+    });
+  });
+
+  it("refuses to charge a lane's prices when nothing was reported", () => {
+    // End to end: the unreadable shape reaches `chargeForTurn` and takes the
+    // deliberately over-stating branch rather than pricing a $0 turn.
+    const charge = chargeForTurn(
+      { prices: GLM_FLASH },
+      { costUsd: 0.194985, usage: readTurnUsage({ usage: {} }) }
+    );
+
+    expect(charge.basis).toBe("harness-unpriced");
+    expect(charge.usd).toBe(0.194985);
   });
 });
 
@@ -149,5 +210,57 @@ describe("what the two lanes actually cost", () => {
     // permanently, and must never inherit another lane's observation.
     expect(OPENROUTER_RESULT).not.toHaveProperty("rate_limit_info");
     expect(OPENROUTER_RESULT.api_error_status).toBeNull();
+  });
+});
+
+describe("prompt caching on the lane", () => {
+  it("re-reads a cached prefix instead of re-paying for it", () => {
+    // Two identical turns, seconds apart. The whole system prompt and tool
+    // schema move from fresh input to a cache read — which on a long agentic
+    // pass is the dominant cost term, not a detail.
+    const cold = readTurnUsage(CACHE_COLD_RESULT)!;
+    const warm = readTurnUsage(CACHE_WARM_RESULT)!;
+
+    expect(cold.cacheReadTokens).toBe(0);
+    expect(cold.inputTokens).toBe(21261);
+    expect(warm.cacheReadTokens).toBe(21051);
+    expect(warm.inputTokens).toBe(210);
+  });
+
+  it("counts no cache writes at all, so they are charged as input", () => {
+    // OpenRouter never reports a cache-write count (0 here; `null` on the raw
+    // API) and publishes no cache-write price for this family. The tokens are
+    // billed, though — they simply arrive in the input column, which is
+    // exactly what `priceTokens` assumes when a cache price is absent.
+    for (const result of [CACHE_COLD_RESULT, CACHE_WARM_RESULT]) {
+      expect(readTurnUsage(result)!.cacheWriteTokens).toBe(0);
+    }
+  });
+
+  it("prices the cached turn far below the cold one on the lane's own prices", () => {
+    // The economics the lane exists for: a 21k-token prefix at $0.075/Mtok
+    // fresh versus $0.015/Mtok cached.
+    const cold = priceTokens(GLM_FLASH, readTurnUsage(CACHE_COLD_RESULT)!);
+    const warm = priceTokens(GLM_FLASH, readTurnUsage(CACHE_WARM_RESULT)!);
+
+    expect(cold).toBeCloseTo(0.0016, 4);
+    expect(warm).toBeCloseTo(0.000342, 6);
+    expect(cold / warm).toBeGreaterThan(4);
+  });
+
+  it("shows the harness overstating the cached turn by more than 30x", () => {
+    // The cheaper the turn really is, the wilder the harness's figure looks:
+    // it prices a cache read at a tenth of its own $5/Mtok basis, not at the
+    // lane's $0.015.
+    const charge = chargeForTurn(
+      { prices: GLM_FLASH },
+      {
+        costUsd: CACHE_WARM_RESULT.total_cost_usd as number,
+        usage: readTurnUsage(CACHE_WARM_RESULT),
+      }
+    );
+
+    expect(charge.basis).toBe("lane-prices");
+    expect(costOverstatement(charge)).toBeGreaterThan(30);
   });
 });

@@ -19,6 +19,7 @@ import {
   type QuotaObservation,
   type QuotaSeverity,
 } from "../quota/rate-limit-event";
+import type { LaneBilling } from "../lanes/lane-config";
 
 export interface FleetRows {
   /** Current time — passed in, never read inside */
@@ -91,7 +92,7 @@ export interface FleetLaneRow {
    * The unified-window machinery is subscription-only (#165), so `metered` is
    * exactly the set of lanes for which "no observation" is permanent rather
    * than pending. */
-  billing: "subscription" | "metered";
+  billing: LaneBilling;
 }
 
 export interface FleetProjectRow {
@@ -359,7 +360,7 @@ export interface FleetView {
 export interface QuotaLaneGlance {
   id: string;
   label: string;
-  billing: "subscription" | "metered";
+  billing: LaneBilling;
   /** Whether this lane's provider emits rate-limit telemetry at all. */
   reportsQuota: boolean;
 }
@@ -425,6 +426,10 @@ function quotaLaneGlance(lane: FleetLaneRow | null): QuotaLaneGlance | null {
     id: lane.id,
     label: lane.label,
     billing: lane.billing,
+    // Only `subscription`, positively — a billing kind added later reads as
+    // "reports nothing", which is the fail-safe direction: it costs a tile its
+    // colour, where the reverse would have the fleet waiting on a reading that
+    // never comes.
     reportsQuota: lane.billing === "subscription",
   };
 }

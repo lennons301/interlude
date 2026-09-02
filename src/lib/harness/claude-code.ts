@@ -71,6 +71,8 @@ export function buildTurnEnv(input: HarnessExecEnvInput): string[] {
  * `maxTurns`/`maxBudgetUsd` fall back to the configured defaults; a lane with
  * no model identifier for the pass passes no `--model` at all, leaving the
  * harness to resolve its own default exactly as before any of this existed.
+ * A lane that declares its own prices passes no `--max-budget-usd` — see the
+ * note at that branch, which is a finding rather than a preference.
  */
 export function buildClaudeTurnCommand(input: HarnessCommandInput): string {
   const config = getConfig();
@@ -87,9 +89,34 @@ export function buildClaudeTurnCommand(input: HarnessCommandInput): string {
     "--dangerously-skip-permissions",
     "--max-turns",
     String(input.maxTurns ?? config.maxTurns),
-    "--max-budget-usd",
-    String(input.maxBudgetUsd ?? config.maxBudgetUsd),
   ];
+
+  // The harness's own spend ceiling, and only where it means anything (issue
+  // #175).
+  //
+  // `--max-budget-usd` is enforced by the CLI against the CLI's *own* cost
+  // figure, and that figure is Anthropic list prices applied to whatever model
+  // it was handed: measured, it billed a turn on a free model $0.194985, 67x
+  // what the same tokens cost on the lane's published prices. Handing it a
+  // ceiling in the fleet's currency would therefore stop a turn at roughly a
+  // sixtieth of the budget the operator set — and the orchestrator would not
+  // see a failure, because a budget-stopped turn is not `error_max_turns`: the
+  // pass would end early, mid-work, and be parked as though it had finished.
+  // "A lane that is cheap and fails every ticket is not cheap" is exactly that
+  // failure.
+  //
+  // So a lane that declares prices is not given a ceiling the harness would
+  // misapply. What still bounds it: `--max-turns` inside the turn, and the
+  // fleet's own accounting between turns, which since this ticket charges the
+  // lane's real prices (`attemptExhaustion` reads accumulated cost). A lane
+  // with no prices — Anthropic-direct, where the CLI's figure is its own list
+  // price and correct — keeps the flag and is unchanged by any of this.
+  if (input.lane.prices === null) {
+    cmdParts.push(
+      "--max-budget-usd",
+      String(input.maxBudgetUsd ?? config.maxBudgetUsd)
+    );
+  }
 
   if (input.lane.model) {
     // Single-quote the model id: real ids can carry shell glob metacharacters

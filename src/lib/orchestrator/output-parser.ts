@@ -65,12 +65,13 @@ export interface TurnResult {
    * (issue #175) — what a lane's own prices are applied to when the harness's
    * dollar figure cannot be trusted.
    *
-   * Read from `modelUsage` rather than from the sibling `usage` object,
-   * because `modelUsage` is the aggregate the CLI itself charges from. Pinned
-   * by observation on 2026-09-02: a subscription turn reported
+   * Read from `modelUsage` and *only* from it — never the sibling `usage`
+   * object, which is the last API iteration rather than the turn. Pinned by
+   * observation on 2026-09-02: a subscription turn reported
    * `usage.input_tokens: 10` beside `modelUsage.inputTokens: 909`, and only
    * the latter reproduces the CLI's own `total_cost_usd` at list prices to the
-   * cent. `usage` is the last API iteration; `modelUsage` is the turn.
+   * cent. See `readTurnUsage` for why that rules the fallback out rather than
+   * making it a second-best.
    */
   usage: TurnTokenUsage | null;
 }
@@ -86,54 +87,88 @@ interface ContentBlock {
   content?: string | Array<{ type: string; text?: string }>;
 }
 
-function readCount(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
+/** A token count, or null when the field was not reported at all.
+ *
+ * Absent is kept apart from zero for the same reason `utilization` is over in
+ * the quota reader: a lane charges from these numbers, and a report whose
+ * fields are all missing must not price as a free turn. Negatives are treated
+ * as unreported — a count cannot be one. */
+function readCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
-    : 0;
+    : null;
 }
+
+/** One reader's four counts, before they are known to be worth anything. */
+type PartialCounts = Record<keyof TurnTokenUsage, number | null>;
+
+const EMPTY_COUNTS: PartialCounts = {
+  inputTokens: null,
+  outputTokens: null,
+  cacheReadTokens: null,
+  cacheWriteTokens: null,
+};
+
+const COUNT_KEYS = Object.keys(EMPTY_COUNTS) as (keyof TurnTokenUsage)[];
 
 /**
  * The turn's token counts, summed over every model it used (issue #175).
  *
- * Summed rather than read from one entry because a pass that spawns subagents
- * bills several models under one turn, and a lane charges for all of them. The
- * sibling `usage` object is the fallback for a harness that reports no
- * `modelUsage` at all; null when neither is present, which `chargeForTurn`
- * has its own (deliberately over-reporting) answer for.
+ * **`modelUsage` and nothing else.** The sibling `usage` object looks like a
+ * cheap fallback and is a trap: the captured turns show it carrying the *last
+ * API iteration* rather than the turn (`usage.input_tokens: 10` beside
+ * `modelUsage.inputTokens: 909`), and only `modelUsage` reproduces the CLI's
+ * own cost at list prices. Charging a lane's prices against `usage` would
+ * therefore undercharge by ~90x with every appearance of being right — the one
+ * direction `chargeForTurn` refuses to fail in. A harness that reports no
+ * `modelUsage` gets null here and is charged its own reported figure instead,
+ * which over-states on a third-party lane and is the safe half of that trade.
+ *
+ * Summed across entries rather than read from one, because a pass that spawns
+ * subagents bills several models under one turn and the lane charges for all of
+ * them. Null unless at least one count was actually a number: a shape carrying
+ * the field names and no values would otherwise total to a legitimate-looking
+ * zero. A genuine zero survives, since zero is reported as a number.
  */
 export function readTurnUsage(
   event: Record<string, unknown>
 ): TurnTokenUsage | null {
   const modelUsage = event.modelUsage;
-  if (modelUsage !== null && typeof modelUsage === "object") {
-    const entries = Object.values(modelUsage as Record<string, unknown>).filter(
+  if (modelUsage === null || typeof modelUsage !== "object") return null;
+
+  const totals = Object.values(modelUsage as Record<string, unknown>)
+    .filter(
       (entry): entry is Record<string, unknown> =>
         entry !== null && typeof entry === "object"
-    );
-    if (entries.length > 0) {
-      return entries.reduce<TurnTokenUsage>(
-        (total, entry) => ({
-          inputTokens: total.inputTokens + readCount(entry.inputTokens),
-          outputTokens: total.outputTokens + readCount(entry.outputTokens),
-          cacheReadTokens:
-            total.cacheReadTokens + readCount(entry.cacheReadInputTokens),
-          cacheWriteTokens:
-            total.cacheWriteTokens + readCount(entry.cacheCreationInputTokens),
+    )
+    .reduce<PartialCounts>(
+      (total, entry) =>
+        addCounts(total, {
+          inputTokens: readCount(entry.inputTokens),
+          outputTokens: readCount(entry.outputTokens),
+          cacheReadTokens: readCount(entry.cacheReadInputTokens),
+          cacheWriteTokens: readCount(entry.cacheCreationInputTokens),
         }),
-        { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
-      );
-    }
-  }
+      EMPTY_COUNTS
+    );
 
-  const usage = event.usage;
-  if (usage === null || typeof usage !== "object") return null;
-  const u = usage as Record<string, unknown>;
+  if (COUNT_KEYS.every((key) => totals[key] === null)) return null;
   return {
-    inputTokens: readCount(u.input_tokens),
-    outputTokens: readCount(u.output_tokens),
-    cacheReadTokens: readCount(u.cache_read_input_tokens),
-    cacheWriteTokens: readCount(u.cache_creation_input_tokens),
+    inputTokens: totals.inputTokens ?? 0,
+    outputTokens: totals.outputTokens ?? 0,
+    cacheReadTokens: totals.cacheReadTokens ?? 0,
+    cacheWriteTokens: totals.cacheWriteTokens ?? 0,
   };
+}
+
+/** Add two partial reports, keeping "neither reported this" as unreported. */
+function addCounts(a: PartialCounts, b: PartialCounts): PartialCounts {
+  const sum = { ...EMPTY_COUNTS };
+  for (const key of COUNT_KEYS) {
+    sum[key] =
+      a[key] === null && b[key] === null ? null : (a[key] ?? 0) + (b[key] ?? 0);
+  }
+  return sum;
 }
 
 export function createOutputHandler(

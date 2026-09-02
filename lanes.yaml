@@ -125,11 +125,17 @@ lanes:
   # slugs and three rows of prices. Nothing else — no new credential, no new
   # adapter, no code.
   #
-  # Verified 2026-09-02 against OpenRouter's Anthropic-compatible endpoint with
-  # the real Claude Code harness: tool use, extended thinking and `--resume`
-  # all passed through, and the pass did the work it was asked to do. See the
-  # findings recorded on issue #175 for what did not carry over — prompt
-  # caching and the CLI's cost figure.
+  # What was verified, and on what (2026-09-02, issue #175). The *endpoint* was
+  # exercised with the real Claude Code harness: tool use, extended thinking,
+  # `--resume` and prompt caching all passed through, and the pass did the work
+  # it was asked to do. That run used a free model
+  # (`minimax/minimax-m2.7:free`), because the OpenRouter account holds no
+  # credits and every paid model answers 402 — so the three slugs below are
+  # verified only as far as OpenRouter's model listing, which is where their
+  # prices come from. Re-check them with
+  # `node scripts/openrouter-lane-check.mjs --model z-ai/glm-5.3-flash` once
+  # the account is funded, and read the findings on issue #175 for what did not
+  # carry over: the harness's own cost figure, and quota telemetry.
   - id: openrouter-glm
     label: OpenRouter (GLM open weights)
     adapter: claude-code

@@ -283,7 +283,6 @@ export const messages = sqliteTable("messages", {
   updatedAt: int("updated_at", { mode: "timestamp_ms" }),
 });
 
-
 /**
  * The last observed quota state **per execution lane** (issue #167, made
  * per-lane by #175): what the Claude Code CLI's `rate_limit_event` said, the

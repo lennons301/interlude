@@ -69,7 +69,11 @@ Schema at `src/db/schema.ts`. Six tables: `projects`, `tasks`, `messages`, `runs
   least one day past the prior entry's (drizzle skips same-day entries it
   believes it has applied), and `rm local.db*` before running tests — a stale
   local DB makes the runs-ledger and parallel-worker migration tests fail on
-  code that is actually correct
+  code that is actually correct. A migration that *renames* a column (issue
+  #175 renamed `quota_state.id` to `lane`) is applied faithfully by the
+  production path, which runs `migrate()` over the journal; `drizzle-kit push`
+  may instead recreate the table and drop its rows, so prefer `migrate()` on
+  any local DB whose contents you care about
 - Generate migrations: `npx drizzle-kit generate`
 - DB client: `import { db } from "@/db"`
 
