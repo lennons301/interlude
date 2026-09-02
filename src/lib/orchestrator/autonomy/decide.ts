@@ -324,13 +324,11 @@ export interface AutonomySnapshot {
   dailyCapUsd: number;
   /** Whether today's cap pause was already announced */
   dailyCapAnnounced: boolean;
-  /**
-   * The money guards (issue #174), all of them keyed off the **billing kind**
-   * of the lane a pass would actually run on — not off whether anything
-   * overflowed. A metered lane is a metered lane whether it is primary, an
-   * overflow target or reached by failover, and metered-primary is the
-   * configuration that would otherwise slip every guard.
-   */
+  // The money guards (issue #174) — the six fields below. All of them key off
+  // the **billing kind** of the lane a pass would actually run on, not off
+  // whether anything overflowed: a metered lane is a metered lane whether it is
+  // primary, an overflow target or reached by failover, and metered-primary is
+  // the configuration that would otherwise slip every guard.
   /** The lane in force, for the announcements that name it; null = none
    * resolves (an unreadable lane file, or a primary naming no declared lane). */
   primaryLaneId: string | null;
@@ -1278,10 +1276,12 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // it too. Registered is the only project gate — triage writes no code and
   // pushes nothing, so pickup preflight does not apply — and the author
   // allow-list bounds whose issues can spend triage money.
-  // The money guards (issue #174), evaluated once for the whole tick from the
-  // billing kind of the lane a pass would run on. `hold` is null on a
-  // subscription lane, on an unresolvable one, and on a metered lane that has
-  // been confirmed today and is still inside its cash cap.
+  //
+  // The money guards (issue #174) are evaluated once for the whole tick, from
+  // the billing kind of the lane a pass would run on, because both pickup
+  // gates below consult them. `hold` is null on a subscription lane, on an
+  // unresolvable one, and on a metered lane confirmed today and still inside
+  // its cash cap.
   const metered = evaluateMeteredSpend({
     billing: snapshot.primaryLaneBilling,
     spentUsd: snapshot.meteredSpendTodayUsd,
