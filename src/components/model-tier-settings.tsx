@@ -2,17 +2,13 @@
 
 import {
   Chip,
-  LoadFailure,
+  ChipRadio,
   PANEL_PLAIN,
+  fallbackNote,
   formatChanged,
 } from "@/components/fleet/fleet-bits";
-import {
-  FALL_THROUGH,
-  OptionChip,
-  fallbackLine,
-  useSettingsOverrides,
-} from "@/components/settings-overrides";
-import type { SettingDetail, SettingFieldView } from "@/lib/settings-resolver";
+import { FALL_THROUGH } from "@/components/settings-overrides";
+import type { SettingFieldView } from "@/lib/settings-resolver";
 
 /**
  * Which tier each kind of pass runs on (issue #166) — the first fields of the
@@ -30,39 +26,30 @@ import type { SettingDetail, SettingFieldView } from "@/lib/settings-resolver";
  * - clearing an override is a first-class option (`environment`), not a
  *   hidden reset, because falling back is the state a fresh deployment is in.
  *
+ * The model id a row names is the one the **primary lane** gives that tier
+ * (issue #172), which is why this panel is presentational and shares its state
+ * with the lane panel below — see `SettingsOverrides`.
+ *
  * A change lands on the settings row and is read fresh when the next pass
  * starts, so it takes effect at the next sweep with no restart. Runs already
  * in flight keep the tier they recorded.
- *
- * The endpoint answers with *every* settable field, so the panel selects its
- * own by what the value means rather than by naming keys: a field whose detail
- * is a model tier belongs here, and one that isn't belongs to whichever panel
- * speaks its language (issue #171's quota threshold is the first).
  */
-
-type ModelTierDetail = Extract<SettingDetail, { kind: "model-tier" }>;
-type ModelTierFieldView = SettingFieldView & { detail: ModelTierDetail };
-
-function isModelTierField(field: SettingFieldView): field is ModelTierFieldView {
-  return field.detail.kind === "model-tier";
-}
-
-export function ModelTierSettings() {
-  const { state, loadError, reload, busyKey, saveError, choose } =
-    useSettingsOverrides();
-
-  if (state === null) {
-    return (
-      <div className={PANEL_PLAIN}>
-        {loadError === null ? (
-          <p className="font-plex-mono text-[11px] text-fl-ink-3">checking…</p>
-        ) : (
-          <LoadFailure what="the model tiers" error={loadError} onRetry={reload} />
-        )}
-      </div>
-    );
-  }
-
+export function ModelTierPanel({
+  fields,
+  updatedAt,
+  busyKey,
+  disabled,
+  saveError,
+  onChoose,
+}: {
+  fields: SettingFieldView[];
+  /** ISO-8601; null = no setting has ever been written on this install. */
+  updatedAt: string | null;
+  busyKey: string | null;
+  disabled: boolean;
+  saveError: string | null;
+  onChoose: (key: string, choice: string) => void;
+}) {
   return (
     <div className={`${PANEL_PLAIN} space-y-4`}>
       <p className="text-[13px] text-fl-ink-3">
@@ -70,20 +57,20 @@ export function ModelTierSettings() {
         <span className="font-plex-mono">heavy</span>,{" "}
         <span className="font-plex-mono">standard</span>,{" "}
         <span className="font-plex-mono">light</span> — so it survives a change
-        of provider. Left on{" "}
-        <span className="font-plex-mono">{FALL_THROUGH}</span>, a row follows
-        the deployment&apos;s own variable. A ticket&apos;s{" "}
+        of provider; the model it names is whatever the lane below resolves it
+        to. Left on <span className="font-plex-mono">{FALL_THROUGH}</span>, a
+        row follows the deployment&apos;s own variable. A ticket&apos;s{" "}
         <span className="font-plex-mono">model:</span> directive still outranks
         both.
       </p>
 
-      {state.fields.filter(isModelTierField).map((field) => (
+      {fields.map((field) => (
         <TierRow
           key={field.key}
           field={field}
           busy={busyKey === field.key}
-          disabled={busyKey !== null}
-          onChoose={(choice) => choose(field.key, choice)}
+          disabled={disabled}
+          onChoose={(choice) => onChoose(field.key, choice)}
         />
       ))}
 
@@ -93,9 +80,9 @@ export function ModelTierSettings() {
         </p>
       )}
 
-      {state.updatedAt !== null && (
+      {updatedAt !== null && (
         <p className="font-plex-mono text-[11px] text-fl-ink-3">
-          settings last changed {formatChanged(state.updatedAt)}
+          settings last changed {formatChanged(updatedAt)}
         </p>
       )}
     </div>
@@ -108,7 +95,7 @@ function TierRow({
   disabled,
   onChoose,
 }: {
-  field: ModelTierFieldView;
+  field: SettingFieldView;
   busy: boolean;
   disabled: boolean;
   onChoose: (choice: string) => void;
@@ -122,10 +109,10 @@ function TierRow({
         </legend>
         <div className="flex flex-wrap items-center gap-1.5">
           {[...field.options, FALL_THROUGH].map((option) => (
-            <OptionChip
+            <ChipRadio
               key={option}
               name={field.key}
-              option={option}
+              value={option}
               selected={selected === option}
               disabled={disabled}
               onSelect={() => onChoose(option)}
@@ -145,7 +132,13 @@ function TierRow({
         </Chip>
         <span>{effective(field)}</span>
         <span aria-hidden>·</span>
-        <span>{fallbackLine(field)}</span>
+        <span>
+          {fallbackNote({
+            envVar: field.envVar,
+            envValue: field.envValue,
+            overridden: field.source === "override",
+          })}
+        </span>
       </p>
     </fieldset>
   );
@@ -153,8 +146,9 @@ function TierRow({
 
 /** What the pass actually runs on. Naming the model id beside the tier is the
  * bit that makes an override checkable against the harness's own logs. */
-function effective(field: ModelTierFieldView): string {
-  const { tier, model } = field.detail;
-  if (model === null) return "no --model — the account default";
-  return tier === null ? `runs ${model}` : `runs ${tier} (${model})`;
+function effective(field: SettingFieldView): string {
+  if (field.model === null) return "no --model — the account default";
+  return field.tier === null
+    ? `runs ${field.model}`
+    : `runs ${field.tier} (${field.model})`;
 }

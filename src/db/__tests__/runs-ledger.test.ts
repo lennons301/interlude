@@ -42,6 +42,7 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
     expect(run.pullRequestNumber).toBeNull();
     expect(run.pullRequestUrl).toBeNull();
     expect(run.model).toBeNull();
+    expect(run.lane).toBeNull();
     expect(run.startedAt).toBeNull();
     expect(run.finishedAt).toBeNull();
   });
@@ -68,7 +69,13 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
         reviewCycleCount: 2,
         interruptionCount: 1,
         blockedQuestion: "Which auth provider should this target?",
-        model: "claude-opus-4-8",
+        // Since lanes (issue #172) the ledger records which substrate the
+        // attempt ran on beside the tier, because the same dollar figure means
+        // subscription quota on one lane and real money on another. The tier —
+        // not the identifier it resolved to — is what `model` holds, so the
+        // run's `model:` directive survives a lane whose ids name no tier.
+        lane: "openrouter",
+        model: "heavy",
         claimedAt,
         startedAt,
         finishedAt,
@@ -83,7 +90,8 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
     expect(run.gateCategories).toEqual(["migrations", "auth"]);
     expect(run.reviewVerdict).toBe("request-changes");
     expect(run.reviewedHeadSha).toBe("d9d06fc1a2b3c4d5e6f708192a3b4c5d6e7f8091");
-    expect(run.model).toBe("claude-opus-4-8");
+    expect(run.lane).toBe("openrouter");
+    expect(run.model).toBe("heavy");
     expect(run.claimedAt).toEqual(claimedAt);
     expect(run.startedAt).toEqual(startedAt);
     expect(run.finishedAt).toEqual(finishedAt);

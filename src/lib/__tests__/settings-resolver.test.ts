@@ -1,17 +1,18 @@
 import { describe, expect, it } from "vitest";
 import type { AppConfig } from "../config";
-import {
-  MODEL_TIERS,
-  normalizeModelTier,
-  tierModelId,
-} from "../model-tiers";
 import { DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT } from "../quota/quota-gate";
 import {
+  MODEL_TIERS,
+  TIER_MODEL_IDS,
+  normalizeModelTier,
+} from "../model-tiers";
+import {
   FIXED_CEILINGS,
+  MODEL_TIER_FIELD_ORDER,
   SETTINGS_FIELDS,
-  SETTINGS_FIELD_ORDER,
+  SETTABLE_KEYS,
   applySettingsPatch,
-  describeSettings,
+  describeModelTierSettings,
   parseSettingsPatch,
   resolveModelTier,
   resolveQuotaThreshold,
@@ -31,12 +32,14 @@ function cfg(models: {
   agentModel?: string | null;
   agentModelReview?: string | null;
   agentModelTriage?: string | null;
+  agentLane?: string | null;
   quotaPickupThresholdPercent?: string | null;
 } = {}): AppConfig {
   return {
     agentModel: models.agentModel ?? null,
     agentModelReview: models.agentModelReview ?? null,
     agentModelTriage: models.agentModelTriage ?? null,
+    agentLane: models.agentLane ?? null,
     quotaPickupThresholdPercent: models.quotaPickupThresholdPercent ?? null,
   } as AppConfig;
 }
@@ -61,7 +64,11 @@ describe("model tier vocabulary", () => {
   });
 
   it("maps every tier to a model id the CLI accepts", () => {
-    expect(MODEL_TIERS.map(tierModelId)).toEqual(["opus", "sonnet", "haiku"]);
+    expect(MODEL_TIERS.map((tier) => TIER_MODEL_IDS[tier])).toEqual([
+      "opus",
+      "sonnet",
+      "haiku",
+    ]);
   });
 });
 
@@ -170,38 +177,43 @@ describe("override — a set field wins, and only for itself", () => {
 
 describe("provenance — every field says where its value came from", () => {
   it("reports the environment and names the variable when nothing is set", () => {
-    const fields = describeSettings(cfg({ agentModel: "sonnet" }), NONE);
+    const fields = describeModelTierSettings(cfg({ agentModel: "sonnet" }), NONE);
     const implement = fields.find((f) => f.key === "modelTierImplement")!;
     expect(implement).toMatchObject({
       source: "environment",
       override: null,
       envVar: "AGENT_MODEL",
       envValue: "sonnet",
-      detail: { kind: "model-tier", tier: "standard", model: "sonnet" },
+      tier: "standard",
+      model: "sonnet",
     });
   });
 
   it("reports the override, and still names what clearing it falls back to", () => {
-    const fields = describeSettings(cfg({ agentModel: "sonnet" }), {
+    const fields = describeModelTierSettings(cfg({ agentModel: "sonnet" }), {
       modelTierImplement: "heavy",
     });
     expect(fields.find((f) => f.key === "modelTierImplement")).toMatchObject({
       source: "override",
       override: "heavy",
-      detail: { kind: "model-tier", tier: "heavy", model: "opus" },
+      model: "opus",
       envValue: "sonnet",
     });
   });
 
-  it("describes every settable field, in display order", () => {
-    expect(describeSettings(cfg(), NONE).map((f) => f.key)).toEqual([
-      ...SETTINGS_FIELD_ORDER,
+  it("describes every model-tier field, in display order", () => {
+    expect(describeModelTierSettings(cfg(), NONE).map((f) => f.key)).toEqual([
+      ...MODEL_TIER_FIELD_ORDER,
     ]);
-    // Every settable field is placed, and nothing is placed twice — a length
-    // check alone would pass a swapped-out key.
-    expect([...SETTINGS_FIELD_ORDER].sort()).toEqual(
+    // Every settable field is placed somewhere, and nothing is placed twice —
+    // a length check alone would pass a swapped-out key. The lane field has
+    // its own panel (it needs the lane catalog to render), so it is in the
+    // settable set without being in the tier panel's order.
+    expect([...SETTABLE_KEYS].sort()).toEqual(
       Object.keys(SETTINGS_FIELDS).sort()
     );
+    expect(SETTABLE_KEYS).toContain("primaryLane");
+    expect(MODEL_TIER_FIELD_ORDER).not.toContain("primaryLane");
   });
 });
 
@@ -259,9 +271,9 @@ describe("rejection — a bad value is refused, never silently clamped", () => {
 });
 
 /**
- * The quota admission threshold (issue #171) — the layer's first non-model
- * field, and the first with three fall-through steps rather than two: a model
- * tier may resolve to "let the CLI decide", but a gate needs a number.
+ * The quota admission threshold (issue #171) — a settable field with three
+ * fall-through steps rather than two: a model tier may resolve to "let the
+ * harness decide", but a gate needs a number.
  */
 describe("the quota pickup threshold", () => {
   it("falls through to its own default with nothing set anywhere", () => {
@@ -288,7 +300,7 @@ describe("the quota pickup threshold", () => {
     ).toMatchObject({
       percent: 95,
       source: "override",
-      override: 95,
+      override: "95",
       envValue: "80",
     });
   });
@@ -328,24 +340,20 @@ describe("the quota pickup threshold", () => {
 
   it("refuses a nonsensical percentage rather than clamping it", () => {
     // A clamp would turn "hold at 140%" into a gate the operator never chose.
-    expect(
-      parseSettingsPatch({ quotaPickupThresholdPercent: "140" }).ok
-    ).toBe(false);
+    expect(parseSettingsPatch({ quotaPickupThresholdPercent: "140" }).ok).toBe(
+      false
+    );
     expect(parseSettingsPatch({ quotaPickupThresholdPercent: "-1" }).ok).toBe(
       false
     );
   });
 
-  it("describes itself as a percent, not as a model tier", () => {
-    const field = describeSettings(cfg(), {
-      quotaPickupThresholdPercent: "70",
-    }).find((f) => f.key === "quotaPickupThresholdPercent")!;
-
-    expect(field).toMatchObject({
-      source: "override",
-      override: "70",
-      detail: { kind: "percent", percent: 70 },
-    });
+  it("is settable, and named in the message that enumerates what is", () => {
+    const parsed = parseSettingsPatch({ agentModel: "heavy" });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toContain("quotaPickupThresholdPercent");
+    expect(SETTABLE_KEYS).toContain("quotaPickupThresholdPercent");
   });
 });
 
@@ -361,7 +369,7 @@ describe("ceiling — a UI override may never widen a safety ceiling", () => {
 
   it("keeps every ceiling out of the settable allowlist", () => {
     for (const key of Object.keys(FIXED_CEILINGS)) {
-      expect(SETTINGS_FIELD_ORDER).not.toContain(key);
+      expect(SETTABLE_KEYS).not.toContain(key);
     }
   });
 
@@ -417,5 +425,69 @@ describe("applying and storing a patch", () => {
     expect(sanitizeOverrides({ modelTierReview: "haiku" })).toEqual({
       modelTierReview: "light",
     });
+  });
+});
+
+/**
+ * The primary-lane field (issue #172). Its vocabulary is the one thing in the
+ * registry that is *not* compiled in — the lanes live in a checked-in file read
+ * at runtime — so it arrives as context, and these tests pin what happens with
+ * and without it.
+ */
+describe("the primary-lane setting", () => {
+  const LANES = { laneIds: ["claude-subscription", "openrouter"] };
+
+  it("accepts a declared lane and stores it canonically", () => {
+    const parsed = parseSettingsPatch({ primaryLane: " OpenRouter " }, LANES);
+    expect(parsed).toEqual({ ok: true, patch: { primaryLane: "openrouter" } });
+  });
+
+  it("refuses a lane that is not declared, listing the ones that are", () => {
+    const parsed = parseSettingsPatch({ primaryLane: "kimi" }, LANES);
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toContain("kimi");
+    expect(parsed.error).toContain("claude-subscription, openrouter");
+  });
+
+  it("refuses a value that is not even lane-shaped", () => {
+    expect(parseSettingsPatch({ primaryLane: "../../etc/passwd" }, LANES).ok).toBe(
+      false
+    );
+    expect(parseSettingsPatch({ primaryLane: "Bearer sk-x" }, LANES).ok).toBe(false);
+    expect(parseSettingsPatch({ primaryLane: "a".repeat(80) }, LANES).ok).toBe(false);
+    // Without a catalog only the shape can honestly be asserted — which is
+    // exactly why the write path always supplies one, and why the shape is
+    // bounded rather than "any string".
+    expect(parseSettingsPatch({ primaryLane: "../../etc/passwd" }).ok).toBe(false);
+  });
+
+  it("clears back to the environment like any other field", () => {
+    expect(parseSettingsPatch({ primaryLane: null }, LANES)).toEqual({
+      ok: true,
+      patch: { primaryLane: null },
+    });
+    expect(
+      applySettingsPatch({ primaryLane: "openrouter" }, { primaryLane: null })
+    ).toEqual({});
+  });
+
+  it("keeps a stored lane id when no catalog is supplied, and drops one when it is", () => {
+    // Which of the two the read path wants is settled in `settings.ts`: it
+    // omits the catalog, so an operator's choice survives a lane the deploy
+    // renamed and the *resolver* reports it. The catalog form is the write
+    // path's, where an undeclared lane is refused by name.
+    expect(sanitizeOverrides({ primaryLane: "openrouter" })).toEqual({
+      primaryLane: "openrouter",
+    });
+    expect(
+      sanitizeOverrides({ primaryLane: "retired-lane" }, LANES)
+    ).toEqual({});
+  });
+
+  it("falls through to AGENT_LANE, and names it", () => {
+    expect(
+      SETTINGS_FIELDS.primaryLane.envDefault(cfg({ agentLane: "openrouter" }))
+    ).toEqual({ envVar: "AGENT_LANE", value: "openrouter" });
   });
 });

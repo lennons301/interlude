@@ -1,60 +1,42 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
-import type { SettingFieldView } from "@/lib/settings-resolver";
+import { describe, expect, it } from "vitest";
+import type { QuotaThresholdView } from "@/lib/settings-resolver";
+import { QuotaGatePanel } from "../quota-gate-settings";
+import { errorFor } from "../settings-overrides";
 
 /**
- * The quota threshold panel (issue #171). What is asserted is the reading an
- * operator gets: the value in force, where it came from, and the fact that
- * clearing it is one press — the same contract the model-tier panel keeps,
- * checked here because the two panels share plumbing but not copy.
+ * The quota-gate panel (issue #171). What is asserted is the reading an
+ * operator gets: the threshold in force, where it came from, what clearing it
+ * falls back to, and — because the whole point of the gate is that a fleet
+ * claiming nothing must not look idle — what the gate does *not* hold.
  *
- * The loaded state is stood up by mocking the one GET hook: the endpoint hands
- * back *every* settable field, so the fixture includes a model-tier row the
- * panel must ignore.
+ * Presentational, so the view model is handed in directly.
  */
-let fields: SettingFieldView[] = [];
 
-vi.mock("@/lib/use-load", () => ({
-  useLoad: () => ({
-    data: { fields, updatedAt: null },
-    error: null,
-    reload: () => {},
-    setData: () => {},
-  }),
-}));
-
-import { QuotaGateSettings } from "../quota-gate-settings";
-
-const TIER_FIELD: SettingFieldView = {
-  key: "modelTierReview",
-  label: "Review",
-  help: "The tier a review pass runs on.",
-  envVar: "AGENT_MODEL_REVIEW",
-  options: ["heavy", "standard", "light"],
-  source: "environment",
-  override: null,
-  envValue: "claude-opus-4-8",
-  detail: { kind: "model-tier", tier: null, model: "claude-opus-4-8" },
-};
-
-function field(over: Partial<SettingFieldView> = {}): SettingFieldView {
+function quota(over: Partial<QuotaThresholdView> = {}): QuotaThresholdView {
   return {
-    key: "quotaPickupThresholdPercent",
+    percent: 90,
+    source: "environment",
+    override: null,
+    options: ["80", "90", "95"],
     label: "Quota pickup threshold",
     help: "How full the account's quota window may get.",
     envVar: "QUOTA_PICKUP_THRESHOLD_PERCENT",
-    options: ["80", "90", "95"],
-    source: "environment",
-    override: null,
     envValue: null,
-    detail: { kind: "percent", percent: 90 },
     ...over,
   };
 }
 
-function render(over: Partial<SettingFieldView> = {}): string {
-  fields = [TIER_FIELD, field(over)];
-  return renderToStaticMarkup(<QuotaGateSettings />);
+function render(over: Partial<QuotaThresholdView> = {}): string {
+  return renderToStaticMarkup(
+    <QuotaGatePanel
+      quota={quota(over)}
+      busy={false}
+      disabled={false}
+      saveError={null}
+      onChoose={() => {}}
+    />
+  );
 }
 
 describe("the quota gate settings panel", () => {
@@ -69,13 +51,6 @@ describe("the quota gate settings panel", () => {
     expect(html).toContain('value="90"');
   });
 
-  it("ignores the model-tier fields the same endpoint hands back", () => {
-    const html = render();
-
-    expect(html).not.toContain("AGENT_MODEL_REVIEW");
-    expect(html).not.toContain("claude-opus-4-8");
-  });
-
   it("reads a falling-through field as the environment's, naming the variable", () => {
     const html = render();
 
@@ -85,10 +60,10 @@ describe("the quota gate settings panel", () => {
 
   it("reads an overridden field as this screen's, and says where clearing lands", () => {
     const html = render({
+      percent: 80,
       source: "override",
       override: "80",
       envValue: "95",
-      detail: { kind: "percent", percent: 80 },
     });
 
     expect(html).toContain("ui override");
@@ -96,12 +71,17 @@ describe("the quota gate settings panel", () => {
     expect(html).toContain("QUOTA_PICKUP_THRESHOLD_PERCENT = 95, unused");
   });
 
+  it("shows a refused environment value beside the default in force", () => {
+    // Collapsing it to "unset" would read back as a variable nobody had set —
+    // the one surprise the provenance line exists to remove.
+    const html = render({ envValue: "93" });
+
+    expect(html).toContain("holds pickup at 90%");
+    expect(html).toContain("from QUOTA_PICKUP_THRESHOLD_PERCENT = 93");
+  });
+
   it("checks the option in force, so the control shows the state", () => {
-    const html = render({
-      source: "override",
-      override: "80",
-      detail: { kind: "percent", percent: 80 },
-    });
+    const html = render({ percent: 80, source: "override", override: "80" });
     const input = (value: string) =>
       html.match(new RegExp(`<input[^>]*value="${value}"[^>]*>`))![0];
 
@@ -127,5 +107,20 @@ describe("the quota gate settings panel", () => {
     expect(html).toMatch(/in flight/i);
     expect(html).toMatch(/parked run still resumes/i);
     expect(html).toMatch(/kill switch/i);
+  });
+
+  it("shows only its own save error, never another panel's", () => {
+    const laneFailure = { key: "primaryLane", message: "That didn't stick" };
+
+    expect(errorFor(laneFailure, "quota")).toBeNull();
+    expect(
+      errorFor(
+        { key: "quotaPickupThresholdPercent", message: "nope" },
+        "quota"
+      )
+    ).toBe("nope");
+    expect(
+      errorFor({ key: "quotaPickupThresholdPercent", message: "nope" }, "tiers")
+    ).toBeNull();
   });
 });

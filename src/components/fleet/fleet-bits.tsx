@@ -152,6 +152,72 @@ export function ControlButton({
   );
 }
 
+/**
+ * One choice in a chip-voiced radio group: the radio itself is the control —
+ * screen-reader-visible and keyboard-operable — with the chip as its skin.
+ * Shared rather than copied, because two settings panels offer a row of
+ * mutually-exclusive choices in the same voice (the model tiers, the execution
+ * lanes) and a second hand-written copy is how the two would drift apart.
+ */
+export function ChipRadio({
+  name,
+  value,
+  label,
+  selected,
+  disabled,
+  onSelect,
+}: {
+  /** Radio-group name — the same for every option in one group. */
+  name: string;
+  value: string;
+  /** What the chip reads; defaults to the value. */
+  label?: React.ReactNode;
+  selected: boolean;
+  disabled?: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <label
+      className={`cursor-pointer rounded-[4px] border px-1.5 py-px font-plex-mono text-[11px] lowercase transition-colors focus-within:border-fl-cool ${
+        selected
+          ? "border-fl-cool/45 bg-fl-cool/13 text-fl-cool"
+          : "border-fl-line text-fl-ink-2 hover:border-fl-line-strong hover:text-fl-ink"
+      } ${disabled ? "opacity-40" : ""}`}
+    >
+      <input
+        type="radio"
+        name={name}
+        value={value}
+        className="sr-only"
+        checked={selected}
+        disabled={disabled}
+        onChange={onSelect}
+      />
+      {label ?? value}
+    </label>
+  );
+}
+
+/**
+ * Where a setting would land if its override were cleared — the variable name
+ * and its value, said the same way by every settings panel (issues #166,
+ * #172). Named rather than "environment default", because a default without
+ * the variable's name is not something an operator can go and check.
+ */
+export function fallbackNote({
+  envVar,
+  envValue,
+  overridden,
+}: {
+  envVar: string;
+  envValue: string | null;
+  /** Whether a UI override is in force, making the environment value moot. */
+  overridden: boolean;
+}): string {
+  const value = envValue === null ? "unset" : `= ${envValue}`;
+  return overridden ? `${envVar} ${value}, unused` : `from ${envVar} ${value}`;
+}
+
 /** The standing-underline text link: cool ink under a hairline that firms up on
  * hover, for a reference you are meant to see is a reference (a ticket, a PR, a
  * "needs you" action). The atom owns where the link goes as well as how it reads

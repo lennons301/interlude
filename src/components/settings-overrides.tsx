@@ -1,37 +1,78 @@
 "use client";
 
 import { useState } from "react";
+import { Eyebrow, LoadFailure, PANEL_PLAIN } from "@/components/fleet/fleet-bits";
+import { ModelTierPanel } from "@/components/model-tier-settings";
+import { ExecutionLanePanel } from "@/components/execution-lane-settings";
+import { QuotaGatePanel } from "@/components/quota-gate-settings";
 import { useLoad } from "@/lib/use-load";
 import type { SettingFieldView } from "@/lib/settings-resolver";
+import type { LaneSettingsView } from "@/lib/lanes/resolve";
+import type { QuotaThresholdView } from "@/lib/settings-resolver";
 
 /**
- * The plumbing every UI-editable settings panel shares (issues #166, #171):
- * one GET of the resolved state, one PATCH per press, and the chip radio the
- * control room speaks in.
+ * The UI-editable settings (issues #166, #172, #171): which tier each kind of
+ * pass runs at, which execution lane it runs on, and how full the account's
+ * quota may get before the fleet stops claiming.
  *
- * Extracted when the second panel arrived rather than copied, because the two
- * halves that must not drift are exactly the two a copy would fork: a
- * rejection has to be shown *as the server worded it* (the point of refusing
- * instead of clamping is that the operator learns what the fleet will do), and
- * the response body — the whole resolved state — has to replace local state, so
- * a panel shows what the fleet would run rather than what was asked for.
+ * Panels, **one** piece of state, deliberately. The first two are not
+ * independent: a tier's model identifier is whatever the primary lane says it
+ * is, so changing the lane changes every row of the panel above it. Fetched
+ * twice they would drift the moment a lane was picked, and the screen would
+ * name models no pass would run — the exact failure the provenance work exists
+ * to prevent. The quota threshold is independent of both, and joins the same
+ * state anyway rather than fetching its own: the endpoint answers a PATCH with
+ * the whole resolved settings state, so one write here would leave a
+ * separately-fetched panel showing a row that is no longer the row.
  */
 
-export interface OverridesState {
+interface OverridesState {
   fields: SettingFieldView[];
+  lanes: LaneSettingsView | null;
+  /** Why the lane file could not be read, when it could not be. */
+  laneError: string | null;
+  quota: QuotaThresholdView;
   /** ISO-8601; null = no setting has ever been written on this install. */
   updatedAt: string | null;
 }
 
+/** The one field the lane panel owns. */
+const LANE_KEY = "primaryLane";
+/** The one field the quota panel owns. */
+const QUOTA_KEY = "quotaPickupThresholdPercent";
+
+/** The save error, shown only by the panel that owns the field it failed on. */
+export function errorFor(
+  error: { key: string; message: string } | null,
+  panel: "lane" | "tiers" | "quota"
+): string | null {
+  if (error === null) return null;
+  const owner =
+    error.key === LANE_KEY
+      ? "lane"
+      : error.key === QUOTA_KEY
+        ? "quota"
+        : "tiers";
+  return owner === panel ? error.message : null;
+}
+
 /** The option that means "no override" — the fall-through every field starts
- * in, offered beside the real values so clearing is one press. */
+ * in, offered beside the real choices so clearing is one press. */
 export const FALL_THROUGH = "environment";
 
-export function useSettingsOverrides() {
-  const { data: state, error: loadError, reload, setData } =
-    useLoad<OverridesState>("/api/settings/overrides");
+export function SettingsOverrides() {
+  const {
+    data: state,
+    error: loadError,
+    reload,
+    setData,
+  } = useLoad<OverridesState>("/api/settings/overrides");
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  // The failed field, not just the message: a rejected lane save must not put
+  // a red alert under Models, where nothing went wrong.
+  const [saveError, setSaveError] = useState<{ key: string; message: string } | null>(
+    null
+  );
 
   async function choose(key: string, choice: string) {
     setBusyKey(key);
@@ -53,70 +94,89 @@ export function useSettingsOverrides() {
             : `the server answered ${res.status}`
         );
       }
-      // The endpoint answers with the whole resolved state, so the panel shows
+      // The endpoint answers with the whole resolved state, so the panels show
       // what the fleet would actually run, not what was asked for.
       setData(body as OverridesState);
     } catch (err) {
-      setSaveError(
-        `That didn't stick — ${err instanceof Error ? err.message : "the request failed"}`
-      );
+      setSaveError({
+        key,
+        message: `That didn't stick — ${err instanceof Error ? err.message : "the request failed"}`,
+      });
     }
     setBusyKey(null);
   }
 
-  return { state, loadError, reload, busyKey, saveError, choose };
-}
+  if (state === null) {
+    return (
+      <Sections>
+        <div className={PANEL_PLAIN}>
+          {loadError === null ? (
+            <p className="font-plex-mono text-[11px] text-fl-ink-3">checking…</p>
+          ) : (
+            <LoadFailure what="the settings" error={loadError} onRetry={reload} />
+          )}
+        </div>
+        <div className={PANEL_PLAIN}>
+          <p className="font-plex-mono text-[11px] text-fl-ink-3">—</p>
+        </div>
+        <div className={PANEL_PLAIN}>
+          <p className="font-plex-mono text-[11px] text-fl-ink-3">—</p>
+        </div>
+      </Sections>
+    );
+  }
 
-/** One choice, in the chip voice the rest of the control room speaks. The radio
- * itself is the control — screen-reader-visible and keyboard-operable — with
- * the chip as its skin. */
-export function OptionChip({
-  name,
-  option,
-  label,
-  selected,
-  disabled,
-  onSelect,
-}: {
-  name: string;
-  /** The stored value this chip selects — also what the radio carries, so the
-   * control is inspectable in the value the fleet would actually keep. */
-  option: string;
-  /** What the chip reads as, when that differs from the value (a percentage
-   * wants its sign). Defaults to the value itself. */
-  label?: string;
-  selected: boolean;
-  disabled: boolean;
-  onSelect: () => void;
-}) {
   return (
-    <label
-      className={`cursor-pointer rounded-[4px] border px-1.5 py-px font-plex-mono text-[11px] lowercase transition-colors focus-within:border-fl-cool ${
-        selected
-          ? "border-fl-cool/45 bg-fl-cool/13 text-fl-cool"
-          : "border-fl-line text-fl-ink-2 hover:border-fl-line-strong hover:text-fl-ink"
-      } ${disabled ? "opacity-40" : ""}`}
-    >
-      <input
-        type="radio"
-        name={name}
-        value={option}
-        className="sr-only"
-        checked={selected}
-        disabled={disabled}
-        onChange={onSelect}
+    <Sections>
+      <ModelTierPanel
+        fields={state.fields}
+        updatedAt={state.updatedAt}
+        busyKey={busyKey}
+        disabled={busyKey !== null}
+        saveError={errorFor(saveError, "tiers")}
+        onChoose={choose}
       />
-      {label ?? option}
-    </label>
+      <ExecutionLanePanel
+        lanes={state.lanes}
+        laneError={state.laneError}
+        busy={busyKey === LANE_KEY}
+        disabled={busyKey !== null}
+        saveError={errorFor(saveError, "lane")}
+        onChoose={(choice) => choose(LANE_KEY, choice)}
+      />
+      <QuotaGatePanel
+        quota={state.quota}
+        busy={busyKey === QUOTA_KEY}
+        disabled={busyKey !== null}
+        saveError={errorFor(saveError, "quota")}
+        onChoose={(choice) => choose(QUOTA_KEY, choice)}
+      />
+    </Sections>
   );
 }
 
-/** Where a row would land if its override were cleared — named variable and
- * all, because "environment default" without the name is not something an
- * operator can go and check. */
-export function fallbackLine(field: SettingFieldView): string {
-  const value = field.envValue === null ? "unset" : `= ${field.envValue}`;
-  return field.source === "override"
-    ? `${field.envVar} ${value}, unused`
-    : `from ${field.envVar} ${value}`;
+/** The headed sections the control room reads as. Kept here rather than on the
+ * page so every panel can share one client-side state. */
+function Sections({
+  children,
+}: {
+  children: [React.ReactNode, React.ReactNode, React.ReactNode];
+}) {
+  const [models, lanes, quota] = children;
+  return (
+    <>
+      <section aria-label="Models" className="space-y-3">
+        <Eyebrow>Models</Eyebrow>
+        {models}
+      </section>
+      <section aria-label="Execution lane" className="space-y-3">
+        <Eyebrow>Execution lane</Eyebrow>
+        {lanes}
+      </section>
+      <section aria-label="Quota" className="space-y-3">
+        <Eyebrow>Quota</Eyebrow>
+        {quota}
+      </section>
+    </>
+  );
 }
