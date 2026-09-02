@@ -165,17 +165,21 @@ lanes:
   # slugs and three rows of prices. Nothing else — no new credential, no new
   # adapter, no code.
   #
-  # What was verified, and on what (2026-09-02, issue #175). The *endpoint* was
-  # exercised with the real Claude Code harness: tool use, extended thinking,
-  # `--resume` and prompt caching all passed through, and the pass did the work
-  # it was asked to do. That run used a free model
-  # (`minimax/minimax-m2.7:free`), because the OpenRouter account holds no
-  # credits and every paid model answers 402 — so the three slugs below are
-  # verified only as far as OpenRouter's model listing, which is where their
-  # prices come from. Re-check them with
-  # `node scripts/openrouter-lane-check.mjs --model z-ai/glm-5.3-flash` once
-  # the account is funded, and read the findings on issue #175 for what did not
-  # carry over: the harness's own cost figure, and quota telemetry.
+  # What was verified, and on what. The full autonomous loop ran on this lane
+  # end to end on the VPS (issue #175, 2026-09-02): triage, implement and
+  # review passes on moontide#82, producing a merged PR, with every turn booked
+  # against the prices below. What did not carry over from Anthropic-direct:
+  # the harness's own cost figure, and quota telemetry (issue #175's findings).
+  #
+  # Prompt caching WORKS on this lane (issue #193, measured 2026-09-02) —
+  # automatic on the GLM family's upstreams, no cache_control needed, cache
+  # writes free, and reads reported through the skin's
+  # `cache_read_input_tokens`. An earlier probe that read `cache_read: 0` was
+  # a routing artifact, not a lane property: OpenRouter fans each request out
+  # across ~20 upstream hosts per slug, and two stateless probes landing on
+  # different hosts miss each other's cache. `scripts/openrouter-lane-check.mjs`
+  # now audits each probe against `GET /v1/generation` (the billed truth, which
+  # names the serving host) so that misreading cannot happen again.
   - id: openrouter-glm
     label: OpenRouter (GLM open weights)
     adapter: claude-code
@@ -191,14 +195,31 @@ lanes:
       heavy: z-ai/glm-5.3
       standard: z-ai/glm-5.3-flash
       light: z-ai/glm-4.7-flash
-    # USD per million tokens, from OpenRouter's model listing on 2026-09-02.
+    # USD per million tokens — the WORST serving endpoint's rates, not the
+    # listing's cheapest (issue #193). OpenRouter's default routing scatters
+    # across every host serving a slug, and their prices spread up to 2x:
+    # measured live, `z-ai/glm-5.3-flash` cold turns billed by NextBit at
+    # $0.15/MTok against the $0.075 floor this file used to declare. The fleet
+    # books spend from these figures, and under-reading cost is how it spends
+    # money nobody authorised (the `lane-cost.ts` asymmetry), so each column is
+    # the maximum across the slug's endpoints on 2026-09-02.
+    #
+    # Reclaiming the ~2x back to floor rates is an operator action, not a code
+    # change: create an OpenRouter preset pinning `provider.only: ["z-ai"]`,
+    # point a tier's slug at `@preset/<name>`, and restore that tier's floor
+    # prices here. (The `:floor` slug suffix is NOT that fix — measured, it
+    # still routed to the $0.15 host. Body-level `provider` pinning does pass
+    # through the Anthropic skin, but the harness cannot send body fields.)
+    #
     # `cache_write` is deliberately absent across the family: OpenRouter
     # publishes no cache-write price for these models, and the cost calculation
-    # reads an absent cache price as the input rate rather than as free.
+    # reads an absent cache price as the input rate rather than as free. Same
+    # rule for `light`'s absent cache_read: one of its hosts (Cloudflare)
+    # publishes no cache-read price, so the worst case IS the input rate.
     prices:
-      heavy: { input: 1.4, output: 4.4, cache_read: 0.26 }
-      standard: { input: 0.075, output: 0.25, cache_read: 0.015 }
-      light: { input: 0.06, output: 0.4, cache_read: 0.01 }
+      heavy: { input: 1.75, output: 5.5, cache_read: 0.325 }
+      standard: { input: 0.15, output: 0.5, cache_read: 0.03 }
+      light: { input: 0.07, output: 0.4 }
     caps:
       # Enforced as above (issue #174, #173) — the lower of this and the
       # operator's own real-money cap binds.
