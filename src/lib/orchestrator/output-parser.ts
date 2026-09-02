@@ -2,6 +2,12 @@ import { db } from "@/db";
 import { messages } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { newId } from "../ulid";
+import { getStreamRecorder, type StreamRecorder } from "./stream-recorder";
+import {
+  parseRateLimitEvent,
+  type QuotaObservation,
+} from "../quota/rate-limit-event";
+import { recordQuotaObservation } from "../quota/quota-store";
 
 /**
  * Parse Claude Code stream-json output and insert messages into DB.
@@ -11,7 +17,15 @@ import { newId } from "../ulid";
  * - assistant: contains message.content[] with blocks: text, tool_use, thinking
  * - user: contains message.content[] with tool_result blocks
  * - result: final result with session_id, total_cost_usd
- * - rate_limit_event: rate limiting info (ignored)
+ * - rate_limit_event: quota state, confirmed to reach stdout (issue #165) —
+ *   read into the turn result and recorded as the fleet's quota state (#167).
+ *   Nothing *decides* on it yet: pausing (#168) and admission (#171) do that
+ *
+ * Anything else, and any line that is not JSON at all, is handed to the passive
+ * recorder rather than dropped silently (issue #165). Nothing about how a
+ * recognised event parses changed: the recorder is a side-channel, and a stream
+ * that carries no unrecognised event produces exactly the messages it did
+ * before.
  */
 
 export interface TurnResult {
@@ -23,6 +37,28 @@ export interface TurnResult {
   /** The result event's subtype ("success", "error_max_turns", ...) — how
    * turn exhaustion is detected. Null when no result event arrived. */
   subtype: string | null;
+  /**
+   * The terminal `result` event verbatim, or null when none arrived (issue
+   * #165) — what the passive recorder writes down as the pass's exit
+   * condition.
+   *
+   * Carried whole rather than as picked fields because `subtype` above is not
+   * enough to classify an exit and the spike found the specific way it is not:
+   * a rate-limit rejection arrives as `subtype: "success"` with `is_error:
+   * true`, `terminal_reason: "api_error"` and `api_error_status: 429`. Nothing
+   * reads those yet — #167 and #168 will — so the log keeps the whole event
+   * instead of a summary chosen before anyone knew which fields mattered.
+   */
+  terminalResult: Record<string, unknown> | null;
+  /**
+   * The last `rate_limit_event` of the turn, read into an observation (issue
+   * #167), or null when the stream carried none — which is the ordinary case
+   * on a metered lane, where the unified-window machinery emits nothing at all.
+   *
+   * The last, not the first: the CLI emits one per API attempt, so a turn that
+   * retried carries several and only the newest describes the account now.
+   */
+  rateLimit: QuotaObservation | null;
 }
 
 interface ContentBlock {
@@ -36,12 +72,27 @@ interface ContentBlock {
   content?: string | Array<{ type: string; text?: string }>;
 }
 
-export function createOutputHandler(taskId: string) {
+export function createOutputHandler(
+  taskId: string,
+  /** Injectable so the recorder can be observed in tests without a filesystem;
+   * production always takes the process-wide one. */
+  recorder: StreamRecorder = getStreamRecorder(),
+  /**
+   * Where an observed quota state is persisted (issue #167). Written here, at
+   * the moment of observation, rather than by the caller once the turn settles:
+   * an interactive turn can run for an hour, and a tile reporting the quota as
+   * it was when the turn *started* would be the fleet's freshest fact arriving
+   * last. Injectable for the same reason the recorder is.
+   */
+  onQuotaObservation: (observation: QuotaObservation) => void = recordQuotaObservation
+) {
   let buffer = "";
   let sessionId: string | null = null;
   let costUsd = 0;
   let finalMessage: string | null = null;
   let subtype: string | null = null;
+  let terminalResult: Record<string, unknown> | null = null;
+  let rateLimit: QuotaObservation | null = null;
   let lastToolUseMessageId: string | null = null;
   let _onDone: (() => void) | null = null;
 
@@ -66,7 +117,7 @@ export function createOutputHandler(taskId: string) {
         this.parseLine(buffer.trim());
         buffer = "";
       }
-      return { sessionId, costUsd, finalMessage, subtype };
+      return { sessionId, costUsd, finalMessage, subtype, terminalResult, rateLimit };
     },
 
     parseLine(line: string): void {
@@ -76,6 +127,7 @@ export function createOutputHandler(taskId: string) {
       } catch {
         // Not valid JSON — insert as raw system message
         if (line.length > 0) {
+          recorder.unparseableLine(taskId, line);
           db.insert(messages)
             .values({
               id: newId(),
@@ -92,6 +144,12 @@ export function createOutputHandler(taskId: string) {
 
     handleEvent(event: Record<string, unknown>): void {
       const type = event.type as string | undefined;
+
+      // Before the type switch, not in its default arm: the recorder's own
+      // allowlist decides what is worth keeping, so it stays the single
+      // statement of "which event types do we claim to understand" rather than
+      // that being implied by the shape of the branches below (issue #165).
+      recorder.streamEvent(taskId, event);
 
       if (type === "assistant") {
         // message is an object: { content: [{ type: "text"|"tool_use"|"thinking", ... }] }
@@ -184,6 +242,7 @@ export function createOutputHandler(taskId: string) {
       if (type === "result") {
         sessionId = (event.session_id as string) ?? null;
         subtype = (event.subtype as string) ?? null;
+        terminalResult = event;
         costUsd =
           (event.total_cost_usd as number) ??
           (event.cost_usd as number) ??
@@ -205,6 +264,17 @@ export function createOutputHandler(taskId: string) {
         return;
       }
 
+      if (type === "rate_limit_event") {
+        // Latest wins, within a turn as across the fleet: the account has one
+        // quota, and the newest event is the only one describing it now.
+        const observed = parseRateLimitEvent(event, new Date());
+        if (observed) {
+          rateLimit = observed;
+          onQuotaObservation(observed);
+        }
+        return;
+      }
+
       if (type === "error") {
         const message = (event.message as string) ?? "Unknown error";
         db.insert(messages)
@@ -220,7 +290,9 @@ export function createOutputHandler(taskId: string) {
         return;
       }
 
-      // Ignore system (hooks/init), rate_limit_event, and other event types
+      // Ignore system (hooks/init) and every other event type here — anything
+      // this parser does not act on has already been handed to the recorder
+      // above, so "ignored" no longer means "lost" (issue #165).
     },
   };
 }

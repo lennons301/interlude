@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "742f38e8-d8c2-40ff-952b-c41c5df451a0",
-  "prevId": "94300650-f27d-458b-8326-3f7d745947c9",
+  "id": "1f4fb47c-4920-445a-bd2a-8a261ec22e0d",
+  "prevId": "742f38e8-d8c2-40ff-952b-c41c5df451a0",
   "tables": {
     "messages": {
       "name": "messages",
@@ -407,6 +407,13 @@
         "finished_at": {
           "name": "finished_at",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "lane": {
+          "name": "lane",
+          "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

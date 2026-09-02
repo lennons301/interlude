@@ -76,7 +76,7 @@ export function FleetDashboard() {
         </p>
       ) : (
         <div className="space-y-8">
-          <PulseStrip view={view} />
+          <PulseStrip view={view} now={now} />
           <div className="space-y-8 min-[900px]:grid min-[900px]:grid-cols-[1fr_320px] min-[900px]:items-start min-[900px]:gap-10 min-[900px]:space-y-0">
             <div className="space-y-8">
               <NeedsYou view={view} />

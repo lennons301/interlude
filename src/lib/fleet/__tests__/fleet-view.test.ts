@@ -28,6 +28,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     needsHumanByProject: null,
     fleetHealth: null,
     failingChecksByRun: null,
+    quota: null,
     ...overrides,
   };
 }
@@ -1952,5 +1953,74 @@ describe("buildFleetView — queue and autonomy", () => {
     expect(view.queue.readyForAgent).toBeNull();
     expect(view.queue.byProject).toBeNull();
     expect(view.autonomyOn).toBe(false);
+  });
+});
+
+describe("quota (issue #167)", () => {
+  const OBSERVED_AT = new Date(2026, 7, 1, 11, 45, 0);
+  const RESETS_AT = new Date(2026, 7, 1, 14, 0, 0);
+
+  function observation(
+    overrides: Partial<NonNullable<FleetRows["quota"]>> = {}
+  ): NonNullable<FleetRows["quota"]> {
+    return {
+      status: "allowed_warning",
+      rateLimitType: "seven_day_opus",
+      utilization: 91,
+      resetsAt: RESETS_AT,
+      overageStatus: null,
+      overageResetsAt: null,
+      isUsingOverage: false,
+      overageInUse: null,
+      observedAt: OBSERVED_AT,
+      ...overrides,
+    };
+  }
+
+  it("says nothing rather than guessing when nothing has been observed", () => {
+    expect(buildFleetView(baseRows()).quota).toBeNull();
+  });
+
+  it("renders the observation in the tile's terms", () => {
+    const view = buildFleetView(baseRows({ quota: observation() }));
+
+    expect(view.quota).toEqual({
+      status: "allowed_warning",
+      severity: "warning",
+      limitLabel: "weekly opus",
+      utilization: 91,
+      resetsAt: RESETS_AT.toISOString(),
+      observedAt: OBSERVED_AT.toISOString(),
+    });
+  });
+
+  it("carries an unreported utilization and reset through as null", () => {
+    // The usual shape on the owner's account: absent, not zero, and the tile
+    // has to be able to tell the difference.
+    const view = buildFleetView(
+      baseRows({
+        quota: observation({ status: "allowed", utilization: null, resetsAt: null }),
+      })
+    );
+
+    expect(view.quota).toMatchObject({
+      severity: "ok",
+      utilization: null,
+      resetsAt: null,
+    });
+  });
+
+  it("shows a limit type this build has never heard of, as itself", () => {
+    const view = buildFleetView(
+      baseRows({
+        quota: observation({ status: "throttled_soft", rateLimitType: "thirty_day" }),
+      })
+    );
+
+    expect(view.quota).toMatchObject({
+      status: "throttled_soft",
+      severity: "unknown",
+      limitLabel: "thirty_day",
+    });
   });
 });

@@ -41,6 +41,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     needsHumanByProject: null,
     fleetHealth: null,
     failingChecksByRun: null,
+    quota: null,
     ...overrides,
   };
 }

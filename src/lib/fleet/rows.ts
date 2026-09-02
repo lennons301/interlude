@@ -14,6 +14,7 @@ import { getBacklogByProject } from "./backlog";
 import { getNeedsHumanByProject } from "./needs-human";
 import { getFleetHealth } from "./health-store";
 import { getFailingChecks } from "./failing-checks";
+import { getQuotaObservation } from "../quota/quota-store";
 import { DAILY_AUTONOMOUS_CAP_USD } from "../orchestrator/autonomy/budgets";
 import {
   buildFleetView,
@@ -134,6 +135,11 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     // Failing check names per parked run from the same sweep (issue #130); null
     // until the first sweep, which renders no failing-checks cards.
     failingChecksByRun: getFailingChecks(),
+    // The last rate-limit event any pass saw (issue #167), from the durable
+    // row rather than an in-memory store: the writer is the stream parser in
+    // the orchestrator's module graph and this read happens in the app
+    // router's, which share nothing but the database (issue #159).
+    quota: getQuotaObservation(),
   };
 }
 
