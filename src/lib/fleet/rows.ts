@@ -8,7 +8,8 @@ import { db } from "@/db";
 import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, eq, gte, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { getConfig } from "../config";
-import { isGlobalAutonomyPaused } from "../settings";
+import { getFleetSettings } from "../settings";
+import { resolveQuotaThreshold } from "../settings-resolver";
 import { getCapacity } from "../orchestrator/capacity";
 import { getBacklogByProject } from "./backlog";
 import { getNeedsHumanByProject } from "./needs-human";
@@ -26,6 +27,11 @@ const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export async function loadFleetRows(now: Date): Promise<FleetRows> {
   const windowStart = new Date(now.getTime() - RECENT_WINDOW_MS);
+  // One read of the settings row per view build, for both runtime flags it
+  // carries — the kill switch and the quota threshold override — exactly as
+  // the sweep reads it each tick, so the dashboard reflects a change on its
+  // next SSE push with no restart.
+  const fleetSettings = getFleetSettings();
 
   // Slots come from the boot-time derivation; if the Docker daemon is
   // unreachable the dashboard should still render, so fall back to the
@@ -89,7 +95,7 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     dailyCapUsd: DAILY_AUTONOMOUS_CAP_USD,
     // Read on every view build, exactly as the sweep reads it each tick — the
     // dashboard reflects a flip on its next SSE push, with no restart.
-    globalAutonomyPaused: isGlobalAutonomyPaused(),
+    globalAutonomyPaused: fleetSettings.globalAutonomyPaused,
     // The env boot master (issue #148), from the same config the sweep gates
     // itself on: with it off no sweep ever starts, so the view must be able to
     // say so rather than rendering a fleet that reads healthy and claims nothing.
@@ -140,6 +146,13 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     // the orchestrator's module graph and this read happens in the app
     // router's, which share nothing but the database (issue #159).
     quota: getQuotaObservation(),
+    // The threshold that observation is judged against (issue #171), resolved
+    // from the same row and the same config the sweep reads — so the banner
+    // cannot say "claiming" while the reducer is refusing, or the reverse.
+    quotaThresholdPercent: resolveQuotaThreshold(
+      getConfig(),
+      fleetSettings.overrides
+    ).percent,
   };
 }
 

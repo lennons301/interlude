@@ -19,6 +19,7 @@ import {
   type QuotaObservation,
   type QuotaSeverity,
 } from "../quota/rate-limit-event";
+import { evaluateQuotaGate } from "../quota/quota-gate";
 
 export interface FleetRows {
   /** Current time — passed in, never read inside */
@@ -66,6 +67,11 @@ export interface FleetRows {
    * (the window after a repair pushes, while the new head's checks run, is not a
    * stall). null = never observed (no sweep yet), which renders no such cards. */
   failingChecksByRun: Record<string, string[]> | null;
+  /** The utilization at or above which no new ticket is claimed (issue #171),
+   * resolved through the same override / environment / default chain the sweep
+   * reads, so the banner and the reducer judge the same observation against the
+   * same number. */
+  quotaThresholdPercent: number;
   /** The fleet's last observed quota state (issue #167), from the durable row;
    * null = no pass has ever reported one, which is also the permanent state of
    * a fleet running on API-key auth, where the CLI emits no quota telemetry at
@@ -221,7 +227,7 @@ export interface NeedsYouItem {
  * the dashboard renders, not to another module's enum.
  */
 export interface PickupPause {
-  reason: "autonomy-off-at-boot" | "kill-switch" | "daily-cap";
+  reason: "autonomy-off-at-boot" | "kill-switch" | "daily-cap" | "quota-gate";
   /** One-line banner copy */
   body: string;
 }
@@ -385,6 +391,26 @@ function quotaGlance(observation: QuotaObservation | null): QuotaGlance | null {
   };
 }
 
+/** The banner's one line for a closed quota gate. It names both numbers,
+ * because "quota" alone leaves the owner to go and find out how close it was —
+ * and it says what is *not* held, since the fleet still looking busy while
+ * claiming nothing is exactly the confusion the field exists to remove. */
+function quotaPauseBody(gate: ReturnType<typeof evaluateQuotaGate>): string {
+  const window =
+    gate.rateLimitType === null
+      ? "the quota window"
+      : `the ${describeRateLimitType(gate.rateLimitType)}`;
+  const lead =
+    gate.reason === "rejected"
+      ? `Quota exhausted — the account is being rejected on ${window}`
+      : `Quota nearly spent — ${gate.utilization}% of ${window}, past the ` +
+        `${gate.thresholdPercent}% pickup threshold`;
+  return (
+    `${lead}. No new tickets are claimed; work in flight continues and ` +
+    "parked runs still resume"
+  );
+}
+
 /** Start of the local calendar day containing `now` — the daily autonomous
  * spend cap resets at local midnight. */
 export function startOfLocalDay(now: Date): Date {
@@ -521,6 +547,18 @@ export function buildFleetView(rows: FleetRows): FleetView {
     .reduce((sum, r) => sum + r.totalCostUsd, 0);
   const capPaused = todayUsd >= rows.dailyCapUsd;
 
+  // The same gate `decideNext` refuses pickup with (issue #171), from the same
+  // pure function: the banner is not allowed to have its own opinion about
+  // whether work is being claimed. Ranked below the cap for the reason the cap
+  // is ranked below the switch — of the two self-lifting holds, the cap is the
+  // one whose ceiling a human chose, and the Quota tile keeps saying its own
+  // piece whichever wins.
+  const quotaGate = evaluateQuotaGate(
+    rows.quota,
+    rows.quotaThresholdPercent,
+    rows.now
+  );
+
   // What the live dot, the banner and the digest all say (issues #118, #148).
   // Precedence is by what a reader must act on, and it is why the boot master
   // leads: with `AUTONOMY_ENABLED` off no sweep runs at all, so naming the kill
@@ -544,7 +582,12 @@ export function buildFleetView(rows: FleetRows): FleetView {
             reason: "daily-cap",
             body: "Daily cap reached — autonomous pickup paused until midnight",
           }
-        : null;
+        : quotaGate.closed
+          ? {
+              reason: "quota-gate",
+              body: quotaPauseBody(quotaGate),
+            }
+          : null;
 
   const tasksOfRun = (runId: string) =>
     rows.tasks.filter((t) => t.runId === runId);
