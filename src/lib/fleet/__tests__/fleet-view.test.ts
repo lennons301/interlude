@@ -29,6 +29,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     fleetHealth: null,
     failingChecksByRun: null,
     quota: null,
+    quotaLane: null,
     ...overrides,
   };
 }
@@ -2022,5 +2023,68 @@ describe("quota (issue #167)", () => {
       severity: "unknown",
       limitLabel: "thirty_day",
     });
+  });
+});
+
+/**
+ * Whose quota it is (issue #175). The observation is per-lane in the database;
+ * the view's job is to carry the lane beside it so a null reading can be told
+ * apart from a lane that will never produce one.
+ */
+describe("the quota's lane (issue #175)", () => {
+  it("says nothing about a lane when none resolves", () => {
+    // An unusable lanes.yaml. The tile may not claim the fleet is metered.
+    expect(buildFleetView(baseRows()).quotaLane).toBeNull();
+  });
+
+  it("marks a subscription lane as one that can report a window", () => {
+    const view = buildFleetView(
+      baseRows({
+        quotaLane: {
+          id: "claude-subscription",
+          label: "Claude subscription",
+          billing: "subscription",
+        },
+      })
+    );
+
+    expect(view.quotaLane).toEqual({
+      id: "claude-subscription",
+      label: "Claude subscription",
+      billing: "subscription",
+      reportsQuota: true,
+    });
+  });
+
+  it("marks every metered lane as one that never will", () => {
+    // The unified-window machinery is subscription-only (#165's finding 6),
+    // confirmed against OpenRouter on 2026-09-02 — no rate-limit headers and no
+    // `rate_limit_event` on a full harness turn. Anthropic's own API lane is
+    // metered too, and is equally silent.
+    for (const id of ["openrouter-glm", "anthropic-api"]) {
+      const view = buildFleetView(
+        baseRows({ quotaLane: { id, label: id, billing: "metered" } })
+      );
+      expect(view.quotaLane?.reportsQuota).toBe(false);
+    }
+  });
+
+  it("leaves a lane's reading untouched — nothing here merges two lanes", () => {
+    // The failure this ticket exists to make impossible: a reading is the lane
+    // it was handed with, never an inherited one. The rows arrive already
+    // keyed by lane from the store, so the view must not reconcile them.
+    const view = buildFleetView(
+      baseRows({
+        quota: null,
+        quotaLane: {
+          id: "openrouter-glm",
+          label: "OpenRouter (GLM open weights)",
+          billing: "metered",
+        },
+      })
+    );
+
+    expect(view.quota).toBeNull();
+    expect(view.quotaLane?.id).toBe("openrouter-glm");
   });
 });

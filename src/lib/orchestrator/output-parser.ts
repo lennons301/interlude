@@ -8,6 +8,7 @@ import {
   type QuotaObservation,
 } from "../quota/rate-limit-event";
 import { recordQuotaObservation } from "../quota/quota-store";
+import type { TurnTokenUsage } from "../lanes/lane-cost";
 
 /**
  * Parse Claude Code stream-json output and insert messages into DB.
@@ -59,6 +60,19 @@ export interface TurnResult {
    * retried carries several and only the newest describes the account now.
    */
   rateLimit: QuotaObservation | null;
+  /**
+   * The tokens the turn consumed, or null when no `result` event arrived
+   * (issue #175) — what a lane's own prices are applied to when the harness's
+   * dollar figure cannot be trusted.
+   *
+   * Read from `modelUsage` rather than from the sibling `usage` object,
+   * because `modelUsage` is the aggregate the CLI itself charges from. Pinned
+   * by observation on 2026-09-02: a subscription turn reported
+   * `usage.input_tokens: 10` beside `modelUsage.inputTokens: 909`, and only
+   * the latter reproduces the CLI's own `total_cost_usd` at list prices to the
+   * cent. `usage` is the last API iteration; `modelUsage` is the turn.
+   */
+  usage: TurnTokenUsage | null;
 }
 
 interface ContentBlock {
@@ -72,8 +86,69 @@ interface ContentBlock {
   content?: string | Array<{ type: string; text?: string }>;
 }
 
+function readCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : 0;
+}
+
+/**
+ * The turn's token counts, summed over every model it used (issue #175).
+ *
+ * Summed rather than read from one entry because a pass that spawns subagents
+ * bills several models under one turn, and a lane charges for all of them. The
+ * sibling `usage` object is the fallback for a harness that reports no
+ * `modelUsage` at all; null when neither is present, which `chargeForTurn`
+ * has its own (deliberately over-reporting) answer for.
+ */
+export function readTurnUsage(
+  event: Record<string, unknown>
+): TurnTokenUsage | null {
+  const modelUsage = event.modelUsage;
+  if (modelUsage !== null && typeof modelUsage === "object") {
+    const entries = Object.values(modelUsage as Record<string, unknown>).filter(
+      (entry): entry is Record<string, unknown> =>
+        entry !== null && typeof entry === "object"
+    );
+    if (entries.length > 0) {
+      return entries.reduce<TurnTokenUsage>(
+        (total, entry) => ({
+          inputTokens: total.inputTokens + readCount(entry.inputTokens),
+          outputTokens: total.outputTokens + readCount(entry.outputTokens),
+          cacheReadTokens:
+            total.cacheReadTokens + readCount(entry.cacheReadInputTokens),
+          cacheWriteTokens:
+            total.cacheWriteTokens + readCount(entry.cacheCreationInputTokens),
+        }),
+        { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+      );
+    }
+  }
+
+  const usage = event.usage;
+  if (usage === null || typeof usage !== "object") return null;
+  const u = usage as Record<string, unknown>;
+  return {
+    inputTokens: readCount(u.input_tokens),
+    outputTokens: readCount(u.output_tokens),
+    cacheReadTokens: readCount(u.cache_read_input_tokens),
+    cacheWriteTokens: readCount(u.cache_creation_input_tokens),
+  };
+}
+
 export function createOutputHandler(
   taskId: string,
+  /**
+   * The lane this turn runs on (issue #175) — which quota state an observed
+   * `rate_limit_event` belongs to.
+   *
+   * Required rather than defaulted, because the whole point is that there is
+   * no fleet-wide quota to fall back to: a rate limit is a fact about one
+   * account on one provider, and attributing a subscription observation to a
+   * metered lane (or the reverse) is how a lane that *cannot* report quota ends
+   * up gated by somebody else's wall.
+   */
+  laneId: string,
   /** Injectable so the recorder can be observed in tests without a filesystem;
    * production always takes the process-wide one. */
   recorder: StreamRecorder = getStreamRecorder(),
@@ -84,7 +159,8 @@ export function createOutputHandler(
    * it was when the turn *started* would be the fleet's freshest fact arriving
    * last. Injectable for the same reason the recorder is.
    */
-  onQuotaObservation: (observation: QuotaObservation) => void = recordQuotaObservation
+  onQuotaObservation: (observation: QuotaObservation) => void = (observation) =>
+    recordQuotaObservation(laneId, observation)
 ) {
   let buffer = "";
   let sessionId: string | null = null;
@@ -93,6 +169,7 @@ export function createOutputHandler(
   let subtype: string | null = null;
   let terminalResult: Record<string, unknown> | null = null;
   let rateLimit: QuotaObservation | null = null;
+  let usage: TurnTokenUsage | null = null;
   let lastToolUseMessageId: string | null = null;
   let _onDone: (() => void) | null = null;
 
@@ -117,7 +194,15 @@ export function createOutputHandler(
         this.parseLine(buffer.trim());
         buffer = "";
       }
-      return { sessionId, costUsd, finalMessage, subtype, terminalResult, rateLimit };
+      return {
+        sessionId,
+        costUsd,
+        finalMessage,
+        subtype,
+        terminalResult,
+        rateLimit,
+        usage,
+      };
     },
 
     parseLine(line: string): void {
@@ -247,6 +332,7 @@ export function createOutputHandler(
           (event.total_cost_usd as number) ??
           (event.cost_usd as number) ??
           0;
+        usage = readTurnUsage(event);
 
         db.insert(messages)
           .values({
@@ -255,6 +341,10 @@ export function createOutputHandler(
             role: "system",
             type: "system",
             content: JSON.stringify({
+              // The harness's own figure, which on a lane that declares prices
+              // is not what the turn is charged (issue #175) — `runTurn` adds
+              // the lane's number beside this line when the two differ, rather
+              // than this one quietly reporting a price nobody paid.
               text: `Turn complete (cost: $${costUsd.toFixed(4)})`,
             }),
             createdAt: new Date(),

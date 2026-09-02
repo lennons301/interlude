@@ -36,6 +36,7 @@ function lane(overrides: Partial<ResolvedLane> = {}): ResolvedLane {
     baseUrl: null,
     tier: "heavy",
     model: "opus",
+    prices: null,
     caps: { dailyBudgetUsd: null },
     ...overrides,
   };

@@ -26,6 +26,7 @@ function lane(over: Partial<LaneView> = {}): LaneView {
     billing: "subscription",
     baseUrl: null,
     models: { heavy: "opus", standard: "sonnet", light: "haiku" },
+    prices: null,
     caps: { dailyBudgetUsd: null },
     authEnvVars: ["CLAUDE_CODE_OAUTH_TOKEN"],
     missingEnvVars: [],
@@ -174,5 +175,53 @@ describe("a save error belongs to the panel whose field failed", () => {
   it("shows nothing on either when the last save succeeded", () => {
     expect(errorFor(null, "lane")).toBeNull();
     expect(errorFor(null, "tiers")).toBeNull();
+  });
+
+  it("shows what a lane charges, per tier, and says when it has no prices", () => {
+    // Issue #175: off an Anthropic-direct endpoint these figures are what the
+    // fleet's budgets are actually measured against, so the screen has to name
+    // them. A lane that declares none says so rather than showing blanks.
+    const html = render({
+      lanes: [
+        lane(),
+        lane({
+          id: "openrouter-glm",
+          label: "OpenRouter (GLM open weights)",
+          billing: "metered",
+          baseUrl: "https://openrouter.ai/api",
+          models: {
+            heavy: "z-ai/glm-5.3",
+            standard: "z-ai/glm-5.3-flash",
+            light: "z-ai/glm-4.7-flash",
+          },
+          prices: {
+            heavy: {
+              inputPerMTok: 1.4,
+              outputPerMTok: 4.4,
+              cacheReadPerMTok: 0.26,
+              cacheWritePerMTok: null,
+            },
+            standard: {
+              inputPerMTok: 0.075,
+              outputPerMTok: 0.25,
+              cacheReadPerMTok: 0.015,
+              cacheWritePerMTok: null,
+            },
+            light: {
+              inputPerMTok: 0.06,
+              outputPerMTok: 0.4,
+              cacheReadPerMTok: 0.01,
+              cacheWritePerMTok: null,
+            },
+          },
+          primary: false,
+        }),
+      ],
+    });
+
+    expect(html).toContain("standard=0.075/0.25");
+    // The subscription lane declares none: the harness's own figure is charged
+    // there, and inventing a table would create a second copy to rot.
+    expect(html).toContain("prices from the harness&#x27;s own reported cost");
   });
 });

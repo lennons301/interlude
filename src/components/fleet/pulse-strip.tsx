@@ -61,7 +61,7 @@ export function PulseStrip({ view, now }: { view: FleetView; now: number }) {
           tone={spend.capPaused ? "red" : "green"}
         />
       </div>
-      <QuotaTile quota={view.quota} now={now} />
+      <QuotaTile quota={view.quota} lane={view.quotaLane} now={now} />
     </section>
   );
 }

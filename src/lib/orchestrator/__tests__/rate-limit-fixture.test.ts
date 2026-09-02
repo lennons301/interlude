@@ -85,17 +85,21 @@ function loadFixture(name: string): Record<string, unknown>[] {
 const ALLOWED = loadFixture("rate-limit-allowed-fixture.ndjson");
 const REJECTED = loadFixture("rate-limit-rejected-fixture.ndjson");
 
+/** The lane a replay runs on. Named, not defaulted, because the quota row is
+ * keyed by lane since issue #175 — the read below has to ask for the same one. */
+const LANE_ID = "claude-subscription";
+
 /**
  * Feed a fixture through the parser line by line, as the exec stream does.
  *
- * The quota sink is left at its default, so a replay writes the fleet's quota
- * row exactly as a live turn would and `getQuotaObservation()` can be read
- * afterwards — the wiring, not a stand-in for it.
+ * The quota sink is left at its default, so a replay writes the lane's quota
+ * row exactly as a live turn would and `getQuotaObservation(LANE_ID)` can be
+ * read afterwards — the wiring, not a stand-in for it.
  */
 function replay(events: Record<string, unknown>[], taskId: string) {
   const observations: Observation[] = [];
   const recorder = createStreamRecorder((o) => observations.push(o));
-  const handler = createOutputHandler(taskId, recorder);
+  const handler = createOutputHandler(taskId, LANE_ID, recorder);
   for (const event of events) {
     handler.write(JSON.stringify(event) + "\n");
   }
@@ -281,12 +285,12 @@ describe("captured stream: the event reaches the turn result (issue #167)", () =
     });
   });
 
-  it("persists the observation as the fleet's quota state", () => {
+  it("persists the observation as the lane's quota state", () => {
     // End to end through the default sink: what the dashboard will read.
-    expect(getQuotaObservation()).toBeNull();
+    expect(getQuotaObservation(LANE_ID)).toBeNull();
     replay(REJECTED, "task-rejected");
 
-    expect(getQuotaObservation()).toMatchObject({
+    expect(getQuotaObservation(LANE_ID)).toMatchObject({
       status: "rejected",
       rateLimitType: "five_hour",
     });
@@ -301,7 +305,7 @@ describe("captured stream: the event reaches the turn result (issue #167)", () =
     };
     replay([warning, ...REJECTED], "task-rejected");
 
-    expect(getQuotaObservation()).toMatchObject({ status: "rejected" });
+    expect(getQuotaObservation(LANE_ID)).toMatchObject({ status: "rejected" });
   });
 
   it("parses a stream with no rate-limit event exactly as it did before", () => {
@@ -315,7 +319,7 @@ describe("captured stream: the event reaches the turn result (issue #167)", () =
       "task-rejected"
     );
     expect(withoutEvent.result.rateLimit).toBeNull();
-    expect(getQuotaObservation()).toBeNull();
+    expect(getQuotaObservation(LANE_ID)).toBeNull();
 
     const withEvent = replay(ALLOWED, "task-allowed");
 

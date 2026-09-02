@@ -176,6 +176,13 @@
       "when": 1788465653826,
       "tag": "0024_run_lane",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1788552053826,
+      "tag": "0025_quota_state_per_lane",
+      "breakpoints": true
     }
   ]
 }

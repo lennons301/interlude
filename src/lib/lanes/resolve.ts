@@ -35,6 +35,8 @@ import {
   type LaneCaps,
   type LaneDefinition,
   type LaneAdapterId,
+  type LanePrices,
+  type TokenPrices,
 } from "./lane-config";
 
 /** Just enough of `process.env` to be handed a plain object in a test. */
@@ -183,6 +185,16 @@ export interface ResolvedLane {
    * an install that has never configured a model has always had.
    */
   model: string | null;
+  /**
+   * What this lane charges for the tier this pass runs at (issue #175), or
+   * null to take the harness's own reported cost — see `lane-cost.ts` for why
+   * that figure cannot be trusted off an Anthropic-direct endpoint.
+   *
+   * Null also covers the pinned-model escape hatch below: a raw model id
+   * naming no tier has no priced tier to read, and inventing one would be a
+   * guess about money.
+   */
+  prices: TokenPrices | null;
   caps: LaneCaps;
 }
 
@@ -263,6 +275,7 @@ export function resolveLane({
       baseUrl: lane.baseUrl,
       tier,
       model: tier !== null ? lane.models[tier] : pinnedModel,
+      prices: tier !== null ? (lane.prices?.[tier] ?? null) : null,
       caps: lane.caps,
     },
   };
@@ -277,6 +290,10 @@ export interface LaneView {
   billing: LaneBilling;
   baseUrl: string | null;
   models: Readonly<Record<ModelTier, string>>;
+  /** The lane's declared per-tier prices (issue #175), or null when it takes
+   * the harness's figure. Shown on the settings screen because "what does this
+   * lane cost?" is the question the lane exists to answer. */
+  prices: LanePrices | null;
   caps: LaneCaps;
   /** The orchestrator variables this lane reads its credentials from. */
   authEnvVars: string[];
@@ -326,6 +343,7 @@ export function describeLanes(input: LaneSettingsInput): LaneSettingsView {
         billing: lane.billing,
         baseUrl: lane.baseUrl,
         models: lane.models,
+        prices: lane.prices,
         caps: lane.caps,
         authEnvVars: lane.auth.map((ref) => ref.fromEnv),
         missingEnvVars,

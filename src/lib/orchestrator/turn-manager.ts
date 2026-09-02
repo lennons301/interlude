@@ -37,6 +37,11 @@ import {
 import { getSettingsOverrides } from "../settings";
 import { getLaneCatalog } from "../lanes/catalog";
 import { resolveLane, type ResolvedLane } from "../lanes/resolve";
+import {
+  chargeForTurn,
+  costOverstatement,
+  type TurnCharge,
+} from "../lanes/lane-cost";
 import { getHarnessAdapter } from "../harness/registry";
 import { getDocker } from "../docker/client";
 import { getInstallationToken } from "../github/client";
@@ -772,6 +777,13 @@ async function observeExecExitCode(exec: {
  * The command, the exec environment and the output handler all come from the
  * harness adapter the resolved lane names (issue #172), so this function is
  * the orchestration around a turn and knows nothing about the harness itself.
+ *
+ * The returned `costUsd` is what the turn is **charged** — the lane's own
+ * prices applied to the reported token counts where the lane declares them,
+ * and the harness's figure only where it does not (issue #175). Every caller
+ * means "what did this turn cost", so the substitution happens once, here,
+ * rather than at each budget check; `charge` carries both numbers and which
+ * basis was used, for the record.
  */
 async function runTurn(
   taskId: string,
@@ -786,9 +798,9 @@ async function runTurn(
     effort?: string | null;
     isGenerationSession?: boolean;
   }
-): Promise<TurnResult & { raw?: string }> {
+): Promise<TurnResult & { raw?: string; charge: TurnCharge }> {
   const adapter = getHarnessAdapter(opts.lane.adapter);
-  const handler = adapter.createOutputHandler(taskId);
+  const handler = adapter.createOutputHandler(taskId, opts.lane);
   const rawChunks: Buffer[] = [];
 
   // One fresh, short-lived App token per exec, serving both the git credential
@@ -849,8 +861,44 @@ async function runTurn(
     });
   }
 
-  if (!opts.captureRaw) return result;
-  return { ...result, raw: Buffer.concat(rawChunks).toString() };
+  const charge = chargeForTurn(opts.lane, result);
+  noteLaneCharge(taskId, opts.lane, charge);
+  const charged = { ...result, costUsd: charge.usd, charge };
+
+  if (!opts.captureRaw) return charged;
+  return { ...charged, raw: Buffer.concat(rawChunks).toString() };
+}
+
+/**
+ * Say, once per turn, when the lane's price differs from the harness's claim
+ * (issue #175).
+ *
+ * Not noise, and not a correction buried in the ledger: on a third-party lane
+ * the CLI prices an open-weights model at Anthropic list rates, so the feed's
+ * own "Turn complete (cost: ...)" line is out by an order of magnitude or more
+ * (16.7x, measured). Leaving that line as the only thing an operator sees
+ * would make a lane that is working look like one that is bankrupting them —
+ * the exact conclusion the lane exists to disprove. Written only when the two
+ * figures actually differ, so a lane on which they agree stays silent.
+ */
+function noteLaneCharge(
+  taskId: string,
+  lane: ResolvedLane,
+  charge: TurnCharge
+): void {
+  if (charge.basis !== "lane-prices") return;
+  if (charge.usd.toFixed(4) === charge.reportedUsd.toFixed(4)) return;
+
+  const factor = costOverstatement(charge);
+  const comparison =
+    factor === null ? "" : ` — ${factor.toFixed(1)}x the lane's own price`;
+  insertSystemMessage(
+    taskId,
+    `Charged $${charge.usd.toFixed(4)} on lane ${lane.label}` +
+      ` (${lane.model ?? "harness default"}). The harness reported ` +
+      `$${charge.reportedUsd.toFixed(4)}${comparison}: it prices every model at ` +
+      `Anthropic list rates, so only the lane's own prices are meaningful here.`
+  );
 }
 
 /**

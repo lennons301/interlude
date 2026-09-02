@@ -118,5 +118,8 @@ export const claudeCodeAdapter: HarnessAdapter = {
   id: "claude-code",
   buildExecEnv: buildTurnEnv,
   buildCommand: buildClaudeTurnCommand,
-  createOutputHandler,
+  // The lane's id, not the lane: the parser only needs to know which account's
+  // quota an observed `rate_limit_event` describes (issue #175), and handing it
+  // the auth values as well would put credentials on the logging path.
+  createOutputHandler: (taskId, lane) => createOutputHandler(taskId, lane.id),
 };

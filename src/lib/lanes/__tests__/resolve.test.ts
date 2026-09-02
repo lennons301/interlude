@@ -53,6 +53,10 @@ lanes:
       heavy: anthropic/claude-opus-4.1
       standard: anthropic/claude-sonnet-4.5
       light: anthropic/claude-haiku-4.5
+    prices:
+      heavy: { input: 15, output: 75, cache_read: 1.5, cache_write: 18.75 }
+      standard: { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 }
+      light: { input: 1, output: 5, cache_read: 0.1, cache_write: 1.25 }
 `;
 
 const catalog: LaneCatalog = (() => {
@@ -239,6 +243,32 @@ describe("what a resolved lane carries", () => {
     });
     // Only the lane's own variables — no other credential rides along.
     expect(Object.keys(result.lane.auth)).toEqual(["ANTHROPIC_AUTH_TOKEN"]);
+  });
+
+  it("carries the priced tier, not the whole price table", () => {
+    // The pass runs at one tier, and what it costs is that tier's prices —
+    // handing the adapter all three would leave the choice open past the point
+    // it was made (issue #175).
+    const result = resolve({
+      overrides: { primaryLane: "openrouter", modelTierReview: "light" },
+      kind: "review",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.lane.tier).toBe("light");
+    expect(result.lane.prices).toEqual({
+      inputPerMTok: 1,
+      outputPerMTok: 5,
+      cacheReadPerMTok: 0.1,
+      cacheWritePerMTok: 1.25,
+    });
+  });
+
+  it("prices nothing on a lane that declares no prices", () => {
+    // An Anthropic-direct lane: the harness's own figure is charged, so there
+    // is nothing here to override it with.
+    const result = resolve({ overrides: { primaryLane: "direct-api" } });
+    expect(result.ok && result.lane.prices).toBeNull();
   });
 
   it("carries the lane's caps through for the guardrails that enforce them", () => {

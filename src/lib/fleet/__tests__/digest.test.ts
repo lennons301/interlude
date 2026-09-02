@@ -42,6 +42,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     fleetHealth: null,
     failingChecksByRun: null,
     quota: null,
+    quotaLane: null,
     ...overrides,
   };
 }
