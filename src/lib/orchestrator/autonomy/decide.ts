@@ -10,6 +10,8 @@
  */
 
 import type { FailedCheck } from "../../github/pull-requests";
+import { evaluateQuotaGate } from "../../quota/quota-gate";
+import type { QuotaObservation } from "../../quota/rate-limit-event";
 import { detectBlockedQuestion } from "./blocked";
 import { resumeEligibleAt } from "./resume-jitter";
 import { evaluateGates, type GateConfig } from "./gates";
@@ -367,6 +369,19 @@ export interface AutonomySnapshot {
   dailyCapUsd: number;
   /** Whether today's cap pause was already announced */
   dailyCapAnnounced: boolean;
+  /**
+   * The fleet's last quota observation (issue #171), from the durable row the
+   * stream parser writes (#167). Null when nothing has ever been observed —
+   * a fresh install, or one on API-key auth, where the CLI emits no quota
+   * telemetry at all; that silence must never read as a wall.
+   */
+  quota: QuotaObservation | null;
+  /** The utilization at or above which new pickup stops, already resolved
+   * through the settings override / environment / built-in default chain, so
+   * the reducer stays pure and a UI change takes effect at the next tick. */
+  quotaThresholdPercent: number;
+  /** Whether the current closed-gate transition was already announced */
+  quotaGateAnnounced: boolean;
   /** Extra allow-listed authors beyond each repo's owner (lowercase) */
   allowedAuthors: string[];
   slots: { total: number; occupied: number; occupants: string[] };
@@ -452,7 +467,10 @@ export type PauseReason =
   | "autonomy-off-project"
   | "preflight-failing"
   | "no-slots"
-  | "daily-cap";
+  | "daily-cap"
+  /** Quota is spent or nearly spent (issue #171) — the fleet stops starting
+   * work it could not finish. Lifted by the window resetting, not by a human */
+  | "quota-gate";
 
 export type Action =
   | {
@@ -492,6 +510,26 @@ export type Action =
       type: "notify";
       event: "daily-cap-reached";
       payload: { spentUsd: number; capUsd: number };
+    }
+  | {
+      type: "notify";
+      event: "quota-gate-closed";
+      payload: {
+        /** The status verbatim, as the CLI said it */
+        status: string;
+        /** The window closest to tripping, verbatim; null when unreported */
+        rateLimitType: string | null;
+        /** Percent of that window consumed; null when the event carried none */
+        utilization: number | null;
+        thresholdPercent: number;
+        /** Whether the account is already rejecting, or the fleet stopped
+         * short of that on purpose — different news, same hold */
+        reason: "rejected" | "utilization";
+        resetsAt: Date | null;
+        /** How many armed tickets the gate is holding. The whole fleet being
+         * stalled is what earns a Discord ping, so the count is the claim. */
+        heldTickets: number;
+      };
     }
   | {
       type: "gatePr";
@@ -789,6 +827,12 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     todayAutonomousSpendUsd: 0,
     dailyCapUsd: 0,
     dailyCapAnnounced: true,
+    // No pickup is decided here, so the quota gate has nothing to hold: an
+    // absent observation is an open gate, and the announcement is marked spent
+    // so nothing could be said even if one were reached.
+    quota: null,
+    quotaThresholdPercent: 100,
+    quotaGateAnnounced: true,
     allowedAuthors: [],
     slots: { total: 0, occupied: 0, occupants: [] },
     queuedInteractiveCount: 0,
@@ -1382,11 +1426,29 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // triage spend is autonomous spend. Skipped for the same reason while the
   // global kill switch is engaged (issue #118) — a triage pass is autonomous
   // pickup that takes a container and spends money, so "stop the fleet" stops
-  // it too. Registered is the only project gate — triage writes no code and
+  // it too — and, for that same reason, while the quota gate is closed
+  // (issue #171): a pass that cannot finish is not worth starting whatever it
+  // costs. Registered is the only project gate — triage writes no code and
   // pushes nothing, so pickup preflight does not apply — and the author
   // allow-list bounds whose issues can spend triage money.
+  // The quota admission gate (issue #171), evaluated once and consulted twice
+  // — here for triage and below for claims — so the fleet cannot hold one kind
+  // of pickup and start the other on the same tick. Everything above this line
+  // is work already in flight and is deliberately unaffected: refusing to
+  // *finish* a run would waste the quota already spent on it, and a parked run
+  // resuming is that same work continuing.
+  const quotaGate = evaluateQuotaGate(
+    snapshot.quota,
+    snapshot.quotaThresholdPercent,
+    snapshot.now
+  );
+
   let triagesQueuedThisSweep = 0;
-  if (!snapshot.globalPaused && snapshot.todayAutonomousSpendUsd < snapshot.dailyCapUsd) {
+  if (
+    !snapshot.globalPaused &&
+    !quotaGate.closed &&
+    snapshot.todayAutonomousSpendUsd < snapshot.dailyCapUsd
+  ) {
     for (const candidate of snapshot.triageCandidates) {
       if (candidate.hasTriageTask) continue;
       const project = snapshot.projects.find((p) => p.repo === candidate.repo);
@@ -1516,6 +1578,39 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // the dashboard names the switch instead, being the hold a human can lift.
   if (snapshot.globalPaused) {
     actions.push({ type: "pausePickup", reason: "kill-switch" });
+    return actions;
+  }
+
+  // The quota admission gate (issue #171). Placed after the switch because the
+  // ticket is explicit that a human's hold outranks an observation — under an
+  // engaged switch nothing would be claimed anyway, and naming quota there
+  // would point the owner at a wall instead of at the control they hold — and
+  // before the slot check because "we are out of quota" is the more useful of
+  // the two answers when both are true: a full box empties by itself in
+  // minutes, a spent window does not.
+  //
+  // Announced once per transition, like saturation and the cap: the executor
+  // holds the flag and clears it the moment the gate opens. And announced only
+  // from here, past the eligibility filter, which is what makes the ping mean
+  // "the fleet is stalled on quota" rather than "a run paused" — there is
+  // armed, eligible work that would otherwise be claimed right now.
+  if (quotaGate.closed) {
+    if (!snapshot.quotaGateAnnounced) {
+      actions.push({
+        type: "notify",
+        event: "quota-gate-closed",
+        payload: {
+          status: quotaGate.status ?? "rejected",
+          rateLimitType: quotaGate.rateLimitType,
+          utilization: quotaGate.utilization,
+          thresholdPercent: quotaGate.thresholdPercent,
+          reason: quotaGate.reason ?? "rejected",
+          resetsAt: quotaGate.resetsAt,
+          heldTickets: eligible.length,
+        },
+      });
+    }
+    actions.push({ type: "pausePickup", reason: "quota-gate" });
     return actions;
   }
 

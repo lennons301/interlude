@@ -3,8 +3,9 @@ import { getConfig } from "@/lib/config";
 import { getFleetSettings, updateSettingsOverrides } from "@/lib/settings";
 import {
   describeModelTierSettings,
-  describeResumeBoundSetting,
   parseSettingsPatch,
+  resolveQuotaThreshold,
+  resolveResumeBound,
   type SettingsOverrides,
   type TierModelIds,
 } from "@/lib/settings-resolver";
@@ -58,9 +59,14 @@ function state(overrides: SettingsOverrides, updatedAt: Date | null) {
     fields: describeModelTierSettings(getConfig(), overrides, tierModels),
     lanes,
     laneError,
-    // The quota bound (issue #169) needs no lane: it is a count, not a tier,
-    // and resolves to itself.
-    resumeBound: describeResumeBoundSetting(getConfig(), overrides),
+    // The quota admission threshold (issue #171) — its own view model beside
+    // the lane's, for the same reason: it shares the allowlist but not the
+    // model-tier field shape, since asking a percentage what tier is in force
+    // is not a meaningful question.
+    quota: resolveQuotaThreshold(getConfig(), overrides),
+    // The resume bound (issue #169) is the same shape of answer as the
+    // threshold above, and the other half of what "quota" means on the screen.
+    resumeBound: resolveResumeBound(getConfig(), overrides),
     updatedAt: updatedAt?.toISOString() ?? null,
   };
 }

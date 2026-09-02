@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { SettingCountView } from "@/lib/settings-resolver";
-import { QuotaPanel } from "../quota-settings";
+import type { ResumeBoundView } from "@/lib/settings-resolver";
+import { QuotaResumePanel } from "../quota-resume-settings";
 
 /**
  * The quota resume bound as the settings screen shows it (issue #169).
@@ -13,9 +13,8 @@ import { QuotaPanel } from "../quota-settings";
  * did not say so would be naming a number from nowhere.
  */
 
-function field(over: Partial<SettingCountView> = {}): SettingCountView {
+function field(over: Partial<ResumeBoundView> = {}): ResumeBoundView {
   return {
-    key: "maxResumesPerAttempt",
     label: "Quota resumes per attempt",
     help: "How many times one attempt may pause on the account's quota.",
     options: ["0", "1", "2", "3", "4", "5"],
@@ -23,16 +22,15 @@ function field(over: Partial<SettingCountView> = {}): SettingCountView {
     override: null,
     envVar: "MAX_RESUMES_PER_ATTEMPT",
     envValue: null,
-    value: 3,
-    builtIn: 3,
+    resumes: 3,
     ...over,
   };
 }
 
-function render(over: Partial<SettingCountView> = {}): string {
+function render(over: Partial<ResumeBoundView> = {}): string {
   return renderToStaticMarkup(
-    <QuotaPanel
-      field={field(over)}
+    <QuotaResumePanel
+      bound={field(over)}
       busy={false}
       disabled={false}
       saveError={null}
@@ -58,7 +56,12 @@ describe("the quota settings panel", () => {
   });
 
   it("reads an overridden field as this screen's, and names what it would fall back to", () => {
-    const html = render({ source: "override", override: 1, value: 1, envValue: "4" });
+    const html = render({
+      source: "override",
+      override: "1",
+      resumes: 1,
+      envValue: "4",
+    });
 
     expect(html).toContain("ui override");
     expect(html).toContain("1 resume per attempt");
@@ -67,15 +70,15 @@ describe("the quota settings panel", () => {
 
   it("spells out what zero means, rather than showing a bare 0", () => {
     // Zero is a real choice, and the least self-explanatory one on the row.
-    expect(render({ source: "override", override: 0, value: 0 })).toContain(
+    expect(render({ source: "override", override: "0", resumes: 0 })).toContain(
       "no resumes — a quota pause goes straight to a human"
     );
   });
 
   it("renders nothing to press while the settings are still loading", () => {
     const html = renderToStaticMarkup(
-      <QuotaPanel
-        field={null}
+      <QuotaResumePanel
+        bound={null}
         busy={false}
         disabled
         saveError={null}

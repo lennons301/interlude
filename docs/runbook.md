@@ -180,8 +180,9 @@ chat/preview is never affected.
 
   **Confirm it took** from the row itself, not from the log: the dashboard's
   live dot turns amber and reads `held` (`paused` is the daily cap, `off` the
-  boot master — deliberately different words for deliberately different states,
-  because they are lifted in three different ways), with a *Kill switch
+  boot master; `paused` is also the quota gate, the other self-lifting ceiling
+  — deliberately different words for deliberately different states, because
+  they are lifted in different ways), with a *Kill switch
   engaged* banner above the panels, and `GET /api/settings/autonomy` answers
   the same row headless. The sweep's `Pickup paused (kill-switch)` line
   is **not** the confirmation: the hold is evaluated only on a tick that found
@@ -192,6 +193,34 @@ chat/preview is never affected.
   the fleet is held.) The next
   morning's Discord digest leads with the hold too, so a fleet you held and
   forgot never reads there as a quiet day.
+- **Automatically, when quota runs out (quota gate):** nothing to press. Above
+  the **Settings → Quota** threshold (default 90% of the account's quota
+  window), or once the account is already being *rejected*, the fleet stops
+  claiming new tickets and starting triage passes — it will not start work it
+  cannot finish. In-flight runs, parked runs resuming, and interactive chat are
+  all unaffected.
+
+  The dot reads `paused` with a banner naming both numbers (what the window is
+  at, and the threshold it crossed), and Discord gets **one** ping per closed
+  spell — fleet-level, saying how many armed tickets are being held, never one
+  per run. It re-arms only when the gate opens again.
+
+  The gate **lifts itself**: an observation stops holding pickup once its stated
+  reset has passed (or, for one that reported no reset, once it is more than
+  five hours old). That expiry is load-bearing, not tidiness — only a pass
+  making an API call produces a fresh quota observation, so a gate held forever
+  by a stale rejection would suppress the very traffic that would lift it. When
+  the window reopens the fleet claims one ticket, observes the quota again, and
+  re-closes the gate within seconds if the wall is still there.
+
+  A fleet on API-key auth is **never** gated: the unified-window telemetry is
+  subscription-only, so such an install reports no quota at all, and silence it
+  cannot break must not read as a wall.
+
+  Raise or lower the threshold in **Settings → Quota** (100 = only ever gate on
+  an outright rejection), or set `QUOTA_PICKUP_THRESHOLD_PERCENT`. There is
+  deliberately **no headroom reserved** for your own Claude Code sessions: the
+  fleet and you draw on one pool and the fleet takes what it takes.
 - **Globally, hard off (boot master):** set `AUTONOMY_ENABLED=false` in Doppler
   `interlude/prd` and restart. Sweeps never start at all. Use this to stand the
   fleet down for a while; use the kill switch to stop it now.
@@ -290,9 +319,9 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   the *same conversation*; where it could not be, the pass starts again on the same
   branch with the work already pushed, and the issue comment says which happened.
   Nothing to do either way — but two things worth knowing:
-    - the resume is **not** held by the kill switch or the daily cap. Both gate
-      *pickup*, and a paused run is the middle of an attempt already started. To
-      stop one, cancel the run (below);
+    - the resume is **not** held by the kill switch, the daily cap or the quota
+      admission gate. All three gate *pickup*, and a paused run is the middle of
+      an attempt already started. To stop one, cancel the run (below);
     - one attempt gets **3 resumes** by default (`MAX_RESUMES_PER_ATTEMPT`,
       settable under **Settings ▸ Quota** without a restart; `0` sends a quota pause
       straight to a human). Past the bound the ticket is labelled
@@ -339,6 +368,12 @@ agent-doable-but-risky work you want to eyeball before merge.
 Model choice is a **tier** — `heavy`, `standard` or `light` — not a vendor model
 id, so the choice survives a change of provider. The old names still work as
 aliases: `opus` = heavy, `sonnet` = standard, `haiku` = light.
+
+**Settings → Quota** holds the quota admission threshold (issue #171) on the
+same layer: an unset row follows `QUOTA_PICKUP_THRESHOLD_PERCENT`, a set one
+wins, a value outside the offered set is refused with the list rather than
+clamped, and the change takes effect at the next sweep with no restart. See
+*Pause pickup → the quota gate* above for what the threshold actually does.
 
 **The standing default** for each kind of pass — implement, review, triage,
 interactive — is set in **Settings → Models**. Each row shows the tier in force,
@@ -399,6 +434,7 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 | `AGENT_MODEL`, `AGENT_MODEL_REVIEW`, `AGENT_MODEL_TRIAGE` | Default model per pass kind, as a tier (`heavy`/`standard`/`light`, or the `opus`/`sonnet`/`haiku` aliases) or a raw model id. The fall-through for a Settings → Models row left on `environment`; unset means no `--model` and the CLI resolves the account default. |
 | `CAPACITY_SLOTS`, `AGENT_MEMORY_MB` | Override derived capacity — only when the derivation is wrong. |
 | `OWED_REVIEW_STALL_MINUTES`, `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES` | Fleet-health watchdog thresholds in minutes (issue #126). Defaults 30 / 3 / 2. |
+| `QUOTA_PICKUP_THRESHOLD_PERCENT` | Quota utilization at or above which no new ticket is claimed (issue #171). One of 50/70/80/85/90/95/100; default 90. The fall-through for Settings → Quota when that row is left on `environment`. |
 | `OCCUPANCY_DIVERGED_MINUTES` | How long occupancy may go uncorroborated by real agent containers before it reads as a phantom slot (issue #152). Default 20 — far longer than the pickup debounce because a task provisioning its container is legitimately uncorroborated until the container exists, and a cold agent-image build happens inside that window. The card's remedy is a restart, so a false positive is expensive. |
 
 ### Labels

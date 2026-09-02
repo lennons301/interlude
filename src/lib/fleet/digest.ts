@@ -213,6 +213,15 @@ function pickupLines(view: FleetView, appBaseUrl: string): string[] {
           "daily cap, so pickup stopped for the rest of the day; the pause " +
           "lifted at midnight.",
       ];
+    case "quota-gate":
+      // Said as it stands when the digest is written, like the switch and the
+      // master above it: the gate is computed from the latest observation and
+      // has no history, so a window that reset overnight leaves the covered day
+      // reading quiet. The view's own line already names both numbers.
+      return [
+        `⏸ Paused right now — ${view.pickupPaused?.body ?? "the quota gate is closed"}. ` +
+          "It lifts itself when the window resets; there is nothing to press.",
+      ];
     case null:
       return [
         view.autonomyOn

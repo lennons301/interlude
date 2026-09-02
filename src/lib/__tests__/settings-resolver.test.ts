@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AppConfig } from "../config";
+import { DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT } from "../quota/quota-gate";
 import {
   MODEL_TIERS,
   TIER_MODEL_IDS,
@@ -13,9 +14,9 @@ import {
   SETTABLE_KEYS,
   applySettingsPatch,
   describeModelTierSettings,
-  describeResumeBoundSetting,
   parseSettingsPatch,
   resolveModelTier,
+  resolveQuotaThreshold,
   resolveResumeBound,
   sanitizeOverrides,
   type SettingsOverrides,
@@ -38,12 +39,14 @@ function cfg(models: {
   agentModelReview?: string | null;
   agentModelTriage?: string | null;
   agentLane?: string | null;
+  quotaPickupThresholdPercent?: string | null;
 } = {}): AppConfig {
   return {
     agentModel: models.agentModel ?? null,
     agentModelReview: models.agentModelReview ?? null,
     agentModelTriage: models.agentModelTriage ?? null,
     agentLane: models.agentLane ?? null,
+    quotaPickupThresholdPercent: models.quotaPickupThresholdPercent ?? null,
   } as AppConfig;
 }
 
@@ -273,6 +276,93 @@ describe("rejection — a bad value is refused, never silently clamped", () => {
   });
 });
 
+/**
+ * The quota admission threshold (issue #171) — a settable field with three
+ * fall-through steps rather than two: a model tier may resolve to "let the
+ * harness decide", but a gate needs a number.
+ */
+describe("the quota pickup threshold", () => {
+  it("falls through to its own default with nothing set anywhere", () => {
+    expect(resolveQuotaThreshold(cfg(), NONE)).toMatchObject({
+      percent: DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT,
+      source: "environment",
+      override: null,
+      envVar: "QUOTA_PICKUP_THRESHOLD_PERCENT",
+      envValue: null,
+    });
+  });
+
+  it("takes the environment when it is set, and says so", () => {
+    expect(
+      resolveQuotaThreshold(cfg({ quotaPickupThresholdPercent: "80" }), NONE)
+    ).toMatchObject({ percent: 80, source: "environment", envValue: "80" });
+  });
+
+  it("lets an override win, and still names what clearing it falls back to", () => {
+    expect(
+      resolveQuotaThreshold(cfg({ quotaPickupThresholdPercent: "80" }), {
+        quotaPickupThresholdPercent: "95",
+      })
+    ).toMatchObject({
+      percent: 95,
+      source: "override",
+      override: "95",
+      envValue: "80",
+    });
+  });
+
+  it("refuses an environment value outside the set, and still shows what was set", () => {
+    // Collapsing it to "unset" would read back on the screen as a variable
+    // nobody had set — the one surprise the provenance line exists to remove.
+    const resolved = resolveQuotaThreshold(
+      cfg({ quotaPickupThresholdPercent: "93" }),
+      NONE
+    );
+
+    expect(resolved.percent).toBe(DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT);
+    expect(resolved.envValue).toBe("93");
+  });
+
+  it("falls through rather than throwing on a stored value it cannot read", () => {
+    // The column is JSON an older build wrote, so a since-narrowed vocabulary
+    // must degrade to the environment rather than gate the fleet on nonsense.
+    expect(
+      resolveQuotaThreshold(cfg(), {
+        quotaPickupThresholdPercent: "ninety",
+      }).percent
+    ).toBe(DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT);
+    expect(
+      sanitizeOverrides({ quotaPickupThresholdPercent: "ninety" })
+    ).toEqual({});
+  });
+
+  it("refuses a value outside the offered set, listing what is accepted", () => {
+    const parsed = parseSettingsPatch({ quotaPickupThresholdPercent: "93" });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toContain("93");
+    expect(parsed.error).toContain("90");
+  });
+
+  it("refuses a nonsensical percentage rather than clamping it", () => {
+    // A clamp would turn "hold at 140%" into a gate the operator never chose.
+    expect(parseSettingsPatch({ quotaPickupThresholdPercent: "140" }).ok).toBe(
+      false
+    );
+    expect(parseSettingsPatch({ quotaPickupThresholdPercent: "-1" }).ok).toBe(
+      false
+    );
+  });
+
+  it("is settable, and named in the message that enumerates what is", () => {
+    const parsed = parseSettingsPatch({ agentModel: "heavy" });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toContain("quotaPickupThresholdPercent");
+    expect(SETTABLE_KEYS).toContain("quotaPickupThresholdPercent");
+  });
+});
+
 describe("ceiling — a UI override may never widen a safety ceiling", () => {
   it("refuses a ceiling by name, saying why it is not a preference", () => {
     for (const key of Object.keys(FIXED_CEILINGS)) {
@@ -417,7 +507,7 @@ describe("the quota resume bound (issue #169)", () => {
   it("falls through to the built-in default with nothing set", () => {
     const resolved = resolveResumeBound(boundCfg(null), NONE);
 
-    expect(resolved.value).toBe(DEFAULT_MAX_RESUMES_PER_ATTEMPT);
+    expect(resolved.resumes).toBe(DEFAULT_MAX_RESUMES_PER_ATTEMPT);
     expect(resolved.source).toBe("environment");
     expect(resolved.override).toBeNull();
     // Named as unset, not as the default's number: a provenance line claiming
@@ -430,7 +520,7 @@ describe("the quota resume bound (issue #169)", () => {
   it("takes the environment when the variable is set", () => {
     const resolved = resolveResumeBound(boundCfg(1), NONE);
 
-    expect(resolved.value).toBe(1);
+    expect(resolved.resumes).toBe(1);
     expect(resolved.source).toBe("environment");
     expect(resolved.envValue).toBe("1");
   });
@@ -438,9 +528,9 @@ describe("the quota resume bound (issue #169)", () => {
   it("lets a UI override win, and says so", () => {
     const resolved = resolveResumeBound(boundCfg(1), { maxResumesPerAttempt: "4" });
 
-    expect(resolved.value).toBe(4);
+    expect(resolved.resumes).toBe(4);
     expect(resolved.source).toBe("override");
-    expect(resolved.override).toBe(4);
+    expect(resolved.override).toBe("4");
     // The environment it would fall back to is still reported, which is what
     // makes clearing the override a predictable press.
     expect(resolved.envValue).toBe("1");
@@ -450,7 +540,9 @@ describe("the quota resume bound (issue #169)", () => {
     const parsed = parseSettingsPatch({ maxResumesPerAttempt: "0" });
 
     expect(parsed).toEqual({ ok: true, patch: { maxResumesPerAttempt: "0" } });
-    expect(resolveResumeBound(boundCfg(null), { maxResumesPerAttempt: "0" }).value).toBe(0);
+    expect(resolveResumeBound(boundCfg(null), { maxResumesPerAttempt: "0" }).resumes).toBe(
+      0
+    );
   });
 
   it("rejects a value past the ceiling with a message, never clamping it", () => {
@@ -490,14 +582,19 @@ describe("the quota resume bound (issue #169)", () => {
     expect(SETTABLE_KEYS).toContain("maxResumesPerAttempt");
   });
 
-  it("describes itself for the screen with the number in force", () => {
-    const view = describeResumeBoundSetting(boundCfg(null), {
-      maxResumesPerAttempt: "2",
-    });
+  it("carries what the screen needs to render and explain the row", () => {
+    const view = resolveResumeBound(boundCfg(null), { maxResumesPerAttempt: "2" });
 
     expect(view.label).toBe(SETTINGS_FIELDS.maxResumesPerAttempt.label);
-    expect(view.value).toBe(2);
-    expect(view.builtIn).toBe(DEFAULT_MAX_RESUMES_PER_ATTEMPT);
+    expect(view.resumes).toBe(2);
     expect(view.options).toEqual(RESUME_BOUND_OPTIONS);
+  });
+
+  it("falls through when a stored value the vocabulary no longer accepts is read", () => {
+    // Read defensively, like every other field: the row is JSON written by an
+    // older build, and a value past the ceiling must not reach the bound.
+    expect(
+      resolveResumeBound(boundCfg(1), { maxResumesPerAttempt: "99" }).resumes
+    ).toBe(1);
   });
 });

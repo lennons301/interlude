@@ -7,27 +7,31 @@ import {
   fallbackNote,
 } from "@/components/fleet/fleet-bits";
 import { FALL_THROUGH } from "@/components/settings-overrides";
-import type { SettingCountView } from "@/lib/settings-resolver";
+import type { ResumeBoundView } from "@/lib/settings-resolver";
 
 /**
  * How far a run may ride the account's quota (issue #169): how many times one
  * attempt may pause on a rate limit and be resumed before its ticket goes to a
  * human.
  *
- * Beside the model tiers rather than under Autonomy, because it is the same
- * kind of knob and answers to the same layer — an unset row follows the
- * deployment's own variable, a set one wins and says so. What differs is that
- * this one is a *count*, so the row names the number in force rather than the
- * model a tier resolves to.
+ * Under **Quota**, beneath the admission gate (issue #171), because the two are
+ * the same subject read in order: the gate is when the fleet stops *starting*
+ * work on a spent window, this is how long work it already started may keep
+ * riding one. Its own panel rather than a row in that one, because they are
+ * separate decisions with separate consequences — the gate delays a claim, this
+ * one eventually hands a ticket to a human.
+ *
+ * Presentational and sharing the other panels' state, for the reason they share
+ * it with each other: one PATCH returns the whole resolved settings state.
  */
-export function QuotaPanel({
-  field,
+export function QuotaResumePanel({
+  bound: field,
   busy,
   disabled,
   saveError,
   onChoose,
 }: {
-  field: SettingCountView | null;
+  bound: ResumeBoundView | null;
   busy: boolean;
   disabled: boolean;
   saveError: string | null;
@@ -41,7 +45,7 @@ export function QuotaPanel({
     );
   }
 
-  const selected = field.override === null ? FALL_THROUGH : String(field.override);
+  const selected = field.override ?? FALL_THROUGH;
   return (
     <div className={`${PANEL_PLAIN} space-y-4`}>
       <p className="text-[13px] text-fl-ink-3">
@@ -62,7 +66,7 @@ export function QuotaPanel({
             {[...field.options, FALL_THROUGH].map((option) => (
               <ChipRadio
                 key={option}
-                name={field.key}
+                name="maxResumesPerAttempt"
                 value={option}
                 selected={selected === option}
                 disabled={disabled}
@@ -105,14 +109,14 @@ export function QuotaPanel({
 /** What the fleet actually does — including the case the provenance line alone
  * would leave unexplained: with the variable unset, the number in force comes
  * from the built-in default, not from nowhere. */
-function effective(field: SettingCountView): string {
-  const plural = field.value === 1 ? "resume" : "resumes";
+function effective(field: ResumeBoundView): string {
+  const plural = field.resumes === 1 ? "resume" : "resumes";
   const origin =
     field.source === "environment" && field.envValue === null
       ? " (built-in default)"
       : "";
-  if (field.value === 0) {
+  if (field.resumes === 0) {
     return `no resumes — a quota pause goes straight to a human${origin}`;
   }
-  return `${field.value} ${plural} per attempt${origin}`;
+  return `${field.resumes} ${plural} per attempt${origin}`;
 }

@@ -35,6 +35,10 @@ import {
   DEFAULT_MAX_RESUMES_PER_ATTEMPT,
   MAX_RESUMES_CEILING,
 } from "./orchestrator/autonomy/budgets";
+import {
+  DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT,
+  QUOTA_THRESHOLD_OPTIONS,
+} from "./quota/quota-gate";
 import { isLaneIdShaped } from "./lanes/lane-id";
 import {
   MODEL_TIERS,
@@ -62,11 +66,12 @@ export type ModelTierSettingKey =
   | "modelTierInteractive";
 
 /** The settings a human may override from the UI. Later tickets in issue #164
- * (the quota admission threshold, the overflow daily cap) add members here and
- * an entry to `SETTINGS_FIELDS`. */
+ * (the overflow daily cap) add members here and an entry to
+ * `SETTINGS_FIELDS`. */
 export type SettingKey =
   | ModelTierSettingKey
   | "primaryLane"
+  | "quotaPickupThresholdPercent"
   | "maxResumesPerAttempt";
 
 /** What is stored on the settings row: a sparse map, because absent means
@@ -244,6 +249,30 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
           : String(config.maxResumesPerAttempt),
     }),
   },
+  quotaPickupThresholdPercent: {
+    key: "quotaPickupThresholdPercent",
+    label: "Quota pickup threshold",
+    help:
+      "How full the account's quota window may get before the fleet stops claiming new tickets. Work already in flight always finishes, and a parked run still resumes. At 100 the gate closes only when the account is already being rejected.",
+    // A fixed set rather than a free number: the spread offered is finer than
+    // the decision it feeds, so nothing useful is out of reach, and a value
+    // outside it is refused *with the list* rather than clamped.
+    options: QUOTA_THRESHOLD_OPTIONS,
+    normalize: (raw) => {
+      const value = raw.trim();
+      return (QUOTA_THRESHOLD_OPTIONS as readonly string[]).includes(value)
+        ? value
+        : null;
+    },
+    vocabulary: () => QUOTA_THRESHOLD_OPTIONS.join(", "),
+    envDefault: (config) => ({
+      envVar: "QUOTA_PICKUP_THRESHOLD_PERCENT",
+      // Verbatim, including a value this build refuses: the screen's job is to
+      // say what the deployment actually set, and a refused one shown beside
+      // the default now in force is how an operator finds their typo.
+      value: config.quotaPickupThresholdPercent,
+    }),
+  },
 };
 
 
@@ -264,6 +293,7 @@ export const MODEL_TIER_FIELD_ORDER: readonly ModelTierSettingKey[] = [
 export const SETTABLE_KEYS: readonly SettingKey[] = [
   ...MODEL_TIER_FIELD_ORDER,
   "primaryLane",
+  "quotaPickupThresholdPercent",
   "maxResumesPerAttempt",
 ];
 
@@ -492,83 +522,117 @@ export function resolveModelTierField(
 }
 
 /**
- * A count field, resolved: the number in force, where it came from, and what
- * clearing the override would fall back to.
+ * The quota admission threshold in force (issue #171), and where it came from.
  *
- * Its own shape rather than the tier view's, because the two answer different
- * questions — a tier resolves to a model identifier the operator wants named
- * beside it, a count resolves to itself — and folding them into one view type
- * would mean a `model: null` on every count row for no one's benefit.
+ * Its own resolver and its own view, like the lane field's — it shares the
+ * registry (which is the allowlist, and so the mechanism that decides what is
+ * settable at all) but not the model-tier field view, because asking a
+ * percentage "what tier is in force?" is not a meaningful question.
+ *
+ * Three layers, where a tier has two: a stored override, then the environment
+ * variable, then the built-in default. The third is what makes this field
+ * different — a tier may resolve to "pass no `--model` and let the harness
+ * decide", but a gate needs a number. The environment is read through the same
+ * `normalize` an override is, so a typo there is refused rather than clamped
+ * and falls through here, while still being *shown* verbatim: a refused value
+ * collapsed to "unset" would read back on the screen as a variable nobody had
+ * set, which is the one surprise the provenance line exists to remove.
  */
-export interface ResolvedCount {
-  key: SettingKey;
-  value: number;
+export interface QuotaThresholdView {
+  /** The percentage in force — what the gate actually judges against. */
+  percent: number;
   source: SettingSource;
   /** The stored override, or null when the field falls through. */
-  override: number | null;
+  override: string | null;
+  /** The values an override may take, in display order. */
+  options: readonly string[];
+  label: string;
+  help: string;
   envVar: string;
-  /** The environment default, verbatim (null = unset, so the built-in default
-   * below is what is actually in force). */
+  /** The environment default, verbatim (null = unset). */
   envValue: string | null;
-  /** What the field falls back to with neither an override nor a variable —
-   * stated, because otherwise the screen shows a number from nowhere. */
-  builtIn: number;
 }
 
-/**
- * How many times one attempt may pause on the quota and be resumed (issue
- * #169) — override, then environment, then the built-in default, exactly the
- * order every other field in this module resolves in.
- *
- * Read at the point of use (the sweep, each tick), never from a cached config:
- * the whole point of the layer is that a change takes effect at the next sweep
- * with no restart.
- */
-export function resolveResumeBound(
+export function resolveQuotaThreshold(
   config: AppConfig,
   overrides: SettingsOverrides
-): ResolvedCount {
-  const key: SettingKey = "maxResumesPerAttempt";
-  const spec = SETTINGS_FIELDS[key];
+): QuotaThresholdView {
+  const spec = SETTINGS_FIELDS.quotaPickupThresholdPercent;
   const { envVar, value: envValue } = spec.envDefault(config);
-  // Through the field's own validator, and *its* answer is what is read: a
-  // stored value the vocabulary no longer accepts falls through to the
-  // environment rather than reaching a bound.
-  const stored = overrides[key];
-  const normalized = stored === undefined ? null : spec.normalize(stored, {});
-  const override = normalized === null ? null : Number(normalized);
+  const stored = overrides.quotaPickupThresholdPercent ?? null;
+  const override = stored === null ? null : spec.normalize(stored, {});
+  const fromEnv = envValue === null ? null : spec.normalize(envValue, {});
+  const inForce = override ?? fromEnv;
 
   return {
-    key,
-    value:
-      override ?? config.maxResumesPerAttempt ?? DEFAULT_MAX_RESUMES_PER_ATTEMPT,
+    percent:
+      inForce === null
+        ? DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT
+        : parseInt(inForce, 10),
     source: override !== null ? "override" : "environment",
     override,
+    options: spec.options ?? [],
+    label: spec.label,
+    help: spec.help,
     envVar,
     envValue,
-    builtIn: DEFAULT_MAX_RESUMES_PER_ATTEMPT,
   };
 }
 
-/** One count field as the settings screen shows it. */
-export interface SettingCountView extends ResolvedCount {
+/**
+ * How many times one attempt may pause on the account's quota and be resumed
+ * (issue #169), and where that number came from.
+ *
+ * Its own resolver and its own view, for the reason the threshold above has
+ * one: it shares the registry — the allowlist, and so the mechanism that
+ * decides what is settable at all — but asking a count "what tier is in
+ * force?" is not a meaningful question.
+ *
+ * Three layers like the threshold's: a stored override, then the environment
+ * variable, then a built-in default, because a bound needs a number and
+ * "unset" is not one. The environment is read through the same `normalize` an
+ * override is, so a typo there falls through rather than reaching the bound as
+ * a NaN, while still being shown verbatim.
+ */
+export interface ResumeBoundView {
+  /** The bound in force — what the reducer actually counts against. */
+  resumes: number;
+  source: SettingSource;
+  /** The stored override, or null when the field falls through. */
+  override: string | null;
+  /** The values an override may take, in display order. */
+  options: readonly string[];
   label: string;
   help: string;
-  options: readonly string[];
+  envVar: string;
+  /** The environment default, verbatim (null = unset, so the built-in default
+   * is what is in force). */
+  envValue: string | null;
 }
 
-/** The resume bound, resolved for display — read by the settings route and
- * rendered by the panel, so the screen shows the number the sweep would use. */
-export function describeResumeBoundSetting(
+export function resolveResumeBound(
   config: AppConfig,
   overrides: SettingsOverrides
-): SettingCountView {
+): ResumeBoundView {
   const spec = SETTINGS_FIELDS.maxResumesPerAttempt;
+  const { envVar, value: envValue } = spec.envDefault(config);
+  const stored = overrides.maxResumesPerAttempt ?? null;
+  const override = stored === null ? null : spec.normalize(stored, {});
+  const fromEnv = envValue === null ? null : spec.normalize(envValue, {});
+  const inForce = override ?? fromEnv;
+
   return {
-    ...resolveResumeBound(config, overrides),
+    resumes:
+      inForce === null
+        ? DEFAULT_MAX_RESUMES_PER_ATTEMPT
+        : parseInt(inForce, 10),
+    source: override !== null ? "override" : "environment",
+    override,
+    options: spec.options ?? [],
     label: spec.label,
     help: spec.help,
-    options: spec.options ?? [],
+    envVar,
+    envValue,
   };
 }
 

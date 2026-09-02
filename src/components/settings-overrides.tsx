@@ -4,24 +4,31 @@ import { useState } from "react";
 import { Eyebrow, LoadFailure, PANEL_PLAIN } from "@/components/fleet/fleet-bits";
 import { ModelTierPanel } from "@/components/model-tier-settings";
 import { ExecutionLanePanel } from "@/components/execution-lane-settings";
-import { QuotaPanel } from "@/components/quota-settings";
+import { QuotaGatePanel } from "@/components/quota-gate-settings";
+import { QuotaResumePanel } from "@/components/quota-resume-settings";
 import { useLoad } from "@/lib/use-load";
-import type { SettingCountView, SettingFieldView } from "@/lib/settings-resolver";
+import type { SettingFieldView } from "@/lib/settings-resolver";
 import type { LaneSettingsView } from "@/lib/lanes/resolve";
+import type {
+  QuotaThresholdView,
+  ResumeBoundView,
+} from "@/lib/settings-resolver";
 
 /**
- * The UI-editable settings (issues #166, #172, #169): which tier each kind of
- * pass runs at, which execution lane it runs on, and how far a run may ride
- * the account's quota.
+ * The UI-editable settings (issues #166, #172, #171, #169): which tier each
+ * kind of pass runs at, which execution lane it runs on, how full the
+ * account's quota may get before the fleet stops claiming, and how far a
+ * paused run may keep riding that quota.
  *
- * Three panels, **one** piece of state, deliberately. The first two are not
+ * Panels, **one** piece of state, deliberately. The first two are not
  * independent: a tier's model identifier is whatever the primary lane says it
  * is, so changing the lane changes every row of the panel above it. Fetched
  * twice they would drift the moment a lane was picked, and the screen would
  * name models no pass would run — the exact failure the provenance work exists
- * to prevent. The quota bound needs no lane, but it is written through the
- * same endpoint and the same override row, and the endpoint answers a PATCH
- * with the whole resolved state — so one write refreshes all three.
+ * to prevent. The two quota fields are independent of both, and join the same
+ * state anyway rather than fetching their own: the endpoint answers a PATCH
+ * with the whole resolved settings state, so one write here would leave a
+ * separately-fetched panel showing a row that is no longer the row.
  */
 
 interface OverridesState {
@@ -29,29 +36,35 @@ interface OverridesState {
   lanes: LaneSettingsView | null;
   /** Why the lane file could not be read, when it could not be. */
   laneError: string | null;
-  /** The quota resume bound (issue #169) — a count, so it needs no lane. */
-  resumeBound: SettingCountView;
+  quota: QuotaThresholdView;
+  /** How many times one attempt may pause on the quota and resume (#169) —
+   * the other half of what "quota" means on this screen. */
+  resumeBound: ResumeBoundView;
   /** ISO-8601; null = no setting has ever been written on this install. */
   updatedAt: string | null;
 }
 
-/** The one field the lane panel owns; every other key belongs to the tiers. */
+/** The one field the lane panel owns. */
 const LANE_KEY = "primaryLane";
-/** The one field the quota panel owns. */
+/** The one field the quota-gate panel owns. */
+const QUOTA_KEY = "quotaPickupThresholdPercent";
+/** The one field the resume-bound panel owns. */
 const RESUME_BOUND_KEY = "maxResumesPerAttempt";
 
 /** The save error, shown only by the panel that owns the field it failed on. */
 export function errorFor(
   error: { key: string; message: string } | null,
-  panel: "lane" | "tiers" | "quota"
+  panel: "lane" | "tiers" | "quota" | "resume-bound"
 ): string | null {
   if (error === null) return null;
   const owner =
     error.key === LANE_KEY
       ? "lane"
-      : error.key === RESUME_BOUND_KEY
+      : error.key === QUOTA_KEY
         ? "quota"
-        : "tiers";
+        : error.key === RESUME_BOUND_KEY
+          ? "resume-bound"
+          : "tiers";
   return owner === panel ? error.message : null;
 }
 
@@ -118,13 +131,9 @@ export function SettingsOverrides() {
         <div className={PANEL_PLAIN}>
           <p className="font-plex-mono text-[11px] text-fl-ink-3">—</p>
         </div>
-        <QuotaPanel
-          field={null}
-          busy={false}
-          disabled
-          saveError={null}
-          onChoose={() => {}}
-        />
+        <div className={PANEL_PLAIN}>
+          <p className="font-plex-mono text-[11px] text-fl-ink-3">—</p>
+        </div>
       </Sections>
     );
   }
@@ -147,20 +156,28 @@ export function SettingsOverrides() {
         saveError={errorFor(saveError, "lane")}
         onChoose={(choice) => choose(LANE_KEY, choice)}
       />
-      <QuotaPanel
-        field={state.resumeBound}
-        busy={busyKey === RESUME_BOUND_KEY}
-        disabled={busyKey !== null}
-        saveError={errorFor(saveError, "quota")}
-        onChoose={(choice) => choose(RESUME_BOUND_KEY, choice)}
-      />
+      <>
+        <QuotaGatePanel
+          quota={state.quota}
+          busy={busyKey === QUOTA_KEY}
+          disabled={busyKey !== null}
+          saveError={errorFor(saveError, "quota")}
+          onChoose={(choice) => choose(QUOTA_KEY, choice)}
+        />
+        <QuotaResumePanel
+          bound={state.resumeBound}
+          busy={busyKey === RESUME_BOUND_KEY}
+          disabled={busyKey !== null}
+          saveError={errorFor(saveError, "resume-bound")}
+          onChoose={(choice) => choose(RESUME_BOUND_KEY, choice)}
+        />
+      </>
     </Sections>
   );
 }
 
 /** The headed sections the control room reads as. Kept here rather than on the
- * page so every panel shares one client-side state — and one PATCH, which
- * answers with the whole resolved state, refreshes all of them. */
+ * page so every panel can share one client-side state. */
 function Sections({
   children,
 }: {
@@ -177,6 +194,9 @@ function Sections({
         <Eyebrow>Execution lane</Eyebrow>
         {lanes}
       </section>
+      {/* Two controls, one section: when the fleet stops *starting* work on
+          the quota (issue #171), and how long work already started may keep
+          riding it (issue #169). */}
       <section aria-label="Quota" className="space-y-3">
         <Eyebrow>Quota</Eyebrow>
         {quota}

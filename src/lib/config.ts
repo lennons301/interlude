@@ -169,6 +169,18 @@ export interface AppConfig {
    * in minutes via OWED_REVIEW_STALL_MINUTES / PICKUP_WEDGED_MINUTES /
    * QUEUE_HEARTBEAT_STALE_MINUTES. */
   fleetHealthThresholds: FleetHealthThresholds;
+  /**
+   * Quota utilization (percent) at or above which no new ticket is claimed
+   * (issue #171), from QUOTA_PICKUP_THRESHOLD_PERCENT — held **verbatim**, as
+   * `agentModel` is, and validated in `resolveQuotaThreshold` rather than here.
+   * Null means the variable is genuinely unset, and only that: a value this
+   * build would refuse from the UI is refused from the environment too, but it
+   * still reaches the settings screen as what the operator actually typed. A
+   * value silently collapsed to "unset" here would read back on the screen as a
+   * variable nobody had set, which is exactly the surprise the provenance line
+   * exists to remove.
+   */
+  quotaPickupThresholdPercent: string | null;
 }
 
 let _config: AppConfig | null = null;
@@ -260,6 +272,8 @@ export function getConfig(): AppConfig {
         DEFAULT_OCCUPANCY_DIVERGED_MS
       ),
     },
+    quotaPickupThresholdPercent:
+      process.env.QUOTA_PICKUP_THRESHOLD_PERCENT || null,
   };
 
   return _config;
