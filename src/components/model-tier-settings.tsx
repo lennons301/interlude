@@ -1,13 +1,13 @@
 "use client";
 
-import { useState } from "react";
 import {
   Chip,
-  LoadFailure,
+  ChipRadio,
   PANEL_PLAIN,
+  fallbackNote,
   formatChanged,
 } from "@/components/fleet/fleet-bits";
-import { useLoad } from "@/lib/use-load";
+import { FALL_THROUGH } from "@/components/settings-overrides";
 import type { SettingFieldView } from "@/lib/settings-resolver";
 
 /**
@@ -26,74 +26,30 @@ import type { SettingFieldView } from "@/lib/settings-resolver";
  * - clearing an override is a first-class option (`environment`), not a
  *   hidden reset, because falling back is the state a fresh deployment is in.
  *
+ * The model id a row names is the one the **primary lane** gives that tier
+ * (issue #172), which is why this panel is presentational and shares its state
+ * with the lane panel below — see `SettingsOverrides`.
+ *
  * A change lands on the settings row and is read fresh when the next pass
  * starts, so it takes effect at the next sweep with no restart. Runs already
  * in flight keep the tier they recorded.
  */
-
-interface OverridesState {
+export function ModelTierPanel({
+  fields,
+  updatedAt,
+  busyKey,
+  disabled,
+  saveError,
+  onChoose,
+}: {
   fields: SettingFieldView[];
   /** ISO-8601; null = no setting has ever been written on this install. */
   updatedAt: string | null;
-}
-
-/** The option that means "no override" — the fall-through every field starts
- * in, offered beside the tiers so clearing is one press. */
-const FALL_THROUGH = "environment";
-
-export function ModelTierSettings() {
-  const {
-    data: state,
-    error: loadError,
-    reload,
-    setData,
-  } = useLoad<OverridesState>("/api/settings/overrides");
-  const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
-
-  async function choose(key: string, choice: string) {
-    setBusyKey(key);
-    setSaveError(null);
-    try {
-      const res = await fetch("/api/settings/overrides", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [key]: choice === FALL_THROUGH ? null : choice }),
-      });
-      const body = await res.json();
-      if (!res.ok) {
-        // The route answers a rejection with the reason it refused — show that
-        // rather than a status code, since the reason is the whole point of
-        // rejecting instead of quietly clamping.
-        throw new Error(
-          typeof body?.error === "string"
-            ? body.error
-            : `the server answered ${res.status}`
-        );
-      }
-      // The endpoint answers with the whole resolved state, so the panel shows
-      // what the fleet would actually run, not what was asked for.
-      setData(body as OverridesState);
-    } catch (err) {
-      setSaveError(
-        `That didn't stick — ${err instanceof Error ? err.message : "the request failed"}`
-      );
-    }
-    setBusyKey(null);
-  }
-
-  if (state === null) {
-    return (
-      <div className={PANEL_PLAIN}>
-        {loadError === null ? (
-          <p className="font-plex-mono text-[11px] text-fl-ink-3">checking…</p>
-        ) : (
-          <LoadFailure what="the model tiers" error={loadError} onRetry={reload} />
-        )}
-      </div>
-    );
-  }
-
+  busyKey: string | null;
+  disabled: boolean;
+  saveError: string | null;
+  onChoose: (key: string, choice: string) => void;
+}) {
   return (
     <div className={`${PANEL_PLAIN} space-y-4`}>
       <p className="text-[13px] text-fl-ink-3">
@@ -101,20 +57,20 @@ export function ModelTierSettings() {
         <span className="font-plex-mono">heavy</span>,{" "}
         <span className="font-plex-mono">standard</span>,{" "}
         <span className="font-plex-mono">light</span> — so it survives a change
-        of provider. Left on{" "}
-        <span className="font-plex-mono">{FALL_THROUGH}</span>, a row follows
-        the deployment&apos;s own variable. A ticket&apos;s{" "}
+        of provider; the model it names is whatever the lane below resolves it
+        to. Left on <span className="font-plex-mono">{FALL_THROUGH}</span>, a
+        row follows the deployment&apos;s own variable. A ticket&apos;s{" "}
         <span className="font-plex-mono">model:</span> directive still outranks
         both.
       </p>
 
-      {state.fields.map((field) => (
+      {fields.map((field) => (
         <TierRow
           key={field.key}
           field={field}
           busy={busyKey === field.key}
-          disabled={busyKey !== null}
-          onChoose={(choice) => choose(field.key, choice)}
+          disabled={disabled}
+          onChoose={(choice) => onChoose(field.key, choice)}
         />
       ))}
 
@@ -124,9 +80,9 @@ export function ModelTierSettings() {
         </p>
       )}
 
-      {state.updatedAt !== null && (
+      {updatedAt !== null && (
         <p className="font-plex-mono text-[11px] text-fl-ink-3">
-          settings last changed {formatChanged(state.updatedAt)}
+          settings last changed {formatChanged(updatedAt)}
         </p>
       )}
     </div>
@@ -153,10 +109,10 @@ function TierRow({
         </legend>
         <div className="flex flex-wrap items-center gap-1.5">
           {[...field.options, FALL_THROUGH].map((option) => (
-            <TierOption
+            <ChipRadio
               key={option}
               name={field.key}
-              option={option}
+              value={option}
               selected={selected === option}
               disabled={disabled}
               onSelect={() => onChoose(option)}
@@ -176,7 +132,13 @@ function TierRow({
         </Chip>
         <span>{effective(field)}</span>
         <span aria-hidden>·</span>
-        <span>{fallback(field)}</span>
+        <span>
+          {fallbackNote({
+            envVar: field.envVar,
+            envValue: field.envValue,
+            overridden: field.source === "override",
+          })}
+        </span>
       </p>
     </fieldset>
   );
@@ -189,53 +151,4 @@ function effective(field: SettingFieldView): string {
   return field.tier === null
     ? `runs ${field.model}`
     : `runs ${field.tier} (${field.model})`;
-}
-
-/** Where the row would land if the override were cleared — named variable and
- * all, because "environment default" without the name is not something an
- * operator can go and check. */
-function fallback(field: SettingFieldView): string {
-  const value =
-    field.envValue === null ? "unset" : `= ${field.envValue}`;
-  return field.source === "override"
-    ? `${field.envVar} ${value}, unused`
-    : `from ${field.envVar} ${value}`;
-}
-
-/** One tier choice, in the chip voice the rest of the control room speaks. The
- * radio itself is the control — screen-reader-visible and keyboard-operable —
- * with the chip as its skin. */
-function TierOption({
-  name,
-  option,
-  selected,
-  disabled,
-  onSelect,
-}: {
-  name: string;
-  option: string;
-  selected: boolean;
-  disabled: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <label
-      className={`cursor-pointer rounded-[4px] border px-1.5 py-px font-plex-mono text-[11px] lowercase transition-colors focus-within:border-fl-cool ${
-        selected
-          ? "border-fl-cool/45 bg-fl-cool/13 text-fl-cool"
-          : "border-fl-line text-fl-ink-2 hover:border-fl-line-strong hover:text-fl-ink"
-      } ${disabled ? "opacity-40" : ""}`}
-    >
-      <input
-        type="radio"
-        name={name}
-        value={option}
-        className="sr-only"
-        checked={selected}
-        disabled={disabled}
-        onChange={onSelect}
-      />
-      {option}
-    </label>
-  );
 }

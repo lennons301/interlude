@@ -6,22 +6,19 @@ import {
   buildPushScript,
   COMMITS_AHEAD_MARKER,
   parseCommitsAhead,
-  buildTurnEnv,
-  buildClaudeTurnCommand,
   createWorkspaceContainer,
   SKILLS_PLUGIN_ID,
   SKILLS_VERSION_MARKER,
 } from "../container-manager";
-import {
-  isGenerationSession,
-  SESSION_SKILLS,
-  type SessionSkill,
-} from "@/db/schema";
 
 // Capture the options passed to docker.createContainer so we can assert on the
 // HostConfig the orchestrator asks Docker for.
 const { createContainerSpy } = vi.hoisted(() => ({
-  createContainerSpy: vi.fn(async () => ({ id: "container-under-test" })),
+  // Typed with an argument so the assertions below can read what the
+  // orchestrator actually asked Docker for.
+  createContainerSpy: vi.fn<(options: unknown) => Promise<{ id: string }>>(
+    async () => ({ id: "container-under-test" })
+  ),
 }));
 
 vi.mock("@/lib/docker/client", () => ({
@@ -44,7 +41,7 @@ vi.mock("@/lib/github/client", () => ({
 vi.mock("@/lib/config", () => ({
   PLATFORM_REPO_URL: "https://github.com/lennons301/platform.git",
   getConfig: () => ({
-    anthropicApiKey: null,
+    anthropicApiKey: "sk-ant-api-test",
     claudeCodeOauthToken: "sk-ant-oat01-test",
     gitUserName: "Interlude Agent",
     gitUserEmail: "agent@interlude.dev",
@@ -178,102 +175,6 @@ describe("parseSkillsVersion (issue #60)", () => {
   });
 });
 
-describe("buildTurnEnv", () => {
-  it("always carries the prompt and git auth token", () => {
-    const env = buildTurnEnv({
-      prompt: "do the thing",
-      gitAuthToken: "ghs_abc",
-      claudeCodeOauthToken: null,
-      ghToken: null,
-    });
-    expect(env).toContain("CLAUDE_PROMPT=do the thing");
-    expect(env).toContain("GIT_AUTH_TOKEN=ghs_abc");
-  });
-
-  it("injects CLAUDE_CODE_OAUTH_TOKEN when configured", () => {
-    const env = buildTurnEnv({
-      prompt: "p",
-      gitAuthToken: "t",
-      claudeCodeOauthToken: "sk-ant-oat01-xyz",
-      ghToken: null,
-    });
-    expect(env).toContain("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-xyz");
-  });
-
-  it("omits CLAUDE_CODE_OAUTH_TOKEN when not configured", () => {
-    const env = buildTurnEnv({
-      prompt: "p",
-      gitAuthToken: "t",
-      claudeCodeOauthToken: null,
-      ghToken: null,
-    });
-    expect(env.some((e) => e.startsWith("CLAUDE_CODE_OAUTH_TOKEN"))).toBe(false);
-  });
-
-  // Issue #62: `gh` inside a generation-session container authenticates from
-  // GH_TOKEN. It is exposed only when the caller passes a token — for autonomous
-  // execs the caller passes null, so the negative case is that GH_TOKEN is simply
-  // never in the env.
-  it("exposes GH_TOKEN to gh when a generation-session token is supplied", () => {
-    const env = buildTurnEnv({
-      prompt: "p",
-      gitAuthToken: "ghs_git",
-      claudeCodeOauthToken: null,
-      ghToken: "ghs_gh",
-    });
-    expect(env).toContain("GH_TOKEN=ghs_gh");
-  });
-
-  it("omits GH_TOKEN entirely when no generation-session token is supplied", () => {
-    const env = buildTurnEnv({
-      prompt: "p",
-      gitAuthToken: "ghs_git",
-      claudeCodeOauthToken: null,
-      ghToken: null,
-    });
-    expect(env.some((e) => e.startsWith("GH_TOKEN"))).toBe(false);
-  });
-});
-
-// Issue #62: the exec-config wiring — a generation session (interactive task
-// with a sessionSkill) receives the App token as GH_TOKEN; every autonomous kind
-// receives none. This mirrors execClaudeTurn's `isGenerationSession(task) ? token
-// : null`, testing the predicate and the env builder as one path. The negative
-// assertions for implement/review/triage are the isolation boundary from #62.
-describe("GH_TOKEN injection is gated on generation sessions (issue #62)", () => {
-  const APP_TOKEN = "ghs_installation";
-
-  const envFor = (task: { kind: string; sessionSkill: SessionSkill | null }) =>
-    buildTurnEnv({
-      prompt: "p",
-      gitAuthToken: APP_TOKEN,
-      claudeCodeOauthToken: null,
-      ghToken: isGenerationSession(task) ? APP_TOKEN : null,
-    });
-
-  it("injects GH_TOKEN for a generation-session exec", () => {
-    for (const sessionSkill of SESSION_SKILLS) {
-      const env = envFor({ kind: "interactive", sessionSkill });
-      expect(env).toContain(`GH_TOKEN=${APP_TOKEN}`);
-    }
-  });
-
-  it("withholds GH_TOKEN from every autonomous kind", () => {
-    // The isolation boundary is per-kind: no unattended exec may hold an
-    // issue-writing token, so `repair` is asserted alongside implement/review/
-    // triage even though #62 names only the latter three.
-    for (const kind of ["implement", "review", "triage", "repair"] as const) {
-      const env = envFor({ kind, sessionSkill: null });
-      expect(env.some((e) => e.startsWith("GH_TOKEN"))).toBe(false);
-    }
-  });
-
-  it("withholds GH_TOKEN from an ordinary chat task (no session skill)", () => {
-    const env = envFor({ kind: "interactive", sessionSkill: null });
-    expect(env.some((e) => e.startsWith("GH_TOKEN"))).toBe(false);
-  });
-});
-
 describe("buildPushScript", () => {
   const script = buildPushScript();
 
@@ -322,61 +223,6 @@ describe("parseCommitsAhead", () => {
   });
 });
 
-describe("buildClaudeTurnCommand", () => {
-  it("runs Claude with stream-json and the configured limits", () => {
-    const cmd = buildClaudeTurnCommand({});
-    expect(cmd).toContain("cd /workspace/repo");
-    expect(cmd).toContain("claude -p");
-    expect(cmd).toContain("--output-format stream-json");
-    expect(cmd).toContain("--max-turns 50");
-    expect(cmd).toContain("--max-budget-usd 20");
-  });
-
-  it("prefers per-exec budget and turn overrides over the config defaults", () => {
-    const cmd = buildClaudeTurnCommand({ maxTurns: 100, maxBudgetUsd: 75 });
-    expect(cmd).toContain("--max-turns 100");
-    expect(cmd).toContain("--max-budget-usd 75");
-  });
-
-  it("omits --model entirely when no model is pinned (issue #74)", () => {
-    expect(buildClaudeTurnCommand({ model: null })).not.toContain("--model");
-    expect(buildClaudeTurnCommand({})).not.toContain("--model");
-  });
-
-  it("pins the model with --model when one is resolved (issue #74)", () => {
-    const cmd = buildClaudeTurnCommand({ model: "claude-sonnet-5" });
-    expect(cmd).toContain("--model 'claude-sonnet-5'");
-  });
-
-  it("single-quotes the model so glob metacharacters stay literal (issue #74)", () => {
-    const cmd = buildClaudeTurnCommand({ model: "claude-opus-4-8[1m]" });
-    // The bracketed id must not be exposed to bash pathname expansion.
-    expect(cmd).toContain("--model 'claude-opus-4-8[1m]'");
-    expect(cmd).not.toContain("--model claude-opus-4-8[1m]");
-  });
-
-  it("omits --effort entirely when no level is pinned (issue #81)", () => {
-    expect(buildClaudeTurnCommand({ effort: null })).not.toContain("--effort");
-    expect(buildClaudeTurnCommand({})).not.toContain("--effort");
-  });
-
-  it("pins the reasoning effort with --effort when one is resolved (issue #81)", () => {
-    const cmd = buildClaudeTurnCommand({ effort: "high" });
-    expect(cmd).toContain("--effort 'high'");
-  });
-
-  it("carries both --model and --effort together, independently (issue #81)", () => {
-    const cmd = buildClaudeTurnCommand({ model: "claude-opus-4-8", effort: "max" });
-    expect(cmd).toContain("--model 'claude-opus-4-8'");
-    expect(cmd).toContain("--effort 'max'");
-  });
-
-  it("appends --resume for a follow-up turn", () => {
-    const cmd = buildClaudeTurnCommand({ sessionId: "sess-123" });
-    expect(cmd).toContain("--resume sess-123");
-  });
-});
-
 describe("createWorkspaceContainer", () => {
   beforeEach(() => {
     createContainerSpy.mockClear();
@@ -385,17 +231,43 @@ describe("createWorkspaceContainer", () => {
   // Regression guard for issue #28: agent containers must not bind-mount
   // anything from the host — the old rw `~/.claude` mount is gone and must
   // stay gone. Auth reaches the container only via exec-scoped env tokens.
-  it("grants no host bind mount", async () => {
+  const created = async () => {
     await createWorkspaceContainer({
       taskId: "01J000000000000000000TASK",
       gitUrl: "https://github.com/lennons301/interlude.git",
       branch: "agent/issue-28",
     });
-
     expect(createContainerSpy).toHaveBeenCalledTimes(1);
-    const opts = createContainerSpy.mock.calls[0][0] as {
+    return createContainerSpy.mock.calls[0][0] as unknown as {
+      Env?: string[];
       HostConfig?: { Binds?: unknown };
     };
+  };
+
+  it("grants no host bind mount", async () => {
+    const opts = await created();
     expect(opts.HostConfig?.Binds).toBeUndefined();
+  });
+
+  /**
+   * Issue #172: no long-lived credential in the *persistent* container
+   * environment. Lane auth is exec-scoped, so a container that outlives a turn
+   * — a parked pass, an idle interactive session — holds nothing readable. The
+   * mocked config deliberately supplies both an API key and a subscription
+   * token; neither may appear here.
+   */
+  it("puts no model-provider credential in the persistent container env", async () => {
+    const opts = await created();
+    const env = opts.Env ?? [];
+    for (const name of [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "GH_TOKEN",
+      "GIT_AUTH_TOKEN",
+    ]) {
+      expect(env.some((e) => e.startsWith(`${name}=`))).toBe(false);
+    }
+    expect(env.join(" ")).not.toContain("sk-ant-");
   });
 });

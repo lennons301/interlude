@@ -1,0 +1,102 @@
+# Execution lanes (issue #172).
+#
+# A lane is how a pass actually gets run: which harness adapter, authenticated
+# with which environment variables, against which endpoint, with which model
+# identifier standing behind each tier, under which caps, on which billing
+# posture. Making that a named bundle is what turns "swap the subscription for
+# a metered API" from a code change into a configuration change.
+#
+# Two rules this file exists to keep honest:
+#
+#   1. **Secrets appear only as environment-variable NAMES, never values.** The
+#      `auth` mapping reads `HARNESS_VARIABLE: ORCHESTRATOR_VARIABLE` — the
+#      variable the harness reads on the left, the orchestrator variable
+#      holding the secret on the right. The resolver reads the named variable
+#      at execution time and hands the value to that one exec, never to the
+#      persistent container environment and never to the database. The parser
+#      enforces the shape (`^[A-Z][A-Z0-9_]*$`), so an inlined secret is a
+#      parse error rather than a leak.
+#   2. **Shape lives here; tuning lives in the UI.** Which lanes exist, which
+#      adapter, which endpoint, which variables and which model identifiers are
+#      a reviewable architectural fact, so they are version-controlled. Which
+#      lane is primary is an operator decision, so it is settable on the
+#      settings screen (and falls through to `AGENT_LANE`, then to the
+#      preference order below).
+#
+# Because several providers expose Anthropic-compatible endpoints, every lane
+# here runs the SAME adapter — Claude Code — and differs only in base URL,
+# auth variable and model identifiers. That is the point: one adapter ships.
+
+# The default primary, in preference order: the first lane whose named
+# variables are all present wins. This reproduces exactly what the platform did
+# before lanes existed — prefer the subscription token, fall back to an API key
+# — and it is deliberately a short list of Anthropic-direct lanes, so a
+# deployment can never *default* onto a lane that spends real money at a
+# third party. An operator's explicit choice (settings screen, or AGENT_LANE)
+# outranks this list and is honoured even when that lane is unavailable, so a
+# missing credential is reported rather than routed around.
+primary:
+  - claude-subscription
+  - anthropic-api
+
+lanes:
+  - id: claude-subscription
+    label: Claude subscription
+    adapter: claude-code
+    billing: subscription
+    # A long-lived token from `claude setup-token`, exec-scoped into the
+    # container — the VPS-verified live path (#48), unchanged by lanes.
+    auth:
+      CLAUDE_CODE_OAUTH_TOKEN: CLAUDE_CODE_OAUTH_TOKEN
+    # No base_url: Anthropic's own endpoint, which is the only one a
+    # subscription OAuth token authenticates against.
+    models:
+      # The CLI's own short aliases, which is what every pass has run on since
+      # issue #74 — so "all existing passes run through this lane unchanged"
+      # is a fact about these three lines.
+      heavy: opus
+      standard: sonnet
+      light: haiku
+
+  - id: anthropic-api
+    label: Anthropic API
+    adapter: claude-code
+    billing: metered
+    auth:
+      ANTHROPIC_API_KEY: ANTHROPIC_API_KEY
+    models:
+      heavy: opus
+      standard: sonnet
+      light: haiku
+    caps:
+      # Real money. Declared here and reported on the settings screen, but
+      # NOT yet enforced: spending against it is issue #175's overflow
+      # guardrail (confirm-once-per-day, then capped). Until that lands, the
+      # cap is a stated intent, and the only way work reaches this lane is an
+      # operator deliberately making it primary.
+      daily_budget_usd: 20
+
+  - id: openrouter
+    label: OpenRouter
+    adapter: claude-code
+    billing: metered
+    # Claude Code sends ANTHROPIC_AUTH_TOKEN as `Authorization: Bearer`, which
+    # is what OpenRouter expects; ANTHROPIC_API_KEY (an x-api-key header) is
+    # deliberately not set for this lane. The credential is provisioned in
+    # Doppler as OPENROUTER_API_KEY — the name on the right is the one the
+    # orchestrator reads, so the two sides differing here is the whole reason
+    # auth is a mapping rather than a list.
+    auth:
+      ANTHROPIC_AUTH_TOKEN: OPENROUTER_API_KEY
+    # Not /api/v1: Claude Code appends its own /v1/messages, so the OpenAI-shaped
+    # base URL would resolve to /api/v1/v1/messages.
+    base_url: https://openrouter.ai/api
+    models:
+      # OpenRouter slugs, not CLI aliases. Anthropic models by default, because
+      # a lane's job is to change who bills for the work, not to change what
+      # the work is run by — retune these here without touching code.
+      heavy: anthropic/claude-opus-4.1
+      standard: anthropic/claude-sonnet-4.5
+      light: anthropic/claude-haiku-4.5
+    caps:
+      daily_budget_usd: 20

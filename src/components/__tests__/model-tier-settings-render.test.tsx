@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { SettingFieldView } from "@/lib/settings-resolver";
+import { ModelTierPanel } from "../model-tier-settings";
 
 /**
  * The provenance half of the settings panel (issue #166). The value in force is
@@ -9,21 +10,10 @@ import type { SettingFieldView } from "@/lib/settings-resolver";
  * it would fall back to. That reading is the contract, so it is asserted rather
  * than left to a class-string edit to quietly drop.
  *
- * The loaded state is stood up by mocking the one GET hook: what matters here
- * is what the panel says about a resolved field, not how it fetched it.
+ * The panel is presentational — it is handed a resolved field and renders it —
+ * so the test hands it one directly. Fetching is `SettingsOverrides`'s job,
+ * shared with the lane panel because a tier's model id comes from the lane.
  */
-let fields: SettingFieldView[] = [];
-
-vi.mock("@/lib/use-load", () => ({
-  useLoad: () => ({
-    data: { fields, updatedAt: null },
-    error: null,
-    reload: () => {},
-    setData: () => {},
-  }),
-}));
-
-import { ModelTierSettings } from "../model-tier-settings";
 
 function field(over: Partial<SettingFieldView> = {}): SettingFieldView {
   return {
@@ -42,8 +32,16 @@ function field(over: Partial<SettingFieldView> = {}): SettingFieldView {
 }
 
 function render(over: Partial<SettingFieldView> = {}): string {
-  fields = [field(over)];
-  return renderToStaticMarkup(<ModelTierSettings />);
+  return renderToStaticMarkup(
+    <ModelTierPanel
+      fields={[field(over)]}
+      updatedAt={null}
+      busyKey={null}
+      disabled={false}
+      saveError={null}
+      onChoose={() => {}}
+    />
+  );
 }
 
 describe("the model-tier settings panel", () => {

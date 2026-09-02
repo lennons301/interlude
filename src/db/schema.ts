@@ -124,11 +124,26 @@ export const runs = sqliteTable("runs", {
   budgetUsd: real("budget_usd").notNull(),
   // Per-exec turn limit from a ticket's max-turns directive; null = default
   maxTurns: int("max_turns"),
+  // Execution lane the implement pass ran on (issue #172) — the id of a lane
+  // declared in `lanes.yaml`. Recorded so a run's spend stays interpretable:
+  // the same dollar figure means subscription quota on one lane and real money
+  // on another, and without the lane there is no way to tell them apart after
+  // the fact. Set when the implement pass starts; null for a run that predates
+  // lanes, and for an interactive task (which has no run row at all).
+  lane: text("lane"),
   // Model the implement pass ran on (issue #74), so this run's spend is
   // interpretable against its tier. A ticket's `model:` directive (issue #80)
   // pins it from claim time; otherwise it is set when the implement pass
   // starts. Null means AGENT_MODEL was unset (no directive) and the CLI
   // resolved the account default.
+  //
+  // Holds a *tier* (`heavy`/`standard`/`light`) since lanes (issue #172), not
+  // the identifier it resolved to — the column is read back as the run's
+  // directive on every later pass of the same attempt, and a lane-specific
+  // identifier names no tier, so storing one would drop the directive. Read
+  // it beside `lane` to recover the identifier. The one exception is an
+  // environment that pins a raw model id naming no tier: that is stored
+  // verbatim, because there is no tier to store.
   model: text("model"),
   // Reasoning-effort level the implement pass ran at (issue #81) — the other
   // half of the cost/quality dial alongside model. A ticket's `effort:`

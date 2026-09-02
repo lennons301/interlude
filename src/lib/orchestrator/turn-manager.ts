@@ -6,7 +6,7 @@ import {
   observeContainerAbsent,
   createWorkspaceContainer,
   execSetup,
-  execClaudeTurn,
+  execAgentTurn,
   execFallbackCommitAndPush,
   removeContainer,
   stopContainer,
@@ -15,7 +15,7 @@ import {
 } from "../docker/container-manager";
 import { checkMemoryAdmission } from "./capacity";
 import { runBoundedProbe } from "../timeout";
-import { createOutputHandler, type TurnResult } from "./output-parser";
+import { type TurnResult } from "./output-parser";
 import { getStreamRecorder } from "./stream-recorder";
 import { parseReviewVerdict } from "./autonomy/verdict";
 import { parseTriageExit } from "./autonomy/triage";
@@ -31,12 +31,15 @@ import {
 import { scanPorts } from "./port-scanner";
 import {
   getConfig,
-  resolveAgentModel,
   resolveAgentEffort,
   type AgentPassKind,
 } from "../config";
 import { getSettingsOverrides } from "../settings";
+import { getLaneCatalog } from "../lanes/catalog";
+import { resolveLane, type ResolvedLane } from "../lanes/resolve";
+import { getHarnessAdapter } from "../harness/registry";
 import { getDocker } from "../docker/client";
+import { getInstallationToken } from "../github/client";
 import { commentOnIssue, parseIssueRef } from "../github/issues";
 import { parseRepoFromGitUrl } from "../github/repo";
 import { createDraftPr, markPrReady, shouldOpenDraftPr } from "../github/pull-requests";
@@ -298,66 +301,6 @@ export async function startTask(taskId: string): Promise<void> {
     ? db.select().from(runs).where(eq(runs.id, task.runId)).get()
     : undefined;
 
-  // The model this pass runs on, pinned by kind (issue #74) and, for an
-  // implement-shaped or interactive pass, overridable by the run's `model:`
-  // directive (issue #80). Passed to every turn as `--model` and recorded on
-  // the run row below so spend is interpretable against the tier it was
-  // earned on.
-  // Read fresh from the settings row, not from a cached config: a UI-set tier
-  // (issue #166) has to reach the next pass without a restart, and
-  // `getConfig()` memoises on first read.
-  const passModel = resolveAgentModel(
-    task.kind,
-    getConfig(),
-    run?.model ?? null,
-    getSettingsOverrides()
-  );
-
-  // The reasoning-effort level this pass runs at (issue #81), the other half
-  // of the cost/quality dial. Pinned by kind and, for an implement-shaped or
-  // interactive pass, overridable by the run's `effort:` directive. Passed to
-  // every turn as `--effort` and recorded on the run row below.
-  const passEffort = resolveAgentEffort(task.kind, getConfig(), run?.effort ?? null);
-
-  // Update task status
-  updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
-  insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
-
-  // Only an implement-shaped pass moves the run to `implementing` — a review
-  // pass starting must not drag a `reviewing`/`gated` run backwards. A repair
-  // pass keeps the run's original startedAt so the dashboard's elapsed time
-  // does not jump when a conflict is repaired mid-life.
-  if (run && isImplementShaped) {
-    // Record the implement-pass model and effort on the run — they drive the
-    // bulk of a run's spend, so they are the tier and depth the run's cost
-    // should be read against. A review pass writes its own (cheaper/lower)
-    // model and effort nowhere on the run, leaving these stable. Repair keeps
-    // the original implement values (same tier and depth).
-    db.update(runs)
-      .set({
-        status: "implementing",
-        startedAt: run.startedAt ?? new Date(),
-        model: passModel,
-        effort: passEffort,
-      })
-      .where(eq(runs.id, run.id))
-      .run();
-  }
-
-  // Notify Discord channel that task is queued — but not for tasks created
-  // from Discord, which already got their queued embed posted in client.ts,
-  // and not for autonomous passes: their lifecycle lives on the issue thread
-  // and Discord stays push-only for exceptional events.
-  if (proj.discordChannelId && !task.discordMessageId && !isAutonomousPass) {
-    notifyTaskQueued(proj.discordChannelId, {
-      id: taskId,
-      title: task.title,
-      projectName: proj.name,
-    }).then((msgId) => {
-      if (msgId) updateTask(taskId, { discordMessageId: msgId });
-    }).catch(console.error);
-  }
-
   let running: RunningContainer | null = null;
   // Whether the initial turn reached a terminal agent result (a `result`
   // event). Stays false if the container dies mid-turn — the signal the catch
@@ -365,7 +308,87 @@ export async function startTask(taskId: string): Promise<void> {
   // (issue #97).
   let producedResult = false;
 
+  // Everything from here is inside the failure path. Lane resolution
+  // (issue #172) is why the boundary sits this early: an unavailable lane is a
+  // routinely reachable misconfiguration, and a throw *outside* the try would
+  // leave the task `queued` for the poll loop to pick up again every two
+  // seconds forever. Inside, it fails the task with the reason on the feed,
+  // and an implement pass routes to the bounded interruption path like any
+  // other infra death.
   try {
+    // The execution lane this pass runs on (issue #172): the harness adapter,
+    // the endpoint, the credentials and the model identifier standing behind the
+    // tier that kind of pass runs at — pinned by kind (issue #74) and, for an
+    // implement-shaped or interactive pass, overridable by the run's `model:`
+    // directive (issue #80).
+    //
+    // Resolved *before* the container is provisioned, so a lane whose named
+    // variables are absent fails the pass here, naming them, rather than dying
+    // inside a live harness twenty seconds later with "Not logged in".
+    //
+    // Read fresh from the settings row, not from a cached config: a UI-set tier
+    // or lane (issues #166, #172) has to reach the next pass without a restart,
+    // and `getConfig()` memoises on first read.
+    const passLane = requireLane(task.kind, run?.model ?? null);
+    const passModel = passLane.model;
+
+    // The reasoning-effort level this pass runs at (issue #81), the other half
+    // of the cost/quality dial. Pinned by kind and, for an implement-shaped or
+    // interactive pass, overridable by the run's `effort:` directive. Passed to
+    // every turn as `--effort` and recorded on the run row below.
+    const passEffort = resolveAgentEffort(task.kind, getConfig(), run?.effort ?? null);
+
+    // Update task status
+    updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
+    insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
+
+    // Only an implement-shaped pass moves the run to `implementing` — a review
+    // pass starting must not drag a `reviewing`/`gated` run backwards. A repair
+    // pass keeps the run's original startedAt so the dashboard's elapsed time
+    // does not jump when a conflict is repaired mid-life.
+    if (run && isImplementShaped) {
+      // Record the implement-pass lane, tier and effort on the run — they drive
+      // the bulk of a run's spend, so they are the substrate, tier and depth
+      // the run's cost should be read against, and the lane is what says
+      // whether that cost was subscription quota or real money (issue #172). A
+      // review pass writes its own (cheaper/lower) model and effort nowhere on
+      // the run, leaving these stable. Repair keeps the original implement
+      // values.
+      //
+      // The *tier* is what goes in `model`, not the identifier it resolved to
+      // (issue #172): this column is read back as the run's `model:` directive
+      // on every later pass, and a lane-specific identifier
+      // ("anthropic/claude-sonnet-4.5") names no tier, so recording it would
+      // silently drop the directive the moment the fleet left an
+      // alias-mapped lane. With the lane recorded beside it, tier + lane still
+      // gives the identifier. A pinned raw id (no tier) is recorded verbatim,
+      // exactly as before.
+      db.update(runs)
+        .set({
+          status: "implementing",
+          startedAt: run.startedAt ?? new Date(),
+          lane: passLane.id,
+          model: passLane.tier ?? passModel,
+          effort: passEffort,
+        })
+        .where(eq(runs.id, run.id))
+        .run();
+    }
+
+    // Notify Discord channel that task is queued — but not for tasks created
+    // from Discord, which already got their queued embed posted in client.ts,
+    // and not for autonomous passes: their lifecycle lives on the issue thread
+    // and Discord stays push-only for exceptional events.
+    if (proj.discordChannelId && !task.discordMessageId && !isAutonomousPass) {
+      notifyTaskQueued(proj.discordChannelId, {
+        id: taskId,
+        title: task.title,
+        projectName: proj.name,
+      }).then((msgId) => {
+        if (msgId) updateTask(taskId, { discordMessageId: msgId });
+      }).catch(console.error);
+    }
+
     // Create container. Review and triage passes receive no credential beyond
     // the App token their setup uses for cloning — not even the project's
     // Doppler secrets: they read code, they don't run the app. A repair pass
@@ -455,7 +478,7 @@ export async function startTask(taskId: string): Promise<void> {
           ? undefined
           : (run?.maxTurns ?? undefined),
       captureRaw: isReviewPass || isTriagePass,
-      model: passModel,
+      lane: passLane,
       effort: passEffort,
       // A generation session's exec gets a `gh` token; no autonomous pass does (#62).
       isGenerationSession: isGenerationSession(task),
@@ -646,6 +669,74 @@ export async function startTask(taskId: string): Promise<void> {
 }
 
 /**
+ * The execution lane one pass runs on, or a throw naming what is missing
+ * (issue #172).
+ *
+ * Read fresh on every call rather than resolved once per pass: the catalog
+ * itself is checked-in and cached, but which lane is primary lives on the
+ * settings row, so a follow-up turn picks up a lane changed mid-session for
+ * the same reason it picks up a tier changed mid-session.
+ *
+ * Throws rather than falling back. An unavailable lane is a configuration
+ * fact, and the two wrong answers here — run on some other lane, or provision
+ * a container and let the harness fail — are respectively "spend money nobody
+ * authorised" and "the failure mode this ticket exists to remove".
+ */
+function requireLane(
+  kind: AgentPassKind,
+  ticketModel: string | null
+): ResolvedLane {
+  const catalog = getLaneCatalog();
+  if (!catalog.ok) {
+    throw new Error(`No usable execution lanes — ${catalog.reason}`);
+  }
+  const resolution = resolveLane({
+    catalog: catalog.catalog,
+    kind,
+    config: getConfig(),
+    ticketModel,
+    overrides: getSettingsOverrides(),
+    env: process.env,
+  });
+  if (!resolution.ok) throw new Error(resolution.reason);
+  return resolution.lane;
+}
+
+/**
+ * The lane a follow-up turn runs on, or null with the reason on the task's
+ * feed (issue #172).
+ *
+ * The note is written at most once per stretch of failure: this is called from
+ * a two-second poll, so an unfixed misconfiguration would otherwise bury the
+ * conversation under thousands of identical lines. Comparing against the
+ * latest message is enough — anything the owner or the agent says in between
+ * makes the note current news again.
+ */
+function laneForFollowUp(
+  taskId: string,
+  kind: AgentPassKind,
+  ticketModel: string | null
+): ResolvedLane | null {
+  try {
+    return requireLane(kind, ticketModel);
+  } catch (err) {
+    const text = `Cannot start this turn — ${err instanceof Error ? err.message : String(err)}`;
+    const latest = db
+      .select({ content: messages.content })
+      .from(messages)
+      .where(eq(messages.taskId, taskId))
+      .orderBy(desc(messages.createdAt))
+      .limit(1)
+      .get();
+    if (latest?.content !== JSON.stringify({ text })) {
+      insertSystemMessage(taskId, text);
+      console.error(`[orchestrator] ${taskId}: ${text}`);
+    }
+    return null;
+  }
+}
+
+/**
  * How long the recorder will wait for the daemon to say what an exec exited
  * with (issue #165). Deliberately *not* the shared `DOCKER_PROBE_TIMEOUT_MS`,
  * and shorter than it: every other bounded Docker probe in the fleet is
@@ -681,36 +772,51 @@ async function observeExecExitCode(exec: {
 }
 
 /**
- * Run a single Claude turn and stream output to DB. With `captureRaw` the
- * raw stream-json is also returned — a review pass's verdict is parsed from
- * it after the turn ends.
+ * Run a single agent turn and stream output to DB. With `captureRaw` the
+ * raw stream is also returned — a review pass's verdict is parsed from it
+ * after the turn ends.
+ *
+ * The command, the exec environment and the output handler all come from the
+ * harness adapter the resolved lane names (issue #172), so this function is
+ * the orchestration around a turn and knows nothing about the harness itself.
  */
 async function runTurn(
   taskId: string,
   running: RunningContainer,
   prompt: string,
-  sessionId?: string,
-  opts?: {
+  sessionId: string | undefined,
+  opts: {
+    lane: ResolvedLane;
     maxBudgetUsd?: number;
     maxTurns?: number;
     captureRaw?: boolean;
-    model?: string | null;
     effort?: string | null;
     isGenerationSession?: boolean;
   }
 ): Promise<TurnResult & { raw?: string }> {
-  const handler = createOutputHandler(taskId);
+  const adapter = getHarnessAdapter(opts.lane.adapter);
+  const handler = adapter.createOutputHandler(taskId);
   const rawChunks: Buffer[] = [];
 
-  const { stream, exec } = await execClaudeTurn({
+  // One fresh, short-lived App token per exec, serving both the git credential
+  // helper and — for a generation session only (#62) — `gh`.
+  const gitAuthToken = await getInstallationToken();
+
+  const { stream, exec } = await execAgentTurn({
     container: running.container,
-    prompt,
-    sessionId,
-    maxBudgetUsd: opts?.maxBudgetUsd,
-    maxTurns: opts?.maxTurns,
-    model: opts?.model,
-    effort: opts?.effort,
-    isGenerationSession: opts?.isGenerationSession,
+    command: adapter.buildCommand({
+      sessionId,
+      maxBudgetUsd: opts.maxBudgetUsd,
+      maxTurns: opts.maxTurns,
+      effort: opts.effort,
+      lane: opts.lane,
+    }),
+    env: adapter.buildExecEnv({
+      prompt,
+      gitAuthToken,
+      ghToken: opts.isGenerationSession ? gitAuthToken : null,
+      lane: opts.lane,
+    }),
   });
 
   // Race: wait for the exec stream to close OR the "result" event from Claude.
@@ -724,7 +830,7 @@ async function runTurn(
     await Promise.race([
       waitForExecStream(stream, exec, (chunk) => {
         handler.write(chunk);
-        if (opts?.captureRaw) rawChunks.push(chunk);
+        if (opts.captureRaw) rawChunks.push(chunk);
       }),
       resultReceived,
     ]);
@@ -750,7 +856,7 @@ async function runTurn(
     });
   }
 
-  if (!opts?.captureRaw) return result;
+  if (!opts.captureRaw) return result;
   return { ...result, raw: Buffer.concat(rawChunks).toString() };
 }
 
@@ -801,6 +907,23 @@ export async function processQueuedMessages(
       await completeTask(taskId);
       break;
     }
+
+    // Resolve the lane before anything is consumed (issue #172). Fresh on
+    // every follow-up turn, so a tier or lane changed mid-session applies from
+    // the next one (issue #166) — and *before* the dequeue below, because a
+    // failure after a message is marked delivered would burn the owner's turn
+    // on a misconfiguration and strand the task non-terminal.
+    //
+    // Reported rather than thrown, unlike `startTask`'s. There is no failure
+    // path to fall into here: the only caller is the poll loop's resume, whose
+    // `.catch` logs to the console, so a throw would leave the task `running`
+    // with its message queued and nothing on the feed while the loop retried
+    // every two seconds forever — the "dies with Not logged in" failure this
+    // ticket removes, re-created one layer up. Leaving the turn for a later
+    // poll is right (the fix is an env var away, and the session is otherwise
+    // healthy); saying so on the feed once is what was missing.
+    const passLane = laneForFollowUp(taskId, task.kind, run?.model ?? null);
+    if (passLane === null) break;
 
     // Find oldest undelivered user message
     const queued = db
@@ -877,14 +1000,7 @@ export async function processQueuedMessages(
       {
         maxBudgetUsd: run ? run.budgetUsd - (task.totalCostUsd ?? 0) : undefined,
         maxTurns: run?.maxTurns ?? undefined,
-        // Fresh again on a follow-up turn, so a tier changed mid-session
-        // applies from the next turn (issue #166).
-        model: resolveAgentModel(
-          task.kind,
-          config,
-          run?.model ?? null,
-          getSettingsOverrides()
-        ),
+        lane: passLane,
         effort: resolveAgentEffort(task.kind, config, run?.effort ?? null),
         // A generation session's follow-up exec gets a `gh` token too (#62).
         isGenerationSession: isGenerationSession(task),

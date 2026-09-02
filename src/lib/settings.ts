@@ -50,6 +50,17 @@ export function getFleetSettings(): FleetSettings {
     // Defensive: the column is JSON an older build wrote, so a retired key or
     // a value a since-narrowed vocabulary no longer accepts falls through to
     // the environment rather than reaching the CLI.
+    //
+    // Deliberately *without* the lane catalog (issue #172), unlike the write
+    // path. Sanitising a stored `primaryLane` against the catalog here would
+    // erase an operator's choice the moment a deploy renamed the lane — the
+    // screen would show the choice as never made, and the next PATCH of any
+    // other field would write the erasure back to the row permanently. The
+    // resolver already handles a dangling id safely *and* visibly: it falls
+    // through to the file's preference order and reports the id as
+    // `unknownChoice`, which the lane panel shows. Rejecting an undeclared
+    // lane by name is the write path's job, where the operator is there to be
+    // told.
     overrides: sanitizeOverrides(row.overrides),
     updatedAt: row.updatedAt,
   };

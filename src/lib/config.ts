@@ -7,7 +7,7 @@ import {
   DEFAULT_QUEUE_HEARTBEAT_STALE_MS,
 } from "./orchestrator/autonomy/budgets";
 import type { FleetHealthThresholds } from "./fleet/health";
-import { normalizeModelTier, tierModelId } from "./model-tiers";
+import { normalizeModelTier, type ModelTier } from "./model-tiers";
 import {
   resolveModelTier,
   type SettingsOverrides,
@@ -57,6 +57,14 @@ export interface AppConfig {
   agentModelReview: string | null;
   /** Optional cheaper-tier override for triage passes; falls back to `agentModel` */
   agentModelTriage: string | null;
+  /**
+   * The deployment's default execution lane (issue #172) — the id of a lane
+   * declared in `lanes.yaml`. Null = fall through to that file's own
+   * preference order, which is the state a fresh deployment is in. A lane
+   * picked on the settings screen outranks this, exactly as a model-tier
+   * override outranks `AGENT_MODEL`.
+   */
+  agentLane: string | null;
   /**
    * Reasoning-effort level the CLI runs an implement pass at — and the base
    * every other pass falls back to (issue #81). The headless CLI exposes this
@@ -137,6 +145,12 @@ export function getConfig(): AppConfig {
   // `claude setup-token`), with ANTHROPIC_API_KEY as an alternative. The old
   // mounted-credentials-file path was retired with the host `~/.claude` mount
   // (#28), so there is nothing to detect on disk here.
+  //
+  // These two variables are the ones the default lane preference reads (issue
+  // #172) — with neither set, both Anthropic-direct lanes are unavailable and
+  // no pass can start. Which lane a pass actually runs on, and which variables
+  // that lane names, is `lanes.yaml`'s answer, not this one; the warning stays
+  // here because it is the boot-time "you have configured nothing" case.
   if (!anthropicApiKey && !claudeCodeOauthToken) {
     console.warn(
       "Warning: No agent Claude auth configured. Set CLAUDE_CODE_OAUTH_TOKEN " +
@@ -150,6 +164,11 @@ export function getConfig(): AppConfig {
     agentModel: process.env.AGENT_MODEL ?? null,
     agentModelReview: process.env.AGENT_MODEL_REVIEW ?? null,
     agentModelTriage: process.env.AGENT_MODEL_TRIAGE ?? null,
+    // Trimmed and lowercased, so the environment and the settings screen speak
+    // the same vocabulary: the UI path normalises before storing, and an
+    // `AGENT_LANE=OpenRouter` that read as a dangling choice rather than the
+    // lane would be an unhelpful way to learn that ids are slugs (issue #172).
+    agentLane: normalizeLaneId(process.env.AGENT_LANE),
     agentEffort: normalizeEffort(process.env.AGENT_EFFORT),
     agentEffortReview: normalizeEffort(process.env.AGENT_EFFORT_REVIEW),
     agentEffortTriage: normalizeEffort(process.env.AGENT_EFFORT_TRIAGE),
@@ -222,13 +241,20 @@ export type AgentPassKind =
  * it, and the ticket chooses the model its work runs on, not the reviewer's.
  * Named once here because the model and effort resolvers both draw the line
  * and it must be the same line. */
+/** `AGENT_LANE` as a lane id, or null when unset or blank. Membership in the
+ * catalog is `resolveLane`'s answer; this only settles the casing. */
+function normalizeLaneId(raw: string | undefined): string | null {
+  const value = raw?.trim().toLowerCase();
+  return value ? value : null;
+}
+
 function isWorkPassKind(kind: AgentPassKind): boolean {
   return kind !== "review" && kind !== "triage";
 }
 
 /**
- * Which model a turn of the given kind runs on (issues #74, #80, #166), and
- * the one place the three layers of that answer are ordered:
+ * Which **tier** a turn of the given kind runs at (issues #74, #80, #166,
+ * #172), and the one place the three layers of that answer are ordered:
  *
  * 1. A ticket's `model:` directive — already normalised to a tier by the
  *    directive parser — wins, for the pass kinds that carry a run's tier
@@ -238,8 +264,14 @@ function isWorkPassKind(kind: AgentPassKind): boolean {
  * 2. Then the UI override for this pass kind, if one is set (issue #166).
  * 3. Then the environment default — `AGENT_MODEL` as the base, with
  *    `AGENT_MODEL_REVIEW` / `AGENT_MODEL_TRIAGE` for the read-heavy passes.
- *    Null means "pass no `--model`": the CLI resolves the account default,
- *    exactly as before any of this was configurable.
+ *
+ * It stops at the tier because what a tier *means* is a property of the
+ * execution lane the pass is about to run on (issue #172), not of this module
+ * — see `resolveLane`, the only caller. `pinnedModel` is the escape hatch that
+ * must keep working: an environment naming a raw model id rather than a tier
+ * (`AGENT_MODEL=claude-opus-4-8`) has no tier to map, so the id passes through
+ * verbatim. Both null means "pass no model flag": the harness resolves its own
+ * default, exactly as before any of this was configurable.
  *
  * `overrides` is explicit rather than fetched here, and has no default, so a
  * new call site has to decide where it reads them from — the answer is
@@ -247,20 +279,24 @@ function isWorkPassKind(kind: AgentPassKind): boolean {
  * `getConfig()` memoises and a UI override cannot ride on something that never
  * re-reads.
  */
-export function resolveAgentModel(
+export function resolveAgentModelChoice(
   kind: AgentPassKind,
   config: AppConfig,
   ticketModel: string | null,
   overrides: SettingsOverrides
-): string | null {
+): { tier: ModelTier | null; pinnedModel: string | null } {
   if (isWorkPassKind(kind)) {
     // A tier or a legacy alias (`opus`) both resolve; anything else — a raw
     // model id previously recorded on the run row, say — names no tier and
     // falls through to the configured default rather than reaching `--model`.
     const ticketTier = normalizeModelTier(ticketModel);
-    if (ticketTier !== null) return tierModelId(ticketTier);
+    if (ticketTier !== null) return { tier: ticketTier, pinnedModel: null };
   }
-  return resolveModelTier(kind, config, overrides).model;
+  const resolved = resolveModelTier(kind, config, overrides);
+  return {
+    tier: resolved.tier,
+    pinnedModel: resolved.tier === null ? resolved.model : null,
+  };
 }
 
 /**
