@@ -34,10 +34,10 @@
  *    call, so a gate held by a stale rejection would suppress the very traffic
  *    that would lift it — the fleet would wedge until a human ran an
  *    interactive turn. An observation is spent once its stated reset has
- *    passed, or — for one that stated none — once it is older than the
- *    shortest unified window. Reopening is self-correcting: the next pass
- *    observes the wall again within seconds and the gate closes again, which
- *    costs one probe; never reopening costs the fleet.
+ *    passed, or — for one that stated none — once it is older than
+ *    {@link QUOTA_OBSERVATION_STALE_MS}. Reopening is self-correcting: the
+ *    next pass observes the wall again within seconds and the gate closes
+ *    again; never reopening costs the fleet everything.
  */
 
 import type { QuotaObservation } from "./rate-limit-event";
@@ -75,9 +75,25 @@ export const QUOTA_THRESHOLD_OPTIONS = [
 ] as const;
 
 /**
- * How long an observation that stated no reset time goes on gating. The
- * shortest unified window is five hours, so a gate held on a reset-less
- * observation can outlive at most one window before the fleet probes again.
+ * How long an observation that stated no reset time goes on gating.
+ *
+ * Timed from when the fleet *saw* it, because that is the only clock such an
+ * event carries — it says nothing about where in its window it sits. So the
+ * worst case is genuinely bad: an event seen four hours into a five-hour window
+ * holds pickup for five hours from then, roughly four hours past the real
+ * reset, on a fleet with nothing else to do. That is accepted rather than
+ * tightened, because the asymmetry runs the other way from the usual one:
+ * reopening early does not merely cost "a probe", it costs a *ticket* one of
+ * its three attempts. A rejected pass exits in about two seconds (#165's
+ * finding 5) and is recorded as a failed attempt like any other, so a fleet
+ * that probed every half hour through a long wall would burn three real
+ * tickets to a human before the window reopened. Waiting is the cheaper
+ * mistake.
+ *
+ * It only ever binds the reset-less case. A rejection carries `resetsAt` (#167)
+ * and is released exactly at it; the events observed without one are
+ * `allowed_warning`, where the fleet is stopping short on purpose and has lost
+ * nothing by stopping a while longer.
  */
 export const QUOTA_OBSERVATION_STALE_MS = 5 * 60 * 60 * 1000;
 

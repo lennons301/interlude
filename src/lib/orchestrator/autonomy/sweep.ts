@@ -9,6 +9,7 @@ import { db } from "@/db";
 import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { newId } from "../../ulid";
+import { processSingleton } from "../../process-singleton";
 import { getConfig, PLATFORM_REPO_URL } from "../../config";
 import { getFleetSettings } from "../../settings";
 import { resolveQuotaThreshold } from "../../settings-resolver";
@@ -160,10 +161,24 @@ let fleetHealthState: FleetHealthState = EMPTY_FLEET_HEALTH_STATE;
 // day rather than a boolean so the announcement re-arms itself at midnight.
 let dailyCapAnnouncedDay: number | null = null;
 // Whether the quota gate's current closed spell has been announced (issue
-// #171) — one Discord ping per transition, not one per 30s sweep. In-memory
-// like the saturation and cap flags beside it, and cleared the moment the gate
-// opens, which is what makes the *next* wall audible again.
-let quotaGateAnnounced = false;
+// #171) — one Discord ping per transition, not one per 30s sweep, cleared the
+// moment the gate opens so the *next* wall is audible again.
+//
+// On `globalThis` rather than beside the saturation and cap flags above, even
+// though it plays the same role, because a webhook-triggered sweep runs on the
+// app-router module graph (#159) where a plain module-level flag is that
+// graph's own, freshly false — so one webhook arriving under a standing wall
+// would double-post the embed. A Discord call is the one thing this codebase
+// says must never be repeated on a maybe (#151: an abandoned call is never
+// retried, because the attempt may still have landed). The older two flags are
+// deliberately left as they are: they are part of the same known split, and
+// moving one at a time without the sweep's other cross-graph state
+// (`fleetHealthState`, `sweeping`, `inFlightClaims`) would imply a fix that is
+// not there.
+const quotaGateAnnouncement = processSingleton(
+  "autonomy.quotaGateAnnounced",
+  () => ({ announced: false })
+);
 const inFlightClaims = new Set<string>();
 // Run IDs whose gate-config failure the owner has already been told about —
 // once per failure, not once per sweep. Pruned as runs leave the pending set.
@@ -262,11 +277,11 @@ export async function runAutonomySweep(): Promise<void> {
         snapshot.now
       ).closed
     ) {
-      quotaGateAnnounced = false;
+      quotaGateAnnouncement.announced = false;
     } else if (
       actions.some((a) => a.type === "notify" && a.event === "quota-gate-closed")
     ) {
-      quotaGateAnnounced = true;
+      quotaGateAnnouncement.announced = true;
     }
 
     // Fleet-health watchdog (issue #126): surface silent pickup/review stalls.
@@ -668,7 +683,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     quota: getQuotaObservation(),
     quotaThresholdPercent: resolveQuotaThreshold(config, settings.overrides)
       .percent,
-    quotaGateAnnounced,
+    quotaGateAnnounced: quotaGateAnnouncement.announced,
     // MAX_BUDGET_USD is the per-attempt default since Phase 5 (a ticket's
     // budget: directive may raise a single attempt to the $75 ceiling)
     attemptBudgetUsd: config.maxBudgetUsd,

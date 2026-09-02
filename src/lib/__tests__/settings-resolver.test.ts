@@ -31,7 +31,7 @@ function cfg(models: {
   agentModel?: string | null;
   agentModelReview?: string | null;
   agentModelTriage?: string | null;
-  quotaPickupThresholdPercent?: number | null;
+  quotaPickupThresholdPercent?: string | null;
 } = {}): AppConfig {
   return {
     agentModel: models.agentModel ?? null,
@@ -276,13 +276,13 @@ describe("the quota pickup threshold", () => {
 
   it("takes the environment when it is set, and says so", () => {
     expect(
-      resolveQuotaThreshold(cfg({ quotaPickupThresholdPercent: 80 }), NONE)
+      resolveQuotaThreshold(cfg({ quotaPickupThresholdPercent: "80" }), NONE)
     ).toMatchObject({ percent: 80, source: "environment", envValue: "80" });
   });
 
   it("lets an override win, and still names what clearing it falls back to", () => {
     expect(
-      resolveQuotaThreshold(cfg({ quotaPickupThresholdPercent: 80 }), {
+      resolveQuotaThreshold(cfg({ quotaPickupThresholdPercent: "80" }), {
         quotaPickupThresholdPercent: "95",
       })
     ).toMatchObject({
@@ -291,6 +291,18 @@ describe("the quota pickup threshold", () => {
       override: 95,
       envValue: "80",
     });
+  });
+
+  it("refuses an environment value outside the set, and still shows what was set", () => {
+    // Collapsing it to "unset" would read back on the screen as a variable
+    // nobody had set — the one surprise the provenance line exists to remove.
+    const resolved = resolveQuotaThreshold(
+      cfg({ quotaPickupThresholdPercent: "93" }),
+      NONE
+    );
+
+    expect(resolved.percent).toBe(DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT);
+    expect(resolved.envValue).toBe("93");
   });
 
   it("falls through rather than throwing on a stored value it cannot read", () => {

@@ -7,7 +7,6 @@ import {
   DEFAULT_QUEUE_HEARTBEAT_STALE_MS,
 } from "./orchestrator/autonomy/budgets";
 import type { FleetHealthThresholds } from "./fleet/health";
-import { QUOTA_THRESHOLD_OPTIONS } from "./quota/quota-gate";
 import { normalizeModelTier, tierModelId } from "./model-tiers";
 import {
   resolveModelTier,
@@ -38,28 +37,6 @@ function normalizeEffort(raw: string | undefined): string | null {
   console.warn(
     `Warning: ignoring unrecognised effort "${raw}" — expected one of ` +
       `${ALLOWED_TICKET_EFFORTS.join(", ")}. Falling back to the CLI default.`
-  );
-  return null;
-}
-
-/**
- * Validate `QUOTA_PICKUP_THRESHOLD_PERCENT` against the same fixed set the
- * settings UI offers (issue #171). Unset stays null, so the gate falls through
- * to its own default; a set-but-unrecognised value warns and falls through
- * too, rather than gating the whole fleet on a typo — an environment value is
- * refused exactly as a UI one is, never clamped into something nobody asked
- * for.
- */
-function parseQuotaThresholdEnv(raw: string | undefined): number | null {
-  if (raw == null || raw === "") return null;
-  const trimmed = raw.trim();
-  if ((QUOTA_THRESHOLD_OPTIONS as readonly string[]).includes(trimmed)) {
-    return parseInt(trimmed, 10);
-  }
-  console.warn(
-    `Warning: ignoring unrecognised QUOTA_PICKUP_THRESHOLD_PERCENT "${raw}" — ` +
-      `expected one of ${QUOTA_THRESHOLD_OPTIONS.join(", ")}. Falling back to ` +
-      "the built-in quota pickup threshold."
   );
   return null;
 }
@@ -148,15 +125,16 @@ export interface AppConfig {
   fleetHealthThresholds: FleetHealthThresholds;
   /**
    * Quota utilization (percent) at or above which no new ticket is claimed
-   * (issue #171), from QUOTA_PICKUP_THRESHOLD_PERCENT. Null = the variable is
-   * unset, and the gate falls through to
-   * DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT — which is also what the settings
-   * screen reports as the fall-back, so "unset" stays one state rather than
-   * being seeded here into a number no operator chose. A value this build
-   * would refuse from the UI is refused from the environment too, for the same
-   * reason: a threshold nobody can read back is a gate nobody can reason about.
+   * (issue #171), from QUOTA_PICKUP_THRESHOLD_PERCENT — held **verbatim**, as
+   * `agentModel` is, and validated in `resolveQuotaThreshold` rather than here.
+   * Null means the variable is genuinely unset, and only that: a value this
+   * build would refuse from the UI is refused from the environment too, but it
+   * still reaches the settings screen as what the operator actually typed. A
+   * value silently collapsed to "unset" here would read back on the screen as a
+   * variable nobody had set, which is exactly the surprise the provenance line
+   * exists to remove.
    */
-  quotaPickupThresholdPercent: number | null;
+  quotaPickupThresholdPercent: string | null;
 }
 
 let _config: AppConfig | null = null;
@@ -233,9 +211,8 @@ export function getConfig(): AppConfig {
         DEFAULT_OCCUPANCY_DIVERGED_MS
       ),
     },
-    quotaPickupThresholdPercent: parseQuotaThresholdEnv(
-      process.env.QUOTA_PICKUP_THRESHOLD_PERCENT
-    ),
+    quotaPickupThresholdPercent:
+      process.env.QUOTA_PICKUP_THRESHOLD_PERCENT || null,
   };
 
   return _config;

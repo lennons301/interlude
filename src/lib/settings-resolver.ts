@@ -177,10 +177,10 @@ function quotaThresholdField(): SettingSpec {
     vocabulary: () => QUOTA_THRESHOLD_OPTIONS.join(", "),
     envDefault: (config) => ({
       envVar: "QUOTA_PICKUP_THRESHOLD_PERCENT",
-      value:
-        config.quotaPickupThresholdPercent === null
-          ? null
-          : String(config.quotaPickupThresholdPercent),
+      // Verbatim, including a value this build refuses: the screen's job is to
+      // say what the deployment actually set, and a refused one shown beside
+      // the default now in force is how an operator finds their typo.
+      value: config.quotaPickupThresholdPercent,
     }),
     detail: (config, overrides) => ({
       kind: "percent",
@@ -486,10 +486,16 @@ export function resolveQuotaThreshold(
     };
   }
 
+  // The environment is read through the same `normalize` an override is, so a
+  // typo there is refused rather than clamped, exactly as it would be from the
+  // UI — and falls through to the built-in default, which is the third layer a
+  // gate needs and a model tier does not.
+  const fromEnv = envValue === null ? null : spec.normalize(envValue);
   return {
     percent:
-      config.quotaPickupThresholdPercent ??
-      DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT,
+      fromEnv === null
+        ? DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT
+        : parseInt(fromEnv, 10),
     source: "environment",
     override: null,
     envVar,
