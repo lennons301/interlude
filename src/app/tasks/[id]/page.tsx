@@ -37,6 +37,7 @@ export default async function TaskDetailPage({
         pullRequestNumber: task.pullRequestNumber ?? null,
         pullRequestUrl: task.pullRequestUrl ?? null,
         sessionSkill: task.sessionSkill ?? null,
+        kind: task.kind,
       }}
       domain={process.env.DOMAIN ?? null}
     />
