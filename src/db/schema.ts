@@ -211,6 +211,14 @@ export const runs = sqliteTable("runs", {
   // resume needs. A quota pause consumes neither an attempt nor an
   // interruption, so there is no counter here to bump.
   resumeAfter: int("resume_after", { mode: "timestamp_ms" }),
+  // Times this attempt has been resumed after a quota pause (issue #169).
+  // Bounded by the resume bound (settable in the UI, `MAX_RESUMES_PER_ATTEMPT`
+  // otherwise): past it the ticket routes to `ready-for-human` the way
+  // exhaustion does, so a pathological ticket cannot loop across quota windows
+  // forever. Deliberately its own counter and not `attempt` or
+  // `interruptionCount` — a pause spends neither, and a bound that measured
+  // one of those would change what those two numbers mean.
+  resumeCount: int("resume_count").notNull().default(0),
   blockedQuestion: text("blocked_question"),
   // A checkpoint: directive's text, stored at claim time. Non-null makes the
   // run supervised: its gate decision is forced to human-signoff regardless
