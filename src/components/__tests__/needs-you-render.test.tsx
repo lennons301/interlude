@@ -56,6 +56,7 @@ const CAP_SPENDING_RUN: FleetRows["runs"][number] = {
   ciRepairCount: 0,
   reviewVerdict: null,
   reviewResult: null,
+  resumeAfter: null,
   claimedAt: new Date(2026, 7, 1, 9, 0, 0),
   startedAt: new Date(2026, 7, 1, 9, 0, 0),
   finishedAt: new Date(2026, 7, 1, 10, 0, 0),

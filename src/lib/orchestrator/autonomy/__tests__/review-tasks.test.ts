@@ -83,6 +83,7 @@ function awaitingReviewSnapshot(hasReviewTask: boolean): AutonomySnapshot {
     // The implement pass is awaiting review, so it produced a PR (moot here —
     // completedPasses is cleared below — but keeps the outcome well-formed).
     producedPr: true,
+    rateLimited: null,
   });
   return {
     ...base,

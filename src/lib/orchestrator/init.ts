@@ -6,7 +6,8 @@ import { getDocker, isDockerAvailable } from "../docker/client";
 import { AGENT_CONTAINER_NAME_PREFIX } from "../docker/agent-containers";
 import { startQueue } from "./queue";
 import { getCapacity } from "./capacity";
-import { ACTIVE_RUN_STATUSES, startAutonomySweeps } from "./autonomy/sweep";
+import { startAutonomySweeps } from "./autonomy/sweep";
+import { ACTIVE_RUN_STATUSES, RECLAIMABLE_RUN_STATUSES } from "./run-status";
 import { startPreflightRefresh } from "./autonomy/preflight";
 import { startDailyDigest } from "./digest-schedule";
 import { getConfig } from "../config";
@@ -15,15 +16,6 @@ import { isGitHubConfigured } from "../github/client";
 import { isDiscordConfigured, startDiscordBot } from "../discord/client";
 
 let initialized = false;
-
-/**
- * The non-terminal run statuses boot recovery reclaims: a run in one of these
- * with no live turn is either interruptible (issue #24) or a dangling ghost
- * (issue #106). Deliberately excludes `gated`/`blocked` (waiting on a human)
- * and every terminal status. Named once so the two boot passes below can never
- * drift apart on which statuses count as reclaimable.
- */
-const RECLAIMABLE_RUN_STATUSES = ["claimed", "implementing", "reviewing"] as const;
 
 /**
  * Restart recovery for the runs ledger (issue #24): a run that was being
@@ -36,8 +28,10 @@ const RECLAIMABLE_RUN_STATUSES = ["claimed", "implementing", "reviewing"] as con
  *
  * A `reviewing` run whose parsed verdict is already stored is left alone —
  * acting on the verdict after a restart is exactly why it is stored on the
- * run — and `gated`/`blocked` runs are waiting on a human, not on a lost
- * turn, so re-running their implement pass would buy nothing.
+ * run — and `gated`/`blocked` runs are waiting on a human, and `rate_limited`
+ * ones (issue #168) on a clock, not on a lost turn, so re-running their
+ * implement pass would buy nothing. Which statuses those are is
+ * RECLAIMABLE_RUN_STATUSES' business, not this function's.
  *
  * Must run before recoverOrphanedTasks, which rewrites the `running` task
  * statuses this reads.

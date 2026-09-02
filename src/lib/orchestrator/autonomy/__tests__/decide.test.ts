@@ -188,6 +188,7 @@ function makePass(overrides: Partial<PassOutcome> = {}): PassOutcome {
     issueRef: "acme/widgets#7",
     finalMessage: "Implemented the frobnicator; tests and lint pass.",
     producedPr: true,
+    rateLimited: null,
     ...overrides,
   };
 }

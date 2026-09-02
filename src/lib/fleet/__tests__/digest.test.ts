@@ -75,6 +75,7 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     ciRepairCount: 0,
     reviewVerdict: null,
     reviewResult: null,
+    resumeAfter: null,
     claimedAt: aug(1, 9),
     startedAt: aug(1, 9),
     finishedAt: null,

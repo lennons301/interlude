@@ -124,6 +124,7 @@ import {
   MAX_TRIAGE_PASSES_PER_ISSUE,
   MAX_UNPARSEABLE_REVIEW_RETRIES,
 } from "./budgets";
+import { ACTIVE_RUN_STATUSES } from "../run-status";
 
 const SWEEP_INTERVAL_MS = 30_000;
 
@@ -133,15 +134,6 @@ const SWEEP_INTERVAL_MS = 30_000;
  * regardless of depth (selectRetryComments), so older guidance still lands. */
 const RETRY_COMMENT_TAIL = 20;
 
-/** Run statuses that mean "this issue is being worked" — not re-claimable,
- * and (issue #24) its containers are off-limits to the reaper. */
-export const ACTIVE_RUN_STATUSES = [
-  "claimed",
-  "implementing",
-  "reviewing",
-  "gated",
-  "blocked",
-] as const;
 const ACTIVE_RUN_STATUS_SET = new Set<string>(ACTIVE_RUN_STATUSES);
 
 let sweepInterval: ReturnType<typeof setInterval> | null = null;

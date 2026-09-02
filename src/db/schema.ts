@@ -107,6 +107,15 @@ export const runs = sqliteTable("runs", {
       "failed",
       "exhausted",
       "interrupted",
+      // Parked on the account's quota clock (issue #168): the pass was
+      // *rejected* on the account-wide rate-limit window, which is not a
+      // failure of the work and must not be counted as one. Non-terminal, and
+      // deliberately the run's own status rather than a flag on another:
+      // everything that gathers work reads `status`, so a paused run leaves
+      // every pipeline by the same door it left `implementing` by, and boot
+      // recovery leaves it alone exactly as it leaves `gated`/`blocked` — it
+      // is waiting on a clock, not on a lost turn.
+      "rate_limited",
       "cancelled",
     ],
   })
@@ -180,6 +189,13 @@ export const runs = sqliteTable("runs", {
   // escalate on a spent count. Never consumes an attempt.
   ciRepairCount: int("ci_repair_count").notNull().default(0),
   interruptionCount: int("interruption_count").notNull().default(0),
+  // When a `rate_limited` run may be tried again (issue #168) — the reset time
+  // the CLI's own `rate_limit_event` reported, stored verbatim rather than
+  // computed from a window length this build would have to guess. Null on
+  // every other status: it is set when the run pauses and is the one fact a
+  // resume needs. A quota pause consumes neither an attempt nor an
+  // interruption, so there is no counter here to bump.
+  resumeAfter: int("resume_after", { mode: "timestamp_ms" }),
   blockedQuestion: text("blocked_question"),
   // A checkpoint: directive's text, stored at claim time. Non-null makes the
   // run supervised: its gate decision is forced to human-signoff regardless

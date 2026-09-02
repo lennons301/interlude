@@ -62,6 +62,7 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     ciRepairCount: 0,
     reviewVerdict: null,
     reviewResult: null,
+    resumeAfter: null,
     claimedAt: TODAY_9AM,
     startedAt: TODAY_9AM,
     finishedAt: null,
@@ -1282,6 +1283,7 @@ describe("buildFleetView — running", () => {
         turns: 4,
         startedAt: TODAY_9AM.toISOString(),
         spend: { usd: 7.8, budgetUsd: 20 },
+        paused: null,
       },
     ]);
   });
@@ -1345,6 +1347,7 @@ describe("buildFleetView — running", () => {
         turns: 3,
         startedAt: TODAY_9AM.toISOString(),
         spend: { usd: 1.23, budgetUsd: null },
+        paused: null,
       },
     ]);
   });
@@ -1675,6 +1678,7 @@ describe("buildFleetView — running", () => {
         turns: 1,
         startedAt: TODAY_9AM.toISOString(),
         spend: { usd: 0.8, budgetUsd: 2 },
+        paused: null,
       },
     ]);
   });

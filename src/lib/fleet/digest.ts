@@ -45,6 +45,15 @@ function shortDate(date: Date): string {
   return `${DAY_NAMES[date.getDay()]} ${date.getDate()} ${MONTH_NAMES[date.getMonth()]}`;
 }
 
+/** "Wed 2 Sep 03:02" — an instant in the fleet's own timezone, hand-rolled for
+ * the same reason shortDate is (locale formatting varies by ICU build). */
+function shortDateTime(iso: string): string {
+  const at = new Date(iso);
+  const hours = String(at.getHours()).padStart(2, "0");
+  const minutes = String(at.getMinutes()).padStart(2, "0");
+  return `${shortDate(at)} ${hours}:${minutes}`;
+}
+
 export interface DigestSection {
   heading: string;
   lines: string[];
@@ -106,6 +115,13 @@ function runningLine(card: RunningCard): string {
         : `${usd(card.spend.usd)} of ${usd(card.spend.budgetUsd)}`
     );
     if (card.mode === "supervised") parts.push("supervised");
+  }
+  // A paused run is listed with the others but never as one of them (issue
+  // #168): the digest reads the same `paused` field the dashboard does, so the
+  // two surfaces cannot disagree about whether a run is being worked. The reset
+  // is stated, not counted down — a digest is read hours after it is written.
+  if (card.paused) {
+    parts.push(`paused, quota resets ${shortDateTime(card.paused.resumeAfter)}`);
   }
   return parts.join(" · ");
 }
