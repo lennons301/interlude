@@ -51,7 +51,7 @@ import {
   resolveMeteredCap,
   type MeteredSpendState,
 } from "./money";
-import { laneIsAvailable, type LaneEnv } from "./resolve";
+import { laneIsAvailable, laneMissingEnv, type LaneEnv } from "./resolve";
 
 /**
  * Just what the crossing needs to know about a lane: who it bills, and up to
@@ -236,8 +236,10 @@ export function meteredOverflowCandidates(
   return candidates;
 }
 
-/** Every declared metered lane and what it is missing — the "told why" half of
- * refusing an overflow with nowhere to go. */
+/** Every declared metered lane and the variables it is missing — the "told
+ * why" half of refusing an overflow with nowhere to go. Reached only when no
+ * candidate resolved, so a lane with nothing missing is (by construction) the
+ * lane already in force. */
 function describeUnavailableMeteredLanes(
   catalog: LaneCatalog | null,
   env: LaneEnv
@@ -248,18 +250,16 @@ function describeUnavailableMeteredLanes(
   if (metered.length === 0) {
     return "no lane in lanes.yaml bills per token";
   }
-  return metered
-    .map((lane) => {
-      const missing = lane.auth
-        .filter((ref) => {
-          const value = env[ref.fromEnv];
-          return value === undefined || value === "";
-        })
-        .map((ref) => ref.fromEnv);
-      return missing.length === 0
-        ? `${lane.id} is available but not permitted`
-        : `${lane.id} needs ${missing.join(", ")}`;
-    })
+  // `laneMissingEnv` rather than a second reading of `auth`: what makes a lane
+  // unavailable is answered in exactly one place (issue #172).
+  const unavailable = metered
+    .map((lane) => ({ id: lane.id, missing: laneMissingEnv(lane, env) }))
+    .filter((lane) => lane.missing.length > 0);
+  if (unavailable.length === 0) {
+    return "the only lane that bills per token is the one already in force";
+  }
+  return unavailable
+    .map((lane) => `${lane.id} needs ${lane.missing.join(", ")}`)
     .join("; ");
 }
 

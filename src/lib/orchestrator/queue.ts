@@ -288,6 +288,11 @@ export function startQueue(): void {
       // finish work already paid for. The hold is fleet-wide for interactive
       // passes, so skipping the whole kind is exactly the right width; the
       // task stays `queued` and starts on the poll after the press.
+      //
+      // Ahead of the slot and memory checks below, which is the precedence
+      // #171 set for the quota gate and for the same reason: a full box empties
+      // by itself in minutes, while a spent cap or an unpressed confirmation
+      // does not, so the reason worth telling the owner is this one.
       if (next?.kind === "interactive" && attendedPickupIsHeld(next.id)) {
         next = nextQueuedTask(true);
       }
