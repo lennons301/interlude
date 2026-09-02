@@ -89,6 +89,7 @@ function resolve(
     overrides?: SettingsOverrides;
     kind?: Parameters<typeof resolveLane>[0]["kind"];
     ticketModel?: string | null;
+    laneId?: string | null;
   } = {}
 ) {
   return resolveLane({
@@ -98,6 +99,7 @@ function resolve(
     ticketModel: over.ticketModel ?? null,
     overrides: over.overrides ?? {},
     env: over.env ?? EVERYTHING,
+    laneId: over.laneId,
   });
 }
 
@@ -416,6 +418,42 @@ describe("what a resolved lane carries", () => {
   it("keeps the subscription lane's mapping identical to the pre-lane one", () => {
     const result = resolve({ overrides: { modelTierImplement: "standard" } });
     expect(result.ok && result.lane.model).toBe("sonnet");
+  });
+});
+
+describe("resolving a named lane rather than the primary (issue #173)", () => {
+  it("resolves the lane it is handed, through the same path as the primary", () => {
+    // What an attended session's overflow needs: the target lane's own
+    // credentials, endpoint and tier mapping — not a second resolver.
+    const result = resolve({ laneId: "openrouter" });
+
+    expect(result.ok && result.lane.id).toBe("openrouter");
+    expect(result.ok && result.lane.billing).toBe("metered");
+    expect(result.ok && result.lane.baseUrl).toBe("https://openrouter.ai/api");
+    expect(result.ok && result.lane.auth).toEqual({
+      ANTHROPIC_AUTH_TOKEN: "sk-or-v1-test",
+    });
+  });
+
+  it("still reports the primary choice, so a caller can say where it came from", () => {
+    const result = resolve({ laneId: "openrouter" });
+
+    expect(result.choice.laneId).toBe("subscription");
+    expect(result.choice.source).toBe("preference");
+  });
+
+  it("reports the named lane's own missing variables", () => {
+    const result = resolve({ laneId: "openrouter", env: SUBSCRIBED });
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.reason).toContain("openrouter");
+    expect(!result.ok && result.reason).toContain("OPENROUTER_API_KEY");
+  });
+
+  it("falls through to the primary when handed nothing", () => {
+    expect(resolve({ laneId: null }).ok).toBe(true);
+    const result = resolve({ laneId: null });
+    expect(result.ok && result.lane.id).toBe("subscription");
   });
 });
 

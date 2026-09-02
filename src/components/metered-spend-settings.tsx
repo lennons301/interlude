@@ -47,6 +47,9 @@ interface MeteredState {
   confirmedAt: string | null;
   confirmedToday: boolean;
   metered: boolean;
+  /** Real money is going out even though the lane declares itself a
+   * subscription: an active overage is paying for it (issue #173). */
+  overage: boolean;
   hold: MeteredHold | null;
   remainingUsd: number;
   updatedAt: string | null;
@@ -239,8 +242,9 @@ export function MeteredSpendPanel() {
             Let the fleet spend real money on{" "}
             <span className="font-plex-mono">{lane?.id}</span> today? Autonomous
             passes run unattended up to <Money usd={cap.capUsd} />, after which
-            pickup pauses until midnight. The confirmation lapses on its own at
-            local midnight.
+            pickup pauses until midnight — as does an interactive session, which
+            is told it is capped rather than spending past it. The confirmation
+            lapses on its own at local midnight.
           </p>
         </ConfirmStrip>
       )}
@@ -261,6 +265,17 @@ export function MeteredSpendPanel() {
   );
 }
 
+/** Who the money is going to, in the owner's terms. An active overage bills
+ * the card while the lane in force still declares itself a subscription
+ * (issue #173), so saying "this lane bills per token" would be false about a
+ * lane that bills nothing. */
+function payer(state: MeteredState): string {
+  const lane = state.lane?.label ?? "the primary lane";
+  return state.overage
+    ? `${lane}'s window is walled and the account's overage is covering it, so the work is real money`
+    : `${lane} bills per token`;
+}
+
 /** The one-line explanation under the headline, in the owner's terms. */
 function summary(state: MeteredState): string {
   if (state.lane === null) {
@@ -270,10 +285,10 @@ function summary(state: MeteredState): string {
     return `${state.lane.label} draws on a subscription, so its work costs quota rather than cash — the cap below applies only once a metered lane is in force.`;
   }
   if (state.hold === "cap-reached") {
-    return `${state.lane.label} bills per token and today's cap is spent — autonomous pickup is paused until local midnight. Raise the cap to carry on today. In-flight runs and interactive work are unaffected.`;
+    return `${payer(state)} and today's cap is spent — autonomous pickup is paused until local midnight, and an interactive session is told it is capped rather than spending past it (issue #173). Raise the cap to carry on today. Runs already in flight are unaffected.`;
   }
   if (state.hold === "unconfirmed") {
-    return `${state.lane.label} bills per token. Autonomous pickup is held until you confirm once for today; after that it runs unattended up to the cap.`;
+    return `${payer(state)}. Autonomous pickup is held until you confirm once for today, and an interactive session asks for the same press where it is (issue #173); after that everything runs up to the cap without asking again.`;
   }
-  return `${state.lane.label} bills per token, and today is confirmed — the fleet spends up to the cap without asking again. The confirmation lapses at local midnight.`;
+  return `${payer(state)}, and today is confirmed — the fleet spends up to the cap without asking again. The confirmation lapses at local midnight.`;
 }

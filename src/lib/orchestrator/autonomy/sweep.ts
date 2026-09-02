@@ -14,7 +14,6 @@ import { getConfig, PLATFORM_REPO_URL } from "../../config";
 import { getFleetSettings } from "../../settings";
 import { resolveQuotaThreshold, resolveResumeBound } from "../../settings-resolver";
 import { evaluateQuotaGate } from "../../quota/quota-gate";
-import { getQuotaObservation } from "../../quota/quota-store";
 import {
   discardTranscript,
   hasTranscript,
@@ -706,11 +705,12 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     // rejection would close the gate over a lane that cannot be rate-limited —
     // holding every pickup on a fleet that was, on that lane, entirely free to
     // work. The gate already treats no observation as open (see its rule 1),
-    // so asking the right lane is the whole fix. The lane comes from the one
-    // resolution this tick already made for the money guards (issue #174), so
-    // the lane whose quota is judged and the lane whose spend is capped can
-    // never be different lanes.
-    quota: getQuotaObservation(money.lane?.id ?? null),
+    // so asking the right lane is the whole fix. It comes from the one read
+    // this tick already made for the money guards (issue #174), which is keyed
+    // to the lane they resolved — so the lane whose quota is judged, the lane
+    // whose spend is capped, and the lane an overage is read against
+    // (issue #173) can never be three different lanes.
+    quota: money.quota,
     quotaThresholdPercent: resolveQuotaThreshold(config, settings.overrides)
       .percent,
     quotaGateAnnounced: quotaGateAnnouncement.announced,
@@ -726,7 +726,10 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     dailyCapUsd: DAILY_AUTONOMOUS_CAP_USD,
     dailyCapAnnounced: dailyCapAnnouncedDay === startOfLocalDay(now).getTime(),
     primaryLaneId: money.lane?.id ?? null,
-    primaryLaneBilling: money.lane?.billing ?? null,
+    // The *effective* kind (issue #173): an active overage means the account
+    // is already paying cash for subscription-lane work, and the guards must
+    // see that or the wall silently becomes a bill.
+    primaryLaneBilling: money.billing,
     meteredSpendTodayUsd: money.spentTodayUsd,
     meteredCapUsd: money.cap.capUsd,
     meteredSpendConfirmedAt: settings.meteredSpendConfirmedAt,

@@ -304,6 +304,17 @@ export const tasks = sqliteTable("tasks", {
   // predates lanes.
   lane: text("lane"),
   laneBilling: text("lane_billing", { enum: ["subscription", "metered"] }),
+  // The model tier this pass ran at (issue #173) — `heavy`/`standard`/`light`,
+  // or a raw model id for an environment that pins one (naming no tier).
+  // Recorded beside the lane for the same reason the lane is recorded beside
+  // the cost: the tier is what makes a figure interpretable, and a lane's
+  // tier→identifier map is version-controlled configuration that changes under
+  // a deployment. A run carries both already; a task is where interactive
+  // spend lives, and interactive work is the only kind that crosses onto a
+  // paid lane, so without this column the one dollar figure the fleet cannot
+  // account for is the one it spent real money on. Null for a pass that
+  // predates this, and for one whose harness resolved its own default.
+  tier: text("tier"),
   containerId: text("container_id"),
   branch: text("branch"),
   sessionId: text("session_id"),

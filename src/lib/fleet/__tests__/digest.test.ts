@@ -35,6 +35,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     meteredSpendTodayUsd: 0,
     primaryLaneId: "claude-subscription",
     primaryLaneBilling: "subscription",
+    primaryLaneOverage: false,
     meteredSpendConfirmedAt: null,
     globalAutonomyPaused: false,
     // The boot master on, so every test that doesn't say otherwise describes an

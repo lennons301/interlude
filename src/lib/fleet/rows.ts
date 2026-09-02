@@ -16,7 +16,6 @@ import { getBacklogByProject } from "./backlog";
 import { getNeedsHumanByProject } from "./needs-human";
 import { getFleetHealth } from "./health-store";
 import { getFailingChecks } from "./failing-checks";
-import { getQuotaObservation } from "../quota/quota-store";
 import type { FleetLaneRow } from "./fleet-view";
 import { DAILY_AUTONOMOUS_CAP_USD } from "../orchestrator/autonomy/budgets";
 import {
@@ -117,7 +116,11 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     meteredCapUsd: money.cap.capUsd,
     meteredSpendTodayUsd: money.spentTodayUsd,
     primaryLaneId: money.lane?.id ?? null,
-    primaryLaneBilling: money.lane?.billing ?? null,
+    // The *effective* kind, not the declared one (issue #173): an active
+    // overage means the subscription lane is already being billed, and the
+    // guards must see that.
+    primaryLaneBilling: money.billing,
+    primaryLaneOverage: money.overagePaying,
     meteredSpendConfirmedAt: fleetSettings.meteredSpendConfirmedAt,
     // Read on every view build, exactly as the sweep reads it each tick — the
     // dashboard reflects a flip on its next SSE push, with no restart.
@@ -171,8 +174,10 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     // per-lane since #175), from the durable row rather than an in-memory
     // store: the writer is the stream parser in the orchestrator's module
     // graph and this read happens in the app router's, which share nothing but
-    // the database (issue #159).
-    quota: getQuotaObservation(primaryLane?.id ?? null),
+    // the database (issue #159). Taken from the guards' own read rather than
+    // read again: they need the same row to tell quota from an active overage
+    // (issue #173), and the tile and the gate must judge one instant of it.
+    quota: money.quota,
     quotaLane: primaryLane,
     // The threshold that observation is judged against (issue #171), resolved
     // from the same row and the same config the sweep reads — so the banner

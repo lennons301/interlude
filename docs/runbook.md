@@ -332,6 +332,9 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   whose event carried *no* reset time is not paused at all: with no clock to wait
   on, the pass takes its ordinary path and spends the attempt, as before. A
   tier-scoped one still steps down — a degrade waits on no clock.
+  An **interactive** session on either kind of wall does not pause or step down
+  — it crosses onto a paid lane instead, because you are sitting there waiting;
+  see *When the subscription window walls* below.
 - **A paused run resumes itself** (issue #169). Once the window resets — plus up to
   five minutes of jitter, so a fleet-wide pause does not stampede — the ordinary
   30-second sweep queues the pass again in a fresh container on the same branch,
@@ -454,12 +457,53 @@ things the dashboard does:
   open across days is split across them rather than heaped onto one. The two
   figures overlap and are shown separately (the dashboard's second gauge, the
   digest's second Spend line); never add them.
-- **What is never held.** In-flight runs, follow-up turns and interactive
-  sessions. Both guards hold *new autonomous pickup* only — a claim or a triage
-  pass — which is the same thing the daily cap and the kill switch hold.
+- **What is never held.** In-flight runs and follow-up turns of a run. Both
+  guards hold *new autonomous pickup* — a claim or a triage pass — which is the
+  same thing the daily cap and the kill switch hold, plus an interactive
+  session's own crossing (below).
 
 Switching the primary lane between billing kinds takes effect at the next sweep,
 with no restart: the guards read the lane and the settings row fresh every tick.
+
+### When the subscription window walls (interactive overflow)
+
+A walled subscription window stops autonomous work — the run parks on the
+window's clock and resumes itself when it resets. An **interactive** session
+does the opposite, because you are sitting there waiting: it crosses onto an
+available metered lane and carries on, under the guards above.
+
+What you will see, on the session's own screen and in its transcript:
+
+- **"Confirm real-money spend to continue"** — the day's first cash spend,
+  asked for where you are rather than on the settings screen. One press and the
+  session continues immediately; that press is the *fleet's* confirmation, so
+  autonomous passes may also spend up to the cap for the rest of the day. The
+  session stays queued until you press, and starts on the next poll (~2s).
+- **"Capped: today's real-money limit of $X is spent"** — no press helps before
+  midnight, so none is offered. Raise the cap in Settings → Real money, or
+  carry on tomorrow. The session is not failed; it waits.
+- **"...no paid lane to overflow onto"** — naming the variable that would fix
+  it (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`). Set it in Doppler and the
+  session starts on the next poll.
+
+Two things follow from this that are easy to be surprised by:
+
+- **An active overage is treated as a paid lane.** If the account has overage
+  billing and the window walls, requests still succeed — on the card. So the
+  fleet reads that as metered spend: it counts against the cash cap, it needs
+  the same confirmation, and the dashboard's real-money gauge moves even though
+  the lane in force still says `claude-subscription`. Without this rule an
+  overage-enabled account would never show a `rejected` at all and the wall
+  would silently become a bill. Overage merely being *available* (nothing
+  drawing on it) changes nothing.
+- **A metered primary asks too.** The confirmation is per day and per fleet,
+  not per overflow, so on a metered-primary deployment the first interactive
+  turn of the day is the one that asks. That is the point of a guard keyed to
+  billing kind rather than to having overflowed.
+
+A held session never holds the queue: the pickup loop steps over the whole
+interactive kind while the guards refuse it, so review passes and resumes —
+work already paid for — keep starting.
 
 ### Reasoning effort (`effort:`)
 

@@ -19,6 +19,9 @@ import { GET, PATCH } from "@/app/api/settings/metered-spend/route";
 import { resetConfig } from "@/lib/config";
 import { getFleetSettings } from "@/lib/settings";
 import { resetLaneCatalog } from "@/lib/lanes/catalog";
+import { recordQuotaObservation } from "@/lib/quota/quota-store";
+import type { QuotaObservation } from "@/lib/quota/rate-limit-event";
+import { recordMeteredSpend } from "@/lib/orchestrator/spend";
 import { MAX_METERED_DAILY_CAP_USD } from "@/lib/orchestrator/autonomy/budgets";
 
 function patch(body: unknown, raw?: string): Request {
@@ -36,6 +39,7 @@ describe("GET/PATCH /api/settings/metered-spend", () => {
     testDb = createTestDb().db;
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-test";
     process.env.OPENROUTER_API_KEY = "sk-or-test";
+    delete process.env.ANTHROPIC_API_KEY;
     delete process.env.AGENT_LANE;
     delete process.env.METERED_DAILY_CAP_USD;
     resetConfig();
@@ -152,5 +156,159 @@ describe("GET/PATCH /api/settings/metered-spend", () => {
 
     expect(body).not.toContain("sk-or-test");
     expect(body).not.toContain("sk-ant-oat01-test");
+  });
+});
+
+/**
+ * The crossing the same endpoint answers (issue #173): what would happen to an
+ * attended session right now. The task screen asks it so the confirmation can
+ * be offered where the human already is, and it is the *same* pure decision
+ * the turn manager routes a pass with — so these cases are also the contract
+ * between the two.
+ */
+describe("the crossing an attended session would make", () => {
+  beforeEach(() => {
+    testDb = createTestDb().db;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-test";
+    process.env.OPENROUTER_API_KEY = "sk-or-test";
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.AGENT_LANE;
+    delete process.env.METERED_DAILY_CAP_USD;
+    resetConfig();
+    resetLaneCatalog();
+  });
+
+  afterEach(() => {
+    process.env = { ...savedEnv };
+    resetConfig();
+    resetLaneCatalog();
+  });
+
+  /** An observation on the subscription lane — the one the crossing reads,
+   * since a quota row belongs to a lane (issue #175) and a metered lane never
+   * reports one at all. */
+  function observe(fields: Partial<QuotaObservation>): void {
+    recordQuotaObservation("claude-subscription", {
+      status: "allowed",
+      rateLimitType: "five_hour",
+      utilization: 20,
+      resetsAt: new Date(Date.now() + 4 * 60 * 60 * 1000),
+      overageStatus: null,
+      overageResetsAt: null,
+      isUsingOverage: false,
+      overageInUse: null,
+      observedAt: new Date(),
+      ...fields,
+    });
+  }
+
+  async function crossing() {
+    return (await (await GET()).json()).crossing;
+  }
+
+  it("is nothing at all on a healthy subscription day", async () => {
+    observe({});
+
+    const state = await crossing();
+
+    expect(state.laneId).toBe("claude-subscription");
+    expect(state.billing).toBe("subscription");
+    expect(state.walled).toBe(false);
+    expect(state.refusal).toBeNull();
+    expect(state.notice).toBeNull();
+  });
+
+  it("overflows a walled window onto the available paid lane, once confirmed", async () => {
+    observe({ status: "rejected", utilization: null });
+
+    const held = await crossing();
+    expect(held.walled).toBe(true);
+    expect(held.laneId).toBe("openrouter");
+    expect(held.overflowedFrom).toBe("claude-subscription");
+    expect(held.refusal.reason).toBe("unconfirmed");
+
+    const state = (await (await PATCH(patch({ confirmed: true }))).json()).crossing;
+
+    expect(state.refusal).toBeNull();
+    expect(state.laneId).toBe("openrouter");
+    expect(state.notice).toContain("OpenRouter");
+  });
+
+  it("reports the cap rather than an overflow once the day's cash is spent", async () => {
+    observe({ status: "rejected", utilization: null });
+    await PATCH(patch({ confirmed: true }));
+    await PATCH(patch({ capUsd: "5" }));
+    recordMeteredSpend(0, 5);
+
+    const state = await crossing();
+
+    expect(state.refusal.reason).toBe("cap-reached");
+    expect(state.refusal.message).toContain("$5.00");
+  });
+
+  it("classifies an active overage as a paid lane, and guards the whole fleet with it", async () => {
+    // The wall is up and the overage window is still serving — the request
+    // succeeds and the card pays for it. No overflow: the lane in force is
+    // already the paid one.
+    observe({
+      status: "rejected",
+      utilization: null,
+      overageStatus: "allowed",
+      overageInUse: true,
+    });
+
+    const state = await (await GET()).json();
+
+    expect(state.crossing.laneId).toBe("claude-subscription");
+    expect(state.crossing.overflowedFrom).toBeNull();
+    expect(state.crossing.overage).toBe(true);
+    expect(state.crossing.refusal.reason).toBe("unconfirmed");
+    // The same reclassification the sweep and the dashboard see: an account
+    // with overage billing enabled would otherwise never show a `rejected`,
+    // and the wall would silently become a bill.
+    expect(state.billing).toBe("metered");
+    expect(state.overage).toBe(true);
+    expect(state.hold).toBe("unconfirmed");
+    // ...while the lane itself still declares what it is.
+    expect(state.lane.billing).toBe("subscription");
+  });
+
+  it("leaves overage merely being available alone", async () => {
+    // The real captured event from a healthy account: billing configured,
+    // nothing drawing on it.
+    observe({ overageStatus: "allowed", overageInUse: true, isUsingOverage: false });
+
+    const state = await (await GET()).json();
+
+    expect(state.overage).toBe(false);
+    expect(state.billing).toBe("subscription");
+    expect(state.crossing.refusal).toBeNull();
+  });
+
+  it("refuses with the variables that would fix it when nothing can be paid", async () => {
+    delete process.env.OPENROUTER_API_KEY;
+    resetConfig();
+    observe({ status: "rejected", utilization: null });
+
+    const state = await crossing();
+
+    expect(state.refusal.reason).toBe("no-metered-lane");
+    expect(state.refusal.message).toContain("ANTHROPIC_API_KEY");
+  });
+
+  it("stops crossing once the observation's own window has reset", async () => {
+    // Only a pass making an API call produces a fresh observation, so a
+    // crossing held by a spent one would outlive the wall it describes.
+    observe({
+      status: "rejected",
+      utilization: null,
+      resetsAt: new Date(Date.now() - 1000),
+    });
+
+    const state = await crossing();
+
+    expect(state.walled).toBe(false);
+    expect(state.laneId).toBe("claude-subscription");
+    expect(state.refusal).toBeNull();
   });
 });

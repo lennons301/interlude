@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb } from "@/test/create-test-db";
 import {
+  bookTaskCost,
   localDayKey,
   recordMeteredSpend,
   todayAutonomousSpendUsd,
@@ -210,5 +212,104 @@ describe("the real-money ledger", () => {
     recordMeteredSpend(0, 1, MIDNIGHT);
 
     expect(todayMeteredSpendUsd(NOW)).toBeCloseTo(1);
+  });
+});
+
+/**
+ * Booking a task's cost — the funnel every cost write goes through, and the
+ * one place the "does this dollar count?" question is answered (issues #174,
+ * #173).
+ *
+ * The overflow path (#173) is where an *interactive* task first touches real
+ * money, and interactive work is exempt from the $500 autonomous cap by
+ * construction — it owns no run. So these cases are the check that the
+ * exemption does not carry over to the cash cap: what decides is the pass's
+ * recorded billing kind, never its kind of work.
+ */
+describe("booking a task's cost against the day", () => {
+  beforeEach(() => {
+    testDb = createTestDb().db;
+    testDb
+      .insert(schema.projects)
+      .values({ id: "test-project", name: "Test", createdAt: new Date() })
+      .run();
+  });
+
+  function insertTask(
+    overrides: Partial<typeof schema.tasks.$inferInsert> = {}
+  ): string {
+    const id = `task-${Math.random().toString(36).slice(2)}`;
+    testDb
+      .insert(schema.tasks)
+      .values({
+        id,
+        projectId: "test-project",
+        title: "A chat session",
+        kind: "interactive",
+        createdAt: TODAY_9AM,
+        updatedAt: TODAY_9AM,
+        ...overrides,
+      })
+      .run();
+    return id;
+  }
+
+  it("counts an interactive session that overflowed onto a paid lane", () => {
+    const chat = insertTask({ lane: "openrouter", laneBilling: "metered" });
+
+    bookTaskCost(chat, 2.5, NOW);
+
+    expect(todayMeteredSpendUsd(NOW)).toBeCloseTo(2.5);
+    // ...and it is still exempt from the quota-funded cap, which is the split
+    // the two figures exist to keep.
+    expect(todayAutonomousSpendUsd(NOW)).toBe(0);
+  });
+
+  it("counts a session an active overage is paying for", () => {
+    // The lane declares itself a subscription; the crossing recorded `metered`
+    // because the card is what is really being charged (issue #173).
+    const chat = insertTask({
+      lane: "claude-subscription",
+      laneBilling: "metered",
+    });
+
+    bookTaskCost(chat, 1.25, NOW);
+
+    expect(todayMeteredSpendUsd(NOW)).toBeCloseTo(1.25);
+  });
+
+  it("counts nothing for subscription work, whatever it spent", () => {
+    const chat = insertTask({
+      lane: "claude-subscription",
+      laneBilling: "subscription",
+    });
+
+    bookTaskCost(chat, 40, NOW);
+
+    expect(todayMeteredSpendUsd(NOW)).toBe(0);
+  });
+
+  it("counts nothing for a pass that predates lanes", () => {
+    const chat = insertTask();
+
+    bookTaskCost(chat, 3, NOW);
+
+    expect(todayMeteredSpendUsd(NOW)).toBe(0);
+  });
+
+  it("books each turn's increment, so a driven session is not re-counted", () => {
+    const chat = insertTask({ lane: "openrouter", laneBilling: "metered" });
+
+    bookTaskCost(chat, 1, NOW);
+    // What the turn manager does: write the new running total on the row, then
+    // book the next one against it.
+    testDb
+      .update(schema.tasks)
+      .set({ totalCostUsd: 1 })
+      .where(eq(schema.tasks.id, chat))
+      .run();
+    bookTaskCost(chat, 3, NOW);
+
+    expect(todayMeteredSpendUsd(NOW)).toBeCloseTo(3);
   });
 });

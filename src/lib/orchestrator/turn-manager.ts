@@ -33,8 +33,12 @@ import {
 } from "../config";
 import { getSettingsOverrides } from "../settings";
 import { getLaneCatalog } from "../lanes/catalog";
-import { recordMeteredSpend } from "./spend";
+import { bookTaskCost } from "./spend";
 import { resolveLane, type ResolvedLane } from "../lanes/resolve";
+import { readLaneCrossing } from "../lanes/overflow-state";
+import { payerChanged, type LaneCrossing } from "../lanes/overflow";
+import type { LaneBilling } from "../lanes/lane-config";
+import { noteOnceOnFeed } from "../tasks/feed-note";
 import {
   chargeForTurn,
   costOverstatement,
@@ -318,6 +322,19 @@ export async function startTask(taskId: string): Promise<void> {
   // (issue #97).
   let producedResult = false;
 
+  // The crossing (issue #173) — deliberately *outside* the failure path below,
+  // and the one thing that is. A pass the money guards refuse is **held, not
+  // failed**: it stays `queued` with the reason on its feed, because a
+  // confirmation is one press away and the cash cap lifts itself at midnight.
+  // The poll loop already steps over such a task so it cannot hold the work
+  // behind it, which makes this the guard for every *other* way here — the
+  // manual run route, and the race where the day's confirmation is withdrawn
+  // between that check and this one. Read once and handed to the resolver
+  // below, so the lane a pass runs on and the reason it was held cannot come
+  // from two different readings of the fleet.
+  const crossing = readLaneCrossing(task.kind);
+  if (crossingHoldsPass(taskId, crossing)) return;
+
   // Everything from here is inside the failure path. Lane resolution
   // (issue #172) is why the boundary sits this early: an unavailable lane is a
   // routinely reachable misconfiguration, and a throw *outside* the try would
@@ -339,8 +356,17 @@ export async function startTask(taskId: string): Promise<void> {
     // Read fresh from the settings row, not from a cached config: a UI-set tier
     // or lane (issues #166, #172) has to reach the next pass without a restart,
     // and `getConfig()` memoises on first read.
-    const passLane = requireLane(task.kind, run?.model ?? null);
+    const pass = requirePassLane(task.kind, run?.model ?? null, crossing);
+    const passLane = pass.lane;
     const passModel = passLane.model;
+
+    // Say so on the feed when this pass costs real money (issue #173).
+    // Written before the container, so it is on the screen while the workspace
+    // is still being built.
+    announceCrossing(taskId, pass, {
+      lane: task.lane,
+      laneBilling: task.laneBilling,
+    });
 
     // The reasoning-effort level this pass runs at (issue #81), the other half
     // of the cost/quality dial. Pinned by kind and, for an implement-shaped or
@@ -393,7 +419,15 @@ export async function startTask(taskId: string): Promise<void> {
       branch,
       containerStatus: "setup",
       lane: passLane.id,
-      laneBilling: passLane.billing,
+      // The crossing's billing kind, not the lane's declared one (issue #173):
+      // an overage means these dollars are cash however the lane describes
+      // itself, and the real-money ledger keys off exactly this column.
+      laneBilling: pass.billing,
+      // The tier beside the lane, for the reason the run row records both
+      // (issue #172): the pair is what makes this task's cost interpretable
+      // after the fact, and interactive work — the only kind that crosses onto
+      // a paid lane — has no run row to record it on.
+      tier: passLane.tier ?? passModel,
     });
     insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
 
@@ -423,7 +457,7 @@ export async function startTask(taskId: string): Promise<void> {
           status: "implementing",
           startedAt: run.startedAt ?? new Date(),
           lane: passLane.id,
-          laneBilling: passLane.billing,
+          laneBilling: pass.billing,
           model: passLane.tier ?? passModel,
           effort: passEffort,
           // A resumed run stops waiting on a clock the moment its pass starts
@@ -838,27 +872,60 @@ async function preserveSessionTranscript(
 }
 
 /**
+ * The lane one pass runs on, with the two facts the lane itself cannot supply:
+ * how its spend must be booked, and whether it got there by crossing off a
+ * walled subscription lane (issues #172, #173).
+ */
+interface PassLane {
+  lane: ResolvedLane;
+  /**
+   * Who pays for this pass — the lane's declared kind, or `metered` when an
+   * active overage means subscription work is already being charged to the
+   * card (issue #173). Recorded on the task and the run in place of
+   * `lane.billing`, because the ledger's job is to say what was true when the
+   * work ran.
+   */
+  billing: LaneBilling;
+  /** The walled lane this pass overflowed off; null when it did not. */
+  overflowedFrom: string | null;
+  /** A line for the task's feed when the human should know that this pass
+   * costs money; null when there is nothing new to say. */
+  notice: string | null;
+}
+
+/**
  * The execution lane one pass runs on, or a throw naming what is missing
- * (issue #172).
+ * (issue #172) or what has to happen first (issue #173).
  *
  * Read fresh on every call rather than resolved once per pass: the catalog
  * itself is checked-in and cached, but which lane is primary lives on the
  * settings row, so a follow-up turn picks up a lane changed mid-session for
- * the same reason it picks up a tier changed mid-session.
+ * the same reason it picks up a tier changed mid-session — and, since #173,
+ * so a session walled mid-conversation crosses onto a paid lane at its very
+ * next turn, and one held for a confirmation starts the turn after the press.
  *
  * Throws rather than falling back. An unavailable lane is a configuration
  * fact, and the two wrong answers here — run on some other lane, or provision
  * a container and let the harness fail — are respectively "spend money nobody
  * authorised" and "the failure mode this ticket exists to remove".
+ *
+ * The crossing arrives already decided (issue #173), because it decides
+ * *which* lane to resolve — an attended session whose subscription window is
+ * walled runs on a metered lane instead — and because a refusal is the
+ * caller's to answer: it is a hold, not a failure, and each caller holds its
+ * own way. A refusal must therefore be dealt with before this is called;
+ * `crossingHoldsPass` is how both callers do it.
  */
-function requireLane(
+function requirePassLane(
   kind: AgentPassKind,
-  ticketModel: string | null
-): ResolvedLane {
+  ticketModel: string | null,
+  crossing: LaneCrossing
+): PassLane {
   const catalog = getLaneCatalog();
   if (!catalog.ok) {
     throw new Error(`No usable execution lanes — ${catalog.reason}`);
   }
+
   const resolution = resolveLane({
     catalog: catalog.catalog,
     kind,
@@ -866,9 +933,77 @@ function requireLane(
     ticketModel,
     overrides: getSettingsOverrides(),
     env: process.env,
+    // Null falls through to the primary, which is every pass that has not
+    // crossed onto another lane.
+    laneId: crossing.laneId,
   });
   if (!resolution.ok) throw new Error(resolution.reason);
-  return resolution.lane;
+  return {
+    lane: resolution.lane,
+    // The crossing's answer, not the lane's: only it knows about an overage.
+    billing: crossing.billing ?? resolution.lane.billing,
+    overflowedFrom: crossing.overflowedFrom,
+    notice: crossing.notice,
+  };
+}
+
+/**
+ * Tell the owner — and the log — that this pass is spending real money
+ * (issue #173): an overflow off a walled window, an overage picking the
+ * subscription up, or a metered lane the operator made primary.
+ *
+ * Said when the *payer changes*, which is what makes it news, and not on every
+ * turn thereafter. The obvious dedup — "is this line already the last thing on
+ * the feed?" — is not enough on its own here: the sentence quotes the day's
+ * running spend and the window's reset, so every turn would produce a line
+ * that differs by a few cents and post again. What the task last recorded is
+ * the honest comparison, and it is a column rather than memory, so it survives
+ * a restart mid-session.
+ *
+ * The console line names the lane it came off, since "why did this session run
+ * on openrouter?" is asked long after the feed has scrolled.
+ */
+function announceCrossing(
+  taskId: string,
+  pass: PassLane,
+  /** What this task's previous turn recorded, or nulls before its first. */
+  recorded: { lane: string | null; laneBilling: LaneBilling | null }
+): void {
+  if (pass.notice === null) return;
+  if (!payerChanged(recorded, { laneId: pass.lane.id, billing: pass.billing })) {
+    return;
+  }
+  noteOnceOnFeed(taskId, pass.notice);
+  const from =
+    pass.overflowedFrom === null
+      ? ""
+      : `, overflowed off ${pass.overflowedFrom}`;
+  console.log(
+    `[orchestrator] Task ${taskId} runs on ${pass.lane.id} (${pass.billing}${from})`
+  );
+}
+
+/**
+ * Put a crossing's refusal where the human will see it, once, and say whether
+ * the pass may start (issue #173).
+ *
+ * A refused pass is **held, not failed**: the guards' two holds are a press
+ * away and a cap that lifts itself at midnight, so there is work here to
+ * start later rather than work to abandon. Shared with the queue loop, which
+ * steps over a held session so it cannot hold the work behind it — the same
+ * sentence and the same dedup wherever the refusal is met.
+ */
+export function crossingHoldsPass(
+  taskId: string,
+  crossing: LaneCrossing
+): boolean {
+  if (crossing.refusal === null) return false;
+  if (noteOnceOnFeed(taskId, crossing.refusal.message)) {
+    console.log(
+      `[orchestrator] Task ${taskId} is not starting — ${crossing.refusal.reason} (issue #173)`
+    );
+  }
+  return true;
 }
 
 /**
@@ -885,20 +1020,18 @@ function laneForFollowUp(
   taskId: string,
   kind: AgentPassKind,
   ticketModel: string | null
-): ResolvedLane | null {
+): PassLane | null {
+  // A crossing the money guards refuse leaves the turn for a later poll with
+  // the reason on the feed, exactly as a misconfigured lane does — the queued
+  // message is still undelivered, so the owner's turn is not burnt and it runs
+  // on the poll after the press (issue #173).
+  const crossing = readLaneCrossing(kind);
+  if (crossingHoldsPass(taskId, crossing)) return null;
   try {
-    return requireLane(kind, ticketModel);
+    return requirePassLane(kind, ticketModel, crossing);
   } catch (err) {
     const text = `Cannot start this turn — ${err instanceof Error ? err.message : String(err)}`;
-    const latest = db
-      .select({ content: messages.content })
-      .from(messages)
-      .where(eq(messages.taskId, taskId))
-      .orderBy(desc(messages.createdAt))
-      .limit(1)
-      .get();
-    if (latest?.content !== JSON.stringify({ text })) {
-      insertSystemMessage(taskId, text);
+    if (noteOnceOnFeed(taskId, text)) {
       console.error(`[orchestrator] ${taskId}: ${text}`);
     }
     return null;
@@ -1148,14 +1281,26 @@ export async function processQueuedMessages(
     // ticket removes, re-created one layer up. Leaving the turn for a later
     // poll is right (the fix is an env var away, and the session is otherwise
     // healthy); saying so on the feed once is what was missing.
-    const passLane = laneForFollowUp(taskId, task.kind, run?.model ?? null);
-    if (passLane === null) break;
+    const pass = laneForFollowUp(taskId, task.kind, run?.model ?? null);
+    if (pass === null) break;
+    const passLane = pass.lane;
+    // A session walled mid-conversation crosses onto a paid lane at its next
+    // turn, and the human reading the transcript is told — once, when the
+    // payer changes (issue #173).
+    announceCrossing(taskId, pass, {
+      lane: task.lane,
+      laneBilling: task.laneBilling,
+    });
     // Re-recorded per turn, latest wins (issue #174). A session whose lane was
     // switched mid-flight has spent on both, and the task carries one figure;
     // attributing the lot to the lane it is on *now* is the direction that
     // fails safe, since over-reporting real money pauses pickup early while
     // under-reporting spends past the cap.
-    updateTask(taskId, { lane: passLane.id, laneBilling: passLane.billing });
+    updateTask(taskId, {
+      lane: passLane.id,
+      laneBilling: pass.billing,
+      tier: passLane.tier ?? passLane.model,
+    });
 
     // Find oldest undelivered user message
     const queued = db
@@ -2394,24 +2539,18 @@ function updateTask(
     triageResult: (typeof tasks.$inferSelect)["triageResult"];
     lane: string | null;
     laneBilling: "subscription" | "metered" | null;
+    tier: string | null;
   }>
 ): void {
   // The one funnel every task-cost write goes through, which is why the
   // real-money ledger (issue #174) is booked here rather than at the two call
   // sites: a later third caller cannot forget it. Only the *increment* is
-  // booked, and only when the pass in hand ran on a metered lane — so a
-  // session whose lane was switched mid-flight has each turn's dollars
+  // booked, and only when the pass in hand ran on a lane that bills per token
+  // — so a session whose lane was switched mid-flight has each turn's dollars
   // attributed to the lane that actually spent them, which no single column on
   // the row could say.
   if (fields.totalCostUsd !== undefined) {
-    const before = db
-      .select({ total: tasks.totalCostUsd, billing: tasks.laneBilling })
-      .from(tasks)
-      .where(eq(tasks.id, taskId))
-      .get();
-    if (before?.billing === "metered") {
-      recordMeteredSpend(before.total ?? 0, fields.totalCostUsd);
-    }
+    bookTaskCost(taskId, fields.totalCostUsd);
   }
 
   db.update(tasks)

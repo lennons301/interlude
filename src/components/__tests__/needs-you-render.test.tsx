@@ -20,6 +20,7 @@ function render(overrides: Partial<FleetRows> = {}): string {
     meteredSpendTodayUsd: 0,
     primaryLaneId: "claude-subscription",
     primaryLaneBilling: "subscription",
+    primaryLaneOverage: false,
     meteredSpendConfirmedAt: null,
     globalAutonomyPaused: false,
     autonomyEnabledAtBoot: true,

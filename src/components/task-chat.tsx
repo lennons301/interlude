@@ -2,10 +2,12 @@
 
 import { useCallback, useState } from "react";
 import type { SessionSkill } from "@/db/schema";
+import type { AgentPassKind } from "@/lib/config";
 import { SlimShell } from "@/components/app-shell";
 import { ActionLink, FOCUS_RING, Gauge, Money } from "@/components/fleet/fleet-bits";
 import { toChatView, type ChatMessageRow } from "@/lib/chat/chat-view";
 import { isTerminalTaskStatus } from "@/lib/tasks/status";
+import { MeteredCrossing } from "./metered-crossing";
 import { TaskStream } from "./task-stream";
 import { MessageInput } from "./message-input";
 import { PreviewPane } from "./preview-pane";
@@ -26,6 +28,10 @@ interface TaskData {
   /** Non-null on a generation session — the composer offers its slash menu
    * only where the orchestrator re-frames a typed skill slash (issue #63). */
   sessionSkill: SessionSkill | null;
+  /** Which pass this is. Only an interactive session can cross onto a paid
+   * lane (issue #173) — an autonomous pass pauses instead — so only one asks
+   * the human to confirm. */
+  kind: AgentPassKind;
 }
 
 type TaskStatusUpdate = {
@@ -212,6 +218,14 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
             onMessage={handleMessage}
             onQueuedChange={setQueued}
           />
+          {/* The money guards, where the human already is (issue #173): a
+              walled window, an overage or a metered lane means this session
+              spends cash, and the first press of the day is asked for here
+              rather than on the settings screen. Autonomous passes never
+              reach this — they pause. */}
+          {!isTerminal && initialTask.kind === "interactive" && (
+            <MeteredCrossing />
+          )}
           {!isTerminal && (
             <MessageInput
               taskId={initialTask.id}
