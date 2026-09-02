@@ -390,6 +390,137 @@ export async function execAgentTurn(options: {
 }
 
 /**
+ * Wait for an exec to finish and report its exit code.
+ *
+ * Both signals, for the reason every exec in this file uses both: the stream
+ * ending is the fast path, and the poll is what covers a stream that never
+ * ends (which is the normal case for a demuxed or hijacked attach — the socket
+ * outlives the process). Bounded by neither, deliberately: these execs are a
+ * `cat` of one file, and the container itself is the bound.
+ */
+async function awaitExecExit(
+  exec: Docker.Exec,
+  stream: NodeJS.ReadableStream
+): Promise<number | null> {
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let poll: ReturnType<typeof setInterval> | null = null;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      if (poll) clearInterval(poll);
+      resolve();
+    };
+    stream.on("end", done);
+    stream.on("close", done);
+    stream.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      if (poll) clearInterval(poll);
+      reject(err);
+    });
+    poll = setInterval(async () => {
+      try {
+        const info = await exec.inspect();
+        if (!info.Running) setTimeout(done, 200);
+      } catch {
+        done();
+      }
+    }, 250);
+    // Nothing may sit unread: a paused stream never ends, and a caller that
+    // does not want the output (the write below) would otherwise wait out the
+    // poll on every call.
+    stream.resume();
+  });
+
+  return (await exec.inspect()).ExitCode ?? null;
+}
+
+/**
+ * Read one file out of a container, verbatim (issue #169).
+ *
+ * Null means "no such file" (or an unreadable one), which is a state the
+ * caller has an answer for — a paused pass whose transcript cannot be copied
+ * out resumes on the same branch with its context declared lost — so this
+ * reports rather than throws.
+ *
+ * Two details make the bytes trustworthy. The exec runs with `Tty: true`, so
+ * the daemon hands back a **raw** stream rather than Docker's multiplexed
+ * frames, which no caller here could safely strip out of file content. A TTY
+ * then rewrites newlines, so the file is read as `base64` and decoded on this
+ * side: one long line, no newlines to rewrite, and byte-exact either way. The
+ * path travels in the environment rather than the command line, so nothing in
+ * a session id can reach `bash` as syntax.
+ */
+export async function readContainerFile(
+  container: Docker.Container,
+  filePath: string
+): Promise<Buffer | null> {
+  const exec = await container.exec({
+    Cmd: ["bash", "-c", 'base64 -w0 -- "$INTERLUDE_FILE"'],
+    Env: [`INTERLUDE_FILE=${filePath}`],
+    AttachStdout: true,
+    AttachStderr: true,
+    Tty: true,
+  });
+
+  const stream = await exec.start({});
+  const chunks: Buffer[] = [];
+  stream.on("data", (chunk: Buffer) => chunks.push(chunk));
+
+  const exitCode = await awaitExecExit(exec, stream);
+  if (exitCode !== 0) return null;
+
+  // Whitespace is the TTY's, never the payload's: `base64 -w0` emits one line.
+  const encoded = Buffer.concat(chunks).toString("utf8").replace(/\s+/g, "");
+  if (encoded === "") return null;
+  return Buffer.from(encoded, "base64");
+}
+
+/**
+ * Write one file into a container, creating its directory (issue #169).
+ *
+ * The content goes in over the exec's **stdin** rather than through the
+ * command line or the environment: a transcript is unbounded (a long pass's is
+ * megabytes) and both of those have a limit the caller could not see coming.
+ * Writing through a process that runs as the container's own user is also what
+ * makes the file the agent's to append to — the harness appends to the same
+ * transcript when it resumes the session, so ownership is not cosmetic.
+ *
+ * Throws on failure, unlike the read: a caller that asked for a file to exist
+ * and did not get one has nothing to fall back to at this level.
+ */
+export async function writeContainerFile(
+  container: Docker.Container,
+  filePath: string,
+  contents: Buffer | string
+): Promise<void> {
+  const exec = await container.exec({
+    Cmd: [
+      "bash",
+      "-c",
+      'mkdir -p -- "$(dirname -- "$INTERLUDE_FILE")" && cat > "$INTERLUDE_FILE"',
+    ],
+    Env: [`INTERLUDE_FILE=${filePath}`],
+    AttachStdin: true,
+    AttachStdout: true,
+    AttachStderr: true,
+  });
+
+  const stream = (await exec.start({
+    hijack: true,
+    stdin: true,
+  })) as NodeJS.ReadWriteStream;
+  stream.write(contents);
+  stream.end();
+
+  const exitCode = await awaitExecExit(exec, stream);
+  if (exitCode !== 0) {
+    throw new Error(`Writing ${filePath} into the container failed (exit ${exitCode})`);
+  }
+}
+
+/**
  * Commit anything uncommitted, push the branch, and report how far the branch is
  * ahead of the default branch — `null` when the push output carried no readable
  * count (issue #151). Throws if the push itself failed, as before.
