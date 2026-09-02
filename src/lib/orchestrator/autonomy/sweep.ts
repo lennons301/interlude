@@ -10,7 +10,12 @@ import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { newId } from "../../ulid";
 import { getConfig, PLATFORM_REPO_URL } from "../../config";
-import { isGlobalAutonomyPaused } from "../../settings";
+import { getSettingsOverrides, isGlobalAutonomyPaused } from "../../settings";
+import { resolveResumeBound } from "../../settings-resolver";
+import {
+  discardTranscript,
+  hasTranscript,
+} from "../../quota/session-transcript";
 import { getOctokit, isGitHubConfigured } from "../../github/client";
 import { fetchFileFromDefaultBranch } from "../../github/contents";
 import {
@@ -70,6 +75,7 @@ import {
   type CandidateIssue,
   type ChecksFailingPr,
   type ConflictingPr,
+  type PausedRun,
   type PendingGateEvaluation,
   type PendingTriage,
   type PendingVerdict,
@@ -102,6 +108,7 @@ import {
   buildCiRepairPrompt,
   buildImplementPrompt,
   buildRepairPrompt,
+  buildResumePrompt,
   buildReviewPrompt,
   buildTriagePrompt,
   type PriorAttempt,
@@ -123,6 +130,7 @@ import {
   MAX_REVIEW_CYCLES_PER_ATTEMPT,
   MAX_TRIAGE_PASSES_PER_ISSUE,
   MAX_UNPARSEABLE_REVIEW_RETRIES,
+  RESUME_JITTER_WINDOW_MS,
 } from "./budgets";
 import { ACTIVE_RUN_STATUSES } from "../run-status";
 
@@ -670,7 +678,46 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     pendingTriageResults,
     queuedTriageCount: queuedTasks.filter((t) => t.kind === "triage").length,
     announcedTriageErrors: [...announcedTriageErrors],
+    pausedRuns: gatherPausedRuns(allRuns),
+    // Read fresh from the settings row every tick, never from the memoised
+    // config: a bound changed on the settings screen must bind at the next
+    // sweep with no restart (issue #166's freshness rule, which lives at the
+    // call site).
+    maxResumesPerAttempt: resolveResumeBound(config, getSettingsOverrides()).value,
+    resumeJitterMs: RESUME_JITTER_WINDOW_MS,
   };
+}
+
+/**
+ * Runs parked on the quota clock (issue #169), with the two facts the reducer
+ * decides from: how many resumes this attempt has spent, and whether one is
+ * already under way.
+ *
+ * `hasLiveTask` is the idempotency latch and is deliberately a *task* fact
+ * rather than a run-status one: the resume executor leaves the run
+ * `rate_limited` until its pass actually starts, so that a restart between the
+ * two leaves a paused run that is still visibly paused rather than one
+ * pretending to be claimed.
+ */
+function gatherPausedRuns(allRuns: Array<typeof runs.$inferSelect>): PausedRun[] {
+  return allRuns
+    .filter((run) => run.status === "rate_limited")
+    .map((run) => ({
+      runId: run.id,
+      issueRef: run.githubIssue,
+      resumeAfter: run.resumeAfter,
+      resumesMade: run.resumeCount,
+      hasLiveTask: db
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.runId, run.id),
+            inArray(tasks.status, ["queued", "running"])
+          )
+        )
+        .all().length > 0,
+    }));
 }
 
 /**
@@ -1291,6 +1338,12 @@ async function executeActions(actions: Action[]): Promise<void> {
         break;
       case "exhaust":
         await executeExhaust(action);
+        break;
+      case "resumeRun":
+        await executeResumeRun(action);
+        break;
+      case "exhaustPausedRun":
+        await executeExhaustPausedRun(action);
         break;
       case "failAttempt":
         await executeFailAttempt(action);
@@ -2483,6 +2536,195 @@ async function executeEscalateStaleReview(
  * counter — two failed runs, or four interruptions — granting exactly one
  * fresh claim instead of insta-exhausting.
  */
+/**
+ * Resume a run parked on the quota clock (issue #169).
+ *
+ * A fresh task for the same run, on the same branch, carrying the paused
+ * pass's own prompt behind a resume preamble — and, when the transcript
+ * survived the teardown, the session id that makes the harness continue the
+ * same conversation instead of re-orienting from scratch. The queue starts it
+ * under the ordinary capacity check like any other queued pass, and
+ * `startTask` provisions the container: nothing here touches Docker.
+ *
+ * Two pieces of bookkeeping, and what is *not* touched matters as much:
+ *
+ * - `resumeCount` is bumped here, at the moment the resume is decided, rather
+ *   than when the pass starts. A resume whose task never starts (a lane
+ *   misconfiguration, a container that will not build) would otherwise be
+ *   retried every sweep forever; counted here, the bound catches it.
+ * - The run stays `rate_limited` until its pass actually starts, and keeps its
+ *   `resumeAfter`. A restart in between then leaves a run that is still
+ *   visibly paused rather than one pretending to be claimed, and the
+ *   dashboard's countdown keeps naming the window it waited on. `startTask`
+ *   moves it to `implementing` and clears the clock, as it does for every
+ *   implement-shaped pass.
+ *
+ * A run whose status has moved on since the decision (a human cancelled it) is
+ * left alone: the action is stale, not wrong.
+ */
+async function executeResumeRun(
+  action: Extract<Action, { type: "resumeRun" }>
+): Promise<void> {
+  const run = db.select().from(runs).where(eq(runs.id, action.runId)).get();
+  if (!run || run.status !== "rate_limited") return;
+
+  // The pass that was paused — its prompt, its kind and its session. The run's
+  // most recent work-carrying task: a repair pass can be walled exactly as an
+  // implement pass can, and resuming it as an implement pass would hand a
+  // conflict-repair brief to something that thinks it is building a feature.
+  const paused = db
+    .select()
+    .from(tasks)
+    .where(eq(tasks.runId, run.id))
+    .all()
+    .filter((task) => task.kind === "implement" || task.kind === "repair")
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+    .pop();
+  if (!paused) {
+    console.error(
+      `[autonomy] Run ${action.runId} is paused but owns no implement pass to resume`
+    );
+    return;
+  }
+
+  // The session is only worth resuming if its transcript is actually on disk:
+  // `--resume` against a session the fresh container has never heard of would
+  // fail the pass outright, where the declared fallback is a pass that starts
+  // again on the same branch with its context lost.
+  const sessionId =
+    paused.sessionId !== null && hasTranscript(run.id) ? paused.sessionId : null;
+
+  const now = new Date();
+  const taskId = newId();
+  db.insert(tasks)
+    .values({
+      id: taskId,
+      projectId: run.projectId,
+      title: paused.title,
+      description: buildResumePrompt({
+        originalPrompt: paused.description,
+        branch: paused.branch ?? "the attempt's branch",
+        resume: action.resume,
+        maxResumes: action.maxResumes,
+      }),
+      status: "queued",
+      kind: paused.kind,
+      runId: run.id,
+      githubIssue: action.issueRef,
+      branch: paused.branch,
+      sessionId,
+      pullRequestNumber: paused.pullRequestNumber,
+      pullRequestUrl: paused.pullRequestUrl,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .run();
+
+  db.update(runs)
+    .set({ resumeCount: run.resumeCount + 1 })
+    .where(eq(runs.id, run.id))
+    .run();
+
+  console.log(
+    `[autonomy] Resuming ${action.issueRef} (attempt ${run.attempt}, resume ` +
+      `${action.resume}/${action.maxResumes}) -> task ${taskId}` +
+      `${sessionId ? ` continuing session ${sessionId}` : " without its prior context"}`
+  );
+
+  await commentOnIssue(
+    action.issueRef,
+    `The quota window has reset — resuming attempt ${run.attempt} ` +
+      `(resume ${action.resume}/${action.maxResumes}). ` +
+      (sessionId
+        ? `The paused pass's session was preserved, so it continues the same ` +
+          `conversation on \`${paused.branch}\`.`
+        : `The paused pass's session could not be preserved, so it starts again ` +
+          `on \`${paused.branch}\` with the work pushed so far and no prior ` +
+          `context.`)
+  );
+}
+
+/**
+ * A run that has paused more often than one attempt may (issue #169): hand the
+ * ticket to a human the way an exhausted one is handed over.
+ *
+ * The run lands in `exhausted` rather than `failed`, deliberately. Attempts are
+ * counted from *failed* runs, and the pauses spent none — so a human who reads
+ * the story and re-arms the ticket gets the attempts it never used, while the
+ * run still leaves the active set so nothing claims a second one over it.
+ *
+ * Labels first, and the mutation only if they landed: a run driven terminal
+ * whose issue still says `ready-for-agent` would be re-claimed as if nothing
+ * had happened.
+ */
+async function executeExhaustPausedRun(
+  action: Extract<Action, { type: "exhaustPausedRun" }>
+): Promise<void> {
+  const run = db.select().from(runs).where(eq(runs.id, action.runId)).get();
+  if (!run || run.status !== "rate_limited") return;
+
+  if (!(await addLabelToIssue(action.issueRef, READY_FOR_HUMAN_LABEL))) return;
+  if (!(await removeLabelFromIssue(action.issueRef, ARMING_LABEL))) return;
+
+  const spent =
+    action.resumesMade === 0
+      ? "resuming after a quota pause is switched off"
+      : `it was resumed ${action.resumesMade} time(s) and walled again each time`;
+
+  db.update(runs)
+    .set({
+      status: "exhausted",
+      finishedAt: new Date(),
+      resumeAfter: null,
+      failureReason: `the account's quota kept refusing this attempt — ${spent}`,
+    })
+    .where(eq(runs.id, run.id))
+    .run();
+  await terminalizeFinalizedRunTasks(run.id);
+  // Nothing will resume this conversation now.
+  discardTranscript(run.id);
+
+  console.log(
+    `[autonomy] ${action.issueRef} hit the quota resume bound ` +
+      `(${action.resumesMade}) — ready-for-human`
+  );
+
+  const allRuns = db
+    .select()
+    .from(runs)
+    .where(eq(runs.githubIssue, action.issueRef))
+    .all();
+  const totalSpendUsd = allRuns.reduce((sum, r) => sum + r.totalCostUsd, 0);
+
+  await commentOnIssue(
+    action.issueRef,
+    `This attempt kept hitting the account's quota: ${spent}. Swapping ` +
+      `\`${ARMING_LABEL}\` for \`${READY_FOR_HUMAN_LABEL}\`.\n\n` +
+      `A quota pause spends no attempt, so attempt ${run.attempt} is still ` +
+      `this ticket's — re-arming it once there is quota picks the work back up ` +
+      `on \`agent/issue-${parseIssueRef(action.issueRef)?.number ?? "?"}\`, ` +
+      `where everything pushed so far already lives.\n\n` +
+      `Total autonomous spend on this ticket: $${totalSpendUsd.toFixed(2)}.`
+  );
+
+  const project = db
+    .select()
+    .from(projects)
+    .where(eq(projects.id, run.projectId))
+    .get();
+  await notifyAttemptsExhausted(
+    project?.discordChannelId ?? getConfig().discordFleetChannelId,
+    {
+      issueRef: action.issueRef,
+      attempts: run.attempt,
+      interruptions: run.interruptionCount,
+      resumes: action.resumesMade,
+      reason: "quota-pauses",
+      totalSpendUsd,
+    }
+  );
+}
+
 async function executeExhaust(action: Extract<Action, { type: "exhaust" }>): Promise<void> {
   if (!(await addLabelToIssue(action.issueRef, READY_FOR_HUMAN_LABEL))) return;
   if (!(await removeLabelFromIssue(action.issueRef, ARMING_LABEL))) return;

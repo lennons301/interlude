@@ -8,9 +8,11 @@ import {
   execSetup,
   execAgentTurn,
   execFallbackCommitAndPush,
+  readContainerFile,
   removeContainer,
   stopContainer,
   startContainer,
+  writeContainerFile,
   type RunningContainer,
 } from "../docker/container-manager";
 import { checkMemoryAdmission } from "./capacity";
@@ -53,6 +55,11 @@ import {
   type TurnQuotaSignals,
 } from "../quota/rate-limit-rejection";
 import { describeRateLimitType } from "../quota/rate-limit-event";
+import {
+  containerTranscriptPath,
+  readTranscript,
+  saveTranscript,
+} from "../quota/session-transcript";
 
 /**
  * Track all active task containers for cancellation and idle polling.
@@ -370,6 +377,12 @@ export async function startTask(taskId: string): Promise<void> {
           lane: passLane.id,
           model: passLane.tier ?? passModel,
           effort: passEffort,
+          // A resumed run stops waiting on a clock the moment its pass starts
+          // (issue #169). Cleared here rather than when the resume was decided,
+          // so a restart in between leaves a run that is still visibly paused
+          // with the window it is waiting on, rather than one pretending to be
+          // claimed.
+          resumeAfter: null,
         })
         .where(eq(runs.id, run.id))
         .run();
@@ -459,12 +472,20 @@ export async function startTask(taskId: string): Promise<void> {
       ).catch(console.error);
     }
 
+    // A resumed pass (issue #169) opens with the paused pass's conversation put
+    // back where the harness keeps it, and continues that session rather than
+    // starting a new one. Every other pass gets `undefined` and behaves exactly
+    // as before.
+    const resumeSessionId = isImplementShaped
+      ? await restoreSessionTranscript(task, running)
+      : undefined;
+
     // Run initial turn. An autonomous pass is one whole turn — an implement
     // pass carries the run's per-attempt budget, a review pass its own
     // smaller allowance, a triage pass the smallest of all plus a hard turn
     // cap, never the interactive per-task default. Review and triage keep
     // their raw stream: the structured exit is parsed from it.
-    const turnResult = await runTurn(taskId, running, prompt, undefined, {
+    const turnResult = await runTurn(taskId, running, prompt, resumeSessionId, {
       maxBudgetUsd: isReviewPass
         ? DEFAULT_REVIEW_BUDGET_USD
         : isTriagePass
@@ -665,6 +686,98 @@ export async function startTask(taskId: string): Promise<void> {
     }
 
     await removeTaskContainer(taskId, running);
+  }
+}
+
+/**
+ * Put a paused pass's conversation back into its fresh container, and say
+ * which session the turn should continue (issue #169).
+ *
+ * Returns the session id only when the transcript actually landed. Everything
+ * that can go wrong here — no session recorded, no saved transcript, a write
+ * the daemon refused — degrades to the declared fallback rather than to a
+ * failure: the pass runs on the same branch, with the work already pushed,
+ * and its prompt (which carries the original brief behind the resume
+ * preamble) stands on its own. Resuming a session the container has never
+ * heard of would be the one genuinely bad outcome, so it is the one thing this
+ * refuses to do.
+ *
+ * The task's `sessionId` is set only by the resume executor, so an ordinary
+ * first pass never reaches past the first line.
+ */
+async function restoreSessionTranscript(
+  task: typeof tasks.$inferSelect,
+  running: RunningContainer
+): Promise<string | undefined> {
+  if (task.sessionId === null || task.runId === null) return undefined;
+
+  const transcript = readTranscript(task.runId);
+  if (transcript === null) {
+    insertSystemMessage(
+      task.id,
+      "Resuming without the paused session's transcript — this pass continues " +
+        "on the same branch, with the work pushed so far but no prior context."
+    );
+    return undefined;
+  }
+
+  try {
+    await writeContainerFile(
+      running.container,
+      containerTranscriptPath(task.sessionId),
+      transcript
+    );
+    insertSystemMessage(
+      task.id,
+      `Restored the paused session (${task.sessionId}) — continuing the same conversation.`
+    );
+    return task.sessionId;
+  } catch (err) {
+    console.error(
+      `[orchestrator] Could not restore the session transcript for task ${task.id}:`,
+      err
+    );
+    insertSystemMessage(
+      task.id,
+      "The paused session's transcript could not be restored — this pass " +
+        "continues on the same branch without its prior context."
+    );
+    return undefined;
+  }
+}
+
+/**
+ * Copy a paused pass's conversation out of the container that is about to be
+ * torn down (issue #169), and report whether it survived.
+ *
+ * Best-effort by design, and the ordering is the point: this runs before the
+ * teardown and its failure changes nothing about the pause. A pause protects
+ * the ticket's attempt; keeping the conversation only saves the resumed pass
+ * some re-orientation, so a transcript that cannot be copied must never cost
+ * the pause itself.
+ */
+async function preserveSessionTranscript(
+  runId: string,
+  sessionId: string | null,
+  container: RunningContainer | null
+): Promise<boolean> {
+  if (sessionId === null || container === null) return false;
+  try {
+    const transcript = await readContainerFile(
+      container.container,
+      containerTranscriptPath(sessionId)
+    );
+    if (transcript === null) {
+      console.warn(
+        `[autonomy] Run ${runId} paused with no readable transcript for session ` +
+          `${sessionId} — its resume will start again on the same branch`
+      );
+      return false;
+    }
+    return saveTranscript(runId, transcript);
+  } catch (err) {
+    console.error(`[autonomy] Could not copy the transcript of run ${runId} out:`, err);
+    return false;
   }
 }
 
@@ -1661,6 +1774,16 @@ async function pauseRunOnRateLimit(
   // the container until the 5-minute reaper caught it.
   const container = activeTasks.get(taskId)?.container ?? null;
 
+  // Before the teardown, and before anything terminal is written: the
+  // conversation only exists inside the container that is about to go (issue
+  // #169). Its failure is reported, never fatal — the pause protects the
+  // attempt whether or not the context survives.
+  const preserved = await preserveSessionTranscript(
+    pause.runId,
+    task?.sessionId ?? null,
+    container
+  );
+
   const window = pause.limitType
     ? `the ${describeRateLimitType(pause.limitType)}`
     : "the account's rate limit";
@@ -1672,7 +1795,11 @@ async function pauseRunOnRateLimit(
   insertSystemMessage(
     taskId,
     `Paused on ${window} — the account's quota refused this pass. ` +
-      `The window resets at ${resumes}; no attempt or interruption was consumed.`
+      `The window resets at ${resumes}; no attempt or interruption was consumed.` +
+      (preserved
+        ? " The session was copied out, so the resume continues this conversation."
+        : " The session could not be copied out, so the resume will start again" +
+          " on the same branch.")
   );
   updateTask(taskId, { status: "failed", containerStatus: null });
   syncRunCost(pause.runId);
@@ -1697,9 +1824,10 @@ async function pauseRunOnRateLimit(
     commentOnIssue(
       task.githubIssue,
       `Run paused (attempt ${run?.attempt ?? "?"}): the account's quota ` +
-        `refused this pass on ${window}. The window resets at ${resumes}. ` +
-        `A quota pause consumes neither an attempt nor an interruption — ` +
-        `work so far is pushed to \`${task.branch}\`.`
+        `refused this pass on ${window}. The window resets at ${resumes}, when ` +
+        `the run resumes by itself. A quota pause consumes neither an attempt ` +
+        `nor an interruption — work so far is pushed to \`${task.branch}\`` +
+        `${preserved ? ", and the pass resumes the same conversation" : ""}.`
     ).catch(console.error);
   }
 

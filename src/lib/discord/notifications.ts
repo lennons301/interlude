@@ -703,7 +703,9 @@ export async function notifyAttemptsExhausted(
     issueRef: string;
     attempts: number;
     interruptions: number;
-    reason: "attempts" | "interruptions";
+    /** Quota resumes spent, for the `quota-pauses` reason (issue #169) */
+    resumes?: number;
+    reason: "attempts" | "interruptions" | "quota-pauses";
     totalSpendUsd: number;
   }
 ): Promise<void> {
@@ -713,25 +715,38 @@ export async function notifyAttemptsExhausted(
   try {
     const channel = await fetchTextChannel(channelId);
 
-    const embed =
-      payload.reason === "interruptions"
-        ? new EmbedBuilder()
-            .setTitle(`Interruption bound hit — ${payload.issueRef} needs you`)
-            .setDescription(
-              `${payload.interruptions} runs lost to interruptions — restarts or ` +
-                `containers that died before finishing ` +
-                `($${payload.totalSpendUsd.toFixed(2)} autonomous spend). Re-claims are ` +
-                `bounded, so the ticket is now \`ready-for-human\`; the story is on the issue.`
-            )
-            .setColor(0xef4444)
-        : new EmbedBuilder()
-            .setTitle(`Attempts exhausted — ${payload.issueRef} needs you`)
-            .setDescription(
-              `All ${payload.attempts} attempts failed ` +
-                `($${payload.totalSpendUsd.toFixed(2)} autonomous spend). ` +
-                `The ticket is now \`ready-for-human\`; the per-attempt story is on the issue.`
-            )
-            .setColor(0xef4444);
+    const embed = new EmbedBuilder().setColor(0xef4444);
+    if (payload.reason === "interruptions") {
+      embed
+        .setTitle(`Interruption bound hit — ${payload.issueRef} needs you`)
+        .setDescription(
+          `${payload.interruptions} runs lost to interruptions — restarts or ` +
+            `containers that died before finishing ` +
+            `($${payload.totalSpendUsd.toFixed(2)} autonomous spend). Re-claims are ` +
+            `bounded, so the ticket is now \`ready-for-human\`; the story is on the issue.`
+        );
+    } else if (payload.reason === "quota-pauses") {
+      // Deliberately says what was *not* spent: this is the one exhaustion
+      // whose ticket still has its attempts, so "re-arm it later" is the
+      // obvious next move rather than a judgement call about the work.
+      embed
+        .setTitle(`Quota pauses spent — ${payload.issueRef} needs you`)
+        .setDescription(
+          `Attempt ${payload.attempts} kept being refused by the account's quota ` +
+            `(${payload.resumes ?? 0} resumes spent, ` +
+            `$${payload.totalSpendUsd.toFixed(2)} autonomous spend). The ticket is ` +
+            `now \`ready-for-human\` — but a quota pause spends no attempt, so ` +
+            `re-arming it once there is quota picks the work up where it stopped.`
+        );
+    } else {
+      embed
+        .setTitle(`Attempts exhausted — ${payload.issueRef} needs you`)
+        .setDescription(
+          `All ${payload.attempts} attempts failed ` +
+            `($${payload.totalSpendUsd.toFixed(2)} autonomous spend). ` +
+            `The ticket is now \`ready-for-human\`; the per-attempt story is on the issue.`
+        );
+    }
 
     await sendWithRetry(channel, embed);
   } catch (err) {
