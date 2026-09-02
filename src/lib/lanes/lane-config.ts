@@ -66,6 +66,49 @@ export interface LaneCaps {
   dailyBudgetUsd: number | null;
 }
 
+/**
+ * What a lane's provider charges, in USD per million tokens (issue #175).
+ *
+ * Declared per lane because a turn's cost has to come from *somewhere the
+ * orchestrator trusts*, and the harness's own figure is not that on a
+ * third-party endpoint. Observed on 2026-09-02 against OpenRouter's
+ * Anthropic-compatible endpoint: the Claude Code CLI reported
+ * `total_cost_usd: 0.194985` for a turn run on a **free** model, computing it
+ * at Anthropic list rates ($5/$25 per Mtok) for a model the endpoint had never
+ * heard of — 16.7x the paid slug's real price, and infinitely over the free
+ * one's. The CLI even says so itself, in the `costBasis: "unknown"` it puts on
+ * `modelUsage` where a first-party model reads `"list"`.
+ *
+ * So every spend guard in the milestone — the per-attempt budget, the daily
+ * cap, issue #174's real-money cap — is only as good as this table on a lane
+ * that is not Anthropic-direct.
+ */
+export interface TokenPrices {
+  /** USD per million input tokens (uncached). */
+  inputPerMTok: number;
+  /** USD per million output tokens, thinking tokens included. */
+  outputPerMTok: number;
+  /**
+   * USD per million tokens served from the prompt cache, or null when the
+   * provider does not price them apart — in which case they cost the input
+   * rate, which is what a provider with no cache discount actually charges.
+   */
+  cacheReadPerMTok: number | null;
+  /** USD per million tokens written to the prompt cache, or null for the same
+   * reason (OpenRouter prices no cache write on the GLM family). */
+  cacheWritePerMTok: number | null;
+}
+
+/**
+ * A lane's prices for every tier, or null when it declares none.
+ *
+ * All three tiers or nothing, exactly as `models` is: a lane that could price
+ * `standard` but not `light` would silently fall back to the untrusted harness
+ * figure the moment issue #164's ladder stepped down, which is the one moment
+ * nobody would be watching the number.
+ */
+export type LanePrices = Readonly<Record<ModelTier, TokenPrices>>;
+
 export interface LaneDefinition {
   id: string;
   /** Human-facing name for the settings screen. */
@@ -81,6 +124,16 @@ export interface LaneDefinition {
    * cannot answer "what is light here?" would degrade to nothing under issue
    * #164's ladder. */
   models: Readonly<Record<ModelTier, string>>;
+  /**
+   * What this lane's provider charges per tier (issue #175), or null to take
+   * the harness's own reported cost.
+   *
+   * Null is the right answer for an Anthropic-direct lane and only for one:
+   * there the CLI prices a model it recognises at that model's list rates,
+   * which is the figure the fleet wants and the one it has always used. A lane
+   * pointing anywhere else declares its prices or its spend is fiction.
+   */
+  prices: LanePrices | null;
   caps: LaneCaps;
 }
 
@@ -212,6 +265,9 @@ function parseLane(raw: unknown, index: number): LaneParse {
   const models = parseModels(raw.models, where);
   if ("reason" in models) return models;
 
+  const prices = parsePrices(raw.prices, where);
+  if ("reason" in prices) return prices;
+
   const caps = parseCaps(raw.caps, where);
   if ("reason" in caps) return caps;
 
@@ -224,6 +280,7 @@ function parseLane(raw: unknown, index: number): LaneParse {
       auth: auth.auth,
       baseUrl: baseUrl.baseUrl,
       models: models.models,
+      prices: prices.prices,
       caps: caps.caps,
     },
   };
@@ -305,6 +362,93 @@ function parseModels(
     };
   }
   return { models };
+}
+
+function parsePrices(
+  raw: unknown,
+  where: string
+): { prices: LanePrices | null } | { reason: string } {
+  if (raw === undefined || raw === null) return { prices: null };
+  if (!isMapping(raw)) {
+    return {
+      reason: `${where} has a non-mapping \`prices\` (expected one entry per tier)`,
+    };
+  }
+
+  const prices = {} as Record<ModelTier, TokenPrices>;
+  for (const tier of MODEL_TIERS) {
+    const entry = raw[tier];
+    if (entry === undefined || entry === null) {
+      // All three or none — see the note on LanePrices.
+      return {
+        reason:
+          `${where} declares \`prices\` but none for the "${tier}" tier — ` +
+          "price every tier or none of them",
+      };
+    }
+    if (!isMapping(entry)) {
+      return { reason: `${where} has a non-mapping \`prices.${tier}\`` };
+    }
+    const input = parsePrice(entry.input, `${where} prices.${tier}.input`);
+    if ("reason" in input) return input;
+    const output = parsePrice(entry.output, `${where} prices.${tier}.output`);
+    if ("reason" in output) return output;
+    const cacheRead = parseOptionalPrice(
+      entry.cache_read,
+      `${where} prices.${tier}.cache_read`
+    );
+    if ("reason" in cacheRead) return cacheRead;
+    const cacheWrite = parseOptionalPrice(
+      entry.cache_write,
+      `${where} prices.${tier}.cache_write`
+    );
+    if ("reason" in cacheWrite) return cacheWrite;
+
+    prices[tier] = {
+      inputPerMTok: input.price,
+      outputPerMTok: output.price,
+      cacheReadPerMTok: cacheRead.price,
+      cacheWritePerMTok: cacheWrite.price,
+    };
+  }
+
+  const extra = Object.keys(raw).filter(
+    (key) => !(MODEL_TIERS as readonly string[]).includes(key)
+  );
+  if (extra.length > 0) {
+    return {
+      reason:
+        `${where} prices unknown tier(s) ${extra.join(", ")} — expected ` +
+        `${MODEL_TIERS.join(", ")}.`,
+    };
+  }
+
+  return { prices };
+}
+
+/** A required price. Zero is legal — a free model really is free, and reading
+ * it as "unpriced" would send the fleet back to the harness's fiction. */
+function parsePrice(
+  raw: unknown,
+  where: string
+): { price: number } | { reason: string } {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) {
+    return {
+      reason: `${where} is not a non-negative number of USD per million tokens`,
+    };
+  }
+  return { price: raw };
+}
+
+/** An optional price: absent means "not priced apart", which the cost
+ * calculation reads as the input rate rather than as free. */
+function parseOptionalPrice(
+  raw: unknown,
+  where: string
+): { price: number | null } | { reason: string } {
+  if (raw === undefined || raw === null) return { price: null };
+  const parsed = parsePrice(raw, where);
+  return "reason" in parsed ? parsed : { price: parsed.price };
 }
 
 function parseCaps(

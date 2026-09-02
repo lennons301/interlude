@@ -19,6 +19,7 @@
 
 import { getConfig } from "../config";
 import { todayMeteredSpendUsd } from "../orchestrator/spend";
+import { getQuotaObservation } from "../quota/quota-store";
 import type { QuotaObservation } from "../quota/rate-limit-event";
 import type { FleetSettings } from "../settings";
 import { getLaneCatalog } from "./catalog";
@@ -56,6 +57,19 @@ export interface MoneyGuards {
   overagePaying: boolean;
   /** Why the lane file could not be read, when it could not be. */
   laneError: string | null;
+  /**
+   * The last quota observation from **that lane** (issue #167, per-lane since
+   * #175), or null when no pass on it has reported one — which is the
+   * permanent state of a metered lane, whose provider gives no quota
+   * telemetry at all.
+   *
+   * Read here rather than by each caller because *which* row to read depends
+   * on the lane this function resolves: the guards need it to tell quota from
+   * an active overage (issue #173), and the admission gate needs the same
+   * lane's window. Handed back so no caller reads it a second time and the
+   * two judge one instant of one row.
+   */
+  quota: QuotaObservation | null;
   cap: MeteredCap;
   /** Real money spent on the local day containing `now`. */
   spentTodayUsd: number;
@@ -66,11 +80,7 @@ export interface MoneyGuards {
 
 export function readMoneyGuards(
   now: Date,
-  settings: FleetSettings,
-  /** The fleet's last quota observation (issue #167). Handed in rather than
-   * read here because both impure callers have just read it for the admission
-   * gate, and the two must describe the same instant. */
-  observation: QuotaObservation | null
+  settings: FleetSettings
 ): MoneyGuards {
   const config = getConfig();
   const catalog = getLaneCatalog();
@@ -88,7 +98,11 @@ export function readMoneyGuards(
     lane?.caps.dailyBudgetUsd ?? null
   );
   const spentTodayUsd = todayMeteredSpendUsd(now);
-  const overage = overagePaysNow(observation, now);
+  // Keyed by the lane resolved just above, which is why this read lives here:
+  // a quota row belongs to one lane (issue #175), so the lane whose window is
+  // judged and the lane whose spend is capped can never be different lanes.
+  const quota = getQuotaObservation(lane?.id ?? null);
+  const overage = overagePaysNow(quota, now);
   const billing =
     lane === null ? null : effectiveBilling(lane.billing, overage);
   const overagePaying = overageIsThePayer(lane?.billing ?? null, overage);
@@ -98,6 +112,7 @@ export function readMoneyGuards(
     billing,
     overagePaying,
     laneError: catalog.ok ? null : catalog.reason,
+    quota,
     cap,
     spentTodayUsd,
     state: evaluateMeteredSpend({

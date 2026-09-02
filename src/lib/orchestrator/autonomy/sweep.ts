@@ -14,7 +14,6 @@ import { getConfig, PLATFORM_REPO_URL } from "../../config";
 import { getFleetSettings } from "../../settings";
 import { resolveQuotaThreshold, resolveResumeBound } from "../../settings-resolver";
 import { evaluateQuotaGate } from "../../quota/quota-gate";
-import { getQuotaObservation } from "../../quota/quota-store";
 import {
   discardTranscript,
   hasTranscript,
@@ -502,11 +501,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
   // overrides, which is what makes switching the primary lane between billing
   // kinds take effect at the next sweep with no restart. The same read the
   // dashboard and the settings panel make, so all three describe one fleet.
-  // The quota observation is read once for the tick: the money guards need it
-  // to tell subscription quota from an active overage (issue #173), and the
-  // admission gate reads the same row, so both describe one instant.
-  const quota = getQuotaObservation();
-  const money = readMoneyGuards(now, settings, quota);
+  const money = readMoneyGuards(now, settings);
 
   const registered = db
     .select()
@@ -698,11 +693,24 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     // what makes the kill switch (issue #118) take effect at the next sweep
     // rather than at the next restart.
     globalPaused: settings.globalAutonomyPaused,
-    // The last observation any pass wrote (issue #167), and the threshold in
-    // force. Both read fresh each tick, never captured at boot: that is what
-    // lets a wall observed mid-sweep, or a threshold changed on the settings
+    // The last observation a pass on the lane *this* tick would claim onto
+    // wrote (issue #167, per-lane since #175), and the threshold in force.
+    // Both read fresh each tick, never captured at boot: that is what lets a
+    // wall observed mid-sweep, or a threshold or lane changed on the settings
     // screen, take effect at the next tick rather than at the next restart.
-    quota,
+    //
+    // Per-lane is what keeps the gate honest, not a refinement of it: the
+    // unified-window machinery is subscription-only, so a metered lane never
+    // produces an observation at all. Read fleet-wide, the subscription's last
+    // rejection would close the gate over a lane that cannot be rate-limited —
+    // holding every pickup on a fleet that was, on that lane, entirely free to
+    // work. The gate already treats no observation as open (see its rule 1),
+    // so asking the right lane is the whole fix. It comes from the one read
+    // this tick already made for the money guards (issue #174), which is keyed
+    // to the lane they resolved — so the lane whose quota is judged, the lane
+    // whose spend is capped, and the lane an overage is read against
+    // (issue #173) can never be three different lanes.
+    quota: money.quota,
     quotaThresholdPercent: resolveQuotaThreshold(config, settings.overrides)
       .percent,
     quotaGateAnnounced: quotaGateAnnouncement.announced,

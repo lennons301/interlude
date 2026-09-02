@@ -26,6 +26,11 @@ import type { LaneSettingsView, LaneView } from "@/lib/lanes/resolve";
  *   inside the harness with "Not logged in";
  * - a lane says who pays. `metered` is real money, so it reads in the same
  *   amber the rest of the control room uses for a deliberate hold;
+ * - a lane says what it *charges*, per tier (issue #175). Not decoration: off
+ *   an Anthropic-direct endpoint these figures — not the harness's reported
+ *   cost — are what every budget in the fleet is measured against, so the
+ *   number an operator is billed by is the number on this screen. A lane with
+ *   no prices declared says so, because there the harness's figure stands;
  * - variable **names** only ever cross the wire. No lane secret is stored in
  *   the database or served by the API, and this panel could not show one if it
  *   wanted to.
@@ -156,6 +161,22 @@ export function ExecutionLanePanel({
   );
 }
 
+/**
+ * A lane's prices in one line: input/output USD per million tokens, per tier.
+ *
+ * Input and output only — the cache columns matter to the total but not to the
+ * comparison a reader is making here, which is "how much dearer is heavy than
+ * light, and how does this lane compare to the last one?". The full table is
+ * in `lanes.yaml`, where it is reviewed.
+ */
+function priceNote(prices: LaneView["prices"]): string {
+  if (prices === null) return "prices from the harness's own reported cost";
+  const perTier = MODEL_TIERS.map(
+    (tier) => `${tier}=${prices[tier].inputPerMTok}/${prices[tier].outputPerMTok}`
+  );
+  return `$/Mtok in/out · ${perTier.join(" ")}`;
+}
+
 const SOURCE_LABEL: Record<LaneSettingsView["source"], string> = {
   override: "ui override",
   environment: "environment",
@@ -186,6 +207,14 @@ function LaneRow({ lane }: { lane: LaneView }) {
         {MODEL_TIERS.map((tier) => `${tier}=${lane.models[tier]}`).join(" ")}
         {lane.caps.dailyBudgetUsd !== null &&
           ` · cap $${lane.caps.dailyBudgetUsd}/day`}
+      </p>
+
+      <p className="font-plex-mono text-[11px] text-fl-ink-3">
+        {/* What the fleet charges a pass on this lane (issue #175). Spelled out
+            per tier because the tiers differ by more than an order of
+            magnitude on an open-weights lane, so one blended figure would
+            misprice whichever tier the reader had in mind. */}
+        {priceNote(lane.prices)}
       </p>
 
       <p className="font-plex-mono text-[11px] text-fl-ink-3">

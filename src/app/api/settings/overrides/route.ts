@@ -9,9 +9,14 @@ import {
   type SettingsOverrides,
   type TierModelIds,
 } from "@/lib/settings-resolver";
+import type { ModelTier } from "@/lib/model-tiers";
 import { getLaneCatalog } from "@/lib/lanes/catalog";
 import { laneCatalogContext } from "@/lib/lanes/settings-context";
-import { describeLanes, type LaneSettingsView } from "@/lib/lanes/resolve";
+import {
+  describeLanes,
+  laneFallbackTier,
+  type LaneSettingsView,
+} from "@/lib/lanes/resolve";
 
 /**
  * The UI-editable settings layer (issues #166, #172): env config with a stored
@@ -35,13 +40,21 @@ function laneState(overrides: SettingsOverrides): {
   /** The primary lane's tier map — what the model-tier rows must be resolved
    * against, so the screen names the model a pass would actually run. */
   tierModels: TierModelIds | undefined;
+  /** And what that lane answers an *unset* row with (issue #175): a priced
+   * lane runs its own default tier rather than no `--model` at all. */
+  fallbackTier: ModelTier | null;
 } {
   const catalog = getLaneCatalog();
   if (!catalog.ok) {
     // No catalog means no pass can start at all, which the lane panel says in
     // as many words; the tier rows fall back to the pre-lane map rather than
     // rendering blank beside it.
-    return { lanes: null, laneError: catalog.reason, tierModels: undefined };
+    return {
+      lanes: null,
+      laneError: catalog.reason,
+      tierModels: undefined,
+      fallbackTier: null,
+    };
   }
   const lanes = describeLanes({
     catalog: catalog.catalog,
@@ -50,13 +63,23 @@ function laneState(overrides: SettingsOverrides): {
     env: process.env,
   });
   const primary = lanes.lanes.find((lane) => lane.primary);
-  return { lanes, laneError: null, tierModels: primary?.models };
+  return {
+    lanes,
+    laneError: null,
+    tierModels: primary?.models,
+    fallbackTier: primary ? laneFallbackTier(primary) : null,
+  };
 }
 
 function state(overrides: SettingsOverrides, updatedAt: Date | null) {
-  const { tierModels, lanes, laneError } = laneState(overrides);
+  const { tierModels, fallbackTier, lanes, laneError } = laneState(overrides);
   return {
-    fields: describeModelTierSettings(getConfig(), overrides, tierModels),
+    fields: describeModelTierSettings(
+      getConfig(),
+      overrides,
+      tierModels,
+      fallbackTier
+    ),
     lanes,
     laneError,
     // The quota admission threshold (issue #171) — its own view model beside

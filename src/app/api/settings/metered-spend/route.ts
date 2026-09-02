@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { readMoneyGuards } from "@/lib/lanes/money-state";
 import { readLaneCrossing } from "@/lib/lanes/overflow-state";
-import { getQuotaObservation } from "@/lib/quota/quota-store";
 import {
   getFleetSettings,
   setMeteredSpendConfirmed,
@@ -36,16 +35,14 @@ import { parseSettingsPatch } from "@/lib/settings-resolver";
 function state() {
   const settings = getFleetSettings();
   const now = new Date();
-  // One read of the quota row for both answers below, so the guards and the
-  // crossing describe the same instant.
-  const observation = getQuotaObservation();
-  // The same read the sweep and the dashboard make, so the panel cannot report
-  // a fleet other than the one being gated.
+  // The same read the sweep and the dashboard make — which lane, at what cap,
+  // spent how much, and that lane's own quota row (issue #175) — so the panel
+  // cannot report a fleet other than the one being gated.
   const { lane, billing, overagePaying, laneError, cap, spentTodayUsd, state: guards } =
-    readMoneyGuards(now, settings, observation);
+    readMoneyGuards(now, settings);
   // The same pure decision the turn manager routes a pass with and the queue
   // loop declines to start one with — never a second opinion about it.
-  const crossing = readLaneCrossing("interactive", now, settings, observation);
+  const crossing = readLaneCrossing("interactive", now, settings);
 
   return {
     lane:

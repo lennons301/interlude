@@ -100,10 +100,11 @@ function seedTask(
   return id;
 }
 
-/** The account refusing work, with a stated reset — what an interactive
- * session overflows off (and what #168 parks an autonomous run on). */
+/** The subscription lane refusing work, with a stated reset — what an
+ * interactive session overflows off (and what #168 parks an autonomous run
+ * on). Keyed to that lane, because a quota row belongs to one (issue #175). */
 function recordWall(): void {
-  recordQuotaObservation({
+  recordQuotaObservation("claude-subscription", {
     status: "rejected",
     rateLimitType: "five_hour",
     utilization: null,

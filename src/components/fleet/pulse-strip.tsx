@@ -94,7 +94,7 @@ export function PulseStrip({ view, now }: { view: FleetView; now: number }) {
           />
         </div>
       )}
-      <QuotaTile quota={view.quota} now={now} />
+      <QuotaTile quota={view.quota} lane={view.quotaLane} now={now} />
     </section>
   );
 }

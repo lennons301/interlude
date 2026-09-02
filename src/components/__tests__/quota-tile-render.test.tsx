@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { QuotaTile } from "../fleet/quota-tile";
-import type { QuotaGlance } from "@/lib/fleet/fleet-view";
+import type { QuotaGlance, QuotaLaneGlance } from "@/lib/fleet/fleet-view";
 
 /**
  * The quota tile (issue #167). What the read model decides is tested in
@@ -16,8 +16,27 @@ const NOW = new Date("2026-09-01T12:00:00.000Z").getTime();
  * tile, is drawn at this height. */
 const GAUGE = "h-[3px]";
 
-function render(quota: QuotaGlance | null): string {
-  return renderToStaticMarkup(<QuotaTile quota={quota} now={NOW} />);
+/** The subscription lane — the one kind that can report a window at all. */
+const SUBSCRIPTION_LANE: QuotaLaneGlance = {
+  id: "claude-subscription",
+  label: "Claude subscription",
+  billing: "subscription",
+  reportsQuota: true,
+};
+
+/** A metered lane, which reports none, ever (issue #175). */
+const METERED_LANE: QuotaLaneGlance = {
+  id: "openrouter-glm",
+  label: "OpenRouter (GLM open weights)",
+  billing: "metered",
+  reportsQuota: false,
+};
+
+function render(
+  quota: QuotaGlance | null,
+  lane: QuotaLaneGlance | null = SUBSCRIPTION_LANE
+): string {
+  return renderToStaticMarkup(<QuotaTile quota={quota} lane={lane} now={NOW} />);
 }
 
 const OBSERVED: QuotaGlance = {
@@ -31,8 +50,8 @@ const OBSERVED: QuotaGlance = {
 
 describe("quota tile", () => {
   it("renders sensibly before anything has been observed", () => {
-    // The state a fresh install is in, and the permanent state of a fleet on
-    // API-key auth. It must not read as a quota of zero.
+    // A fresh install on a lane that could report a window. It must not read
+    // as a quota of zero.
     const html = render(null);
 
     expect(html).toContain("not observed yet");
@@ -108,5 +127,31 @@ describe("quota tile", () => {
     // still the CLI's own, not one this build substituted for it.
     expect(unknown).toContain("throttled soft");
     expect(unknown).toContain("border-fl-line");
+  });
+
+  it("says a metered lane is bounded by spend, not that it is unobserved", () => {
+    // The distinction issue #175 turns on. "Not observed yet" implies a reading
+    // is coming; on a metered lane none ever is, because the unified-window
+    // machinery is subscription-only. An operator told the wrong one waits.
+    const html = render(null, METERED_LANE);
+
+    expect(html).toContain("bounded by spend");
+    expect(html).toContain("OpenRouter (GLM open weights)");
+    expect(html).not.toContain("not observed yet");
+  });
+
+  it("falls back to the pending wording when no lane resolves at all", () => {
+    // An unusable lanes.yaml: nothing is known about the lane, so the tile may
+    // not claim the fleet is metered.
+    const html = render(null, null);
+
+    expect(html).toContain("not observed yet");
+    expect(html).not.toContain("bounded by spend");
+  });
+
+  it("names the lane an observed reading belongs to", () => {
+    // With more than one lane declared, a reading with no owner is a reading
+    // nobody can act on.
+    expect(render(OBSERVED)).toContain("Claude subscription");
   });
 });

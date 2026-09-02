@@ -184,8 +184,11 @@ describe("the crossing an attended session would make", () => {
     resetLaneCatalog();
   });
 
+  /** An observation on the subscription lane — the one the crossing reads,
+   * since a quota row belongs to a lane (issue #175) and a metered lane never
+   * reports one at all. */
   function observe(fields: Partial<QuotaObservation>): void {
-    recordQuotaObservation({
+    recordQuotaObservation("claude-subscription", {
       status: "allowed",
       rateLimitType: "five_hour",
       utilization: 20,

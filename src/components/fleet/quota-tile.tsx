@@ -1,4 +1,4 @@
-import type { QuotaGlance } from "@/lib/fleet/fleet-view";
+import type { QuotaGlance, QuotaLaneGlance } from "@/lib/fleet/fleet-view";
 import type { QuotaSeverity } from "@/lib/quota/rate-limit-event";
 import { Chip, Gauge, TONES, formatCountdown, formatElapsed } from "./fleet-bits";
 
@@ -9,12 +9,19 @@ import { Chip, Gauge, TONES, formatCountdown, formatElapsed } from "./fleet-bits
  * spend is what the fleet has cost, quota is whether it may keep going at all.
  * Purely a readout — nothing in the fleet acts on this yet.
  *
- * Four states, all of them ordinary:
+ * Five states, all of them ordinary:
  *
- *  - **Nothing observed.** A fresh install, and also the permanent state of a
- *    fleet on API-key auth, where the CLI emits no quota telemetry at all
- *    (#165, finding 6). Said plainly rather than drawn as an empty gauge,
- *    which would read as "0% used".
+ *  - **A lane that cannot report quota at all.** Every metered lane: the
+ *    unified-window machinery is an Anthropic-subscription construct (#165,
+ *    finding 6), re-confirmed against OpenRouter on 2026-09-02 — no
+ *    `anthropic-ratelimit-*` headers, no `rate_limit_event` on a full harness
+ *    turn. That is a *different sentence* from "not observed yet" (issue
+ *    #175): one is permanent and by design, the other is pending. Saying the
+ *    wrong one would have an operator waiting for a reading that will never
+ *    come.
+ *  - **Nothing observed.** A fresh install on a lane that could report one.
+ *    Said plainly rather than drawn as an empty gauge, which would read as
+ *    "0% used".
  *  - **Observed without a utilization.** The *usual* shape on the owner's
  *    account: the figure only appears when the reported window has a
  *    claim-scoped utilization header. The gauge is omitted rather than drawn
@@ -47,20 +54,32 @@ const QUOTA_TONE: Record<QuotaSeverity, keyof typeof TONES> = {
 
 export function QuotaTile({
   quota,
+  lane,
   now,
 }: {
   quota: QuotaGlance | null;
+  /** The lane the reading belongs to (issue #175); null when no lane resolves. */
+  lane: QuotaLaneGlance | null;
   now: number;
 }) {
   if (quota === null) {
+    // A lane that emits no quota telemetry is not an unobserved one — it is
+    // bounded by spend, which is the gauge directly above this tile. Naming the
+    // lane matters here: it is the one thing that would tell an operator why
+    // the tile went quiet after they switched lanes.
+    const laneless = lane !== null && !lane.reportsQuota;
     return (
       <section aria-label="Quota" className="space-y-1.5">
-        <div className="flex items-baseline justify-between font-plex-mono text-[11px] text-fl-ink-2">
+        <div className="flex items-baseline justify-between gap-2 font-plex-mono text-[11px] text-fl-ink-2">
           <span>quota</span>
-          <span className="text-fl-ink-3">not observed yet</span>
+          <span className="truncate text-fl-ink-3">
+            {laneless ? "bounded by spend" : "not observed yet"}
+          </span>
         </div>
         <p className="font-plex-mono text-[11px] text-fl-ink-3">
-          no pass has reported a limit window
+          {laneless
+            ? `${lane.label} reports no limit window — this lane is metered`
+            : "no pass has reported a limit window"}
         </p>
       </section>
     );
@@ -103,7 +122,12 @@ export function QuotaTile({
               ? "reset time passed"
               : `resets in ${resetsIn}`}
         </span>
-        <span>seen {formatElapsed(quota.observedAt, now)} ago</span>
+        <span className="truncate">
+          {/* Whose quota: with more than one lane declared, a reading with no
+              owner is a reading an operator cannot act on (issue #175). */}
+          {lane && <span className="mr-1.5">{lane.label}</span>}
+          seen {formatElapsed(quota.observedAt, now)} ago
+        </span>
       </div>
     </section>
   );

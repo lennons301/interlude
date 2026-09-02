@@ -261,6 +261,83 @@ describe("execution lanes on /api/settings/overrides", () => {
     ).toMatchObject({ tier: "light", model: "anthropic/claude-haiku-4.5" });
   });
 
+  it("switches to the open-weights lane and back, with no redeploy", async () => {
+    // Acceptance criterion of issue #175, end to end through the route the
+    // screen uses: one PATCH moves every pass onto GLM, and clearing the
+    // override puts them back. Nothing here restarts, and nothing here
+    // re-reads a file — the choice is a row, and the lane's meaning is the
+    // checked-in catalog.
+    process.env.OPENROUTER_API_KEY = "sk-or-v1-test";
+    resetConfig();
+    resetLaneCatalog();
+
+    // The lane and nothing else — no tier override and no AGENT_MODEL, which
+    // is the state a fresh deployment is in and therefore the one that has to
+    // work. A priced lane answers it from its own default tier rather than
+    // letting the harness pick a model from another provider's catalogue.
+    const onGlm = await (
+      await PATCH(patch({ primaryLane: "openrouter-glm" }))
+    ).json();
+    expect(onGlm.lanes).toMatchObject({
+      primaryLaneId: "openrouter-glm",
+      source: "override",
+    });
+
+    const resolveNow = () => {
+      const catalog = getLaneCatalog();
+      if (!catalog.ok) throw new Error(catalog.reason);
+      return resolveLane({
+        catalog: catalog.catalog,
+        kind: "implement",
+        config: getConfig(),
+        ticketModel: null,
+        overrides: getSettingsOverrides(),
+        env: process.env,
+      });
+    };
+
+    const glm = resolveNow();
+    expect(glm.ok).toBe(true);
+    if (!glm.ok) return;
+    // The tier map resolves to a concrete OpenRouter identifier, and the lane
+    // carries its own prices — the harness's reported cost is not trusted
+    // here. Both hold with no tier configured, which is the whole point: this
+    // is the configuration one press leaves the fleet in.
+    expect(glm.lane.tier).toBe("standard");
+    expect(glm.lane.model).toBe("z-ai/glm-5.3-flash");
+    expect(glm.lane.baseUrl).toBe("https://openrouter.ai/api");
+    expect(glm.lane.prices?.inputPerMTok).toBeGreaterThan(0);
+    expect(glm.lane.declaresPrices).toBe(true);
+    // Same credential as its Anthropic-slug neighbour: changing model on a
+    // third-party provider is a tier-map edit, not a new secret.
+    expect(glm.lane.auth).toEqual({ ANTHROPIC_AUTH_TOKEN: "sk-or-v1-test" });
+
+    // The screen says the same thing the pass would run — the tier row is
+    // resolved against the primary lane's map *and* its answer for an unset
+    // field, so it cannot read "no --model" over a lane that names one.
+    const onGlmFields = await (await GET()).json();
+    expect(
+      onGlmFields.fields.find(
+        (f: { key: string }) => f.key === "modelTierImplement"
+      )
+    ).toMatchObject({ tier: "standard", model: "z-ai/glm-5.3-flash" });
+
+    // And a tier chosen on the screen still wins over the lane's default.
+    await PATCH(patch({ modelTierImplement: "heavy" }));
+    const heavy = resolveNow();
+    expect(heavy.ok && heavy.lane.model).toBe("z-ai/glm-5.3");
+
+    await PATCH(patch({ primaryLane: null }));
+
+    const back = resolveNow();
+    expect(back.ok).toBe(true);
+    if (!back.ok) return;
+    expect(back.lane.id).toBe("claude-subscription");
+    // And back on a lane whose reported cost *is* the charged one.
+    expect(back.lane.prices).toBeNull();
+    expect(back.lane.declaresPrices).toBe(false);
+  });
+
   it("refuses a lane that is not declared, storing nothing", async () => {
     const res = await PATCH(patch({ primaryLane: "kimi" }));
 

@@ -16,8 +16,6 @@
  */
 
 import { getConfig, type AgentPassKind } from "../config";
-import { getQuotaObservation } from "../quota/quota-store";
-import type { QuotaObservation } from "../quota/rate-limit-event";
 import { getFleetSettings, type FleetSettings } from "../settings";
 import { getLaneCatalog } from "./catalog";
 import { readMoneyGuards } from "./money-state";
@@ -27,7 +25,8 @@ import { decideLaneCrossing, type LaneCrossing } from "./overflow";
  * The crossing for one pass kind, as the fleet stands right now.
  *
  * Everything is read fresh — the settings row (which carries the cap and the
- * confirmation), the quota row (which carries the wall) and the day's cash —
+ * confirmation), the primary lane's quota row (which carries the wall) and the
+ * day's cash —
  * so a confirmation pressed on the screen reaches the next poll rather than
  * the next restart. The lane *file* is the one cached read, because it cannot
  * change without a deploy.
@@ -35,8 +34,7 @@ import { decideLaneCrossing, type LaneCrossing } from "./overflow";
 export function readLaneCrossing(
   kind: AgentPassKind,
   now: Date = new Date(),
-  settings: FleetSettings = getFleetSettings(),
-  observation: QuotaObservation | null = getQuotaObservation()
+  settings: FleetSettings = getFleetSettings()
 ): LaneCrossing {
   const catalog = getLaneCatalog();
   // Read for its facts — which lane is in force, and what the card has been
@@ -45,7 +43,7 @@ export function readLaneCrossing(
   // binds. `decideLaneCrossing` therefore re-evaluates #174's own functions for
   // the lane it picks, which is the same pair of pure calls, not a second
   // policy.
-  const guards = readMoneyGuards(now, settings, observation);
+  const guards = readMoneyGuards(now, settings);
 
   return decideLaneCrossing({
     kind,
@@ -58,7 +56,10 @@ export function readLaneCrossing(
     // decides which lane, and `resolveLane` is still the only reader of a
     // credential.
     env: process.env,
-    observation,
+    // The primary lane's own observation, as the guards read it (issue #175's
+    // per-lane keying): the wall this crossing is about is that lane's wall,
+    // and the metered lane it would cross onto reports no quota at all.
+    observation: guards.quota,
     config: getConfig(),
     overrides: settings.overrides,
     spentTodayUsd: guards.spentTodayUsd,
