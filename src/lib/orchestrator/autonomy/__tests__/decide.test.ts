@@ -22,6 +22,7 @@ import {
   type StaleReview,
   type TriageCandidate,
 } from "../decide";
+import type { ModelTier } from "../../../model-tiers";
 import type { QuotaObservation } from "../../../quota/rate-limit-event";
 
 // Fixed clock — time arrives in the snapshot, never read inside the reducer
@@ -241,6 +242,9 @@ function makePass(overrides: Partial<PassOutcome> = {}): PassOutcome {
     finalMessage: "Implemented the frobnicator; tests and lint pass.",
     producedPr: true,
     rateLimited: null,
+    // The top of the ladder, so a degrade test has somewhere to step and a
+    // pause test is not passing by accident (issue #170).
+    tier: "heavy",
     ...overrides,
   };
 }
@@ -3119,6 +3123,216 @@ describe("decideNext — pausing a pass on a quota wall (issue #168)", () => {
 
   it("leaves a healthy pass alone — a pass is paused only when it was refused", () => {
     expect(pauses(decideNext(passOutcomeSnapshot(NOW, makePass())))).toEqual([]);
+  });
+});
+
+describe("decideNext — the tier degrade ladder (issue #170)", () => {
+  const RESUME_AFTER = new Date(2026, 7, 1, 17, 0, 0);
+
+  function degrades(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "degradeRunTier");
+  }
+  function pauses(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "pauseRunOnRateLimit");
+  }
+
+  /** One refused pass, decided at the seam the turn manager decides it. */
+  function decide(tier: PassOutcome["tier"], limitType: string | null) {
+    return decideNext(
+      passOutcomeSnapshot(
+        NOW,
+        makePass({ tier, rateLimited: { resumeAfter: RESUME_AFTER, limitType } })
+      )
+    );
+  }
+
+  /**
+   * The table the ticket asks for: every limit type this build knows, plus the
+   * two it does not, against the tier the pass ran at. `degrade` names the rung
+   * the run retries on; `pause` means the wall stops the run.
+   *
+   * This is where the ticket's whole claim lives — that losing one tier's
+   * allowance is not the same event as losing the account's — so it is stated
+   * as data rather than as prose spread over a dozen cases.
+   */
+  const LADDER: [ModelTier | null, string | null, ModelTier | "pause"][] = [
+    // Tier-scoped: the account still has quota, one rung down.
+    ["heavy", "seven_day_opus", "standard"],
+    ["standard", "seven_day_sonnet", "light"],
+    // ... but never onto a rung the wall itself covers.
+    ["heavy", "seven_day_sonnet", "light"],
+    // The bottom of the ladder has nowhere to step.
+    ["light", "seven_day_opus", "pause"],
+    ["light", "seven_day_sonnet", "pause"],
+    // Account-wide: every tier is refused, so stepping down buys nothing.
+    ["heavy", "five_hour", "pause"],
+    ["heavy", "seven_day", "pause"],
+    ["heavy", "seven_day_overage_included", "pause"],
+    ["heavy", "overage", "pause"],
+    ["standard", "five_hour", "pause"],
+    ["light", "five_hour", "pause"],
+    // Unreadable, and unnamed: the cautious answer both times.
+    ["heavy", "thirty_day_enterprise", "pause"],
+    ["heavy", null, "pause"],
+    // No rung to step off: a pinned raw model id, or no model configured.
+    [null, "seven_day_opus", "pause"],
+    [null, "five_hour", "pause"],
+  ];
+
+  it.each(LADDER)(
+    "a %s pass refused on %s -> %s",
+    (tier, limitType, expected) => {
+      const actions = decide(tier, limitType);
+
+      if (expected === "pause") {
+        expect(degrades(actions)).toEqual([]);
+        expect(pauses(actions)).toEqual([
+          {
+            type: "pauseRunOnRateLimit",
+            runId: "run-1",
+            taskId: "task-1",
+            issueRef: "acme/widgets#7",
+            resumeAfter: RESUME_AFTER,
+            limitType,
+          },
+        ]);
+        return;
+      }
+      expect(pauses(actions)).toEqual([]);
+      expect(degrades(actions)).toEqual([
+        {
+          type: "degradeRunTier",
+          runId: "run-1",
+          taskId: "task-1",
+          issueRef: "acme/widgets#7",
+          from: tier,
+          to: expected,
+          limitType,
+          resumeAfter: RESUME_AFTER,
+        },
+      ]);
+    }
+  );
+
+  it("degrades a rejection that named no reset time, where a pause could not", () => {
+    // The asymmetry #170 introduces: a pause needs a clock and a degrade does
+    // not, so a reset-less tier wall steps down where a reset-less account-wide
+    // one still falls through to the ordinary path.
+    const actions = decideNext(
+      passOutcomeSnapshot(
+        NOW,
+        makePass({
+          tier: "heavy",
+          rateLimited: { resumeAfter: null, limitType: "seven_day_opus" },
+        })
+      )
+    );
+
+    expect(degrades(actions)).toEqual([
+      {
+        type: "degradeRunTier",
+        runId: "run-1",
+        taskId: "task-1",
+        issueRef: "acme/widgets#7",
+        from: "heavy",
+        to: "standard",
+        limitType: "seven_day_opus",
+        resumeAfter: null,
+      },
+    ]);
+  });
+
+  it("spends the attempt on a reset-less account-wide wall, exactly as before", () => {
+    // No clock to wait on and no rung to step to: a run paused on an invented
+    // window is stranded where no later ticket can find it, so the pass takes
+    // its ordinary path — here #106's empty-pass finalize.
+    const actions = decideNext(
+      passOutcomeSnapshot(
+        NOW,
+        makePass({
+          tier: "heavy",
+          producedPr: false,
+          rateLimited: { resumeAfter: null, limitType: "five_hour" },
+        })
+      )
+    );
+
+    expect(degrades(actions)).toEqual([]);
+    expect(pauses(actions)).toEqual([]);
+    expect(actions).toEqual([
+      {
+        type: "finalizeEmptyPass",
+        runId: "run-1",
+        taskId: "task-1",
+        issueRef: "acme/widgets#7",
+      },
+    ]);
+  });
+
+  it("does not read a degraded pass's empty diff or final message as the work's", () => {
+    // The same argument the pause path makes: a refused turn never reached the
+    // model, so its empty diff is the wall's (#106 would charge a strike) and
+    // its "final message" is the CLI's own line (#107 would page the owner).
+    const actions = decideNext(
+      passOutcomeSnapshot(
+        NOW,
+        makePass({
+          tier: "heavy",
+          producedPr: false,
+          finalMessage: "BLOCKED: which database?",
+          rateLimited: { resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" },
+        })
+      )
+    );
+
+    expect(actions.map((a) => a.type)).toEqual(["degradeRunTier"]);
+  });
+
+  it("leaves the ticket's attempt and interruption accounting untouched", () => {
+    // A step down the ladder is not a failed attempt and not an interruption:
+    // the work was never tried, so neither bound moves and no second run is
+    // claimed over the one now retrying.
+    const actions = decideNext(
+      makeSnapshot({
+        completedPasses: [
+          makePass({
+            tier: "heavy",
+            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" },
+          }),
+        ],
+        candidates: [
+          makeCandidate({ attemptsMade: 2, interruptionsMade: 4, hasActiveRun: true }),
+        ],
+      })
+    );
+
+    expect(actions.some((a) => a.type === "exhaust")).toBe(false);
+    expect(actions.some((a) => a.type === "failAttempt")).toBe(false);
+    expect(actions.filter((a) => a.type === "claimIssue")).toHaveLength(0);
+  });
+
+  it("drives nothing else for a run it just stepped down", () => {
+    // Same guard the paused and blocked runs get: the executors never gather a
+    // run mid-degrade into the review pipeline, but the combination is
+    // representable in a snapshot, so the reducer refuses to double-drive it.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [
+          makePass({
+            tier: "heavy",
+            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" },
+          }),
+        ],
+        conflictingPrs: [makeConflictingPr()],
+        awaitingReview: [makeAwaitingReview()],
+        settledPrs: [
+          { runId: "run-1", issueRef: "acme/widgets#7", prNumber: 41, merged: true },
+        ],
+      })
+    );
+
+    expect(actions.map((a) => a.type)).toEqual(["degradeRunTier"]);
   });
 });
 

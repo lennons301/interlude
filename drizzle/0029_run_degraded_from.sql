@@ -1,0 +1,1 @@
+ALTER TABLE `runs` ADD `degraded_from` text;

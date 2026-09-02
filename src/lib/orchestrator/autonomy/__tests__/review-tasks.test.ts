@@ -84,6 +84,7 @@ function awaitingReviewSnapshot(hasReviewTask: boolean): AutonomySnapshot {
     // completedPasses is cleared below — but keeps the outcome well-formed).
     producedPr: true,
     rateLimited: null,
+        tier: null,
   });
   return {
     ...base,

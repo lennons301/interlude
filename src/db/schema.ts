@@ -171,6 +171,17 @@ export const runs = sqliteTable("runs", {
   // pass starts. Null means AGENT_EFFORT was unset (no directive) and the CLI
   // resolved its own default.
   effort: text("effort"),
+  // The tier this run was *asked* for, once the quota degrade ladder has moved
+  // it off that tier (issue #170). Null on every run still running at the tier
+  // it was given, which is what makes "is this run degraded?" one non-null
+  // check; set on the first step down and never rewritten, so a run that has
+  // walked heavy -> standard -> light still reads as "asked for heavy".
+  //
+  // Two columns rather than one because `model` has to keep meaning "the tier
+  // that actually ran" — it is what the run's spend is read against, and what
+  // every later pass of the same attempt resolves through — so the requested
+  // tier needs somewhere of its own to live rather than overwriting it.
+  degradedFrom: text("degraded_from"),
   // Resolved version of the mattpocock-skills plugin the container installed at
   // start (issue #60) — the forensic trail for "what skill version ran?".
   // Recorded when the run's first pass sets up; null for a run whose container
@@ -307,9 +318,10 @@ export const tasks = sqliteTable("tasks", {
   containerId: text("container_id"),
   branch: text("branch"),
   sessionId: text("session_id"),
-  // The pass this one resumed off a quota pause (issue #169). A resume is a
-  // *new* task row for the same attempt, so lineage is what makes "the same
-  // pass, continued" a fact rather than a guess — and it is what the attempt's
+  // The pass this one continued past a quota wall — resumed off a pause (issue
+  // #169) or retried a tier lower (issue #170). Either is a *new* task row for
+  // the same attempt, so lineage is what makes "the same pass, continued" a
+  // fact rather than a guess — and it is what the attempt's
   // budget follows, so a resumed pass keeps spending the allowance its
   // predecessor started on rather than being handed a fresh one. The run
   // cannot answer this: it also owns review passes with their own allowance,

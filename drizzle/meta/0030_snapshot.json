@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "eb000c3e-ccd8-495f-9667-db8576b67277",
-  "prevId": "b8f2b035-e026-4c4e-adee-5ddc18715608",
+  "id": "41588e66-eaf6-41c7-a939-b535b98ad582",
+  "prevId": "eb000c3e-ccd8-495f-9667-db8576b67277",
   "tables": {
     "messages": {
       "name": "messages",
@@ -631,6 +631,13 @@
         },
         "lane_billing": {
           "name": "lane_billing",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "tier": {
+          "name": "tier",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

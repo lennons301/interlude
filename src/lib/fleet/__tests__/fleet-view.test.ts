@@ -75,6 +75,8 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     reviewVerdict: null,
     reviewResult: null,
     resumeAfter: null,
+    model: null,
+    degradedFrom: null,
     claimedAt: TODAY_9AM,
     startedAt: TODAY_9AM,
     finishedAt: null,
@@ -1483,6 +1485,7 @@ describe("buildFleetView — running", () => {
         startedAt: TODAY_9AM.toISOString(),
         spend: { usd: 7.8, budgetUsd: 20 },
         paused: null,
+        degraded: null,
       },
     ]);
   });
@@ -1615,6 +1618,58 @@ describe("buildFleetView — running", () => {
     expect(view.running[0].paused).toBeNull();
   });
 
+  it("shows a run working below the tier it was asked for (issue #170)", () => {
+    // A degraded run is *working*, not waiting: the tier ladder stepped it down
+    // and it carried on. The card says so because the result in front of the
+    // operator was produced by a cheaper model than the one they chose, which
+    // is not recoverable from anywhere else on the screen.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "implementing",
+            model: "light",
+            degradedFrom: "heavy",
+          }),
+        ],
+      })
+    );
+
+    expect(view.running[0]).toMatchObject({
+      degraded: { from: "heavy", to: "light" },
+      paused: null,
+      mode: "afk",
+    });
+  });
+
+  it("shows no degrade on a run still running at the tier it was given", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", model: "heavy" })],
+      })
+    );
+
+    expect(view.running[0].degraded).toBeNull();
+  });
+
+  it("claims no degrade from a half-written row", () => {
+    // `degraded_from` is only ever written beside the tier stepped to, so a row
+    // carrying one without the other could not say what it stepped between —
+    // and half a claim on this screen is worse than none.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", model: null, degradedFrom: "heavy" })],
+      })
+    );
+
+    expect(view.running[0].degraded).toBeNull();
+  });
+
   it("marks a supervised run's mode chip", () => {
     const view = buildFleetView(
       baseRows({
@@ -1659,6 +1714,7 @@ describe("buildFleetView — running", () => {
         startedAt: TODAY_9AM.toISOString(),
         spend: { usd: 1.23, budgetUsd: null },
         paused: null,
+        degraded: null,
       },
     ]);
   });
@@ -1990,6 +2046,7 @@ describe("buildFleetView — running", () => {
         startedAt: TODAY_9AM.toISOString(),
         spend: { usd: 0.8, budgetUsd: 2 },
         paused: null,
+        degraded: null,
       },
     ]);
   });
