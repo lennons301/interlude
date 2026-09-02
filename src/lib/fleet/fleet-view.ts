@@ -852,9 +852,11 @@ export function buildFleetView(rows: FleetRows): FleetView {
     .sort((a, b) => a.claimedAt.getTime() - b.claimedAt.getTime())
     .map((run) => {
       const pass = currentPassOf(run);
-      // A `rate_limited` run paused during its implement pass — the only pass
-      // the wall can interrupt — so it reads with implement current, which is
-      // where it resumes from.
+      // A `rate_limited` run paused during an implement-shaped pass — the only
+      // kind #168 pauses, not the only kind a wall can refuse: a walled review
+      // pass still fails closed to a human, and #171 is the ticket that stops a
+      // pass starting under a wall at all. So it reads with implement current,
+      // which is where it resumes from.
       const reviewing = run.status === "reviewing" || run.status === "gated";
       // An in-flight review pass reads with its own spend against the review
       // budget (issue #90); the run's rolled-up spend against the attempt
