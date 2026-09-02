@@ -42,7 +42,7 @@ describe("chargeForTurn", () => {
     // model's list rates and says so (costBasis: "list"). Re-deriving it here
     // would only be a second copy to fall out of date.
     const charge = chargeForTurn(
-      { prices: null },
+      { prices: null, declaresPrices: false },
       { costUsd: 0.0160339, usage: usage({ inputTokens: 909 }) }
     );
 
@@ -53,12 +53,29 @@ describe("chargeForTurn", () => {
     });
   });
 
+  it("says a priced lane took the harness's figure, apart from a lane that has none", () => {
+    // A pinned model on a priced lane: no tier resolves, so there is no priced
+    // tier to read, but the *provider* is still one the CLI does not price.
+    // Reporting that as `harness` would call the fiction a list price; the
+    // basis has to say the lane has prices that could not be applied.
+    const charge = chargeForTurn(
+      { prices: null, declaresPrices: true },
+      { costUsd: 0.194985, usage: usage({ inputTokens: 38387, outputTokens: 122 }) }
+    );
+
+    expect(charge).toEqual({
+      usd: 0.194985,
+      basis: "harness-unpriced",
+      reportedUsd: 0.194985,
+    });
+  });
+
   it("derives the charge from the lane's prices, ignoring the harness's claim", () => {
     // The measured turn: 38387 in / 122 out through OpenRouter. The CLI
     // reported $0.194985, having applied $5/$25 per Mtok — Anthropic list
     // rates — to a model the endpoint had never billed at those rates.
     const charge = chargeForTurn(
-      { prices: GLM_FLASH },
+      { prices: GLM_FLASH, declaresPrices: true },
       {
         costUsd: 0.194985,
         usage: usage({ inputTokens: 38387, outputTokens: 122 }),
@@ -80,7 +97,7 @@ describe("chargeForTurn", () => {
     // figure stands, knowingly: this is a money guard, and over-reporting stops
     // work early while under-reporting spends money nobody authorised.
     const charge = chargeForTurn(
-      { prices: GLM_FLASH },
+      { prices: GLM_FLASH, declaresPrices: true },
       { costUsd: 0.194985, usage: null }
     );
 
@@ -99,6 +116,7 @@ describe("chargeForTurn", () => {
     // would send the fleet straight back to that number.
     const charge = chargeForTurn(
       {
+        declaresPrices: true,
         prices: {
           inputPerMTok: 0,
           outputPerMTok: 0,

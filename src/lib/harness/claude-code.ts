@@ -106,11 +106,23 @@ export function buildClaudeTurnCommand(input: HarnessCommandInput): string {
   // failure.
   //
   // So a lane that declares prices is not given a ceiling the harness would
-  // misapply. What still bounds it: `--max-turns` inside the turn, and the
-  // fleet's own accounting between turns, which since this ticket charges the
-  // lane's real prices (`attemptExhaustion` reads accumulated cost). A lane
-  // with no prices — Anthropic-direct, where the CLI's figure is its own list
-  // price and correct — keeps the flag and is unchanged by any of this.
+  // misapply. A lane with no prices — Anthropic-direct, where the CLI's figure
+  // is its own list price and correct — keeps the flag and is unchanged by any
+  // of this.
+  //
+  // What still bounds a priced turn, exactly: `--max-turns` inside it, and
+  // between turns the fleet's own accounting, which since this ticket charges
+  // the lane's real prices — `attemptExhaustion` for an implement or repair
+  // pass, and the daily autonomous cap, which counts every autonomous pass
+  // kind. **A review or triage pass has no in-turn ceiling on a priced lane**:
+  // its `DEFAULT_REVIEW_BUDGET_USD` / `DEFAULT_TRIAGE_BUDGET_USD` reached the
+  // harness through this flag and nowhere else. That is a real loss and it is
+  // still the better trade: enforced against the CLI's figure those ceilings
+  // cut a review off at a fraction of themselves — roughly $0.08 of real spend
+  // for a $5 budget at the measured 67x — mid-work and invisibly, which is a
+  // review pass that silently reviews half a PR. Converting the ceiling into
+  // the CLI's currency would mean modelling its pricing, and a wrong ratio is
+  // that same invisible truncation back again.
   //
   // The question is asked of the lane *definition* (`declaresPrices`), never
   // of this pass's resolved tier: "does the CLI price this provider?" is a

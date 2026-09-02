@@ -312,6 +312,16 @@ describe("execution lanes on /api/settings/overrides", () => {
     // third-party provider is a tier-map edit, not a new secret.
     expect(glm.lane.auth).toEqual({ ANTHROPIC_AUTH_TOKEN: "sk-or-v1-test" });
 
+    // The screen says the same thing the pass would run — the tier row is
+    // resolved against the primary lane's map *and* its answer for an unset
+    // field, so it cannot read "no --model" over a lane that names one.
+    const onGlmFields = await (await GET()).json();
+    expect(
+      onGlmFields.fields.find(
+        (f: { key: string }) => f.key === "modelTierImplement"
+      )
+    ).toMatchObject({ tier: "standard", model: "z-ai/glm-5.3-flash" });
+
     // And a tier chosen on the screen still wins over the lane's default.
     await PATCH(patch({ modelTierImplement: "heavy" }));
     const heavy = resolveNow();

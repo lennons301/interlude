@@ -29,10 +29,13 @@
  *    recognises at that model's list rates (it says so: `costBasis: "list"`).
  *  - Declared prices and reported tokens -> derived, and the harness's figure
  *    is kept beside it so a surprising bill is debuggable.
- *  - Declared prices and *no* reported tokens -> the harness's figure, which
- *    on a third-party lane is an overstatement. Deliberately: this is a money
+ *  - Declared prices that could not be applied — no reported tokens, or a
+ *    pinned model at no priced tier -> the harness's figure, which on a
+ *    third-party lane is an overstatement. Deliberately: this is a money
  *    guard, and over-reporting stops work early, while under-reporting spends
- *    money nobody authorised. The basis says which happened.
+ *    money nobody authorised. The basis says which happened, and says it
+ *    apart from the honest `harness` case, because "the CLI is right here"
+ *    and "the CLI is all we have here" call for different reading.
  */
 
 import type { TokenPrices } from "./lane-config";
@@ -60,12 +63,14 @@ export interface TurnTokenUsage {
  * record, because "why does this pass say $0.01 when the CLI said $0.19?" is a
  * question an operator will ask exactly once if the answer is written down. */
 export type TurnCostBasis =
-  /** The harness's own `total_cost_usd`; the lane declares no prices. */
+  /** The harness's own `total_cost_usd`; the lane declares no prices, so that
+   * figure is the lane's own list price and correct. */
   | "harness"
   /** Derived from the lane's declared prices and the reported token counts. */
   | "lane-prices"
-  /** The lane declares prices but the turn reported no token counts, so the
-   * harness's figure stands — knowingly, as the safe overstatement. */
+  /** The lane declares prices but they could not be applied to this turn — it
+   * reported no token counts, or it ran a pinned model at no priced tier — so
+   * the harness's figure stands, knowingly, as the safe overstatement. */
   | "harness-unpriced";
 
 export interface TurnCharge {
@@ -86,16 +91,22 @@ const PER_MTOK = 1_000_000;
  * basis exists for.
  */
 export function chargeForTurn(
-  lane: Pick<ResolvedLane, "prices">,
+  lane: Pick<ResolvedLane, "prices" | "declaresPrices">,
   reported: { costUsd: number; usage: TurnTokenUsage | null }
 ): TurnCharge {
   const reportedUsd = reported.costUsd;
   const prices = lane.prices;
 
-  if (prices === null) {
+  // Two questions, and both are asked: does the lane price its provider at
+  // all, and does it price *this* pass? A lane running a pinned model answers
+  // yes then no — it has prices but no tier to read them at — and calling that
+  // `harness` would report the CLI's figure as the lane's own list price,
+  // which on a third-party endpoint is the fiction this module exists to
+  // replace.
+  if (!lane.declaresPrices) {
     return { usd: reportedUsd, basis: "harness", reportedUsd };
   }
-  if (reported.usage === null) {
+  if (prices === null || reported.usage === null) {
     return { usd: reportedUsd, basis: "harness-unpriced", reportedUsd };
   }
 

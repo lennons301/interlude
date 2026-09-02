@@ -153,7 +153,7 @@ describe("token counts, as the harness reports them", () => {
     // End to end: the unreadable shape reaches `chargeForTurn` and takes the
     // deliberately over-stating branch rather than pricing a $0 turn.
     const charge = chargeForTurn(
-      { prices: GLM_FLASH },
+      { prices: GLM_FLASH, declaresPrices: true },
       { costUsd: 0.194985, usage: readTurnUsage({ usage: {} }) }
     );
 
@@ -165,7 +165,7 @@ describe("token counts, as the harness reports them", () => {
 describe("what the two lanes actually cost", () => {
   it("charges the subscription lane exactly what the harness said", () => {
     const charge = chargeForTurn(
-      { prices: null },
+      { prices: null, declaresPrices: false },
       {
         costUsd: SUBSCRIPTION_RESULT.total_cost_usd as number,
         usage: readTurnUsage(SUBSCRIPTION_RESULT),
@@ -183,7 +183,7 @@ describe("what the two lanes actually cost", () => {
     expect(38387 * 5e-6 + 122 * 25e-6).toBeCloseTo(reported, 9);
 
     const charge = chargeForTurn(
-      { prices: GLM_FLASH },
+      { prices: GLM_FLASH, declaresPrices: true },
       { costUsd: reported, usage: readTurnUsage(OPENROUTER_RESULT) }
     );
 
@@ -253,7 +253,7 @@ describe("prompt caching on the lane", () => {
     // it prices a cache read at a tenth of its own $5/Mtok basis, not at the
     // lane's $0.015.
     const charge = chargeForTurn(
-      { prices: GLM_FLASH },
+      { prices: GLM_FLASH, declaresPrices: true },
       {
         costUsd: CACHE_WARM_RESULT.total_cost_usd as number,
         usage: readTurnUsage(CACHE_WARM_RESULT),
