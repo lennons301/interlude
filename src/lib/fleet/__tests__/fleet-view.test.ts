@@ -16,6 +16,12 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     now: NOW,
     slots: 2,
     dailyCapUsd: 500,
+    // The money guards (issue #174) idle by default: a subscription lane, so
+    // nothing here costs cash and the guards decide nothing.
+    meteredCapUsd: 20,
+    primaryLaneId: "claude-subscription",
+    primaryLaneBilling: "subscription",
+    meteredSpendConfirmedAt: null,
     globalAutonomyPaused: false,
     // The boot master on, so every test that doesn't say otherwise describes an
     // install where autonomy is actually armed at boot (issue #148).
@@ -81,6 +87,7 @@ function makeTask(overrides: Partial<FleetTaskRow> = {}): FleetTaskRow {
     status: "running",
     containerStatus: "idle",
     totalCostUsd: 0,
+    laneBilling: null,
     turns: 1,
     githubIssue: null,
     pullRequestNumber: null,
@@ -332,6 +339,155 @@ describe("buildFleetView — spend", () => {
     );
 
     expect(view.spend.capPaused).toBe(true);
+  });
+});
+
+/**
+ * The real-money split (issue #174). It is a different number from the one
+ * above and answers to different rules: summed over tasks by the billing kind
+ * each recorded, with nothing exempt by kind, because a chat session on a
+ * metered lane charges the same card an implement pass does.
+ */
+describe("buildFleetView — metered spend", () => {
+  const METERED = { primaryLaneId: "openrouter", primaryLaneBilling: "metered" as const };
+
+  it("shows nothing metered while the fleet runs on a subscription lane", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject()],
+        tasks: [makeTask({ totalCostUsd: 9, laneBilling: "subscription" })],
+        runs: [makeRun({ id: "r1", totalCostUsd: 9 })],
+      })
+    );
+
+    expect(view.spend.metered.active).toBe(false);
+    expect(view.spend.metered.todayUsd).toBe(0);
+    // The autonomous gauge is untouched by any of this.
+    expect(view.spend.todayUsd).toBeCloseTo(9);
+  });
+
+  it("counts every task that ran on a metered lane, interactive included", () => {
+    const view = buildFleetView(
+      baseRows({
+        ...METERED,
+        meteredSpendConfirmedAt: TODAY_9AM,
+        projects: [makeProject()],
+        tasks: [
+          makeTask({ id: "t1", totalCostUsd: 4, laneBilling: "metered" }),
+          makeTask({
+            id: "t2",
+            kind: "implement",
+            runId: "r1",
+            totalCostUsd: 6,
+            laneBilling: "metered",
+          }),
+          // Subscription work on the same day is not cash.
+          makeTask({ id: "t3", totalCostUsd: 99, laneBilling: "subscription" }),
+          // A pass that predates lanes records nothing, and is not guessed at.
+          makeTask({ id: "t4", totalCostUsd: 99, laneBilling: null }),
+        ],
+      })
+    );
+
+    expect(view.spend.metered.todayUsd).toBeCloseTo(10);
+    expect(view.spend.metered.active).toBe(true);
+    expect(view.spend.metered.laneId).toBe("openrouter");
+    expect(view.spend.metered.hold).toBeNull();
+  });
+
+  it("attributes metered spend to the day the task was created", () => {
+    const view = buildFleetView(
+      baseRows({
+        ...METERED,
+        meteredSpendConfirmedAt: TODAY_9AM,
+        projects: [makeProject()],
+        tasks: [
+          makeTask({
+            id: "yesterday",
+            totalCostUsd: 15,
+            laneBilling: "metered",
+            createdAt: new Date(2026, 6, 31, 23, 0, 0),
+          }),
+          makeTask({ id: "today", totalCostUsd: 2, laneBilling: "metered" }),
+        ],
+      })
+    );
+
+    expect(view.spend.metered.todayUsd).toBeCloseTo(2);
+  });
+
+  it("still reports cash spent today after a switch back to a subscription lane", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject()],
+        tasks: [makeTask({ totalCostUsd: 7, laneBilling: "metered" })],
+      })
+    );
+
+    expect(view.spend.metered.active).toBe(false);
+    expect(view.spend.metered.todayUsd).toBeCloseTo(7);
+    // Nothing more will be spent, so nothing is held.
+    expect(view.spend.metered.hold).toBeNull();
+  });
+
+  it("holds and says so when the cash cap is spent", () => {
+    const view = buildFleetView(
+      baseRows({
+        ...METERED,
+        meteredCapUsd: 20,
+        meteredSpendConfirmedAt: TODAY_9AM,
+        projects: [makeProject()],
+        tasks: [makeTask({ totalCostUsd: 20, laneBilling: "metered" })],
+      })
+    );
+
+    expect(view.spend.metered.capPaused).toBe(true);
+    expect(view.pickupPaused).toEqual({
+      reason: "metered-cap",
+      body: expect.stringContaining("openrouter"),
+    });
+    expect(view.needsYou.map((i) => i.cause)).toContain("metered-cap");
+  });
+
+  it("holds for the day's one confirmation, pointing at the press that lifts it", () => {
+    const view = buildFleetView(
+      baseRows({ ...METERED, meteredSpendConfirmedAt: null, projects: [makeProject()] })
+    );
+
+    expect(view.pickupPaused?.reason).toBe("metered-unconfirmed");
+    const card = view.needsYou.find((i) => i.cause === "metered-confirm");
+    expect(card?.action).toEqual({ label: "Settings", href: "/settings" });
+  });
+
+  it("treats yesterday's confirmation as none", () => {
+    const view = buildFleetView(
+      baseRows({
+        ...METERED,
+        meteredSpendConfirmedAt: new Date(2026, 6, 31, 23, 59, 0),
+        projects: [makeProject()],
+      })
+    );
+
+    expect(view.spend.metered.confirmed).toBe(false);
+    expect(view.pickupPaused?.reason).toBe("metered-unconfirmed");
+  });
+
+  it("lets the kill switch outrank a money hold on the banner", () => {
+    // Both hold; the switch is the one a human threw and can lift, so naming
+    // the money guard would send them to the wrong control.
+    const view = buildFleetView(
+      baseRows({
+        ...METERED,
+        globalAutonomyPaused: true,
+        meteredSpendConfirmedAt: null,
+        projects: [makeProject()],
+      })
+    );
+
+    expect(view.pickupPaused?.reason).toBe("kill-switch");
+    // The money hold keeps its own surfaces regardless of being outranked.
+    expect(view.spend.metered.hold).toBe("unconfirmed");
+    expect(view.needsYou.map((i) => i.cause)).toContain("metered-confirm");
   });
 });
 

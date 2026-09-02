@@ -13,6 +13,8 @@ import {
   MAX_INTEGRATION_ATTEMPTS,
 } from "../orchestrator/autonomy/budgets";
 import { formatDuration, type FleetHealthSignals } from "./health";
+import type { LaneBilling } from "../lanes/lane-config";
+import { evaluateMeteredSpend, type MeteredHold } from "../lanes/money";
 import {
   describeRateLimitType,
   quotaSeverity,
@@ -27,6 +29,18 @@ export interface FleetRows {
   slots: number;
   /** Daily estate-wide autonomous spend cap in USD */
   dailyCapUsd: number;
+  /** The real-money daily cap in force (issue #174): the operator's dial,
+   * bound down by the primary lane's own declared cap. */
+  meteredCapUsd: number;
+  /** The id of the lane work would run on; null = none resolves. */
+  primaryLaneId: string | null;
+  /** Who pays for that lane. Null = it could not be resolved, which is not a
+   * money hold — such a fleet spends nothing, since every pass refuses to
+   * start. */
+  primaryLaneBilling: LaneBilling | null;
+  /** When the fleet last confirmed it may spend real money; null = never. The
+   * view judges it against `now`, exactly as the reducer does. */
+  meteredSpendConfirmedAt: Date | null;
   /** The global kill switch (issue #118), from the durable settings row: while
    * engaged the sweep claims nothing new, so the dashboard has to say so — a
    * held fleet and an idle one look identical otherwise */
@@ -154,6 +168,11 @@ export interface FleetTaskRow {
   status: "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled";
   containerStatus: "setup" | "running" | "idle" | "completing" | null;
   totalCostUsd: number;
+  /** Who paid for this pass (issue #174), as recorded when it ran. Null for a
+   * task that predates lanes. The real-money split is summed off this rather
+   * than off the lane in force now, so switching lanes cannot rewrite what
+   * yesterday's work cost. */
+  laneBilling: LaneBilling | null;
   /** Claude turns run so far — counted by the caller from delivered messages */
   turns: number;
   githubIssue: string | null;
@@ -161,6 +180,27 @@ export interface FleetTaskRow {
   pullRequestUrl: string | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * The real-money half of the spend tile (issue #174). Rendered whenever the
+ * fleet is on a metered lane *or* has spent cash today, so a day that ran on
+ * OpenRouter this morning and moved back to the subscription still shows what
+ * it cost.
+ */
+export interface MeteredSpendView {
+  /** Whether the lane in force bills per token — i.e. whether more cash is
+   * about to be spent, as opposed to merely having been. */
+  active: boolean;
+  /** The lane in force, for the line that names it. */
+  laneId: string | null;
+  todayUsd: number;
+  capUsd: number;
+  capPaused: boolean;
+  /** Today's spend has the one confirmation the guards ask for. */
+  confirmed: boolean;
+  /** What is holding autonomous pickup on money grounds, or null. */
+  hold: MeteredHold | null;
 }
 
 /** Re-exported from the budgets leaf so the view and the loop can't drift */
@@ -176,6 +216,10 @@ export type NeedsYouCause =
   | "checks-failing"
   | "exhausted"
   | "cap"
+  /** The real-money cap is spent (issue #174) — pickup paused until midnight */
+  | "metered-cap"
+  /** A metered lane's day is unconfirmed (issue #174) — one press starts it */
+  | "metered-confirm"
   | "preflight"
   /** Fleet-health watchdog (issue #126): an owed review that never started, a
    * wedged pickup, a queue poll loop gone quiet. */
@@ -214,7 +258,18 @@ export interface NeedsYouItem {
  * the dashboard renders, not to another module's enum.
  */
 export interface PickupPause {
-  reason: "autonomy-off-at-boot" | "kill-switch" | "daily-cap";
+  reason:
+    | "autonomy-off-at-boot"
+    | "kill-switch"
+    | "daily-cap"
+    /** The real-money cap on a metered lane (issue #174). Its own reason
+     * rather than the daily cap's — though the reducer pauses through that
+     * one, being one mechanism — because the two say different things to a
+     * reader: a plan pushed hard, versus a card charged. */
+    | "metered-cap"
+    /** A metered lane whose day nobody has confirmed (issue #174). The only
+     * hold here lifted by a press *on this screen*. */
+    | "metered-unconfirmed";
   /** One-line banner copy */
   body: string;
 }
@@ -293,6 +348,13 @@ export interface FleetView {
     todayUsd: number;
     capUsd: number;
     capPaused: boolean;
+    /** Real money, kept apart from the figure above (issue #174). That one is
+     * autonomous spend against a quota-funded plan; this one is cash, summed
+     * over every task that ran on a metered lane — interactive work included,
+     * because a chat session on a metered lane charges the same card an
+     * implement pass does. The two overlap by construction and are not meant
+     * to be added. */
+    metered: MeteredSpendView;
   };
   /** Why no new autonomous work is being picked up, or null while nothing
    * fleet-wide holds it (issues #118, #148) — the live dot, the banner and the
@@ -503,6 +565,39 @@ export function buildFleetView(rows: FleetRows): FleetView {
     .reduce((sum, r) => sum + r.totalCostUsd, 0);
   const capPaused = todayUsd >= rows.dailyCapUsd;
 
+  // Real money (issue #174), summed over *tasks* rather than runs and filtered
+  // by the billing kind each one recorded when it ran. Nothing is exempt by
+  // kind here — a chat session on a metered lane charges the same card an
+  // implement pass does — which is exactly how this differs from the figure
+  // above, where interactive work is exempt by construction. Attributed to the
+  // day the task was created, the same rule the autonomous sum uses.
+  const meteredTodayUsd = rows.tasks
+    .filter(
+      (t) =>
+        t.laneBilling === "metered" &&
+        t.createdAt.getTime() >= dayStart &&
+        t.createdAt.getTime() <= rows.now.getTime()
+    )
+    .reduce((sum, t) => sum + t.totalCostUsd, 0);
+  // The same pure evaluation the reducer runs, over the same facts: the tile
+  // and the sweep cannot disagree about whether money is holding the fleet.
+  const meteredState = evaluateMeteredSpend({
+    billing: rows.primaryLaneBilling,
+    spentUsd: meteredTodayUsd,
+    capUsd: rows.meteredCapUsd,
+    confirmedAt: rows.meteredSpendConfirmedAt,
+    now: rows.now,
+  });
+  const metered: MeteredSpendView = {
+    active: meteredState.metered,
+    laneId: rows.primaryLaneId,
+    todayUsd: meteredTodayUsd,
+    capUsd: rows.meteredCapUsd,
+    capPaused: meteredState.hold === "cap-reached",
+    confirmed: meteredState.confirmed,
+    hold: meteredState.hold,
+  };
+
   // What the live dot, the banner and the digest all say (issues #118, #148).
   // Precedence is by what a reader must act on, and it is why the boot master
   // leads: with `AUTONOMY_ENABLED` off no sweep runs at all, so naming the kill
@@ -526,7 +621,17 @@ export function buildFleetView(rows: FleetRows): FleetView {
             reason: "daily-cap",
             body: "Daily cap reached — autonomous pickup paused until midnight",
           }
-        : null;
+        : metered.hold === "cap-reached"
+          ? {
+              reason: "metered-cap",
+              body: `Real-money cap reached on ${metered.laneId ?? "a metered lane"} — autonomous pickup paused until midnight; interactive work unaffected`,
+            }
+          : metered.hold === "unconfirmed"
+            ? {
+                reason: "metered-unconfirmed",
+                body: `${metered.laneId ?? "The primary lane"} bills real money — pickup is held until today's spend is confirmed once in Settings`,
+              }
+            : null;
 
   const tasksOfRun = (runId: string) =>
     rows.tasks.filter((t) => t.runId === runId);
@@ -639,6 +744,28 @@ export function buildFleetView(rows: FleetRows): FleetView {
       context: `$${todayUsd.toFixed(2)} / $${rows.dailyCapUsd.toFixed(2)} today`,
       body: "Autonomous pickup paused until midnight — interactive work unaffected",
       action: null,
+    });
+  }
+
+  // The money guards (issue #174). Beside the cap card and shaped like it,
+  // because they hold the fleet the same way — but each carries the remedy
+  // that actually applies: the cash cap wants the cap raised (or the day
+  // ended), and the confirmation wants one press.
+  if (metered.hold === "cap-reached") {
+    needsYou.push({
+      cause: "metered-cap",
+      severity: "red",
+      context: `$${metered.todayUsd.toFixed(2)} / $${metered.capUsd.toFixed(2)} real money today`,
+      body: `Real-money cap spent on ${metered.laneId ?? "a metered lane"} — autonomous pickup paused until midnight. Raise the cap to carry on today.`,
+      action: { label: "Settings", href: "/settings" },
+    });
+  } else if (metered.hold === "unconfirmed") {
+    needsYou.push({
+      cause: "metered-confirm",
+      severity: "amber",
+      context: `${metered.laneId ?? "primary lane"} · cap $${metered.capUsd.toFixed(2)}`,
+      body: "This lane bills real money and today's spend isn't confirmed — autonomous pickup is held until you confirm it once.",
+      action: { label: "Settings", href: "/settings" },
     });
   }
 
@@ -970,7 +1097,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
       saturated: occupants.length >= rows.slots,
       segments,
     },
-    spend: { todayUsd, capUsd: rows.dailyCapUsd, capPaused },
+    spend: { todayUsd, capUsd: rows.dailyCapUsd, capPaused, metered },
     pickupPaused,
     needsYou,
     running,

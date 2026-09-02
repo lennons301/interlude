@@ -197,6 +197,26 @@ function pickupLines(view: FleetView, appBaseUrl: string): string[] {
           "daily cap, so pickup stopped for the rest of the day; the pause " +
           "lifted at midnight.",
       ];
+    // Both money holds (issue #174) are told in the tense their cause has. The
+    // cash cap is past news like the daily cap above — it lifted at midnight.
+    // The confirmation has no history to read: it is taken off the live
+    // settings row, so it says how the fleet stands as the digest is written,
+    // and it is the one hold here a single press clears.
+    case "metered-cap":
+      return [
+        `⏸ Paused — yesterday's real-money spend reached the ` +
+          `${usd(view.spend.metered.capUsd)} cash cap on ` +
+          `${view.spend.metered.laneId ?? "a metered lane"}, so pickup stopped ` +
+          "for the rest of the day; the pause lifted at midnight.",
+      ];
+    case "metered-unconfirmed":
+      return [
+        `⏸ Held right now — ${view.spend.metered.laneId ?? "the primary lane"} ` +
+          "bills real money and today's spend hasn't been confirmed, so nothing " +
+          "is being claimed. One confirmation runs the fleet up to " +
+          `${usd(view.spend.metered.capUsd)} for the day. · ` +
+          `[Confirm it](${appBaseUrl}/settings)`,
+      ];
     case null:
       return [
         view.autonomyOn
@@ -245,7 +265,9 @@ export function renderDailyDigest(
 
   // The cap card describes a pause that lapsed at midnight — the spend
   // section reports the breach; the blocked list keeps only real waits.
-  const waits = view.needsYou.filter((item) => item.cause !== "cap");
+  const waits = view.needsYou.filter(
+    (item) => item.cause !== "cap" && item.cause !== "metered-cap"
+  );
 
   return {
     title: `${DIGEST_TITLE_PREFIX} — ${shortDate(window.start)}`,
@@ -283,6 +305,21 @@ export function renderDailyDigest(
         lines: [
           `${usd(view.spend.todayUsd)} of ${usd(view.spend.capUsd)} daily cap` +
             (view.spend.capPaused ? " — cap hit, pickup was paused" : ""),
+          // Real money, said separately and only when there is any (issue
+          // #174): it is a different kind of number from the line above —
+          // cash rather than quota — and the two deliberately overlap, so
+          // adding them would be wrong. A quota-funded day says nothing here
+          // rather than printing a reassuring $0.00 every morning.
+          ...(view.spend.metered.active || view.spend.metered.todayUsd > 0
+            ? [
+                `${usd(view.spend.metered.todayUsd)} of ` +
+                  `${usd(view.spend.metered.capUsd)} real money on ` +
+                  `${view.spend.metered.laneId ?? "a metered lane"}` +
+                  (view.spend.metered.capPaused
+                    ? " — cash cap hit, pickup was paused"
+                    : ""),
+              ]
+            : []),
         ],
       },
     ],

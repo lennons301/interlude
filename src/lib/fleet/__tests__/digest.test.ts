@@ -29,6 +29,12 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     now: VIEW_AT,
     slots: 2,
     dailyCapUsd: 500,
+    // The money guards (issue #174) idle by default: a subscription lane, so
+    // nothing here costs cash and the guards decide nothing.
+    meteredCapUsd: 20,
+    primaryLaneId: "claude-subscription",
+    primaryLaneBilling: "subscription",
+    meteredSpendConfirmedAt: null,
     globalAutonomyPaused: false,
     // The boot master on, so every test that doesn't say otherwise describes an
     // install where autonomy is actually armed at boot (issue #148).
@@ -94,6 +100,7 @@ function makeTask(overrides: Partial<FleetTaskRow> = {}): FleetTaskRow {
     status: "running",
     containerStatus: "idle",
     totalCostUsd: 0,
+    laneBilling: null,
     turns: 1,
     githubIssue: null,
     pullRequestNumber: null,
@@ -251,6 +258,54 @@ describe("renderDailyDigest — autonomous pickup", () => {
     expect(section(content, "Autonomous pickup")[0]).toContain("AUTONOMY_ENABLED");
     expect(section(content, "Spend")).toEqual([
       "$512.34 of $500.00 daily cap — cap hit, pickup was paused",
+    ]);
+  });
+
+  it("tells the cash cap in the past tense and the confirmation in the present", () => {
+    // A lapsed hold and a standing one are different news (issue #174): the
+    // cash cap lifted itself at midnight, while the confirmation is read off
+    // the live settings row and is still holding as the digest is written.
+    const capped = render({
+      primaryLaneId: "openrouter",
+      primaryLaneBilling: "metered",
+      meteredCapUsd: 20,
+      meteredSpendConfirmedAt: aug(1, 9),
+      projects: [makeProject({ id: "proj-1" })],
+      tasks: [makeTask({ totalCostUsd: 21, laneBilling: "metered" })],
+    });
+    expect(section(capped, "Autonomous pickup")[0]).toContain("lifted at midnight");
+    expect(section(capped, "Autonomous pickup")[0]).toContain("openrouter");
+
+    const unconfirmed = render({
+      primaryLaneId: "openrouter",
+      primaryLaneBilling: "metered",
+      meteredSpendConfirmedAt: null,
+      projects: [makeProject({ id: "proj-1" })],
+    });
+    expect(section(unconfirmed, "Autonomous pickup")[0]).toContain("Held right now");
+    expect(section(unconfirmed, "Autonomous pickup")[0]).toContain(
+      "[Confirm it](https://interludes.co.uk/settings)"
+    );
+  });
+
+  it("reports real money as its own Spend line, and says nothing on a quota-funded day", () => {
+    const cash = render({
+      primaryLaneId: "openrouter",
+      primaryLaneBilling: "metered",
+      meteredCapUsd: 20,
+      meteredSpendConfirmedAt: aug(1, 9),
+      projects: [makeProject({ id: "proj-1" })],
+      tasks: [makeTask({ totalCostUsd: 8.5, laneBilling: "metered" })],
+    });
+
+    expect(section(cash, "Spend")).toEqual([
+      "$0.00 of $500.00 daily cap",
+      "$8.50 of $20.00 real money on openrouter",
+    ]);
+
+    // A subscription day prints no reassuring $0.00 cash line at all.
+    expect(section(render({ projects: [makeProject({ id: "proj-1" })] }), "Spend")).toEqual([
+      "$0.00 of $500.00 daily cap",
     ]);
   });
 
