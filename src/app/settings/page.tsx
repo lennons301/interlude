@@ -4,6 +4,7 @@ import { ProjectList } from "@/components/project-list";
 import { DockerStatus } from "@/components/docker-status";
 import { KillSwitch } from "@/components/kill-switch";
 import { SettingsOverrides } from "@/components/settings-overrides";
+import { MeteredSpendPanel } from "@/components/metered-spend-settings";
 import { getConfig } from "@/lib/config";
 
 /**
@@ -49,6 +50,14 @@ export default function SettingsPage() {
             identifier is whatever the primary lane resolves it to, so the two
             panels cannot be fetched independently (issue #172). */}
         <SettingsOverrides />
+
+        {/* Under the lane panel, because it is that choice's consequence:
+            which lane is primary decides whether the fleet is spending quota
+            or cash, and this is where the cash is bounded (issue #174). */}
+        <section aria-label="Real money" className="space-y-3">
+          <Eyebrow>Real money</Eyebrow>
+          <MeteredSpendPanel />
+        </section>
 
         <section aria-label="Projects" className="space-y-3">
           <Eyebrow>Projects</Eyebrow>

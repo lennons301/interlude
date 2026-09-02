@@ -8,6 +8,7 @@ import { startQueue } from "./queue";
 import { getCapacity } from "./capacity";
 import { startAutonomySweeps } from "./autonomy/sweep";
 import { ACTIVE_RUN_STATUSES, RECLAIMABLE_RUN_STATUSES } from "./run-status";
+import { pruneTranscripts } from "../quota/session-transcript";
 import { startPreflightRefresh } from "./autonomy/preflight";
 import { startDailyDigest } from "./digest-schedule";
 import { getConfig } from "../config";
@@ -142,6 +143,38 @@ async function finalizeDanglingRuns(): Promise<void> {
       `[orchestrator] Run ${run.id} (${run.githubIssue}) finalized — dangling ` +
         `non-terminal with no PR and all tasks terminal (issue #106)`
     );
+  }
+}
+
+/**
+ * Drop the stored session transcripts of runs that are over (issue #169).
+ *
+ * A transcript is kept for as long as its run might still resume — while it is
+ * `rate_limited` and waiting, and after it resumes too, since a resumed pass
+ * may pause again and a restart in between must not strand it. Anything whose
+ * run has reached a terminal status, or whose run is gone entirely, is
+ * finished with its conversation.
+ *
+ * At boot rather than on every terminal path: a run reaches a terminal status
+ * from a dozen places, and a cleanup hook on each would be one edit away from a
+ * leak. One directory sweep costs nothing and cannot miss a path it never knew
+ * about — and merging any interlude PR restarts this process, so it runs often.
+ *
+ * Runs after the recovery above, so a run *this boot* just finalized has its
+ * transcript collected in the same pass.
+ */
+function pruneStoredTranscripts(): void {
+  const live = new Set(
+    db
+      .select({ id: runs.id })
+      .from(runs)
+      .where(inArray(runs.status, [...ACTIVE_RUN_STATUSES]))
+      .all()
+      .map((run) => run.id)
+  );
+  const pruned = pruneTranscripts(live);
+  if (pruned > 0) {
+    console.log(`[orchestrator] Pruned ${pruned} stored session transcript(s)`);
   }
 }
 
@@ -286,6 +319,7 @@ export async function initOrchestrator(): Promise<void> {
     await finalizeDanglingRuns();
     await recoverOrphanedTasks();
     await reapStaleContainers();
+    pruneStoredTranscripts();
     startQueue();
 
     // Autonomous pickup: boot sweep + reconciliation interval. The webhook

@@ -14,6 +14,7 @@ import {
   type ChecksFailingPr,
   type ConflictingPr,
   type PassOutcome,
+  type PausedRun,
   type PendingGateEvaluation,
   type PendingTriage,
   type PendingVerdict,
@@ -91,6 +92,16 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     todayAutonomousSpendUsd: 0,
     dailyCapUsd: 500,
     dailyCapAnnounced: false,
+    // The default fleet is on a subscription lane, so the money guards
+    // (issue #174) are inert unless a test says otherwise — which is also the
+    // state every install is in before someone picks a metered lane.
+    primaryLaneId: "claude-subscription",
+    primaryLaneBilling: "subscription",
+    meteredSpendTodayUsd: 0,
+    meteredCapUsd: 20,
+    meteredSpendConfirmedAt: null,
+    meteredCapAnnounced: false,
+    meteredConfirmationAnnounced: false,
     quota: null,
     quotaThresholdPercent: 90,
     quotaGateAnnounced: false,
@@ -124,6 +135,23 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     pendingTriageResults: [],
     queuedTriageCount: 0,
     announcedTriageErrors: [],
+    pausedRuns: [],
+    maxResumesPerAttempt: 3,
+    // No jitter by default: a table test asserts what is decided, and the
+    // spread has its own tests. Given one, the tests below say so.
+    resumeJitterMs: 0,
+    ...overrides,
+  };
+}
+
+function makePausedRun(overrides: Partial<PausedRun> = {}): PausedRun {
+  return {
+    runId: "run-1",
+    issueRef: "acme/widgets#7",
+    // An hour before the snapshot's clock: the window has reset.
+    resumeAfter: new Date(NOW.getTime() - 60 * 60_000),
+    resumesMade: 0,
+    hasLiveTask: false,
     ...overrides,
   };
 }
@@ -1284,6 +1312,258 @@ describe("decideNext — pause reasons", () => {
         },
       ]);
     });
+  });
+});
+
+/**
+ * The money guards (issue #174). Every case here is a pure table over the
+ * snapshot — no Docker, no network, no lane file — because what is being
+ * asserted is a policy: when a lane bills real money, what may start.
+ *
+ * The through-line is that the guards key off the resolved lane's **billing
+ * kind**, never off whether anything overflowed. A metered lane chosen as
+ * primary is the configuration that would otherwise slip every guard, so it is
+ * the configuration most of these cases are in.
+ */
+describe("decideNext — money guards on a metered lane", () => {
+  function pauses(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "pausePickup");
+  }
+
+  /** A metered primary, confirmed for today and inside its cap: the ordinary
+   * running state of a metered fleet. */
+  const CONFIRMED_TODAY = new Date(2026, 7, 1, 8, 0, 0);
+
+  function meteredSnapshot(overrides: Partial<AutonomySnapshot> = {}) {
+    return makeSnapshot({
+      primaryLaneId: "openrouter",
+      primaryLaneBilling: "metered",
+      meteredCapUsd: 20,
+      meteredSpendConfirmedAt: CONFIRMED_TODAY,
+      ...overrides,
+    });
+  }
+
+  it("permits autonomous claims on a metered primary lane once the day is confirmed", () => {
+    // The entire point of the cost flip: metered-primary autonomous work is
+    // allowed, bounded by the cap rather than treated as overflow and blocked.
+    const actions = decideNext(meteredSnapshot());
+
+    expect(claims(actions)).toHaveLength(1);
+    expect(pauses(actions)).toEqual([]);
+  });
+
+  it("holds pickup for one confirmation on the first metered spend of a day", () => {
+    const actions = decideNext(
+      meteredSnapshot({ meteredSpendConfirmedAt: null })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "notify",
+        event: "metered-confirmation-required",
+        payload: { capUsd: 20, laneId: "openrouter" },
+      },
+      {
+        type: "pausePickup",
+        reason: "metered-unconfirmed",
+        detail: "openrouter bills real money — today's spend is unconfirmed",
+      },
+    ]);
+    expect(claims(actions)).toHaveLength(0);
+  });
+
+  it("treats yesterday's confirmation as no confirmation", () => {
+    const actions = decideNext(
+      meteredSnapshot({
+        meteredSpendConfirmedAt: new Date(2026, 6, 31, 23, 59, 0),
+      })
+    );
+
+    expect(pauses(actions)).toEqual([
+      expect.objectContaining({ reason: "metered-unconfirmed" }),
+    ]);
+  });
+
+  it("asks for the confirmation once per day, not once per sweep", () => {
+    const actions = decideNext(
+      meteredSnapshot({
+        meteredSpendConfirmedAt: null,
+        meteredConfirmationAnnounced: true,
+      })
+    );
+
+    expect(actions).toEqual([
+      expect.objectContaining({ type: "pausePickup", reason: "metered-unconfirmed" }),
+    ]);
+  });
+
+  it("lets further metered spend proceed automatically after the day's confirmation", () => {
+    // Confirm once, then run: the gate is per day, not per claim, and a day
+    // already part-spent needs no second press.
+    const actions = decideNext(meteredSnapshot({ meteredSpendTodayUsd: 12.5 }));
+
+    expect(claims(actions)).toHaveLength(1);
+    expect(pauses(actions)).toEqual([]);
+  });
+
+  it("pauses through the existing daily-cap reason when the real-money cap is reached", () => {
+    const actions = decideNext(
+      meteredSnapshot({ meteredSpendTodayUsd: 20, meteredCapUsd: 20 })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "notify",
+        event: "metered-cap-reached",
+        payload: { spentUsd: 20, capUsd: 20, laneId: "openrouter" },
+      },
+      {
+        type: "pausePickup",
+        reason: "daily-cap",
+        detail: "real-money cap: $20.00 of $20.00 spent on openrouter",
+      },
+    ]);
+  });
+
+  it("announces the real-money cap once per transition", () => {
+    const actions = decideNext(
+      meteredSnapshot({
+        meteredSpendTodayUsd: 24.4,
+        meteredCapUsd: 20,
+        meteredCapAnnounced: true,
+      })
+    );
+
+    expect(actions).toEqual([
+      expect.objectContaining({ type: "pausePickup", reason: "daily-cap" }),
+    ]);
+  });
+
+  it("names the cap rather than the confirmation on a capped, unconfirmed day", () => {
+    // Confirming would start nothing, so sending the operator to press it
+    // would be advice that cannot help.
+    const actions = decideNext(
+      meteredSnapshot({
+        meteredSpendTodayUsd: 25,
+        meteredSpendConfirmedAt: null,
+      })
+    );
+
+    expect(actions.map((a) => a.type)).toEqual(["notify", "pausePickup"]);
+    expect(pauses(actions)).toEqual([
+      expect.objectContaining({ reason: "daily-cap" }),
+    ]);
+  });
+
+  it("exempts subscription work from the real-money cap entirely", () => {
+    // The cap measures money, not quota: a subscription lane sitting on a
+    // day of recorded metered spend (an earlier lane switch) claims normally.
+    const actions = decideNext(
+      makeSnapshot({
+        primaryLaneId: "claude-subscription",
+        primaryLaneBilling: "subscription",
+        meteredSpendTodayUsd: 500,
+        meteredCapUsd: 20,
+        meteredSpendConfirmedAt: null,
+      })
+    );
+
+    expect(claims(actions)).toHaveLength(1);
+    expect(pauses(actions)).toEqual([]);
+  });
+
+  it("decides nothing either way when no lane resolves", () => {
+    // An unreadable lane file or a dangling choice: every pass already fails
+    // as it starts with the reason named, and a money hold invented on top of
+    // that would only hide it.
+    const actions = decideNext(
+      makeSnapshot({
+        primaryLaneId: null,
+        primaryLaneBilling: null,
+        meteredSpendConfirmedAt: null,
+      })
+    );
+
+    expect(claims(actions)).toHaveLength(1);
+    expect(pauses(actions)).toEqual([]);
+  });
+
+  it("holds triage pickup on an unconfirmed metered lane", () => {
+    // A triage pass takes a container and spends money; on a metered lane
+    // that money is cash, so it is held by the same guard a claim is.
+    const actions = decideNext(
+      meteredSnapshot({
+        candidates: [],
+        triageCandidates: [makeTriageCandidate()],
+        meteredSpendConfirmedAt: null,
+      })
+    );
+
+    expect(actions.filter((a) => a.type === "startTriage")).toHaveLength(0);
+  });
+
+  it("holds triage pickup once the real-money cap is reached", () => {
+    const actions = decideNext(
+      meteredSnapshot({
+        candidates: [],
+        triageCandidates: [makeTriageCandidate()],
+        meteredSpendTodayUsd: 20,
+      })
+    );
+
+    expect(actions.filter((a) => a.type === "startTriage")).toHaveLength(0);
+  });
+
+  it("triages normally on a confirmed metered lane inside its cap", () => {
+    const actions = decideNext(
+      meteredSnapshot({
+        candidates: [],
+        triageCandidates: [makeTriageCandidate()],
+        meteredSpendTodayUsd: 5,
+      })
+    );
+
+    expect(actions.filter((a) => a.type === "startTriage")).toHaveLength(1);
+  });
+
+  it("keeps driving in-flight work while a money guard holds pickup", () => {
+    // Same discipline as the daily cap: the guards hold new claims and
+    // nothing else. A burnt ticket is still routed back to a human.
+    const actions = decideNext(
+      meteredSnapshot({
+        meteredSpendConfirmedAt: null,
+        candidates: [makeCandidate({ attemptsMade: 3 })],
+      })
+    );
+
+    expect(actions).toContainEqual({
+      type: "exhaust",
+      issueRef: "acme/widgets#7",
+      attemptsMade: 3,
+      interruptionsMade: 0,
+      reason: "attempts",
+    });
+  });
+
+  it("lets the estate daily cap answer first when both caps are reached", () => {
+    // The $500 autonomous cap is checked above the money guards, and its
+    // announcement must not be swallowed by a second hold.
+    const actions = decideNext(
+      meteredSnapshot({
+        todayAutonomousSpendUsd: 500,
+        meteredSpendTodayUsd: 25,
+      })
+    );
+
+    expect(actions).toEqual([
+      {
+        type: "notify",
+        event: "daily-cap-reached",
+        payload: { spentUsd: 500, capUsd: 500 },
+      },
+      { type: "pausePickup", reason: "daily-cap" },
+    ]);
   });
 });
 
@@ -3596,5 +3876,245 @@ describe("decideNext — ordering and slots", () => {
 
     expect(claims(actions)).toHaveLength(1);
     expect(claims(actions)[0]).toMatchObject({ issueRef: "acme/widgets#7" });
+  });
+});
+
+describe("decideNext — resuming a paused run (issue #169)", () => {
+  function resumes(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "resumeRun");
+  }
+
+  function exhausted(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "exhaustPausedRun");
+  }
+
+  it("resumes a run whose window has reset", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], pausedRuns: [makePausedRun()] })
+    );
+
+    expect(resumes(actions)).toEqual([
+      {
+        type: "resumeRun",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        resume: 1,
+        maxResumes: 3,
+      },
+    ]);
+  });
+
+  it("leaves a run whose window has not reset alone", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pausedRuns: [
+          makePausedRun({ resumeAfter: new Date(NOW.getTime() + 60 * 60_000) }),
+        ],
+      })
+    );
+
+    expect(resumes(actions)).toEqual([]);
+    expect(exhausted(actions)).toEqual([]);
+  });
+
+  it("holds a run back through its own jittered offset, then resumes it", () => {
+    // The stampede guard: every run the fleet paused was refused by the same
+    // account-wide window and carries the same reset, so they would otherwise
+    // all become eligible on one tick.
+    const resetAt = new Date(NOW.getTime() - 60_000);
+    const jittered = makeSnapshot({
+      candidates: [],
+      resumeJitterMs: 10 * 60_000,
+      pausedRuns: [makePausedRun({ resumeAfter: resetAt })],
+    });
+
+    expect(resumes(decideNext(jittered))).toEqual([]);
+    // Same run, same offset — a later sweep past it resumes. The offset is a
+    // function of the run id, so it does not move between sweeps.
+    expect(
+      resumes(decideNext({ ...jittered, now: new Date(resetAt.getTime() + 10 * 60_000) }))
+    ).toHaveLength(1);
+  });
+
+  it("spreads two runs off one window across the jitter", () => {
+    const resetAt = new Date(NOW.getTime() - 60_000);
+    const snapshot = makeSnapshot({
+      candidates: [],
+      resumeJitterMs: 10 * 60_000,
+      slots: { total: 4, occupied: 0, occupants: [] },
+      pausedRuns: [
+        makePausedRun({ runId: "run-a", resumeAfter: resetAt }),
+        makePausedRun({ runId: "run-b", issueRef: "acme/widgets#8", resumeAfter: resetAt }),
+      ],
+    });
+
+    // Sampled across the window: the two runs must not become eligible on the
+    // same tick — that they *both* eventually do is the other half of it.
+    const eligibleOver = Array.from({ length: 41 }, (_, step) =>
+      resumes(
+        decideNext({ ...snapshot, now: new Date(resetAt.getTime() + step * 15_000) })
+      ).length
+    );
+
+    expect(eligibleOver[0]).toBe(0);
+    expect(eligibleOver[eligibleOver.length - 1]).toBe(2);
+    expect(eligibleOver.some((count) => count === 1)).toBe(true);
+  });
+
+  it("resumes a run parked with no clock at all rather than stranding it", () => {
+    // #168 never writes one — a rejection with no reset time takes the ordinary
+    // failure path — but a paused run nothing can reach is the failure this
+    // ticket exists to prevent, so a clockless row is eligible now.
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], pausedRuns: [makePausedRun({ resumeAfter: null })] })
+    );
+
+    expect(resumes(actions)).toHaveLength(1);
+  });
+
+  it("does not queue a second pass for a run already resuming", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], pausedRuns: [makePausedRun({ hasLiveTask: true })] })
+    );
+
+    expect(resumes(actions)).toEqual([]);
+  });
+
+  it("counts each resume against the bound", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxResumesPerAttempt: 3,
+        pausedRuns: [makePausedRun({ resumesMade: 2 })],
+      })
+    );
+
+    expect(resumes(actions)).toEqual([
+      {
+        type: "resumeRun",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        resume: 3,
+        maxResumes: 3,
+      },
+    ]);
+  });
+
+  it("hands the ticket to a human once the bound is spent", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxResumesPerAttempt: 3,
+        pausedRuns: [makePausedRun({ resumesMade: 3 })],
+      })
+    );
+
+    expect(resumes(actions)).toEqual([]);
+    expect(exhausted(actions)).toEqual([
+      {
+        type: "exhaustPausedRun",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        resumesMade: 3,
+      },
+    ]);
+  });
+
+  it("leaves a run whose last permitted resume is still in flight alone", () => {
+    // The resume is counted when it is *queued*, so between the queue and the
+    // pass starting the run reads as spent while its own pass is starting.
+    // Judging the bound there would cancel the very pass just queued.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxResumesPerAttempt: 1,
+        pausedRuns: [makePausedRun({ resumesMade: 1, hasLiveTask: true })],
+      })
+    );
+
+    expect(resumes(actions)).toEqual([]);
+    expect(exhausted(actions)).toEqual([]);
+  });
+
+  it("does not make a spent run wait out its window first", () => {
+    // A run with no resumes left is never going to resume, so waiting five
+    // hours would only delay telling the human the ticket is theirs.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxResumesPerAttempt: 1,
+        pausedRuns: [
+          makePausedRun({
+            resumesMade: 1,
+            resumeAfter: new Date(NOW.getTime() + 5 * 60 * 60_000),
+          }),
+        ],
+      })
+    );
+
+    expect(exhausted(actions)).toHaveLength(1);
+  });
+
+  it("never resumes when the bound is zero", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxResumesPerAttempt: 0,
+        pausedRuns: [makePausedRun()],
+      })
+    );
+
+    expect(resumes(actions)).toEqual([]);
+    expect(exhausted(actions)).toHaveLength(1);
+  });
+
+  it("prefers resuming existing work over claiming a new ticket", () => {
+    // One slot, one paused run and one armed ticket: the resume takes it.
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 1, occupied: 0, occupants: [] },
+        pausedRuns: [makePausedRun({ issueRef: "acme/widgets#3" })],
+      })
+    );
+
+    expect(resumes(actions)).toHaveLength(1);
+    expect(claims(actions)).toEqual([]);
+    expect(actions.some((a) => a.type === "pausePickup" && a.reason === "no-slots")).toBe(
+      true
+    );
+  });
+
+  it("still claims when a resume leaves a slot spare", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 2, occupied: 0, occupants: [] },
+        pausedRuns: [makePausedRun({ issueRef: "acme/widgets#3" })],
+      })
+    );
+
+    expect(resumes(actions)).toHaveLength(1);
+    expect(claims(actions)).toHaveLength(1);
+  });
+
+  it("resumes in-flight work while the kill switch holds new pickup", () => {
+    // The switch (and the daily cap) gate *pickup*; everything already in
+    // flight is decided as it would be otherwise. A paused run is the middle of
+    // an attempt the fleet already started.
+    const held = decideNext(
+      makeSnapshot({ globalPaused: true, pausedRuns: [makePausedRun()] })
+    );
+    const capped = decideNext(
+      makeSnapshot({
+        todayAutonomousSpendUsd: 500,
+        dailyCapUsd: 500,
+        pausedRuns: [makePausedRun()],
+      })
+    );
+
+    expect(resumes(held)).toHaveLength(1);
+    expect(claims(held)).toEqual([]);
+    expect(resumes(capped)).toHaveLength(1);
+    expect(claims(capped)).toEqual([]);
   });
 });

@@ -10,9 +10,12 @@
  */
 
 import type { FailedCheck } from "../../github/pull-requests";
+import type { LaneBilling } from "../../lanes/lane-config";
+import { evaluateMeteredSpend } from "../../lanes/money";
 import { evaluateQuotaGate } from "../../quota/quota-gate";
 import type { QuotaObservation } from "../../quota/rate-limit-event";
 import { detectBlockedQuestion } from "./blocked";
+import { resumeEligibleAt } from "./resume-jitter";
 import { evaluateGates, type GateConfig } from "./gates";
 import {
   NEEDS_INFO_LABEL,
@@ -174,6 +177,38 @@ export interface PassOutcome {
    * the pause exactly as it did before this ticket.
    */
   tier: ModelTier | null;
+}
+
+/**
+ * A run parked on the account's quota clock (issue #168), up for the decision
+ * this ticket adds: resume it, or hand its ticket to a human because the
+ * attempt has paused more often than the bound allows.
+ *
+ * Gathered every sweep, because the sweep is the resume driver — no new
+ * scheduler, exactly as the 30-second reconciliation loop already drives every
+ * other waiting thing.
+ */
+export interface PausedRun {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  /**
+   * When the refusing window resets — the run's `resumeAfter`.
+   *
+   * Null means the row carries no clock, which #168 never writes (a rejection
+   * with no reset time takes the ordinary failure path precisely so a run is
+   * never parked on a window nobody knows the length of). If one appears
+   * anyway it is treated as eligible now rather than left waiting forever:
+   * stranding a run where no later ticket can find it is the failure this
+   * whole ticket exists to prevent, and a wall that is still up simply pauses
+   * it again — which the bound below counts.
+   */
+  resumeAfter: Date | null;
+  /** Resumes this attempt has already had (runs.resumeCount) */
+  resumesMade: number;
+  /** A task of this run already queued or running — the idempotency fact, so
+   * re-deciding across sweeps cannot queue a second resumed pass */
+  hasLiveTask: boolean;
 }
 
 /** An open issue awaiting triage (`needs-triage`), as gathered by the sweep. */
@@ -353,6 +388,33 @@ export interface AutonomySnapshot {
   dailyCapUsd: number;
   /** Whether today's cap pause was already announced */
   dailyCapAnnounced: boolean;
+  // The money guards (issue #174) — the six fields below. All of them key off
+  // the **billing kind** of the lane a pass would actually run on, not off
+  // whether anything overflowed: a metered lane is a metered lane whether it is
+  // primary, an overflow target or reached by failover, and metered-primary is
+  // the configuration that would otherwise slip every guard.
+  /** The lane in force, for the announcements that name it; null = none
+   * resolves (an unreadable lane file, or a primary naming no declared lane). */
+  primaryLaneId: string | null;
+  /** Who pays for that lane. `null` = it could not be resolved, which decides
+   * nothing either way: such a fleet spends nothing, because every pass fails
+   * as it starts with the reason named, and a money hold invented on top would
+   * only hide that. */
+  primaryLaneBilling: LaneBilling | null;
+  /** Real money spent through metered lanes since local midnight — every task,
+   * not only run-owned ones, because the cap measures money rather than
+   * autonomy (see `todayMeteredSpendUsd`). */
+  meteredSpendTodayUsd: number;
+  /** The real-money cap in force: the operator's dial, bound down by the
+   * lane's own declared cap. */
+  meteredCapUsd: number;
+  /** When the fleet last confirmed it may spend real money; null = never. The
+   * reducer judges it against `now`, so nothing has to clear it at midnight. */
+  meteredSpendConfirmedAt: Date | null;
+  /** Whether today's real-money cap pause was already announced */
+  meteredCapAnnounced: boolean;
+  /** Whether today's request for a spend confirmation was already announced */
+  meteredConfirmationAnnounced: boolean;
   /**
    * The fleet's last quota observation (issue #171), from the durable row the
    * stream parser writes (#167). Null when nothing has ever been observed —
@@ -431,6 +493,16 @@ export interface AutonomySnapshot {
   queuedTriageCount: number;
   /** Task IDs whose unparseable triage exit was already announced */
   announcedTriageErrors: string[];
+  /** Runs parked on the quota clock (issue #169) — resumed once their window
+   * has reset, or handed to a human once the resume bound is spent */
+  pausedRuns: PausedRun[];
+  /** Resumes one attempt may have after a quota pause before its ticket is
+   * routed to a human. UI-settable (issue #166's layer), so it is a snapshot
+   * field rather than a constant read inside the reducer. */
+  maxResumesPerAttempt: number;
+  /** The window a paused run's own offset is spread across, so a fleet-wide
+   * pause does not put every run on the same tick — see resume-jitter.ts */
+  resumeJitterMs: number;
 }
 
 export type PauseReason =
@@ -441,7 +513,14 @@ export type PauseReason =
   | "autonomy-off-project"
   | "preflight-failing"
   | "no-slots"
+  /** The estate's daily autonomous cap, or — since issue #174 — the real-money
+   * cap on a metered lane. Deliberately one reason for both: they are two caps
+   * feeding one mechanism, and the `detail` says which. */
   | "daily-cap"
+  /** A metered lane has not been confirmed for this local day (issue #174).
+   * Its own reason rather than the cap's, because the remedy is opposite: the
+   * cap lifts itself at midnight and this one waits for a human press. */
+  | "metered-unconfirmed"
   /** Quota is spent or nearly spent (issue #171) — the fleet stops starting
    * work it could not finish. Lifted by the window resetting, not by a human */
   | "quota-gate";
@@ -484,6 +563,26 @@ export type Action =
       type: "notify";
       event: "daily-cap-reached";
       payload: { spentUsd: number; capUsd: number };
+    }
+  | {
+      // The real-money cap (issue #174). Its own event rather than a field on
+      // the one above, because the two say different things to a reader: that
+      // one is "the fleet has worked hard today", this one is "the card has
+      // been charged $X and stops here", and it names the lane doing the
+      // charging.
+      type: "notify";
+      event: "metered-cap-reached";
+      payload: { spentUsd: number; capUsd: number; laneId: string | null };
+    }
+  | {
+      // Nobody is at the keyboard when an autonomous pass crosses into
+      // billing, so the fleet asks: one ping per local day, the same
+      // once-per-transition discipline every other announcement here keeps.
+      // Without it a metered fleet would simply sit quiet, which is the
+      // silent-wedge failure this codebase has been bitten by twice.
+      type: "notify";
+      event: "metered-confirmation-required";
+      payload: { capUsd: number; laneId: string | null };
     }
   | {
       type: "notify";
@@ -720,6 +819,35 @@ export type Action =
       resumeAfter: Date | null;
     }
   | {
+      // A paused run whose window has reset (issue #169): queue its pass again
+      // in a fresh container, on the same branch, continuing the same
+      // conversation where the transcript survived the teardown. Consumes no
+      // attempt — the pause did not either — but does count against the resume
+      // bound, which is what stops a ticket looping across quota windows.
+      type: "resumeRun";
+      runId: string;
+      /** "owner/repo#n" */
+      issueRef: string;
+      /** Which resume this is (resumesMade + 1) — recorded on the run and
+       * named on the issue, so a ticket crossing several windows reads as one
+       * attempt rather than as several */
+      resume: number;
+      /** The bound it is counted against, for the issue comment */
+      maxResumes: number;
+    }
+  | {
+      // A run that has paused more often than one attempt may (issue #169):
+      // the ticket goes to a human the way an exhausted one does. Deliberately
+      // not a failed attempt — the pauses spent none — so a human who re-arms
+      // the ticket still gets the attempts it never used.
+      type: "exhaustPausedRun";
+      runId: string;
+      /** "owner/repo#n" */
+      issueRef: string;
+      /** Resumes spent before giving up — named in the escalation */
+      resumesMade: number;
+    }
+  | {
       type: "startTriage";
       issueRef: string;
       projectId: string;
@@ -800,6 +928,16 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     todayAutonomousSpendUsd: 0,
     dailyCapUsd: 0,
     dailyCapAnnounced: true,
+    // Inert like every other pickup input: the money guards hold new claims,
+    // never a turn that already ran. A subscription billing kind is the one
+    // value that decides nothing here.
+    primaryLaneId: null,
+    primaryLaneBilling: "subscription",
+    meteredSpendTodayUsd: 0,
+    meteredCapUsd: 0,
+    meteredSpendConfirmedAt: null,
+    meteredCapAnnounced: true,
+    meteredConfirmationAnnounced: true,
     // No pickup is decided here, so the quota gate has nothing to hold: an
     // absent observation is an open gate, and the announcement is marked spent
     // so nothing could be said even if one were reached.
@@ -836,6 +974,11 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     pendingTriageResults: [],
     queuedTriageCount: 0,
     announcedTriageErrors: [],
+    // A pass that just ended is not a paused run: the run it belongs to may be
+    // *about* to become one, decided below from this very outcome.
+    pausedRuns: [],
+    maxResumesPerAttempt: 0,
+    resumeJitterMs: 0,
   };
 }
 
@@ -1298,6 +1441,58 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     });
   }
 
+  // Paused runs next (issue #169) — before review pickup and well before any
+  // claim, because resuming existing work outranks starting new work: a run
+  // parked on the quota clock already holds its ticket, has a branch with work
+  // on it, and is one pass from a PR, while a claim is all of that still to
+  // buy. Each resume reserves a slot against new claims exactly as a queued
+  // review does (see claimableSlots below).
+  //
+  // Deliberately *not* held by the daily cap or the kill switch. Both of those
+  // gate pickup — "no claim, no triage pass" — and everything already in
+  // flight is decided regardless: a verdict is posted, a fix-up turn is
+  // delivered, a conflict is repaired. A paused run is in flight; it is the
+  // middle of an attempt the fleet already started, and abandoning it at a
+  // window boundary would spend the very attempt the pause protected.
+  let resumesQueuedThisSweep = 0;
+  for (const paused of snapshot.pausedRuns) {
+    if (parkedRunIds.has(paused.runId)) continue;
+    // Already resuming — a queued or running task of this run *is* the resume
+    // — so the run is not up for a decision at all. First, ahead of the bound
+    // as well as the clock: a resume is counted when it is queued, so the run
+    // whose last permitted resume is in flight reads as spent while its pass
+    // is still starting, and judging the bound here would cancel the very pass
+    // just queued.
+    if (paused.hasLiveTask) continue;
+    // The bound before the clock, on purpose: a run with no resumes left is
+    // never going to resume, so making it wait out a five-hour window first
+    // would only delay telling the human it is theirs.
+    if (paused.resumesMade >= snapshot.maxResumesPerAttempt) {
+      actions.push({
+        type: "exhaustPausedRun",
+        runId: paused.runId,
+        issueRef: paused.issueRef,
+        resumesMade: paused.resumesMade,
+      });
+      continue;
+    }
+    if (
+      paused.resumeAfter !== null &&
+      snapshot.now <
+        resumeEligibleAt(paused.runId, paused.resumeAfter, snapshot.resumeJitterMs)
+    ) {
+      continue;
+    }
+    resumesQueuedThisSweep++;
+    actions.push({
+      type: "resumeRun",
+      runId: paused.runId,
+      issueRef: paused.issueRef,
+      resume: paused.resumesMade + 1,
+      maxResumes: snapshot.maxResumesPerAttempt,
+    });
+  }
+
   // Review passes are queued before gate decisions and claims: they finish
   // work already in flight. The queue starts them under the ordinary
   // capacity check, so emitting one here only reserves intent, not a slot.
@@ -1378,6 +1573,20 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // costs. Registered is the only project gate — triage writes no code and
   // pushes nothing, so pickup preflight does not apply — and the author
   // allow-list bounds whose issues can spend triage money.
+  //
+  // The money guards (issue #174) are evaluated once for the whole tick, from
+  // the billing kind of the lane a pass would run on, because both pickup
+  // gates below consult them. `hold` is null on a subscription lane, on an
+  // unresolvable one, and on a metered lane confirmed today and still inside
+  // its cash cap.
+  const metered = evaluateMeteredSpend({
+    billing: snapshot.primaryLaneBilling,
+    spentUsd: snapshot.meteredSpendTodayUsd,
+    capUsd: snapshot.meteredCapUsd,
+    confirmedAt: snapshot.meteredSpendConfirmedAt,
+    now: snapshot.now,
+  });
+
   // The quota admission gate (issue #171), evaluated once and consulted twice
   // — here for triage and below for claims — so the fleet cannot hold one kind
   // of pickup and start the other on the same tick. Everything above this line
@@ -1394,7 +1603,12 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   if (
     !snapshot.globalPaused &&
     !quotaGate.closed &&
-    snapshot.todayAutonomousSpendUsd < snapshot.dailyCapUsd
+    snapshot.todayAutonomousSpendUsd < snapshot.dailyCapUsd &&
+    // Held by the money guards for the same reason the daily cap holds it: a
+    // triage pass takes a container and spends money, and on a metered lane
+    // that money is cash. Autonomous work on a metered primary is explicitly
+    // allowed — it is bounded here, not exempted.
+    metered.hold === null
   ) {
     for (const candidate of snapshot.triageCandidates) {
       if (candidate.hasTriageTask) continue;
@@ -1512,6 +1726,36 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     return actions;
   }
 
+  // The real-money cap (issue #174): the second cap feeding the mechanism
+  // directly above, keyed off the resolved lane's billing kind rather than off
+  // an overflow that may never have happened. Same pause reason — this is one
+  // hold with two causes, and the detail names which — but its own
+  // announcement, because "the card has been charged $X" is different news
+  // from "the fleet worked hard today". Subscription work never reaches here:
+  // `metered.hold` is null unless the lane bills per token, which is what
+  // "the cap measures money, not quota" means in code.
+  if (metered.hold === "cap-reached") {
+    if (!snapshot.meteredCapAnnounced) {
+      actions.push({
+        type: "notify",
+        event: "metered-cap-reached",
+        payload: {
+          spentUsd: metered.spentUsd,
+          capUsd: metered.capUsd,
+          laneId: snapshot.primaryLaneId,
+        },
+      });
+    }
+    actions.push({
+      type: "pausePickup",
+      reason: "daily-cap",
+      detail:
+        `real-money cap: $${metered.spentUsd.toFixed(2)} of ` +
+        `$${metered.capUsd.toFixed(2)} spent on ${snapshot.primaryLaneId ?? "a metered lane"}`,
+    });
+    return actions;
+  }
+
   // The operator's global kill switch (issue #118), read from the settings row
   // each tick. It sits beside the env master far above — that one stops sweeps
   // from ever starting, this one stops what a running sweep would claim, at the
@@ -1525,6 +1769,32 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // the dashboard names the switch instead, being the hold a human can lift.
   if (snapshot.globalPaused) {
     actions.push({ type: "pausePickup", reason: "kill-switch" });
+    return actions;
+  }
+
+  // The confirm-once gate. A fleet-level press, not a per-session one: nobody
+  // is at the keyboard when an autonomous pass crosses into billing. Once
+  // given it stands for the local day, so the second claim of the day and
+  // every one after it proceeds automatically until the cap above.
+  //
+  // Below the kill switch, unlike its own cap directly above: this one *asks
+  // for a press*, and asking under a switch a human has engaged would point
+  // them at a control that would change nothing — the same reasoning the quota
+  // gate below is placed here for. The cap stays above because its
+  // announcement is news either way, exactly as the daily cap's is.
+  if (metered.hold === "unconfirmed") {
+    if (!snapshot.meteredConfirmationAnnounced) {
+      actions.push({
+        type: "notify",
+        event: "metered-confirmation-required",
+        payload: { capUsd: metered.capUsd, laneId: snapshot.primaryLaneId },
+      });
+    }
+    actions.push({
+      type: "pausePickup",
+      reason: "metered-unconfirmed",
+      detail: `${snapshot.primaryLaneId ?? "the primary lane"} bills real money — today's spend is unconfirmed`,
+    });
     return actions;
   }
 
@@ -1577,7 +1847,13 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       snapshot.queuedRepairCount -
       repairsQueuedThisSweep -
       snapshot.queuedTriageCount -
-      triagesQueuedThisSweep
+      triagesQueuedThisSweep -
+      // A resumed run's pass is queued work like any other, and it is the one
+      // the ticket asks to be preferred: subtracting it here is what makes
+      // "resuming existing work outranks claiming new work" true when slots
+      // are scarce, rather than a matter of which action happens to be
+      // executed first.
+      resumesQueuedThisSweep
   );
 
   if (claimableSlots === 0) {

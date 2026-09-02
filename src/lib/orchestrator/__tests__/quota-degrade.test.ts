@@ -246,6 +246,16 @@ describe("an implement pass refused on a tier's own allowance (issue #170)", () 
     expect(retry.githubIssue).toBe(ISSUE_REF);
   });
 
+  it("keeps the attempt's budget on the retry rather than handing out a fresh one", async () => {
+    await turns.evaluatePassOutcome(taskId, walledOn("seven_day_opus"));
+
+    // The retry is a *second* implement-shaped task row under one run, and
+    // every budget control in the turn manager is scoped to the row. Without
+    // the lineage #169 introduced, a run that stepped twice would be handed the
+    // whole per-attempt allowance three times over.
+    expect(retryTask()[0].resumedFromTaskId).toBe(taskId);
+  });
+
   it("records the tier it was asked for, so the ledger stays interpretable", async () => {
     await turns.evaluatePassOutcome(taskId, walledOn("seven_day_opus"));
 

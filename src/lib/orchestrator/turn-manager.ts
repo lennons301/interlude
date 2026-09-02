@@ -8,9 +8,11 @@ import {
   execSetup,
   execAgentTurn,
   execFallbackCommitAndPush,
+  readContainerFile,
   removeContainer,
   stopContainer,
   startContainer,
+  writeContainerFile,
   type RunningContainer,
 } from "../docker/container-manager";
 import { checkMemoryAdmission } from "./capacity";
@@ -21,13 +23,8 @@ import { parseReviewVerdict } from "./autonomy/verdict";
 import { parseTriageExit } from "./autonomy/triage";
 import { passProducedResult } from "./autonomy/pass-output";
 import { cancelOrphanedRunTasks } from "./autonomy/review-tasks";
-import {
-  DEFAULT_REPAIR_BUDGET_USD,
-  DEFAULT_REVIEW_BUDGET_USD,
-  DEFAULT_TRIAGE_BUDGET_USD,
-  MAX_ATTEMPTS,
-  TRIAGE_MAX_TURNS,
-} from "./autonomy/budgets";
+import { MAX_ATTEMPTS, TRIAGE_MAX_TURNS } from "./autonomy/budgets";
+import { resolvePassBudget, spendCarriedIntoPass } from "./pass-budget";
 import { scanPorts } from "./port-scanner";
 import {
   getConfig,
@@ -36,6 +33,7 @@ import {
 } from "../config";
 import { getSettingsOverrides } from "../settings";
 import { getLaneCatalog } from "../lanes/catalog";
+import { recordMeteredSpend } from "./spend";
 import { resolveLane, type ResolvedLane } from "../lanes/resolve";
 import { getHarnessAdapter } from "../harness/registry";
 import { getDocker } from "../docker/client";
@@ -54,6 +52,12 @@ import {
 } from "../quota/rate-limit-rejection";
 import { describeRateLimitType } from "../quota/rate-limit-event";
 import { normalizeModelTier } from "../model-tiers";
+import {
+  containerTranscriptPath,
+  MAX_TRANSCRIPT_BYTES,
+  readTranscript,
+  saveTranscript,
+} from "../quota/session-transcript";
 
 /**
  * Track all active task containers for cancellation and idle polling.
@@ -339,8 +343,53 @@ export async function startTask(taskId: string): Promise<void> {
     // every turn as `--effort` and recorded on the run row below.
     const passEffort = resolveAgentEffort(task.kind, getConfig(), run?.effort ?? null);
 
-    // Update task status
-    updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
+    // What this attempt has already spent on *this* pass, across the quota
+    // walls it was continued from — the pauses it was resumed from (issue
+    // #169) and the tier steps it was retried from (issue #170) — and zero for
+    // every pass that is neither. The allowance below is stated net of it,
+    // because each of those is a new task row for the same attempt while every
+    // budget control here is scoped to the row: left gross, one attempt's real
+    // ceiling would be `(1 + continuations) x run.budgetUsd`.
+    const carriedCostUsd = spendCarriedIntoPass(task);
+
+    // What this pass may spend: its kind's allowance, net of the above.
+    const passBudget = resolvePassBudget({
+      kind: task.kind,
+      attemptBudgetUsd: run?.budgetUsd ?? null,
+      carriedCostUsd,
+    });
+
+    // Defence in depth, on the one kind for which "the attempt has no money
+    // left" and "the attempt fails" are the same sentence. An implement pass
+    // cannot actually reach this — exhaustion is judged ahead of the pause, so
+    // an attempt at its ceiling fails rather than parks, and every link in a
+    // resume chain is therefore strictly under it — but if it ever did, this is
+    // the answer, and it is given before a ~2 GiB container is built to run a
+    // turn with no money in it. Deliberately not repair: a repair pass is never
+    // an attempt and may not fail one, and its allowance is not netted anyway.
+    if (isImplementPass && run && passBudget.remainingUsd !== null && passBudget.remainingUsd <= 0) {
+      await failImplementAttempt(
+        taskId,
+        run.id,
+        `budget exhausted ($${passBudget.carriedCostUsd.toFixed(2)} of ` +
+          `$${(passBudget.allowanceUsd ?? 0).toFixed(2)} spent before this resume)`
+      );
+      return;
+    }
+
+    // Update task status, and record the lane this pass runs on with it
+    // (issues #172, #174). The billing kind is written *here*, on the task,
+    // because the task is the unit money is spent by: a run's lane covers its
+    // implement pass, but triage owns no run and an interactive session never
+    // has one, and the real-money cap has to see every dollar that went
+    // through a metered lane today or it is not measuring money.
+    updateTask(taskId, {
+      status: "running",
+      branch,
+      containerStatus: "setup",
+      lane: passLane.id,
+      laneBilling: passLane.billing,
+    });
     insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
 
     // Only an implement-shaped pass moves the run to `implementing` — a review
@@ -369,8 +418,15 @@ export async function startTask(taskId: string): Promise<void> {
           status: "implementing",
           startedAt: run.startedAt ?? new Date(),
           lane: passLane.id,
+          laneBilling: passLane.billing,
           model: passLane.tier ?? passModel,
           effort: passEffort,
+          // A resumed run stops waiting on a clock the moment its pass starts
+          // (issue #169). Cleared here rather than when the resume was decided,
+          // so a restart in between leaves a run that is still visibly paused
+          // with the window it is waiting on, rather than one pretending to be
+          // claimed.
+          resumeAfter: null,
         })
         .where(eq(runs.id, run.id))
         .run();
@@ -460,29 +516,20 @@ export async function startTask(taskId: string): Promise<void> {
       ).catch(console.error);
     }
 
-    // Run initial turn. An autonomous pass is one whole turn — an implement
-    // pass carries the run's per-attempt budget, a review pass its own
-    // smaller allowance, a triage pass the smallest of all plus a hard turn
-    // cap, never the interactive per-task default. Review and triage keep
-    // their raw stream: the structured exit is parsed from it.
-    const turnResult = await runTurn(taskId, running, prompt, undefined, {
-      maxBudgetUsd: isReviewPass
-        ? DEFAULT_REVIEW_BUDGET_USD
-        : isTriagePass
-          ? DEFAULT_TRIAGE_BUDGET_USD
-          : isRepairPass
-            ? DEFAULT_REPAIR_BUDGET_USD
-            : // The **attempt's** remaining budget, not a fresh copy of it. A
-              // no-op for the first implement pass of a run, which is the only
-              // one there was until the tier ladder (issue #170): a degraded
-              // run retries as a *second* implement task under the same run, and
-              // the per-task budget check downstream would otherwise hand it the
-              // whole $20 again on top of whatever the refused pass spent. A
-              // refused pass usually spends ~nothing, but a wall hit deep into a
-              // long turn does not, and one attempt must not cost two budgets.
-              run
-              ? Math.max(0, run.budgetUsd - run.totalCostUsd)
-              : undefined,
+    // A resumed pass (issue #169) opens with the paused pass's conversation put
+    // back where the harness keeps it, and continues that session rather than
+    // starting a new one. Every other pass gets `undefined` and behaves exactly
+    // as before.
+    const resumeSessionId = isImplementShaped
+      ? await restoreSessionTranscript(task, running)
+      : undefined;
+
+    // Run initial turn. An autonomous pass is one whole turn, carrying the
+    // allowance resolved above (net of anything a quota pause already spent on
+    // it). Review and triage keep their raw stream: the structured exit is
+    // parsed from it.
+    const turnResult = await runTurn(taskId, running, prompt, resumeSessionId, {
+      maxBudgetUsd: passBudget.remainingUsd ?? undefined,
       maxTurns: isTriagePass
         ? TRIAGE_MAX_TURNS
         : isReviewPass || isRepairPass
@@ -547,7 +594,13 @@ export async function startTask(taskId: string): Promise<void> {
       // conflict check then escalates the still-CONFLICTING PR to a human,
       // rather than the repair burning a strike.
       if (isImplementPass) {
-        const exhaustion = run ? attemptExhaustion(run, turnResult.costUsd, turnResult.subtype) : null;
+        const exhaustion = run
+          ? attemptExhaustion(
+              run,
+              passBudget.carriedCostUsd + turnResult.costUsd,
+              turnResult.subtype
+            )
+          : null;
         if (exhaustion) {
           await failImplementAttempt(taskId, run!.id, exhaustion);
           return;
@@ -676,6 +729,106 @@ export async function startTask(taskId: string): Promise<void> {
     }
 
     await removeTaskContainer(taskId, running);
+  }
+}
+
+/**
+ * Put a paused pass's conversation back into its fresh container, and say
+ * which session the turn should continue (issue #169).
+ *
+ * Returns the session id only when the transcript actually landed. Everything
+ * that can go wrong here — no session recorded, no saved transcript, a write
+ * the daemon refused — degrades to the declared fallback rather than to a
+ * failure: the pass runs on the same branch, with the work already pushed,
+ * and its prompt (which carries the original brief behind the resume
+ * preamble) stands on its own. Resuming a session the container has never
+ * heard of would be the one genuinely bad outcome, so it is the one thing this
+ * refuses to do.
+ *
+ * The task's `sessionId` is set only by the resume executor, so an ordinary
+ * first pass never reaches past the first line.
+ *
+ * Exported as the seam it is, like `evaluatePassOutcome`: whether a resumed
+ * pass continues its session or falls back is decided here, and a test that
+ * wanted to assert it otherwise would have to provision a container.
+ */
+export async function restoreSessionTranscript(
+  task: typeof tasks.$inferSelect,
+  running: RunningContainer
+): Promise<string | undefined> {
+  if (task.sessionId === null || task.runId === null) return undefined;
+
+  const transcript = readTranscript(task.runId);
+  if (transcript === null) {
+    insertSystemMessage(
+      task.id,
+      "Resuming without the paused session's transcript — this pass continues " +
+        "on the same branch, with the work pushed so far but no prior context."
+    );
+    return undefined;
+  }
+
+  try {
+    await writeContainerFile(
+      running.container,
+      containerTranscriptPath(task.sessionId),
+      transcript
+    );
+    insertSystemMessage(
+      task.id,
+      `Restored the paused session (${task.sessionId}) — continuing the same conversation.`
+    );
+    return task.sessionId;
+  } catch (err) {
+    console.error(
+      `[orchestrator] Could not restore the session transcript for task ${task.id}:`,
+      err
+    );
+    insertSystemMessage(
+      task.id,
+      "The paused session's transcript could not be restored — this pass " +
+        "continues on the same branch without its prior context."
+    );
+    return undefined;
+  }
+}
+
+/**
+ * Copy a paused pass's conversation out of the container that is about to be
+ * torn down (issue #169), and report whether it survived.
+ *
+ * Best-effort by design, and the ordering is the point: this runs before the
+ * teardown and its failure changes nothing about the pause. A pause protects
+ * the ticket's attempt; keeping the conversation only saves the resumed pass
+ * some re-orientation, so a transcript that cannot be copied must never cost
+ * the pause itself.
+ */
+async function preserveSessionTranscript(
+  runId: string,
+  sessionId: string | null,
+  container: RunningContainer | null
+): Promise<boolean> {
+  if (sessionId === null || container === null) return false;
+  try {
+    const transcript = await readContainerFile(
+      container.container,
+      containerTranscriptPath(sessionId),
+      // The store's ceiling, handed to the container so an over-size transcript
+      // is refused before it is encoded rather than after it has been decoded
+      // into this process.
+      MAX_TRANSCRIPT_BYTES
+    );
+    if (transcript === null) {
+      console.warn(
+        `[autonomy] Run ${runId} paused with no readable transcript for session ` +
+          `${sessionId} — its resume will start again on the same branch`
+      );
+      return false;
+    }
+    return saveTranscript(runId, transcript);
+  } catch (err) {
+    console.error(`[autonomy] Could not copy the transcript of run ${runId} out:`, err);
+    return false;
   }
 }
 
@@ -902,18 +1055,25 @@ export async function processQueuedMessages(
       ? db.select().from(runs).where(eq(runs.id, task.runId)).get()
       : undefined;
     const budgetUsd = run?.budgetUsd ?? config.maxBudgetUsd;
-    if (task.totalCostUsd && task.totalCostUsd >= budgetUsd) {
+    // The attempt's spend on this pass, not the row's: a pass resumed off a
+    // quota pause carries what its predecessors spent (issue #169), so a
+    // fix-up turn cannot re-open a budget the attempt has already used up. The
+    // figure judged here is the *attempt's* budget for every run-owned task, a
+    // repair pass included, so what carries is netted by the same rule
+    // `resolvePassBudget` applies on the way in.
+    const spentUsd = spendCarriedIntoPass(task) + (task.totalCostUsd ?? 0);
+    if (spentUsd > 0 && spentUsd >= budgetUsd) {
       if (run) {
         await failImplementAttempt(
           taskId,
           run.id,
-          `budget exhausted ($${task.totalCostUsd.toFixed(2)} of $${budgetUsd.toFixed(2)})`
+          `budget exhausted ($${spentUsd.toFixed(2)} of $${budgetUsd.toFixed(2)})`
         );
         break;
       }
       insertSystemMessage(
         taskId,
-        `Budget limit reached ($${task.totalCostUsd.toFixed(2)} / $${budgetUsd.toFixed(2)})`
+        `Budget limit reached ($${spentUsd.toFixed(2)} / $${budgetUsd.toFixed(2)})`
       );
       await completeTask(taskId);
       break;
@@ -935,6 +1095,12 @@ export async function processQueuedMessages(
     // healthy); saying so on the feed once is what was missing.
     const passLane = laneForFollowUp(taskId, task.kind, run?.model ?? null);
     if (passLane === null) break;
+    // Re-recorded per turn, latest wins (issue #174). A session whose lane was
+    // switched mid-flight has spent on both, and the task carries one figure;
+    // attributing the lot to the lane it is on *now* is the direction that
+    // fails safe, since over-reporting real money pauses pickup early while
+    // under-reporting spends past the cap.
+    updateTask(taskId, { lane: passLane.id, laneBilling: passLane.billing });
 
     // Find oldest undelivered user message
     const queued = db
@@ -1009,7 +1175,7 @@ export async function processQueuedMessages(
       promptText,
       task.sessionId ?? undefined,
       {
-        maxBudgetUsd: run ? run.budgetUsd - (task.totalCostUsd ?? 0) : undefined,
+        maxBudgetUsd: run ? run.budgetUsd - spentUsd : undefined,
         maxTurns: run?.maxTurns ?? undefined,
         lane: passLane,
         effort: resolveAgentEffort(task.kind, config, run?.effort ?? null),
@@ -1039,7 +1205,7 @@ export async function processQueuedMessages(
       // attempt's remaining budget or turns fails the attempt through the
       // ledger — the branch is already pushed, the work survives.
       const exhaustion = run
-        ? attemptExhaustion(run, currentCost + turnResult.costUsd, turnResult.subtype)
+        ? attemptExhaustion(run, spentUsd + turnResult.costUsd, turnResult.subtype)
         : null;
       if (exhaustion) {
         await failImplementAttempt(taskId, run!.id, exhaustion);
@@ -1694,6 +1860,12 @@ export async function evaluatePassOutcome(
  *    from that write on the queue's poll may drop the session entry (issue
  *    #159), and reading the map afterwards would leak the container until the
  *    5-minute reaper caught it;
+ *  - the session transcript is copied out **before** the teardown and before
+ *    anything terminal is written (issue #169), because the conversation only
+ *    exists inside the container that is about to go. Best-effort by design:
+ *    an ending protects the ticket's attempt, and keeping the conversation
+ *    only saves its successor some re-orientation, so a transcript that cannot
+ *    be copied must never cost the ending itself;
  *  - the task is failed for the same reason an interrupted pass's is — its exec
  *    is over and its container is going, so leaving it live would hold a slot
  *    against a run that is doing nothing. The *run*, not the task, is what
@@ -1713,22 +1885,39 @@ export async function evaluatePassOutcome(
 async function endRefusedPass(args: {
   taskId: string;
   runId: string;
-  /** Said on the task's own feed, in place of a failure */
-  note: string;
+  /** The refused pass's session, copied out of the container before it goes so
+   *  whatever takes this pass's place can continue the same conversation
+   *  (issue #169). Null when there is no session, or when the successor is not
+   *  a continuation of this pass. */
+  sessionId?: string | null;
+  /** Said on the task's own feed, in place of a failure. Takes whether the
+   *  conversation survived the teardown, which only this knows. */
+  note: (preserved: boolean) => string;
   /** What the run records instead of a spent attempt */
   runPatch: Partial<typeof runs.$inferInsert>;
   /** The pass queued to take this one's place, if any */
   queueNext?: () => void;
-}): Promise<void> {
+}): Promise<boolean> {
   const container = activeTasks.get(args.taskId)?.container ?? null;
 
-  insertSystemMessage(args.taskId, args.note);
+  // Before the teardown, and before anything terminal is written: the
+  // conversation only exists inside the container that is about to go (issue
+  // #169). Its failure is reported, never fatal — the ending protects the
+  // attempt whether or not the context survives.
+  const preserved = await preserveSessionTranscript(
+    args.runId,
+    args.sessionId ?? null,
+    container
+  );
+
+  insertSystemMessage(args.taskId, args.note(preserved));
   updateTask(args.taskId, { status: "failed", containerStatus: null });
   syncRunCost(args.runId);
   db.update(runs).set(args.runPatch).where(eq(runs.id, args.runId)).run();
   args.queueNext?.();
 
   await removeTaskContainer(args.taskId, container);
+  return preserved;
 }
 
 async function degradeRunTier(
@@ -1766,7 +1955,11 @@ async function degradeRunTier(
   await endRefusedPass({
     taskId: step.taskId,
     runId: step.runId,
-    note:
+    // Deliberately no session: the retry starts a fresh conversation at the
+    // lower tier, on the same branch with the work pushed. Continuing the
+    // refused pass's session is the *resume* path's promise (issue #169),
+    // where the pass that continues is the same pass on the same tier.
+    note: () =>
       `Stepping down from the ${step.from} tier to ${step.to} — ${window} ` +
       `refused this pass${resets}. The run retries at ${step.to}; ` +
       `no attempt or interruption was consumed.`,
@@ -1799,6 +1992,14 @@ async function degradeRunTier(
           runId: step.runId,
           githubIssue: task.githubIssue,
           branch: task.branch,
+          // Lineage, and with it the attempt's budget (issues #169, #170): a
+          // degraded retry is a *second* implement-shaped task under the same
+          // run, and every budget control is scoped to the task row, so
+          // without this the turn manager would hand it the whole per-attempt
+          // allowance again on top of whatever the refused pass spent. A
+          // refused pass usually spends ~nothing, but a wall hit deep into a
+          // long turn does not, and one attempt must not cost two budgets.
+          resumedFromTaskId: task.id,
           pullRequestNumber: task.pullRequestNumber,
           pullRequestUrl: task.pullRequestUrl,
           createdAt: new Date(),
@@ -1842,6 +2043,27 @@ async function pauseRunOnRateLimit(
       `${window} until ${resumes} — no attempt consumed`
   );
 
+  // The paused pass's conversation is copied out on the way through: nothing
+  // takes this pass's place here — a paused run waits on a clock — but the
+  // sweep's resume (issue #169) continues the same session when it survived.
+  const preserved = await endRefusedPass({
+    taskId,
+    runId: pause.runId,
+    sessionId: task?.sessionId ?? null,
+    note: (kept) =>
+      `Paused on ${window} — the account's quota refused this pass. ` +
+      `The window resets at ${resumes}; no attempt or interruption was consumed.` +
+      (kept
+        ? " The session was copied out, so the resume continues this conversation."
+        : " The session could not be copied out, so the resume will start again" +
+          " on the same branch."),
+    runPatch: {
+      status: "rate_limited",
+      resumeAfter: pause.resumeAfter,
+      // Deliberately not finishedAt: the run has not finished. It is waiting.
+    },
+  });
+
   if (task?.githubIssue) {
     // Fire-and-forget, as the interruption path's comment is: one call site
     // awaits this from inside startTask's try, and a rejected comment must not
@@ -1849,26 +2071,12 @@ async function pauseRunOnRateLimit(
     commentOnIssue(
       task.githubIssue,
       `Run paused (attempt ${run?.attempt ?? "?"}): the account's quota ` +
-        `refused this pass on ${window}. The window resets at ${resumes}. ` +
-        `A quota pause consumes neither an attempt nor an interruption — ` +
-        `work so far is pushed to \`${task.branch}\`.`
+        `refused this pass on ${window}. The window resets at ${resumes}, when ` +
+        `the run resumes by itself. A quota pause consumes neither an attempt ` +
+        `nor an interruption — work so far is pushed to \`${task.branch}\`` +
+        `${preserved ? ", and the pass resumes the same conversation" : ""}.`
     ).catch(console.error);
   }
-
-  await endRefusedPass({
-    taskId,
-    runId: pause.runId,
-    note:
-      `Paused on ${window} — the account's quota refused this pass. ` +
-      `The window resets at ${resumes}; no attempt or interruption was consumed.`,
-    runPatch: {
-      status: "rate_limited",
-      resumeAfter: pause.resumeAfter,
-      // Deliberately not finishedAt: the run has not finished. It is waiting.
-    },
-    // Nothing takes this pass's place: a paused run waits on a clock, and
-    // resuming it is its own ticket (#169).
-  });
 }
 
 /**
@@ -2129,8 +2337,28 @@ function updateTask(
     pullRequestUrl: string | null;
     discordMessageId: string | null;
     triageResult: (typeof tasks.$inferSelect)["triageResult"];
+    lane: string | null;
+    laneBilling: "subscription" | "metered" | null;
   }>
 ): void {
+  // The one funnel every task-cost write goes through, which is why the
+  // real-money ledger (issue #174) is booked here rather than at the two call
+  // sites: a later third caller cannot forget it. Only the *increment* is
+  // booked, and only when the pass in hand ran on a metered lane — so a
+  // session whose lane was switched mid-flight has each turn's dollars
+  // attributed to the lane that actually spent them, which no single column on
+  // the row could say.
+  if (fields.totalCostUsd !== undefined) {
+    const before = db
+      .select({ total: tasks.totalCostUsd, billing: tasks.laneBilling })
+      .from(tasks)
+      .where(eq(tasks.id, taskId))
+      .get();
+    if (before?.billing === "metered") {
+      recordMeteredSpend(before.total ?? 0, fields.totalCostUsd);
+    }
+  }
+
   db.update(tasks)
     .set({ ...fields, updatedAt: new Date() })
     .where(eq(tasks.id, taskId))

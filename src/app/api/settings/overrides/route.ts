@@ -5,6 +5,7 @@ import {
   describeModelTierSettings,
   parseSettingsPatch,
   resolveQuotaThreshold,
+  resolveResumeBound,
   type SettingsOverrides,
   type TierModelIds,
 } from "@/lib/settings-resolver";
@@ -63,6 +64,9 @@ function state(overrides: SettingsOverrides, updatedAt: Date | null) {
     // model-tier field shape, since asking a percentage what tier is in force
     // is not a meaningful question.
     quota: resolveQuotaThreshold(getConfig(), overrides),
+    // The resume bound (issue #169) is the same shape of answer as the
+    // threshold above, and the other half of what "quota" means on the screen.
+    resumeBound: resolveResumeBound(getConfig(), overrides),
     updatedAt: updatedAt?.toISOString() ?? null,
   };
 }

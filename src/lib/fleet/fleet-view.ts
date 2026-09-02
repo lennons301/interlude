@@ -11,8 +11,12 @@ import {
   MAX_ATTEMPTS,
   MAX_CI_REPAIR_ATTEMPTS,
   MAX_INTEGRATION_ATTEMPTS,
+  RESUME_JITTER_WINDOW_MS,
 } from "../orchestrator/autonomy/budgets";
+import { resumeEligibleAt } from "../orchestrator/autonomy/resume-jitter";
 import { formatDuration, type FleetHealthSignals } from "./health";
+import type { LaneBilling } from "../lanes/lane-config";
+import { evaluateMeteredSpend, type MeteredHold } from "../lanes/money";
 import {
   describeRateLimitType,
   quotaSeverity,
@@ -28,6 +32,25 @@ export interface FleetRows {
   slots: number;
   /** Daily estate-wide autonomous spend cap in USD */
   dailyCapUsd: number;
+  /** The real-money daily cap in force (issue #174): the operator's dial,
+   * bound down by the primary lane's own declared cap. */
+  meteredCapUsd: number;
+  /** Real money spent on the local day containing `now`, from the per-day
+   * ledger (`todayMeteredSpendUsd`) rather than summed here. Passed in for the
+   * reason the cap is: it is the *same* number the reducer gates on, and a
+   * second implementation of "what has the card been charged today?" would
+   * eventually disagree with the first. A task's stored cost is a running
+   * total carrying no day, so it cannot be attributed to one here anyway. */
+  meteredSpendTodayUsd: number;
+  /** The id of the lane work would run on; null = none resolves. */
+  primaryLaneId: string | null;
+  /** Who pays for that lane. Null = it could not be resolved, which is not a
+   * money hold — such a fleet spends nothing, since every pass refuses to
+   * start. */
+  primaryLaneBilling: LaneBilling | null;
+  /** When the fleet last confirmed it may spend real money; null = never. The
+   * view judges it against `now`, exactly as the reducer does. */
+  meteredSpendConfirmedAt: Date | null;
   /** The global kill switch (issue #118), from the durable settings row: while
    * engaged the sweep claims nothing new, so the dashboard has to say so — a
    * held fleet and an idle one look identical otherwise */
@@ -183,6 +206,27 @@ export interface FleetTaskRow {
   updatedAt: Date;
 }
 
+/**
+ * The real-money half of the spend tile (issue #174). Rendered whenever the
+ * fleet is on a metered lane *or* has spent cash today, so a day that ran on
+ * OpenRouter this morning and moved back to the subscription still shows what
+ * it cost.
+ */
+export interface MeteredSpendView {
+  /** Whether the lane in force bills per token — i.e. whether more cash is
+   * about to be spent, as opposed to merely having been. */
+  active: boolean;
+  /** The lane in force, for the line that names it. */
+  laneId: string | null;
+  todayUsd: number;
+  capUsd: number;
+  capPaused: boolean;
+  /** Today's spend has the one confirmation the guards ask for. */
+  confirmed: boolean;
+  /** What is holding autonomous pickup on money grounds, or null. */
+  hold: MeteredHold | null;
+}
+
 /** Re-exported from the budgets leaf so the view and the loop can't drift */
 export { MAX_ATTEMPTS };
 
@@ -196,6 +240,10 @@ export type NeedsYouCause =
   | "checks-failing"
   | "exhausted"
   | "cap"
+  /** The real-money cap is spent (issue #174) — pickup paused until midnight */
+  | "metered-cap"
+  /** A metered lane's day is unconfirmed (issue #174) — one press starts it */
+  | "metered-confirm"
   | "preflight"
   /** Fleet-health watchdog (issue #126): an owed review that never started, a
    * wedged pickup, a queue poll loop gone quiet. */
@@ -234,7 +282,19 @@ export interface NeedsYouItem {
  * the dashboard renders, not to another module's enum.
  */
 export interface PickupPause {
-  reason: "autonomy-off-at-boot" | "kill-switch" | "daily-cap" | "quota-gate";
+  reason:
+    | "autonomy-off-at-boot"
+    | "kill-switch"
+    | "daily-cap"
+    /** The real-money cap on a metered lane (issue #174). Its own reason
+     * rather than the daily cap's — though the reducer pauses through that
+     * one, being one mechanism — because the two say different things to a
+     * reader: a plan pushed hard, versus a card charged. */
+    | "metered-cap"
+    /** A metered lane whose day nobody has confirmed (issue #174). The only
+     * hold here lifted by a press *on this screen*. */
+    | "metered-unconfirmed"
+    | "quota-gate";
   /** One-line banner copy */
   body: string;
 }
@@ -336,6 +396,13 @@ export interface FleetView {
     todayUsd: number;
     capUsd: number;
     capPaused: boolean;
+    /** Real money, kept apart from the figure above (issue #174). That one is
+     * autonomous spend against a quota-funded plan; this one is cash, summed
+     * over every task that ran on a metered lane — interactive work included,
+     * because a chat session on a metered lane charges the same card an
+     * implement pass does. The two overlap by construction and are not meant
+     * to be added. */
+    metered: MeteredSpendView;
   };
   /** Why no new autonomous work is being picked up, or null while nothing
    * fleet-wide holds it (issues #118, #148) — the live dot, the banner and the
@@ -566,6 +633,31 @@ export function buildFleetView(rows: FleetRows): FleetView {
     .reduce((sum, r) => sum + r.totalCostUsd, 0);
   const capPaused = todayUsd >= rows.dailyCapUsd;
 
+  // Real money (issue #174), taken from the per-day ledger rather than derived
+  // here. Nothing is exempt by kind — a chat session on a metered lane charges
+  // the same card an implement pass does — which is exactly how it differs
+  // from the figure above, where interactive work is exempt by construction.
+  // The two overlap and must never be added.
+  const meteredTodayUsd = rows.meteredSpendTodayUsd;
+  // The same pure evaluation the reducer runs, over the same facts: the tile
+  // and the sweep cannot disagree about whether money is holding the fleet.
+  const meteredState = evaluateMeteredSpend({
+    billing: rows.primaryLaneBilling,
+    spentUsd: meteredTodayUsd,
+    capUsd: rows.meteredCapUsd,
+    confirmedAt: rows.meteredSpendConfirmedAt,
+    now: rows.now,
+  });
+  const metered: MeteredSpendView = {
+    active: meteredState.metered,
+    laneId: rows.primaryLaneId,
+    todayUsd: meteredTodayUsd,
+    capUsd: rows.meteredCapUsd,
+    capPaused: meteredState.hold === "cap-reached",
+    confirmed: meteredState.confirmed,
+    hold: meteredState.hold,
+  };
+
   // The same gate `decideNext` refuses pickup with (issue #171), from the same
   // pure function: the banner is not allowed to have its own opinion about
   // whether work is being claimed. Ranked below the cap for the reason the cap
@@ -584,7 +676,9 @@ export function buildFleetView(rows: FleetRows): FleetView {
   // switch there would send an owner to press a control that changes nothing.
   // Below it the switch outranks the cap — both can hold, but the switch is the
   // one a human engaged and the one they can lift, while midnight lifts the cap
-  // on its own. Whichever wins, the others keep their own surfaces: the cap's
+  // on its own. The two money holds (issue #174) sit under the cap, in the
+  // order the reducer refuses them: a spent cash cap, then a day nobody has
+  // confirmed. Whichever wins, the others keep their own surfaces: the cap's
   // gauge and needs-you card are untouched by being outranked here.
   const pickupPaused: PickupPause | null = !rows.autonomyEnabledAtBoot
     ? {
@@ -601,12 +695,22 @@ export function buildFleetView(rows: FleetRows): FleetView {
             reason: "daily-cap",
             body: "Daily cap reached — autonomous pickup paused until midnight",
           }
-        : quotaGate.closed
+        : metered.hold === "cap-reached"
           ? {
-              reason: "quota-gate",
-              body: quotaPauseBody(quotaGate),
+              reason: "metered-cap",
+              body: `Real-money cap reached on ${metered.laneId ?? "a metered lane"} — autonomous pickup paused until midnight; interactive work unaffected`,
             }
-          : null;
+          : metered.hold === "unconfirmed"
+            ? {
+                reason: "metered-unconfirmed",
+                body: `${metered.laneId ?? "The primary lane"} bills real money — pickup is held until today's spend is confirmed once in Settings`,
+              }
+            : quotaGate.closed
+              ? {
+                  reason: "quota-gate",
+                  body: quotaPauseBody(quotaGate),
+                }
+              : null;
 
   const tasksOfRun = (runId: string) =>
     rows.tasks.filter((t) => t.runId === runId);
@@ -719,6 +823,28 @@ export function buildFleetView(rows: FleetRows): FleetView {
       context: `$${todayUsd.toFixed(2)} / $${rows.dailyCapUsd.toFixed(2)} today`,
       body: "Autonomous pickup paused until midnight — interactive work unaffected",
       action: null,
+    });
+  }
+
+  // The money guards (issue #174). Beside the cap card and shaped like it,
+  // because they hold the fleet the same way — but each carries the remedy
+  // that actually applies: the cash cap wants the cap raised (or the day
+  // ended), and the confirmation wants one press.
+  if (metered.hold === "cap-reached") {
+    needsYou.push({
+      cause: "metered-cap",
+      severity: "red",
+      context: `$${metered.todayUsd.toFixed(2)} / $${metered.capUsd.toFixed(2)} real money today`,
+      body: `Real-money cap spent on ${metered.laneId ?? "a metered lane"} — autonomous pickup paused until midnight. Raise the cap to carry on today.`,
+      action: { label: "Settings", href: "/settings" },
+    });
+  } else if (metered.hold === "unconfirmed") {
+    needsYou.push({
+      cause: "metered-confirm",
+      severity: "amber",
+      context: `${metered.laneId ?? "primary lane"} · cap $${metered.capUsd.toFixed(2)}`,
+      body: "This lane bills real money and today's spend isn't confirmed — autonomous pickup is held until you confirm it once.",
+      action: { label: "Settings", href: "/settings" },
     });
   }
 
@@ -944,11 +1070,21 @@ export function buildFleetView(rows: FleetRows): FleetView {
         // clock it is actually waiting on: a `rate_limited` row that somehow
         // carries no resumeAfter would be a run waiting on nothing, which is a
         // claim this view refuses to make on a screen an operator trusts.
+        //
+        // The instant shown is the run's *eligible* one — the window's reset
+        // plus this run's own jitter (issue #169) — through the same function
+        // the reducer decides with. A countdown that hit zero minutes before
+        // anything moved would be the screen and the fleet disagreeing about
+        // the one number the card exists to show.
         paused:
           run.status === "rate_limited" && run.resumeAfter
             ? {
                 reason: "rate-limited" as const,
-                resumeAfter: run.resumeAfter.toISOString(),
+                resumeAfter: resumeEligibleAt(
+                  run.id,
+                  run.resumeAfter,
+                  RESUME_JITTER_WINDOW_MS
+                ).toISOString(),
               }
             : null,
         // Both tiers or neither: `degradedFrom` is only ever written beside the
@@ -1084,7 +1220,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
       saturated: occupants.length >= rows.slots,
       segments,
     },
-    spend: { todayUsd, capUsd: rows.dailyCapUsd, capPaused },
+    spend: { todayUsd, capUsd: rows.dailyCapUsd, capPaused, metered },
     pickupPaused,
     needsYou,
     running,

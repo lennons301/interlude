@@ -64,6 +64,19 @@ export const settings = sqliteTable("settings", {
   // Read through `sanitizeOverrides` — never trusted verbatim, because this is
   // JSON written by an older build of the app.
   overrides: text("overrides", { mode: "json" }).$type<SettingsOverrides>(),
+  // When a human last confirmed that the fleet may spend real money (issue
+  // #174). The confirm-once-per-day gate compares this against the local day:
+  // the first metered spend of a day needs one press, and everything after it
+  // that day proceeds automatically until the real-money cap.
+  //
+  // Durable, and a column rather than an in-memory flag, for the reason the
+  // kill switch is: a restart must not re-ask (the fleet would sit held until
+  // someone noticed) and must not silently forget that nobody ever asked. A
+  // timestamp rather than a day string so the screen can say *when* it was
+  // confirmed; the day comparison is the reader's (`sameLocalDay`).
+  meteredSpendConfirmedAt: int("metered_spend_confirmed_at", {
+    mode: "timestamp_ms",
+  }),
   updatedAt: int("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 
@@ -131,6 +144,13 @@ export const runs = sqliteTable("runs", {
   // the fact. Set when the implement pass starts; null for a run that predates
   // lanes, and for an interactive task (which has no run row at all).
   lane: text("lane"),
+  // Who paid for that lane (issue #174) — recorded beside the id rather than
+  // looked up from `lanes.yaml` at read time, because the file is
+  // version-controlled configuration that changes under a deployment: a lane
+  // retired or re-pointed at a different provider would silently rewrite the
+  // billing history of every past run. The ledger's job is to say what was
+  // true when the work ran. Null for a run that predates lanes.
+  laneBilling: text("lane_billing", { enum: ["subscription", "metered"] }),
   // Model the implement pass ran on (issue #74), so this run's spend is
   // interpretable against its tier. A ticket's `model:` directive (issue #80)
   // pins it from claim time; otherwise it is set when the implement pass
@@ -222,6 +242,14 @@ export const runs = sqliteTable("runs", {
   // resume needs. A quota pause consumes neither an attempt nor an
   // interruption, so there is no counter here to bump.
   resumeAfter: int("resume_after", { mode: "timestamp_ms" }),
+  // Times this attempt has been resumed after a quota pause (issue #169).
+  // Bounded by the resume bound (settable in the UI, `MAX_RESUMES_PER_ATTEMPT`
+  // otherwise): past it the ticket routes to `ready-for-human` the way
+  // exhaustion does, so a pathological ticket cannot loop across quota windows
+  // forever. Deliberately its own counter and not `attempt` or
+  // `interruptionCount` — a pause spends neither, and a bound that measured
+  // one of those would change what those two numbers mean.
+  resumeCount: int("resume_count").notNull().default(0),
   blockedQuestion: text("blocked_question"),
   // A checkpoint: directive's text, stored at claim time. Non-null makes the
   // run supervised: its gate decision is forced to human-signoff regardless
@@ -267,9 +295,28 @@ export const tasks = sqliteTable("tasks", {
   // trigger.
   sessionIssue: text("session_issue"),
   runId: text("run_id").references(() => runs.id),
+  // The execution lane this pass ran on, and who paid for it (issues #172,
+  // #174). Recorded per task as well as per run because a task is the unit
+  // money is actually spent by: a run's lane covers its implement pass, but
+  // triage owns no run at all and an interactive session never has one, and
+  // the real-money cap has to measure *every* dollar that went through a
+  // metered lane today or it is not measuring money. Null for a pass that
+  // predates lanes.
+  lane: text("lane"),
+  laneBilling: text("lane_billing", { enum: ["subscription", "metered"] }),
   containerId: text("container_id"),
   branch: text("branch"),
   sessionId: text("session_id"),
+  // The pass this one continued past a quota wall — resumed off a pause (issue
+  // #169) or retried a tier lower (issue #170). Either is a *new* task row for
+  // the same attempt, so lineage is what makes "the same pass, continued" a
+  // fact rather than a guess — and it is what the attempt's
+  // budget follows, so a resumed pass keeps spending the allowance its
+  // predecessor started on rather than being handed a fresh one. The run
+  // cannot answer this: it also owns review passes with their own allowance,
+  // and it may own two *distinct* repair passes, each entitled to its own.
+  // Null for every pass that is not a resume.
+  resumedFromTaskId: text("resumed_from_task_id"),
   containerStatus: text("container_status", {
     enum: ["setup", "running", "idle", "completing"],
   }),
@@ -337,6 +384,34 @@ export const QUOTA_STATE_ROW_ID = "fleet";
  * ticket reading one more of them should be a code change and not a migration.
  * Written by `lib/quota/quota-store.ts`, which never trusts it verbatim on read.
  */
+/**
+ * Real money spent per local day (issue #174), one row per day the fleet has
+ * charged a card.
+ *
+ * A ledger rather than a sum over tasks, because a task's `totalCostUsd` is a
+ * *running total* with no day in it: a chat session opened on Monday and driven
+ * all week carries one figure, and any attempt to attribute it to a day —
+ * creation, last update — is a guess that either under-counts (spending past
+ * the cap) or double-counts (holding the fleet over money it did not spend
+ * today). What is unambiguous is the **delta** at the moment a turn's cost
+ * lands, and the lane that turn ran on, so that is what is written here.
+ *
+ * Keyed by the local day (`YYYY-MM-DD`), which is the reset every other daily
+ * figure here answers to. Rows are tiny and never rewritten once the day turns,
+ * so the history stays readable — the daily digest reports the day it covers
+ * rather than the day it is sent on.
+ *
+ * Written by `recordMeteredSpend` (`src/lib/orchestrator/spend.ts`), which is
+ * idempotent by construction: it adds `new total - old total`, so writing the
+ * same total twice adds nothing.
+ */
+export const meteredSpend = sqliteTable("metered_spend", {
+  /** Local calendar day, `YYYY-MM-DD`. */
+  day: text("day").primaryKey(),
+  usd: real("usd").notNull().default(0),
+  updatedAt: int("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export const quotaState = sqliteTable("quota_state", {
   id: text("id").primaryKey(),
   observation: text("observation", { mode: "json" }).notNull(),
