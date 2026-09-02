@@ -32,6 +32,10 @@
 
 import type { AgentPassKind, AppConfig } from "./config";
 import {
+  DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT,
+  QUOTA_THRESHOLD_OPTIONS,
+} from "./quota/quota-gate";
+import {
   MODEL_TIERS,
   type ModelTier,
   describeModelTierVocabulary,
@@ -40,13 +44,14 @@ import {
 } from "./model-tiers";
 
 /** The settings a human may override from the UI. Later tickets in issue #164
- * (the quota admission threshold, the overflow daily cap, the per-attempt
- * pause bound) add members here and an entry to `SETTINGS_FIELDS`. */
+ * (the overflow daily cap, the per-attempt pause bound) add members here and an
+ * entry to `SETTINGS_FIELDS`. */
 export type SettingKey =
   | "modelTierImplement"
   | "modelTierReview"
   | "modelTierTriage"
-  | "modelTierInteractive";
+  | "modelTierInteractive"
+  | "quotaPickupThresholdPercent";
 
 /** What is stored on the settings row: a sparse map, because absent means
  * "fall through to the environment", which is a different thing from any
@@ -68,6 +73,30 @@ export interface EnvDefault {
   value: string | null;
 }
 
+/**
+ * What a resolved field *means*, beyond the string that is stored — the part
+ * that differs field by field, kept as a discriminated union so a screen that
+ * renders a model tier cannot accidentally render a percentage through the
+ * same words. The shared half (provenance, options, the variable it falls back
+ * to) stays flat on {@link SettingFieldView}, because that half is identical
+ * for every setting and is the reason this layer is general at all.
+ */
+export type SettingDetail =
+  | {
+      kind: "model-tier";
+      /** The tier in force, or null when the environment pins a raw model id. */
+      tier: ModelTier | null;
+      /** What actually reaches the harness (null = no `--model`). */
+      model: string | null;
+    }
+  | {
+      kind: "percent";
+      /** The value in force. Always a number: a percentage has no "let
+       * something downstream decide" state, so an unset override and an unset
+       * variable both land on the field's own built-in default. */
+      percent: number;
+    };
+
 export interface SettingSpec {
   key: SettingKey;
   label: string;
@@ -80,6 +109,8 @@ export interface SettingSpec {
   /** A one-line statement of what is accepted, for a rejection message. */
   vocabulary(): string;
   envDefault(config: AppConfig): EnvDefault;
+  /** The resolved meaning of the value in force — see {@link SettingDetail}. */
+  detail(config: AppConfig, overrides: SettingsOverrides): SettingDetail;
 }
 
 function modelTierField(
@@ -96,6 +127,10 @@ function modelTierField(
     normalize: (raw) => normalizeModelTier(raw),
     vocabulary: describeModelTierVocabulary,
     envDefault,
+    detail: (config, overrides) => {
+      const resolved = resolveModelTierField(key, config, overrides);
+      return { kind: "model-tier", tier: resolved.tier, model: resolved.model };
+    },
   };
 }
 
@@ -115,6 +150,43 @@ function cheaperTierEnv(
   if (own !== null) return { envVar, value: own };
   const base = baseModelEnv(config);
   return base.value !== null ? base : { envVar, value: null };
+}
+
+/**
+ * The quota admission threshold (issue #171): the utilization at or above
+ * which the fleet stops claiming new tickets.
+ *
+ * Not a safety ceiling, which is why it is settable at all — it only ever makes
+ * the fleet do *less*. The one thing it cannot turn off is the outright
+ * rejection: at 100 the gate still closes when the account is already refusing
+ * work, because a claim made then cannot run whatever a threshold says.
+ */
+function quotaThresholdField(): SettingSpec {
+  return {
+    key: "quotaPickupThresholdPercent",
+    label: "Quota pickup threshold",
+    help:
+      "How full the account's quota window may get before the fleet stops claiming new tickets. Work already in flight always finishes, and a parked run still resumes. At 100 the gate closes only when the account is already being rejected.",
+    options: QUOTA_THRESHOLD_OPTIONS,
+    normalize: (raw) => {
+      const trimmed = raw.trim();
+      return (QUOTA_THRESHOLD_OPTIONS as readonly string[]).includes(trimmed)
+        ? trimmed
+        : null;
+    },
+    vocabulary: () => QUOTA_THRESHOLD_OPTIONS.join(", "),
+    envDefault: (config) => ({
+      envVar: "QUOTA_PICKUP_THRESHOLD_PERCENT",
+      value:
+        config.quotaPickupThresholdPercent === null
+          ? null
+          : String(config.quotaPickupThresholdPercent),
+    }),
+    detail: (config, overrides) => ({
+      kind: "percent",
+      percent: resolveQuotaThreshold(config, overrides).percent,
+    }),
+  };
 }
 
 /**
@@ -149,6 +221,7 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
     "The tier a chat or generation session runs on — the work you are sitting in front of.",
     baseModelEnv
   ),
+  quotaPickupThresholdPercent: quotaThresholdField(),
 };
 
 /** Display order for the screen and the API. Kept beside the registry so a new
@@ -158,6 +231,7 @@ export const SETTINGS_FIELD_ORDER: readonly SettingKey[] = [
   "modelTierReview",
   "modelTierTriage",
   "modelTierInteractive",
+  "quotaPickupThresholdPercent",
 ];
 
 /**
@@ -371,6 +445,58 @@ export function resolveModelTierField(
   };
 }
 
+/**
+ * The quota admission threshold in force (issue #171), and where it came from.
+ *
+ * Three layers, in the order every other field uses: a stored override, then
+ * the environment variable, then the built-in default. The third layer is what
+ * makes this field different from a model tier — a tier may resolve to "no
+ * `--model` at all" and let the CLI decide, but a gate needs a number, so
+ * "unset everywhere" lands on {@link DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT}
+ * rather than on nothing. Both the environment reader and the override reader
+ * refuse a value outside the vocabulary, so an unreadable one falls through
+ * here exactly as an absent one does.
+ */
+export interface ResolvedQuotaThreshold {
+  percent: number;
+  source: SettingSource;
+  /** The stored override, or null when the field falls through. */
+  override: number | null;
+  envVar: string;
+  /** The environment default, verbatim (null = unset). */
+  envValue: string | null;
+}
+
+export function resolveQuotaThreshold(
+  config: AppConfig,
+  overrides: SettingsOverrides
+): ResolvedQuotaThreshold {
+  const spec = SETTINGS_FIELDS.quotaPickupThresholdPercent;
+  const { envVar, value: envValue } = spec.envDefault(config);
+  const stored = overrides.quotaPickupThresholdPercent ?? null;
+  const override = stored === null ? null : spec.normalize(stored);
+
+  if (override !== null) {
+    return {
+      percent: parseInt(override, 10),
+      source: "override",
+      override: parseInt(override, 10),
+      envVar,
+      envValue,
+    };
+  }
+
+  return {
+    percent:
+      config.quotaPickupThresholdPercent ??
+      DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT,
+    source: "environment",
+    override: null,
+    envVar,
+    envValue,
+  };
+}
+
 /** One field as the settings screen shows it: what is in force, where it came
  * from, and what clearing it would fall back to. */
 export interface SettingFieldView {
@@ -385,11 +511,10 @@ export interface SettingFieldView {
   envVar: string;
   /** The environment default, verbatim (null = unset). */
   envValue: string | null;
-  /** The tier in force, or null when the environment pins a raw model id. */
-  tier: ModelTier | null;
-  /** What actually reaches the harness (null = no `--model`; the CLI resolves
-   * the account default, which is the pre-#74 behaviour). */
-  model: string | null;
+  /** What the value in force means — see {@link SettingDetail}. Discriminated,
+   * so a panel that renders tiers and a panel that renders a percentage each
+   * narrow to the fields they actually have. */
+  detail: SettingDetail;
 }
 
 /** Every field, resolved for display. The API and the screen both read this,
@@ -400,18 +525,19 @@ export function describeSettings(
 ): SettingFieldView[] {
   return SETTINGS_FIELD_ORDER.map((key) => {
     const spec = SETTINGS_FIELDS[key];
-    const resolved = resolveModelTierField(key, config, overrides);
+    const { envVar, value: envValue } = spec.envDefault(config);
+    const stored = overrides[key] ?? null;
+    const override = stored === null ? null : spec.normalize(stored);
     return {
       key,
       label: spec.label,
       help: spec.help,
-      envVar: resolved.envVar,
+      envVar,
       options: spec.options,
-      source: resolved.source,
-      override: resolved.override,
-      envValue: resolved.envValue,
-      tier: resolved.tier,
-      model: resolved.model,
+      source: override !== null ? "override" : "environment",
+      override,
+      envValue,
+      detail: spec.detail(config, overrides),
     };
   });
 }

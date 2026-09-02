@@ -35,8 +35,7 @@ function field(over: Partial<SettingFieldView> = {}): SettingFieldView {
     source: "environment",
     override: null,
     envValue: "claude-opus-4-8",
-    tier: null,
-    model: "claude-opus-4-8",
+    detail: { kind: "model-tier", tier: null, model: "claude-opus-4-8" },
     ...over,
   };
 }
@@ -75,8 +74,7 @@ describe("the model-tier settings panel", () => {
     const html = render({
       source: "override",
       override: "light",
-      tier: "light",
-      model: "haiku",
+      detail: { kind: "model-tier", tier: "light", model: "haiku" },
     });
 
     expect(html).toContain("ui override");
@@ -86,7 +84,10 @@ describe("the model-tier settings panel", () => {
   });
 
   it("says plainly when nothing pins a model at all", () => {
-    const html = render({ envValue: null, model: null, tier: null });
+    const html = render({
+      envValue: null,
+      detail: { kind: "model-tier", tier: null, model: null },
+    });
 
     expect(html).toContain("no --model — the account default");
     expect(html).toContain("AGENT_MODEL_REVIEW unset");
@@ -96,8 +97,7 @@ describe("the model-tier settings panel", () => {
     const html = render({
       source: "override",
       override: "light",
-      tier: "light",
-      model: "haiku",
+      detail: { kind: "model-tier", tier: "light", model: "haiku" },
     });
     const input = (value: string) =>
       html.match(new RegExp(`<input[^>]*value="${value}"[^>]*>`))![0];

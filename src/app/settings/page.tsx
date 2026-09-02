@@ -4,6 +4,7 @@ import { ProjectList } from "@/components/project-list";
 import { DockerStatus } from "@/components/docker-status";
 import { KillSwitch } from "@/components/kill-switch";
 import { ModelTierSettings } from "@/components/model-tier-settings";
+import { QuotaGateSettings } from "@/components/quota-gate-settings";
 import { getConfig } from "@/lib/config";
 
 /**
@@ -43,6 +44,11 @@ export default function SettingsPage() {
         <section aria-label="Autonomy" className="space-y-3">
           <Eyebrow>Autonomy</Eyebrow>
           <KillSwitch />
+        </section>
+
+        <section aria-label="Quota" className="space-y-3">
+          <Eyebrow>Quota</Eyebrow>
+          <QuotaGateSettings />
         </section>
 
         <section aria-label="Models" className="space-y-3">

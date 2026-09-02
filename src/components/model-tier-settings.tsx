@@ -1,14 +1,18 @@
 "use client";
 
-import { useState } from "react";
 import {
   Chip,
   LoadFailure,
   PANEL_PLAIN,
   formatChanged,
 } from "@/components/fleet/fleet-bits";
-import { useLoad } from "@/lib/use-load";
-import type { SettingFieldView } from "@/lib/settings-resolver";
+import {
+  FALL_THROUGH,
+  OptionChip,
+  fallbackLine,
+  useSettingsOverrides,
+} from "@/components/settings-overrides";
+import type { SettingDetail, SettingFieldView } from "@/lib/settings-resolver";
 
 /**
  * Which tier each kind of pass runs on (issue #166) — the first fields of the
@@ -29,58 +33,23 @@ import type { SettingFieldView } from "@/lib/settings-resolver";
  * A change lands on the settings row and is read fresh when the next pass
  * starts, so it takes effect at the next sweep with no restart. Runs already
  * in flight keep the tier they recorded.
+ *
+ * The endpoint answers with *every* settable field, so the panel selects its
+ * own by what the value means rather than by naming keys: a field whose detail
+ * is a model tier belongs here, and one that isn't belongs to whichever panel
+ * speaks its language (issue #171's quota threshold is the first).
  */
 
-interface OverridesState {
-  fields: SettingFieldView[];
-  /** ISO-8601; null = no setting has ever been written on this install. */
-  updatedAt: string | null;
+type ModelTierDetail = Extract<SettingDetail, { kind: "model-tier" }>;
+type ModelTierFieldView = SettingFieldView & { detail: ModelTierDetail };
+
+function isModelTierField(field: SettingFieldView): field is ModelTierFieldView {
+  return field.detail.kind === "model-tier";
 }
 
-/** The option that means "no override" — the fall-through every field starts
- * in, offered beside the tiers so clearing is one press. */
-const FALL_THROUGH = "environment";
-
 export function ModelTierSettings() {
-  const {
-    data: state,
-    error: loadError,
-    reload,
-    setData,
-  } = useLoad<OverridesState>("/api/settings/overrides");
-  const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
-
-  async function choose(key: string, choice: string) {
-    setBusyKey(key);
-    setSaveError(null);
-    try {
-      const res = await fetch("/api/settings/overrides", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [key]: choice === FALL_THROUGH ? null : choice }),
-      });
-      const body = await res.json();
-      if (!res.ok) {
-        // The route answers a rejection with the reason it refused — show that
-        // rather than a status code, since the reason is the whole point of
-        // rejecting instead of quietly clamping.
-        throw new Error(
-          typeof body?.error === "string"
-            ? body.error
-            : `the server answered ${res.status}`
-        );
-      }
-      // The endpoint answers with the whole resolved state, so the panel shows
-      // what the fleet would actually run, not what was asked for.
-      setData(body as OverridesState);
-    } catch (err) {
-      setSaveError(
-        `That didn't stick — ${err instanceof Error ? err.message : "the request failed"}`
-      );
-    }
-    setBusyKey(null);
-  }
+  const { state, loadError, reload, busyKey, saveError, choose } =
+    useSettingsOverrides();
 
   if (state === null) {
     return (
@@ -108,7 +77,7 @@ export function ModelTierSettings() {
         both.
       </p>
 
-      {state.fields.map((field) => (
+      {state.fields.filter(isModelTierField).map((field) => (
         <TierRow
           key={field.key}
           field={field}
@@ -139,7 +108,7 @@ function TierRow({
   disabled,
   onChoose,
 }: {
-  field: SettingFieldView;
+  field: ModelTierFieldView;
   busy: boolean;
   disabled: boolean;
   onChoose: (choice: string) => void;
@@ -153,7 +122,7 @@ function TierRow({
         </legend>
         <div className="flex flex-wrap items-center gap-1.5">
           {[...field.options, FALL_THROUGH].map((option) => (
-            <TierOption
+            <OptionChip
               key={option}
               name={field.key}
               option={option}
@@ -176,7 +145,7 @@ function TierRow({
         </Chip>
         <span>{effective(field)}</span>
         <span aria-hidden>·</span>
-        <span>{fallback(field)}</span>
+        <span>{fallbackLine(field)}</span>
       </p>
     </fieldset>
   );
@@ -184,58 +153,8 @@ function TierRow({
 
 /** What the pass actually runs on. Naming the model id beside the tier is the
  * bit that makes an override checkable against the harness's own logs. */
-function effective(field: SettingFieldView): string {
-  if (field.model === null) return "no --model — the account default";
-  return field.tier === null
-    ? `runs ${field.model}`
-    : `runs ${field.tier} (${field.model})`;
-}
-
-/** Where the row would land if the override were cleared — named variable and
- * all, because "environment default" without the name is not something an
- * operator can go and check. */
-function fallback(field: SettingFieldView): string {
-  const value =
-    field.envValue === null ? "unset" : `= ${field.envValue}`;
-  return field.source === "override"
-    ? `${field.envVar} ${value}, unused`
-    : `from ${field.envVar} ${value}`;
-}
-
-/** One tier choice, in the chip voice the rest of the control room speaks. The
- * radio itself is the control — screen-reader-visible and keyboard-operable —
- * with the chip as its skin. */
-function TierOption({
-  name,
-  option,
-  selected,
-  disabled,
-  onSelect,
-}: {
-  name: string;
-  option: string;
-  selected: boolean;
-  disabled: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <label
-      className={`cursor-pointer rounded-[4px] border px-1.5 py-px font-plex-mono text-[11px] lowercase transition-colors focus-within:border-fl-cool ${
-        selected
-          ? "border-fl-cool/45 bg-fl-cool/13 text-fl-cool"
-          : "border-fl-line text-fl-ink-2 hover:border-fl-line-strong hover:text-fl-ink"
-      } ${disabled ? "opacity-40" : ""}`}
-    >
-      <input
-        type="radio"
-        name={name}
-        value={option}
-        className="sr-only"
-        checked={selected}
-        disabled={disabled}
-        onChange={onSelect}
-      />
-      {option}
-    </label>
-  );
+function effective(field: ModelTierFieldView): string {
+  const { tier, model } = field.detail;
+  if (model === null) return "no --model — the account default";
+  return tier === null ? `runs ${model}` : `runs ${tier} (${model})`;
 }
