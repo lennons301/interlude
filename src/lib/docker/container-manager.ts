@@ -133,38 +133,13 @@ export function buildSetupScript(
 }
 
 /**
- * Env for a Claude turn exec. Auth is exec-scoped, mirroring GIT_AUTH_TOKEN:
- * the long-lived setup-token never lands in the container's persistent env.
- * CLAUDE_CODE_OAUTH_TOKEN is the sole subscription-auth path — the mounted
- * host credentials file it once fell back to was removed with the host
- * `~/.claude` mount (#28); ANTHROPIC_API_KEY remains an alternative.
- *
- * `ghToken` is exposed to `gh` as GH_TOKEN for generation-session execs only
- * (issue #62): it is the same short-lived App installation token as
- * GIT_AUTH_TOKEN, so there is one minting path to audit, not two, and like
- * GIT_AUTH_TOKEN it is exec-scoped and never persisted in the container. It is
- * `null` for every autonomous kind (implement/review/triage) — a token that can
- * create issues can also apply the launch-button label, so no unattended kind
- * may ever hold it; the caller decides via TurnOptions.isGenerationSession.
+ * How a Claude turn's exec environment and command are built moved to the
+ * harness adapter with issue #172 — see `src/lib/harness/claude-code.ts`. This
+ * module owns the Docker mechanics (create, setup, exec, push, reap) and is
+ * deliberately harness-agnostic now: `execAgentTurn` below runs whatever
+ * command the adapter produced, with whatever environment the resolved lane
+ * supplied.
  */
-export function buildTurnEnv(options: {
-  prompt: string;
-  gitAuthToken: string;
-  claudeCodeOauthToken: string | null;
-  ghToken: string | null;
-}): string[] {
-  const env = [
-    `CLAUDE_PROMPT=${options.prompt}`,
-    `GIT_AUTH_TOKEN=${options.gitAuthToken}`,
-  ];
-  if (options.claudeCodeOauthToken) {
-    env.push(`CLAUDE_CODE_OAUTH_TOKEN=${options.claudeCodeOauthToken}`);
-  }
-  if (options.ghToken) {
-    env.push(`GH_TOKEN=${options.ghToken}`);
-  }
-  return env;
-}
 
 /**
  * Marker the push script reports the branch's commits-ahead count behind
@@ -218,36 +193,6 @@ export interface WorkspaceOptions {
   checkout?: BranchCheckoutMode;
 }
 
-export interface TurnOptions {
-  container: Docker.Container;
-  prompt: string;
-  sessionId?: string; // If set, uses --resume
-  /** Per-exec budget override (autonomous runs carry their attempt budget) */
-  maxBudgetUsd?: number;
-  /** Per-exec turn-limit override (a ticket's max-turns directive) */
-  maxTurns?: number;
-  /**
-   * Model to pin for this turn, resolved from the task's kind (issue #74).
-   * Null/undefined passes no `--model` — the CLI resolves the account default.
-   */
-  model?: string | null;
-  /**
-   * Reasoning-effort level for this turn, resolved from the task's kind
-   * (issue #81). Null/undefined passes no `--effort` — the CLI resolves its
-   * own default.
-   */
-  effort?: string | null;
-  /**
-   * True only for a generation-session exec — an interactive task carrying a
-   * sessionSkill (issue #62). When set, the exec receives the App installation
-   * token as GH_TOKEN so the generation skills can read and write issues via
-   * `gh`. Never set for an autonomous implement/review/triage pass: a token
-   * that can create issues can also apply the launch-button label, so no
-   * unattended kind may hold it.
-   */
-  isGenerationSession?: boolean;
-}
-
 export interface RunningContainer {
   container: Docker.Container;
   id: string;
@@ -273,10 +218,12 @@ export async function createWorkspaceContainer(
     "DISABLE_TELEMETRY=1",
   ];
 
-  if (config.anthropicApiKey) {
-    env.push(`ANTHROPIC_API_KEY=${config.anthropicApiKey}`);
-  }
-
+  // Deliberately no model-provider credential here (issue #172). Lane auth —
+  // whichever variables the resolved lane names — reaches the harness only in
+  // an exec's environment, so no long-lived credential sits in the persistent
+  // container environment where a parked or idle container would keep it
+  // readable. ANTHROPIC_API_KEY used to be set here and is not any more; the
+  // `anthropic-api` lane supplies it per exec instead.
   if (options.dopplerToken) {
     env.push(`DOPPLER_TOKEN=${options.dopplerToken}`);
   }
@@ -285,8 +232,10 @@ export async function createWorkspaceContainer(
   // nothing else (issue #28):
   //   - the `interlude` Docker network (for preview routing), and
   //   - a fresh, short-lived GitHub App token per exec (GIT_AUTH_TOKEN).
-  // Claude auth arrives the same exec-scoped way, as CLAUDE_CODE_OAUTH_TOKEN
-  // in buildTurnEnv — it is the VPS-verified live path (#48). There is NO
+  // Model-provider auth arrives the same exec-scoped way, as whichever
+  // variables the resolved execution lane names (issue #172) — for the default
+  // subscription lane that is CLAUDE_CODE_OAUTH_TOKEN, the VPS-verified live
+  // path (#48) — built by the harness adapter. There is NO
   // bind mount: the container never sees the host's `~/.claude`, so it cannot
   // read or write the host user's Claude config, history, project state or
   // credentials, and whatever the image installs under /home/node/.claude
@@ -391,76 +340,27 @@ export async function execSetup(
 }
 
 /**
- * Build the bash command a Claude turn runs inside the container. Pure and
- * exported so the flag wiring — notably the per-kind `--model` pin (issue #74)
- * and `--effort` level (issue #81) — is unit-testable without a live Docker
- * exec. `maxTurns`/`maxBudgetUsd` fall back to the configured defaults;
- * `model` and `effort`, when set, pin the tier and reasoning depth and are
- * otherwise omitted so the CLI resolves its own defaults as before.
+ * Run one agent turn: exec the harness's command with the harness's
+ * environment, and hand back the demuxed output stream.
+ *
+ * Both come from the adapter the resolved lane names (issue #172), so this
+ * function knows nothing about which harness, which provider or which
+ * credential is in play — it is the Docker half of a turn and nothing else.
+ * The environment it is handed is exec-scoped by construction: it goes into
+ * this one exec and is never written to the container.
  */
-export function buildClaudeTurnCommand(
-  options: Pick<
-    TurnOptions,
-    "sessionId" | "maxBudgetUsd" | "maxTurns" | "model" | "effort"
-  >
-): string {
-  const config = getConfig();
-
-  const cmdParts = [
-    "cd /workspace/repo",
-    "&&",
-    "claude",
-    "-p",
-    '"$CLAUDE_PROMPT"',
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--dangerously-skip-permissions",
-    "--max-turns",
-    String(options.maxTurns ?? config.maxTurns),
-    "--max-budget-usd",
-    String(options.maxBudgetUsd ?? config.maxBudgetUsd),
-  ];
-
-  if (options.model) {
-    // Single-quote the model id: real ids can carry shell glob metacharacters
-    // (e.g. "claude-opus-4-8[1m]"), and this runs under `bash -c`.
-    cmdParts.push("--model", `'${options.model}'`);
-  }
-
-  if (options.effort) {
-    // The value is always one of the CLI's bounded levels — both entry points
-    // validate against the same allowlist (the ticket directive clamps, the
-    // env is checked in config.ts), so no metacharacter can reach here. Still
-    // single-quoted for the same defence-in-depth reason as the model above,
-    // since this runs under `bash -c`.
-    cmdParts.push("--effort", `'${options.effort}'`);
-  }
-
-  if (options.sessionId) {
-    cmdParts.push("--resume", options.sessionId);
-  }
-
-  return cmdParts.join(" ");
-}
-
-export async function execClaudeTurn(
-  options: TurnOptions
-): Promise<{ stream: NodeJS.ReadableStream; exec: Docker.Exec }> {
+export async function execAgentTurn(options: {
+  container: Docker.Container;
+  /** The command the harness adapter built. */
+  command: string;
+  /** The environment the harness adapter built from the resolved lane. */
+  env: string[];
+}): Promise<{ stream: NodeJS.ReadableStream; exec: Docker.Exec }> {
   const docker = getDocker();
-  const config = getConfig();
 
-  const token = await getInstallationToken();
   const exec = await options.container.exec({
-    Cmd: ["bash", "-c", buildClaudeTurnCommand(options)],
-    Env: buildTurnEnv({
-      prompt: options.prompt,
-      gitAuthToken: token,
-      claudeCodeOauthToken: config.claudeCodeOauthToken,
-      // Only a generation session's exec gets an issue-writing token (#62); the
-      // same App token as GIT_AUTH_TOKEN, so one minting path, exec-scoped.
-      ghToken: options.isGenerationSession ? token : null,
-    }),
+    Cmd: ["bash", "-c", options.command],
+    Env: options.env,
     AttachStdout: true,
     AttachStderr: true,
   });

@@ -57,11 +57,6 @@ export function normalizeModelTier(raw: string | null | undefined): ModelTier | 
   return MODEL_TIER_ALIASES[value] ?? null;
 }
 
-/** The model id a tier reaches the CLI as. */
-export function tierModelId(tier: ModelTier): string {
-  return TIER_MODEL_IDS[tier];
-}
-
 /** The accepted vocabulary, for an error message or a doc line: the tiers
  * first, then the aliases that resolve to them. */
 export function describeModelTierVocabulary(): string {
