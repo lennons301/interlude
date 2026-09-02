@@ -702,9 +702,13 @@ export async function notifyAttemptsExhausted(
   channelId: string | null,
   payload: {
     issueRef: string;
+    /** Attempts *failed*, which is what the `attempts` reason counts down. The
+     * quota-pause reason (issue #169) does not read it: no attempt failed. */
     attempts: number;
     interruptions: number;
-    reason: "attempts" | "interruptions";
+    /** Quota resumes spent, for the `quota-pauses` reason (issue #169) */
+    resumes?: number;
+    reason: "attempts" | "interruptions" | "quota-pauses";
     totalSpendUsd: number;
   }
 ): Promise<void> {
@@ -714,25 +718,38 @@ export async function notifyAttemptsExhausted(
   try {
     const channel = await fetchTextChannel(channelId);
 
-    const embed =
-      payload.reason === "interruptions"
-        ? new EmbedBuilder()
-            .setTitle(`Interruption bound hit — ${payload.issueRef} needs you`)
-            .setDescription(
-              `${payload.interruptions} runs lost to interruptions — restarts or ` +
-                `containers that died before finishing ` +
-                `($${payload.totalSpendUsd.toFixed(2)} autonomous spend). Re-claims are ` +
-                `bounded, so the ticket is now \`ready-for-human\`; the story is on the issue.`
-            )
-            .setColor(0xef4444)
-        : new EmbedBuilder()
-            .setTitle(`Attempts exhausted — ${payload.issueRef} needs you`)
-            .setDescription(
-              `All ${payload.attempts} attempts failed ` +
-                `($${payload.totalSpendUsd.toFixed(2)} autonomous spend). ` +
-                `The ticket is now \`ready-for-human\`; the per-attempt story is on the issue.`
-            )
-            .setColor(0xef4444);
+    const embed = new EmbedBuilder().setColor(0xef4444);
+    if (payload.reason === "interruptions") {
+      embed
+        .setTitle(`Interruption bound hit — ${payload.issueRef} needs you`)
+        .setDescription(
+          `${payload.interruptions} runs lost to interruptions — restarts or ` +
+            `containers that died before finishing ` +
+            `($${payload.totalSpendUsd.toFixed(2)} autonomous spend). Re-claims are ` +
+            `bounded, so the ticket is now \`ready-for-human\`; the story is on the issue.`
+        );
+    } else if (payload.reason === "quota-pauses") {
+      // Deliberately says what was *not* spent: this is the one exhaustion
+      // whose ticket still has its attempts, so "re-arm it later" is the
+      // obvious next move rather than a judgement call about the work.
+      embed
+        .setTitle(`Quota pauses spent — ${payload.issueRef} needs you`)
+        .setDescription(
+          `This attempt kept being refused by the account's quota ` +
+            `(${payload.resumes ?? 0} resumes spent, ` +
+            `$${payload.totalSpendUsd.toFixed(2)} autonomous spend). The ticket is ` +
+            `now \`ready-for-human\` — but a quota pause spends no attempt, so ` +
+            `re-arming it once there is quota picks the work up where it stopped.`
+        );
+    } else {
+      embed
+        .setTitle(`Attempts exhausted — ${payload.issueRef} needs you`)
+        .setDescription(
+          `All ${payload.attempts} attempts failed ` +
+            `($${payload.totalSpendUsd.toFixed(2)} autonomous spend). ` +
+            `The ticket is now \`ready-for-human\`; the per-attempt story is on the issue.`
+        );
+    }
 
     await sendWithRetry(channel, embed);
   } catch (err) {
@@ -806,6 +823,73 @@ export async function notifyQuotaGateClosed(
     await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send quota-gate notification:`, err);
+  }
+}
+
+/**
+ * The real-money cap (issue #174). Its own embed rather than a variant of the
+ * daily-cap one below, because the reader's question is different: that cap is
+ * a plan being pushed hard, this one is a card being charged, and the lane
+ * doing the charging is the fact that makes it actionable.
+ */
+export async function notifyMeteredCapReached(
+  channelId: string | null,
+  payload: { spentUsd: number; capUsd: number; laneId: string | null }
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await fetchTextChannel(channelId);
+
+    const embed = new EmbedBuilder()
+      .setTitle("Real-money daily cap reached")
+      .setDescription(
+        `$${payload.spentUsd.toFixed(2)} of the $${payload.capUsd.toFixed(2)} real-money ` +
+          `cap is spent on ${payload.laneId ?? "a metered lane"} — autonomous pickup is ` +
+          `paused until local midnight. Raise the cap in Settings if this was expected.`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send metered-cap notification:`, err);
+  }
+}
+
+/**
+ * The confirm-once-per-day gate (issue #174), asked out loud. Nobody is at the
+ * keyboard when an autonomous pass crosses into billing, so a fleet that only
+ * *waited* would read exactly like an idle one — the silent-wedge failure this
+ * platform has been bitten by before. One ping per local day, deduped on the
+ * day by the sweep, the same discipline every other announcement here keeps.
+ */
+export async function notifyMeteredConfirmationRequired(
+  channelId: string | null,
+  payload: { capUsd: number; laneId: string | null }
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await fetchTextChannel(channelId);
+
+    const embed = new EmbedBuilder()
+      .setTitle("Real-money spend needs confirming")
+      .setDescription(
+        `${payload.laneId ?? "The primary lane"} bills per token, and today's spend ` +
+          `hasn't been confirmed — autonomous pickup is held. Confirm it once in ` +
+          `Settings and the fleet runs unattended up to $${payload.capUsd.toFixed(2)} ` +
+          `for the rest of the day. In-flight runs and interactive work are unaffected.`
+      )
+      .setColor(0xf59e0b);
+
+    await sendWithRetry(channel, embed);
+  } catch (err) {
+    console.error(
+      `[discord] Failed to send metered-confirmation notification:`,
+      err
+    );
   }
 }
 

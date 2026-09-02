@@ -140,7 +140,8 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
 - **running** — each active run's ticket, attempt (n/3), turn, spend vs budget,
   and phase (implement ▸ review ▸ merge). A run the account's quota refused sits
   here too, labelled **paused** with when its window resets (issue #168) — it is
-  deliberately *not* in **needs you**, because a quota window asks nothing of you.
+  deliberately *not* in **needs you**, because a quota window asks nothing of you:
+  the sweep resumes it by itself once the clock runs out (issue #169).
 - **recent** — the last 7 days of completions.
 - **spend** — today's autonomous spend vs the $500/day cap.
 
@@ -178,11 +179,12 @@ chat/preview is never affected.
   restart.
 
   **Confirm it took** from the row itself, not from the log: the dashboard's
-  live dot turns amber and reads `held` (`paused` is the daily cap, `off` the
-  boot master; `paused` is also the quota gate, the other self-lifting ceiling
-  — deliberately different words for deliberately different states, because
-  they are lifted in different ways), with a *Kill switch
-  engaged* banner above the panels, and `GET /api/settings/autonomy` answers
+  live dot turns amber and reads `held` (`paused` covers every self-lifting or
+  money hold — the daily cap, the quota gate, the real-money cap, and a metered
+  lane whose day is unconfirmed — and `off` is the boot master: deliberately
+  different words for deliberately different states, because none of them is
+  lifted the same way), with a *Kill switch engaged* banner above the panels,
+  and `GET /api/settings/autonomy` answers
   the same row headless. The sweep's `Pickup paused (kill-switch)` line
   is **not** the confirmation: the hold is evaluated only on a tick that found
   an eligible ticket it would otherwise have claimed, so engaging the switch
@@ -306,15 +308,33 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   subscription lane — the run goes `rate_limited` with a `resumeAfter` taken from
   the limit event's own reset time, its container is torn down, and both counters
   stay where they were. The issue gets a comment saying so.
-  **Until #169 lands, a paused run stays paused**: nothing resumes it, and because
-  a `rate_limited` run still holds its ticket, the sweep will not claim a fresh run
-  over it either. To move it by hand, cancel it (below) or drive the run row
-  terminal — the branch is pushed, so nothing is lost. A rejection whose event
-  carried *no* reset time is not paused at all: with no clock to wait on, the pass
-  takes its ordinary path and spends the attempt, as before.
+  A `rate_limited` run still holds its ticket, so the sweep will not claim a fresh
+  run over it. A rejection whose event carried *no* reset time is not paused at
+  all: with no clock to wait on, the pass takes its ordinary path and spends the
+  attempt, as before.
+- **A paused run resumes itself** (issue #169). Once the window resets — plus up to
+  five minutes of jitter, so a fleet-wide pause does not stampede — the ordinary
+  30-second sweep queues the pass again in a fresh container on the same branch,
+  ahead of any new claim when slots are scarce. Where the paused pass's session
+  transcript was copied out before its container went, the resumed pass continues
+  the *same conversation*; where it could not be, the pass starts again on the same
+  branch with the work already pushed, and the issue comment says which happened.
+  Nothing to do either way — but two things worth knowing:
+    - the resume is **not** held by the kill switch, the daily cap or the quota
+      admission gate. All three gate *pickup*, and a paused run is the middle of
+      an attempt already started. To stop one, cancel the run (below);
+    - one attempt gets **3 resumes** by default (`MAX_RESUMES_PER_ATTEMPT`,
+      settable under **Settings ▸ Quota** without a restart; `0` sends a quota pause
+      straight to a human). Past the bound the ticket is labelled
+      `ready-for-human` — and because the pauses spent no attempts, re-arming it
+      once there is quota picks the work back up with the attempts it never used.
 - **$500/day** estate-wide autonomous cap pauses pickup (announced once, shown on
   the dashboard, resets at local midnight). Interactive work is exempt by
   construction (it has no run).
+- **Real money is capped separately** — see *Spending real money* below. The
+  $500 cap measures quota-funded autonomous work; the cash cap measures a card
+  being charged, so it applies whenever the lane in force bills per token and it
+  counts interactive work too.
 
 ### Pushing to a PR the loop has already reviewed
 
@@ -384,6 +404,43 @@ model); an unrecognised value is ignored — the run keeps its configured defaul
 and the claim comment notes that it was dropped. Review and triage passes keep
 their own (cheaper) tier regardless. The honoured tier is recorded on the run.
 
+### Spending real money (metered lanes)
+
+An execution lane declares who pays. `claude-subscription` draws on the plan;
+`anthropic-api` and `openrouter` bill per token — real money. Everything below
+applies whenever the lane **in force** is metered, whether you made it primary,
+it was reached as overflow, or it was failed over to. Autonomous work on a
+metered lane is allowed on purpose: it is bounded, not forbidden.
+
+**Settings → Real money** is the control room for it, and it says the same
+things the dashboard does:
+
+- **Confirm once a day.** The first cash spend of each local day is held until
+  you confirm, at fleet level — nobody is at the keyboard when an autonomous
+  pass crosses into billing. After one press the fleet runs unattended for the
+  rest of the day. The confirmation lapses on its own at local midnight, and
+  survives a restart. Withdrawing it is one press.
+- **The cash cap.** `METERED_DAILY_CAP_USD` ($20 by default), overridable on
+  that screen up to a hard **$100** code ceiling — and bound down further by
+  whatever the lane itself declares in `lanes.yaml` (`caps.daily_budget_usd`).
+  The lower of the two always wins, and the panel says which one is binding.
+  Reaching it pauses autonomous pickup until local midnight, exactly like the
+  $500 cap, with one Discord announcement.
+- **What counts.** Every dollar spent on a metered lane today — implement,
+  review, repair, triage *and* interactive. A chat session on a metered lane
+  charges the same card an implement pass does, so it counts; the $500
+  autonomous cap's "interactive is exempt" rule deliberately does not apply
+  here. Each turn's cost is booked to the day it landed on, so a session left
+  open across days is split across them rather than heaped onto one. The two
+  figures overlap and are shown separately (the dashboard's second gauge, the
+  digest's second Spend line); never add them.
+- **What is never held.** In-flight runs, follow-up turns and interactive
+  sessions. Both guards hold *new autonomous pickup* only — a claim or a triage
+  pass — which is the same thing the daily cap and the kill switch hold.
+
+Switching the primary lane between billing kinds takes effect at the next sweep,
+with no restart: the guards read the lane and the settings row fresh every tick.
+
 ### Reasoning effort (`effort:`)
 
 `AGENT_EFFORT` pins the CLI's reasoning depth (the `--effort` flag) for the
@@ -416,6 +473,8 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 | `REVIEWER_GH_TOKEN` | Reviewer machine account PAT. Orchestrator-only — **never** enters a container. Canonical home is `platform/prd`, mirrored into `interlude/prd`; rotation updates both. |
 | `DISCORD_FLEET_CHANNEL_ID` | Channel for fleet events + fallback for blocked questions when a project has no linked channel. |
 | `MAX_BUDGET_USD` | Per-attempt default budget ($20). |
+| `METERED_DAILY_CAP_USD` | Real money the fleet may spend in one local day through a metered lane ($20). Overridable in Settings → Real money up to a hard $100 ceiling, and bound down by the lane's own declared cap. Subscription work never counts against it. |
+| `AGENT_LANE` | The deployment's default execution lane (an id from `lanes.yaml`). Unset, the file's own preference order decides; a lane picked on the settings screen outranks both. |
 | `AGENT_MODEL`, `AGENT_MODEL_REVIEW`, `AGENT_MODEL_TRIAGE` | Default model per pass kind, as a tier (`heavy`/`standard`/`light`, or the `opus`/`sonnet`/`haiku` aliases) or a raw model id. The fall-through for a Settings → Models row left on `environment`; unset means no `--model` and the CLI resolves the account default. |
 | `CAPACITY_SLOTS`, `AGENT_MEMORY_MB` | Override derived capacity — only when the derivation is wrong. |
 | `OWED_REVIEW_STALL_MINUTES`, `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES` | Fleet-health watchdog thresholds in minutes (issue #126). Defaults 30 / 3 / 2. |

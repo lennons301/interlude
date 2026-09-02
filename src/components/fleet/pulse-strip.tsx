@@ -61,6 +61,39 @@ export function PulseStrip({ view, now }: { view: FleetView; now: number }) {
           tone={spend.capPaused ? "red" : "green"}
         />
       </div>
+      {/* Real money, kept as its own row rather than folded into the gauge
+          above (issue #174). The two measure different things — that one is
+          autonomous work against a quota-funded plan, this one is cash — and
+          they overlap, so one bar showing their sum would be a number that
+          means nothing. Shown whenever the fleet is on a metered lane or has
+          spent cash today, so a day that ran on OpenRouter this morning still
+          says what it cost after switching back. */}
+      {(spend.metered.active || spend.metered.todayUsd > 0) && (
+        <div className="space-y-1.5">
+          <div className="flex items-baseline justify-between gap-2 font-plex-mono text-[11px] tabular-nums text-fl-ink-2">
+            <span className="flex items-baseline gap-1.5">
+              <span>real money</span>
+              {spend.metered.laneId !== null && (
+                <span className="truncate text-fl-ink-3">
+                  {spend.metered.laneId}
+                </span>
+              )}
+            </span>
+            <span>
+              <Money usd={spend.metered.todayUsd} />
+              <span className="text-fl-ink-3">
+                {" "}
+                / <Money usd={spend.metered.capUsd} />
+              </span>
+            </span>
+          </div>
+          <Gauge
+            value={spend.metered.todayUsd}
+            max={spend.metered.capUsd}
+            tone={spend.metered.capPaused ? "red" : "amber"}
+          />
+        </div>
+      )}
       <QuotaTile quota={view.quota} lane={view.quotaLane} now={now} />
     </section>
   );

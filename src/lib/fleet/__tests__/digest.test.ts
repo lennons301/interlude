@@ -29,6 +29,13 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     now: VIEW_AT,
     slots: 2,
     dailyCapUsd: 500,
+    // The money guards (issue #174) idle by default: a subscription lane, so
+    // nothing here costs cash and the guards decide nothing.
+    meteredCapUsd: 20,
+    meteredSpendTodayUsd: 0,
+    primaryLaneId: "claude-subscription",
+    primaryLaneBilling: "subscription",
+    meteredSpendConfirmedAt: null,
     globalAutonomyPaused: false,
     // The boot master on, so every test that doesn't say otherwise describes an
     // install where autonomy is actually armed at boot (issue #148).
@@ -282,6 +289,54 @@ describe("renderDailyDigest — autonomous pickup", () => {
     ]);
   });
 
+  it("tells the cash cap in the past tense and the confirmation in the present", () => {
+    // A lapsed hold and a standing one are different news (issue #174): the
+    // cash cap lifted itself at midnight, while the confirmation is read off
+    // the live settings row and is still holding as the digest is written.
+    const capped = render({
+      primaryLaneId: "openrouter",
+      primaryLaneBilling: "metered",
+      meteredCapUsd: 20,
+      meteredSpendConfirmedAt: aug(1, 9),
+      meteredSpendTodayUsd: 21,
+      projects: [makeProject({ id: "proj-1" })],
+    });
+    expect(section(capped, "Autonomous pickup")[0]).toContain("lifted at midnight");
+    expect(section(capped, "Autonomous pickup")[0]).toContain("openrouter");
+
+    const unconfirmed = render({
+      primaryLaneId: "openrouter",
+      primaryLaneBilling: "metered",
+      meteredSpendConfirmedAt: null,
+      projects: [makeProject({ id: "proj-1" })],
+    });
+    expect(section(unconfirmed, "Autonomous pickup")[0]).toContain("Held right now");
+    expect(section(unconfirmed, "Autonomous pickup")[0]).toContain(
+      "[Confirm it](https://interludes.co.uk/settings)"
+    );
+  });
+
+  it("reports real money as its own Spend line, and says nothing on a quota-funded day", () => {
+    const cash = render({
+      primaryLaneId: "openrouter",
+      primaryLaneBilling: "metered",
+      meteredCapUsd: 20,
+      meteredSpendConfirmedAt: aug(1, 9),
+      meteredSpendTodayUsd: 8.5,
+      projects: [makeProject({ id: "proj-1" })],
+    });
+
+    expect(section(cash, "Spend")).toEqual([
+      "$0.00 of $500.00 daily cap",
+      "$8.50 of $20.00 real money on openrouter",
+    ]);
+
+    // A subscription day prints no reassuring $0.00 cash line at all.
+    expect(section(render({ projects: [makeProject({ id: "proj-1" })] }), "Spend")).toEqual([
+      "$0.00 of $500.00 daily cap",
+    ]);
+  });
+
   it("distinguishes an unheld fleet with no project armed", () => {
     const content = render({
       projects: [makeProject({ id: "p1", autonomyEnabled: false })],
@@ -477,9 +532,13 @@ describe("renderDailyDigest — in flight", () => {
       ],
     });
 
+    // The minute is the run's own: the reset plus its jitter (issue #169, a
+    // five-minute window), so the digest names the moment the sweep would
+    // actually resume it rather than one it has already passed.
     expect(section(content, "In flight")).toEqual([
-      "lemons #34 · Add pagination to the list · attempt 2/3 · $7.80 of $20.00 · " +
-        "paused, quota resets Sat 1 Aug 17:00",
+      expect.stringMatching(
+        /^lemons #34 · Add pagination to the list · attempt 2\/3 · \$7\.80 of \$20\.00 · paused, quota resets Sat 1 Aug 17:0\d$/
+      ),
     ]);
   });
 

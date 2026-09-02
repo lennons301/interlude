@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "82ec3323-cd27-4d51-b699-e2b8fb04f8c3",
-  "prevId": "d04c4303-c2cc-4b4a-920d-aa39e072d980",
+  "id": "b8f2b035-e026-4c4e-adee-5ddc18715608",
+  "prevId": "0ecc37ff-cc8c-49c2-ad6a-04f3692b47c6",
   "tables": {
     "messages": {
       "name": "messages",
@@ -201,8 +201,8 @@
     "quota_state": {
       "name": "quota_state",
       "columns": {
-        "id": {
-          "name": "id",
+        "lane": {
+          "name": "lane",
           "type": "text",
           "primaryKey": true,
           "notNull": true,
@@ -422,6 +422,14 @@
           "notNull": false,
           "autoincrement": false
         },
+        "resume_count": {
+          "name": "resume_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
         "blocked_question": {
           "name": "blocked_question",
           "type": "text",
@@ -637,6 +645,13 @@
         },
         "session_id": {
           "name": "session_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "resumed_from_task_id": {
+          "name": "resumed_from_task_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

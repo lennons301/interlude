@@ -188,7 +188,21 @@
       "idx": 26,
       "version": "6",
       "when": 1788638453826,
-      "tag": "0026_quota_state_per_lane",
+      "tag": "0026_metered_money_guards",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "6",
+      "when": 1788724853826,
+      "tag": "0027_quota_resume_counters",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "6",
+      "when": 1788811253826,
+      "tag": "0028_quota_state_per_lane",
       "breakpoints": true
     }
   ]

@@ -78,6 +78,10 @@ export function buildClaudeTurnCommand(input: HarnessCommandInput): string {
   const config = getConfig();
 
   const cmdParts = [
+    // The pass's working directory. Also encoded, mangled, in the path the
+    // harness keeps its session transcript at — see `containerTranscriptDir`
+    // in `src/lib/quota/session-transcript.ts`, which a resumed pass (#169)
+    // restores into: changing this changes that.
     "cd /workspace/repo",
     "&&",
     "claude",

@@ -509,3 +509,71 @@ export function buildImplementPrompt(ticket: ImplementTicket): string {
     ...(history ? [``, history] : []),
   ].join("\n");
 }
+
+/**
+ * Where a resume preamble ends and the pass's own brief begins (issue #169).
+ *
+ * A marker rather than a convention, because an attempt may be resumed several
+ * times and each resume is built from the *last* pass's prompt: without
+ * something to cut on, resume 3 would open with three stacked preambles
+ * counting down from three different numbers.
+ */
+export const RESUME_PREAMBLE_END = "--- END RESUME NOTE ---";
+
+/** A prompt with any earlier resume preamble taken off, so what remains is the
+ * pass's own brief. Exported for the test that a twice-resumed prompt still
+ * carries exactly one preamble. */
+export function stripResumePreamble(prompt: string): string {
+  const end = prompt.lastIndexOf(RESUME_PREAMBLE_END);
+  return end === -1
+    ? prompt
+    : prompt.slice(end + RESUME_PREAMBLE_END.length).trimStart();
+}
+
+/**
+ * The prompt a resumed pass opens with (issue #169) — the pause's own preamble
+ * followed by the pass's original prompt, verbatim.
+ *
+ * Both halves, deliberately. When the session transcript survived the pause,
+ * the harness replays the whole earlier conversation and this arrives as the
+ * next turn, so the preamble is what explains the gap the agent is about to
+ * notice — a turn that ended mid-thought with a rate-limit line it did not
+ * write. When the transcript did *not* survive (or its restore failed at the
+ * last moment, which no prompt chosen earlier could have known), the original
+ * brief carried below is the whole of what the pass needs: this is the
+ * declared fallback — same branch, prior context lost — and it works because
+ * the prompt does not depend on the conversation being there.
+ *
+ * That is also why the preamble never says "your conversation is above": it
+ * tells the pass to read the branch instead, which is true either way and is
+ * the thing that stops a resumed pass redoing work it already pushed.
+ */
+export function buildResumePrompt(args: {
+  /** The paused pass's own prompt — an implement or repair brief. */
+  originalPrompt: string;
+  /** The branch the work is on, already checked out in the fresh container. */
+  branch: string;
+  /** Which resume this is, and the bound it counts against — stated so a pass
+   * that keeps hitting the wall knows its own runway. */
+  resume: number;
+  maxResumes: number;
+}): string {
+  return [
+    `This pass was paused: the account's quota refused it mid-flight, and the ` +
+      `window has now reset. It is resuming in a fresh container on the same ` +
+      `branch, ${args.branch}, with the work you had already pushed. This is ` +
+      `resume ${args.resume} of ${args.maxResumes} for this attempt; past that ` +
+      `the ticket goes to a human.`,
+    ``,
+    `Before you continue, look at what is already done — \`git log\`, \`git ` +
+      `status\` and the files themselves — and carry on from there rather than ` +
+      `starting the work again. The pause cost the ticket no attempt, so ` +
+      `nothing about the brief below has changed.`,
+    ``,
+    RESUME_PREAMBLE_END,
+    ``,
+    // The pass's own brief — with any earlier resume's preamble stripped, so a
+    // third resume does not open with three countdowns.
+    stripResumePreamble(args.originalPrompt),
+  ].join("\n");
+}

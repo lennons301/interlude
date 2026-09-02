@@ -9,8 +9,8 @@ import type { QuotaObservation } from "../rate-limit-event";
  *
  * Three pieces have to line up for that to hold, and each is correct alone —
  * which is why it is worth a test that puts them together. The store keys an
- * observation by the lane it was seen on; `currentPrimaryLane` answers which
- * lane a pass would run on now; and the gate treats *no* observation as open.
+ * observation by the lane it was seen on; `primaryLaneOf` answers which lane
+ * a pass would run on now; and the gate treats *no* observation as open.
  * Read fleet-wide instead, the subscription's last rejection would close the
  * gate over a metered lane that cannot be rate-limited at all — holding every
  * pickup on a fleet that was, on that lane, entirely free to work. That is a
@@ -32,9 +32,11 @@ vi.mock("@/db", () => ({
 const { recordQuotaObservation, getQuotaObservation } = await import(
   "../quota-store"
 );
-const { currentPrimaryLane } = await import("@/lib/lanes/primary-lane");
-const { resetLaneCatalog } = await import("@/lib/lanes/catalog");
-const { resetConfig } = await import("@/lib/config");
+const { primaryLaneOf } = await import("@/lib/lanes/resolve");
+const { getLaneCatalog, resetLaneCatalog } = await import(
+  "@/lib/lanes/catalog"
+);
+const { getConfig, resetConfig } = await import("@/lib/config");
 
 const NOW = new Date("2026-09-02T12:00:00.000Z");
 
@@ -60,9 +62,22 @@ beforeEach(() => {
   resetLaneCatalog();
 });
 
-/** The gate as the sweep computes it: this lane's row, judged at NOW. */
+/**
+ * The gate as the sweep computes it: this lane's row, judged at NOW. The lane
+ * is resolved exactly as the sweep and the dashboard resolve it — through the
+ * same `primaryLaneOf` the money guards read — so this test cannot pass on a
+ * lane neither surface would have picked.
+ */
 function gateFor(overrides: { primaryLane?: string }) {
-  const lane = currentPrimaryLane(overrides);
+  const catalog = getLaneCatalog();
+  const lane = catalog.ok
+    ? primaryLaneOf({
+        catalog: catalog.catalog,
+        config: getConfig(),
+        overrides,
+        env: process.env,
+      })
+    : null;
   return {
     lane,
     gate: evaluateQuotaGate(getQuotaObservation(lane?.id ?? null), 90, NOW),

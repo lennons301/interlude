@@ -6,6 +6,8 @@ import {
   type FleetRunRow,
   type FleetTaskRow,
 } from "../fleet-view";
+import { RESUME_JITTER_WINDOW_MS } from "../../orchestrator/autonomy/budgets";
+import { resumeEligibleAt } from "../../orchestrator/autonomy/resume-jitter";
 
 // Fixed clock: noon local time, so "today" and the 7-day window are unambiguous
 const NOW = new Date(2026, 7, 1, 12, 0, 0);
@@ -16,6 +18,13 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     now: NOW,
     slots: 2,
     dailyCapUsd: 500,
+    // The money guards (issue #174) idle by default: a subscription lane, so
+    // nothing here costs cash and the guards decide nothing.
+    meteredCapUsd: 20,
+    meteredSpendTodayUsd: 0,
+    primaryLaneId: "claude-subscription",
+    primaryLaneBilling: "subscription",
+    meteredSpendConfirmedAt: null,
     globalAutonomyPaused: false,
     // The boot master on, so every test that doesn't say otherwise describes an
     // install where autonomy is actually armed at boot (issue #148).
@@ -335,6 +344,120 @@ describe("buildFleetView — spend", () => {
     );
 
     expect(view.spend.capPaused).toBe(true);
+  });
+});
+
+/**
+ * The real-money split (issue #174). It is a different number from the one
+ * above and answers to different rules: it comes from the per-day ledger, not
+ * from anything derived here, and nothing is exempt by kind — a chat session
+ * on a metered lane charges the same card an implement pass does.
+ */
+describe("buildFleetView — metered spend", () => {
+  const METERED = { primaryLaneId: "openrouter", primaryLaneBilling: "metered" as const };
+
+  it("shows nothing metered while the fleet runs on a subscription lane", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject()],
+        runs: [makeRun({ id: "r1", totalCostUsd: 9 })],
+      })
+    );
+
+    expect(view.spend.metered.active).toBe(false);
+    expect(view.spend.metered.todayUsd).toBe(0);
+    // The autonomous gauge is untouched by any of this.
+    expect(view.spend.todayUsd).toBeCloseTo(9);
+  });
+
+  it("reports the day's cash beside the autonomous figure, never folded into it", () => {
+    const view = buildFleetView(
+      baseRows({
+        ...METERED,
+        meteredSpendTodayUsd: 10,
+        meteredSpendConfirmedAt: TODAY_9AM,
+        projects: [makeProject()],
+        runs: [makeRun({ id: "r1", totalCostUsd: 6 })],
+      })
+    );
+
+    expect(view.spend.metered.todayUsd).toBeCloseTo(10);
+    expect(view.spend.metered.active).toBe(true);
+    expect(view.spend.metered.laneId).toBe("openrouter");
+    expect(view.spend.metered.hold).toBeNull();
+    // The two overlap by construction and are deliberately not added.
+    expect(view.spend.todayUsd).toBeCloseTo(6);
+  });
+
+  it("still reports cash spent today after a switch back to a subscription lane", () => {
+    const view = buildFleetView(
+      baseRows({ meteredSpendTodayUsd: 7, projects: [makeProject()] })
+    );
+
+    expect(view.spend.metered.active).toBe(false);
+    expect(view.spend.metered.todayUsd).toBeCloseTo(7);
+    // Nothing more will be spent, so nothing is held.
+    expect(view.spend.metered.hold).toBeNull();
+  });
+
+  it("holds and says so when the cash cap is spent", () => {
+    const view = buildFleetView(
+      baseRows({
+        ...METERED,
+        meteredCapUsd: 20,
+        meteredSpendTodayUsd: 20,
+        meteredSpendConfirmedAt: TODAY_9AM,
+        projects: [makeProject()],
+      })
+    );
+
+    expect(view.spend.metered.capPaused).toBe(true);
+    expect(view.pickupPaused).toEqual({
+      reason: "metered-cap",
+      body: expect.stringContaining("openrouter"),
+    });
+    expect(view.needsYou.map((i) => i.cause)).toContain("metered-cap");
+  });
+
+  it("holds for the day's one confirmation, pointing at the press that lifts it", () => {
+    const view = buildFleetView(
+      baseRows({ ...METERED, meteredSpendConfirmedAt: null, projects: [makeProject()] })
+    );
+
+    expect(view.pickupPaused?.reason).toBe("metered-unconfirmed");
+    const card = view.needsYou.find((i) => i.cause === "metered-confirm");
+    expect(card?.action).toEqual({ label: "Settings", href: "/settings" });
+  });
+
+  it("treats yesterday's confirmation as none", () => {
+    const view = buildFleetView(
+      baseRows({
+        ...METERED,
+        meteredSpendConfirmedAt: new Date(2026, 6, 31, 23, 59, 0),
+        projects: [makeProject()],
+      })
+    );
+
+    expect(view.spend.metered.confirmed).toBe(false);
+    expect(view.pickupPaused?.reason).toBe("metered-unconfirmed");
+  });
+
+  it("lets the kill switch outrank a money hold on the banner", () => {
+    // Both hold; the switch is the one a human threw and can lift, so naming
+    // the money guard would send them to the wrong control.
+    const view = buildFleetView(
+      baseRows({
+        ...METERED,
+        globalAutonomyPaused: true,
+        meteredSpendConfirmedAt: null,
+        projects: [makeProject()],
+      })
+    );
+
+    expect(view.pickupPaused?.reason).toBe("kill-switch");
+    // The money hold keeps its own surfaces regardless of being outranked.
+    expect(view.spend.metered.hold).toBe("unconfirmed");
+    expect(view.needsYou.map((i) => i.cause)).toContain("metered-confirm");
   });
 });
 
@@ -1384,6 +1507,10 @@ describe("buildFleetView — running", () => {
     // progress — it holds its ticket and its branch — so it stays on the board
     // rather than vanishing between the wall and the reset. The card carries
     // the clock it is waiting on; the countdown is the client's.
+    //
+    // The instant is the run's *eligible* one — the reset plus this run's own
+    // jitter (issue #169) — read through the same function the reducer decides
+    // with, so the countdown cannot hit zero minutes before anything moves.
     const resumeAfter = new Date(2026, 7, 1, 17, 0, 0);
     const view = buildFleetView(
       baseRows({
@@ -1402,7 +1529,14 @@ describe("buildFleetView — running", () => {
     expect(view.running).toHaveLength(1);
     expect(view.running[0]).toMatchObject({
       runId: "r1",
-      paused: { reason: "rate-limited", resumeAfter: resumeAfter.toISOString() },
+      paused: {
+        reason: "rate-limited",
+        resumeAfter: resumeEligibleAt(
+          "r1",
+          resumeAfter,
+          RESUME_JITTER_WINDOW_MS
+        ).toISOString(),
+      },
       // It resumes from where it stopped, which is the implement pass.
       phases: [
         { name: "implement", state: "current" },

@@ -74,11 +74,17 @@ lanes:
     # one the fleet has always charged against, and re-declaring those prices
     # here would only create a second copy to fall out of date.
     caps:
-      # Real money. Declared here and reported on the settings screen, but
-      # NOT yet enforced: spending against it is issue #174's money guardrail
-      # (confirm-once-per-day, then capped). Until that lands, the cap is a
-      # stated intent, and the only way work reaches this lane is an operator
-      # deliberately making it primary.
+      # Real money, and enforced (issue #174). This is a *ceiling on the
+      # ceiling*: the operator's own real-money cap (METERED_DAILY_CAP_USD, or
+      # the settings screen) is bound down by whatever is declared here, the
+      # lower of the two always winning. Both guards hold **new autonomous
+      # pickup** — a claim or a triage pass — so the fleet never starts
+      # unattended work on this lane until the day's spend has been confirmed
+      # once, and stops claiming when the cap is spent. In-flight runs,
+      # follow-up turns and interactive sessions are not held (an interactive
+      # dispatch is attended, and its own confirmation UX is issue #173's);
+      # their spend still counts against the cap. Applies whether this lane is
+      # primary, an overflow target (#173) or reached by failover (#176).
       daily_budget_usd: 20
 
   - id: openrouter
@@ -115,6 +121,8 @@ lanes:
       standard: { input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 3.75 }
       light: { input: 1.0, output: 5.0, cache_read: 0.1, cache_write: 1.25 }
     caps:
+      # Enforced as above (issue #174) — the lower of this and the operator's
+      # own real-money cap binds.
       daily_budget_usd: 20
 
   # The same credential and the same endpoint as the lane above, pointed at
@@ -160,4 +168,6 @@ lanes:
       standard: { input: 0.075, output: 0.25, cache_read: 0.015 }
       light: { input: 0.06, output: 0.4, cache_read: 0.01 }
     caps:
+      # Enforced as above (issue #174) — the lower of this and the operator's
+      # own real-money cap binds.
       daily_budget_usd: 20
