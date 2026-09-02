@@ -24,7 +24,9 @@ import {
   selectWorkflow,
   type WorkflowSelection,
 } from "./ticket";
+import type { ModelTier } from "../../model-tiers";
 import type { QuotaRejection } from "../../quota/rate-limit-rejection";
+import { planTierDegrade } from "../../quota/tier-ladder";
 import type { TriageExitKind, TriageResult } from "./triage";
 import {
   buildFeedbackTurn,
@@ -150,16 +152,31 @@ export interface PassOutcome {
    * operates on an existing PR, so its callers report `true`. */
   producedPr: boolean;
   /**
-   * The account-wide quota wall this turn hit, or null when it hit none
-   * (issue #168) — read off the turn's own result by `detectQuotaRejection`,
-   * never re-derived here.
+   * The quota wall this turn hit, or null when it hit none (issue #168) — read
+   * off the turn's own result by `detectQuotaRejection`, never re-derived here.
    *
    * Non-null outranks every other reading of the pass: a refused turn ran no
    * agent, so its final message is the CLI's own "you've hit your session
    * limit" and its empty diff is the wall's, not the work's. Judging either
    * would charge the account's quota to the ticket's attempt budget.
+   *
+   * It does not say *which* consequence follows — a tier-scoped window steps
+   * the run down the ladder and an account-wide one parks it (issue #170) —
+   * because that is the reducer's decision to make, from this and `tier`.
    */
   rateLimited: QuotaRejection | null;
+  /**
+   * The tier this pass actually ran at (issue #170), read off the run's
+   * `model` column — the only place that records it — and normalised, so a
+   * legacy alias resolves and a pinned raw model id (which names no tier)
+   * arrives as null.
+   *
+   * The ladder's starting rung. Null means there is none: the deployment pins
+   * a model id, or names no model at all and lets the harness choose, and in
+   * neither case may the fleet invent a rung to step off. Such a pass takes
+   * the pause exactly as it did before this ticket.
+   */
+  tier: ModelTier | null;
 }
 
 /**
@@ -757,12 +774,14 @@ export type Action =
       issueRef: string;
     }
   | {
-      // A pass the account's quota refused (issue #168): the run parks on the
-      // window's reset time instead of failing, consuming neither an attempt
-      // (the work was never tried) nor an interruption (the platform did not
-      // die). The executor tears the container down — a parked container holds
-      // memory without holding a slot, which is what wedged the host on
-      // 2026-08-04 — and a paused run then waits: resuming is its own ticket.
+      // A pass the account's quota refused account-wide (issue #168): the run
+      // parks on the window's reset time instead of failing, consuming neither
+      // an attempt (the work was never tried) nor an interruption (the platform
+      // did not die). The executor tears the container down — a parked
+      // container holds memory without holding a slot, which is what wedged the
+      // host on 2026-08-04 — and a paused run then waits: resuming is its own
+      // ticket. A wall on a *tier-scoped* window degrades instead of pausing
+      // (issue #170) — see `degradeRunTier` below.
       type: "pauseRunOnRateLimit";
       runId: string;
       taskId: string;
@@ -772,6 +791,32 @@ export type Action =
       resumeAfter: Date;
       /** Which window refused it, verbatim, or null when the event named none */
       limitType: string | null;
+    }
+  | {
+      // A pass refused on a **tier-scoped** window (issue #170): the account
+      // still has quota, just not for this tier, so the run steps down the
+      // ladder and retries in place rather than waiting out a window that may
+      // be seven days long. Like a pause it consumes neither an attempt nor an
+      // interruption — the work was never tried — and the executor tears the
+      // refused pass's container down and queues a fresh pass of the same kind
+      // under the same run.
+      type: "degradeRunTier";
+      runId: string;
+      taskId: string;
+      /** "owner/repo#n" */
+      issueRef: string;
+      /** The tier the refused pass ran at */
+      from: ModelTier;
+      /** The tier its retry runs at — the first rung below both `from` and the
+       * tier the exhausted window names */
+      to: ModelTier;
+      /** The window that refused it, verbatim. Non-null by construction: a
+       * degrade is only ever decided from a window that names a tier */
+      limitType: string;
+      /** When that window resets, or null when the event named none. Said on
+       * the issue for context only — a degrade waits on no clock, which is why
+       * a reset-less rejection can still degrade where it could not pause */
+      resumeAfter: Date | null;
     }
   | {
       // A paused run whose window has reset (issue #169): queue its pass again
@@ -965,28 +1010,59 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // A finished pass that leads with the blocked marker is parked and its
   // question escalated; a healthy pass gets no action here — the turn
   // manager proceeds to completion. A run parked by its pass outcome is driven
-  // by exactly one thing — its question, or its quota clock: the executors
+  // by exactly one thing — its question, its quota clock, or its retry a tier
+  // lower (issue #170): the executors
   // never gather such a run into the review pipeline (it leaves the
   // reviewing/gated set), but the combination is representable in a snapshot,
   // so the reducer refuses to double-drive it rather than trusting the callers.
   const parkedRunIds = new Set<string>();
   for (const pass of snapshot.completedPasses) {
-    // The quota wall first, ahead of every other reading of the turn (issue
-    // #168). A refused pass never reached the model: the "final message" is the
-    // CLI's own session-limit line and the empty diff is the wall's, so both
-    // the blocked-marker detector and the empty-pass check below would be
+    // The quota wall first, ahead of every other reading of the turn (issues
+    // #168, #170). A refused pass never reached the model: the "final message"
+    // is the CLI's own session-limit line and the empty diff is the wall's, so
+    // both the blocked-marker detector and the empty-pass check below would be
     // judging the account's quota as if it were the work.
     if (pass.rateLimited) {
-      parkedRunIds.add(pass.runId);
-      actions.push({
-        type: "pauseRunOnRateLimit",
-        runId: pass.runId,
-        taskId: pass.taskId,
-        issueRef: pass.issueRef,
-        resumeAfter: pass.rateLimited.resumeAfter,
-        limitType: pass.rateLimited.limitType,
-      });
-      continue;
+      // Which consequence a wall has is the whole of issue #170, and it turns
+      // on one field: the window that refused the pass. A **tier-scoped** one
+      // (`seven_day_opus`) leaves the account with quota the fleet can still
+      // spend, one rung down, so the run steps down and retries. Only an
+      // account-wide window — or the bottom of the ladder, where there is
+      // nowhere left to step — actually stops the run.
+      const { limitType, resumeAfter } = pass.rateLimited;
+      if (limitType !== null) {
+        const degrade = planTierDegrade(pass.tier, limitType);
+        if (degrade !== null) {
+          parkedRunIds.add(pass.runId);
+          actions.push({
+            type: "degradeRunTier",
+            runId: pass.runId,
+            taskId: pass.taskId,
+            issueRef: pass.issueRef,
+            from: degrade.from,
+            to: degrade.to,
+            limitType,
+            resumeAfter,
+          });
+          continue;
+        }
+      }
+      // A pause needs a clock, and a rejection that named no reset time gives
+      // it none. Pausing on an invented one would strand the run where no
+      // later ticket can find it, so — exactly as before #170 — such a pass
+      // falls through to its ordinary path and spends the attempt.
+      if (resumeAfter !== null) {
+        parkedRunIds.add(pass.runId);
+        actions.push({
+          type: "pauseRunOnRateLimit",
+          runId: pass.runId,
+          taskId: pass.taskId,
+          issueRef: pass.issueRef,
+          resumeAfter,
+          limitType,
+        });
+        continue;
+      }
     }
     const question = detectBlockedQuestion(pass.finalMessage);
     if (question) {

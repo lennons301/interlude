@@ -142,6 +142,10 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
   here too, labelled **paused** with when its window resets (issue #168) — it is
   deliberately *not* in **needs you**, because a quota window asks nothing of you:
   the sweep resumes it by itself once the clock runs out (issue #169).
+  A run the tier ladder stepped down (issue #170) also sits here, working
+  normally, with a line saying which tier it is running at and which it was
+  asked for — the result came from a cheaper model than you chose, and that is
+  worth knowing when you read it.
 - **recent** — the last 7 days of completions.
 - **spend** — today's autonomous spend vs the $500/day cap.
 
@@ -303,15 +307,31 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   eventually routes to `ready-for-human` like an exhausted one. A review pass that
   dies the same way re-queues a fresh replacement instead of burning its one
   format-retry.
-- **A quota wall is neither an attempt nor an interruption** (issue #168). If the
-  account's rate limit *refuses* a pass — the five-hour or weekly window, on the
-  subscription lane — the run goes `rate_limited` with a `resumeAfter` taken from
-  the limit event's own reset time, its container is torn down, and both counters
-  stay where they were. The issue gets a comment saying so.
-  A `rate_limited` run still holds its ticket, so the sweep will not claim a fresh
-  run over it. A rejection whose event carried *no* reset time is not paused at
-  all: with no clock to wait on, the pass takes its ordinary path and spends the
-  attempt, as before.
+- **A quota wall is neither an attempt nor an interruption** (issues #168, #170).
+  What a refusal costs depends on *which window* refused it, which the limit
+  event names:
+  - A **tier-scoped** window (`seven_day_opus`, `seven_day_sonnet`) means the
+    account still has quota, just not for that tier. The run steps down the
+    ladder `heavy → standard → light` and retries in place: a fresh pass is
+    queued under the same run, the new tier is recorded on `runs.model`, and the
+    tier it was asked for on `runs.degraded_from`. Nothing to do — the issue
+    gets a comment saying which tier it dropped to. The retry continues the
+    attempt's *budget* rather than being handed a fresh one, so a degrade costs
+    no more money than the attempt was already allowed. A run can step down at
+    most twice before it is at the bottom, and the step is **one-way**: nothing
+    puts the tier back, so the rest of that run stays a rung down even after the
+    window resets. A *later* attempt at the same ticket is a fresh run and
+    starts at the configured tier again.
+  - An **account-wide** window (`five_hour`, `seven_day`, `overage`), or a wall
+    at the bottom of the ladder, pauses instead: the run goes `rate_limited`
+    with a `resumeAfter` taken from the limit event's own reset time, and its
+    container is torn down. The issue gets a comment saying so, and because a
+    `rate_limited` run still holds its ticket, the sweep will not claim a fresh
+    run over it.
+  Either way both counters stay where they were. An **account-wide** rejection
+  whose event carried *no* reset time is not paused at all: with no clock to wait
+  on, the pass takes its ordinary path and spends the attempt, as before. A
+  tier-scoped one still steps down — a degrade waits on no clock.
 - **A paused run resumes itself** (issue #169). Once the window resets — plus up to
   five minutes of jitter, so a fleet-wide pause does not stampede — the ordinary
   30-second sweep queues the pass again in a fresh container on the same branch,

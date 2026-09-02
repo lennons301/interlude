@@ -182,6 +182,13 @@ export interface FleetRunRow {
   /** When a `rate_limited` run's window resets (issue #168) — the "resumes in"
    * the paused card shows. Null on every other status. */
   resumeAfter: Date | null;
+  /** The tier the run is actually running at (issue #170) — `runs.model`. A
+   * pinned raw model id or an unconfigured default is null. */
+  model: string | null;
+  /** The tier the run was asked for, once the degrade ladder has stepped it off
+   * that tier (issue #170); null while it is still running at the tier it was
+   * given. */
+  degradedFrom: string | null;
   claimedAt: Date;
   startedAt: Date | null;
   finishedAt: Date | null;
@@ -364,6 +371,18 @@ export interface RunningCard {
    * against their own clock rather than a value frozen at the last push.
    */
   paused: { reason: "rate-limited"; resumeAfter: string } | null;
+  /**
+   * That this run is working below the tier it was asked for, because a
+   * tier-scoped allowance ran out and the ladder stepped it down (issue #170);
+   * null while it is on the tier it was given.
+   *
+   * On the card *because* nothing is wrong: a degraded run is working, not
+   * waiting, so it never reaches `needsYou` any more than a paused one does —
+   * but its output was produced by a cheaper model than the one asked for, and
+   * an operator reading the result deserves to know that without opening the
+   * ledger.
+   */
+  degraded: { from: string; to: string } | null;
 }
 
 export interface RecentItem {
@@ -1134,6 +1153,14 @@ export function buildFleetView(rows: FleetRows): FleetView {
                 ).toISOString(),
               }
             : null,
+        // Both tiers or neither: `degradedFrom` is only ever written beside the
+        // tier stepped to, so a row carrying one without the other could not
+        // say what it stepped between — and half a claim on this screen is
+        // worse than none (issue #170).
+        degraded:
+          run.degradedFrom !== null && run.model !== null
+            ? { from: run.degradedFrom, to: run.model }
+            : null,
       };
     });
 
@@ -1165,9 +1192,10 @@ export function buildFleetView(rows: FleetRows): FleetView {
         usd: task.totalCostUsd,
         budgetUsd: triage ? DEFAULT_TRIAGE_BUDGET_USD : null,
       },
-      // A standalone session or triage pass has no run to pause: the quota
-      // pause is a run-ledger state (issue #168).
+      // A standalone session or triage pass has no run to pause or degrade:
+      // both are run-ledger states (issues #168, #170).
       paused: null,
+      degraded: null,
     });
   }
 
