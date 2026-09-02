@@ -3307,6 +3307,22 @@ describe("decideNext — resuming a paused run (issue #169)", () => {
     ]);
   });
 
+  it("leaves a run whose last permitted resume is still in flight alone", () => {
+    // The resume is counted when it is *queued*, so between the queue and the
+    // pass starting the run reads as spent while its own pass is starting.
+    // Judging the bound there would cancel the very pass just queued.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxResumesPerAttempt: 1,
+        pausedRuns: [makePausedRun({ resumesMade: 1, hasLiveTask: true })],
+      })
+    );
+
+    expect(resumes(actions)).toEqual([]);
+    expect(exhausted(actions)).toEqual([]);
+  });
+
   it("does not make a spent run wait out its window first", () => {
     // A run with no resumes left is never going to resume, so waiting five
     // hours would only delay telling the human the ticket is theirs.

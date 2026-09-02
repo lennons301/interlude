@@ -1271,9 +1271,16 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   let resumesQueuedThisSweep = 0;
   for (const paused of snapshot.pausedRuns) {
     if (parkedRunIds.has(paused.runId)) continue;
-    // The bound is checked before the clock, on purpose: a run with no resumes
-    // left is never going to resume, so making it wait out a five-hour window
-    // first would only delay telling the human it is theirs.
+    // Already resuming — a queued or running task of this run *is* the resume
+    // — so the run is not up for a decision at all. First, ahead of the bound
+    // as well as the clock: a resume is counted when it is queued, so the run
+    // whose last permitted resume is in flight reads as spent while its pass
+    // is still starting, and judging the bound here would cancel the very pass
+    // just queued.
+    if (paused.hasLiveTask) continue;
+    // The bound before the clock, on purpose: a run with no resumes left is
+    // never going to resume, so making it wait out a five-hour window first
+    // would only delay telling the human it is theirs.
     if (paused.resumesMade >= snapshot.maxResumesPerAttempt) {
       actions.push({
         type: "exhaustPausedRun",
@@ -1283,9 +1290,6 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       });
       continue;
     }
-    // Already resuming: a queued or running task of this run is the resume
-    // this sweep would otherwise queue a second copy of.
-    if (paused.hasLiveTask) continue;
     if (
       paused.resumeAfter !== null &&
       snapshot.now <
