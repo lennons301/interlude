@@ -34,6 +34,7 @@ function render(overrides: Partial<FleetRows> = {}): string {
     fleetHealth: null,
     failingChecksByRun: null,
     quota: null,
+    quotaThresholdPercent: 90,
     ...overrides,
   });
   return renderToStaticMarkup(<NeedsYou view={view} />);

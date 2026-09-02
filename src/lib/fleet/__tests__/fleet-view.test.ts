@@ -29,6 +29,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     fleetHealth: null,
     failingChecksByRun: null,
     quota: null,
+    quotaThresholdPercent: 90,
     ...overrides,
   };
 }
@@ -426,6 +427,79 @@ describe("buildFleetView — why pickup is paused", () => {
     expect(view.spend.capPaused).toBe(true);
     // The cap still raises its own needs-you card — the switch hides nothing
     expect(view.needsYou.map((i) => i.cause)).toContain("cap");
+  });
+
+  // The quota admission gate (issue #171). The banner reads the same pure gate
+  // `decideNext` refuses pickup with, against the same threshold, because the
+  // two surfaces disagreeing about whether work is being claimed is exactly
+  // the confusion this field exists to remove.
+  describe("the quota gate", () => {
+    const walled = (
+      overrides: Partial<NonNullable<FleetRows["quota"]>> = {}
+    ): NonNullable<FleetRows["quota"]> => ({
+      status: "allowed_warning",
+      rateLimitType: "five_hour",
+      utilization: 94,
+      resetsAt: new Date(NOW.getTime() + 60 * 60_000),
+      overageStatus: null,
+      overageResetsAt: null,
+      isUsingOverage: null,
+      overageInUse: null,
+      observedAt: new Date(NOW.getTime() - 60_000),
+      ...overrides,
+    });
+
+    it("names the quota gate, with both numbers, when the window is nearly spent", () => {
+      const view = buildFleetView(baseRows({ quota: walled() }));
+
+      expect(view.pickupPaused?.reason).toBe("quota-gate");
+      expect(view.pickupPaused?.body).toContain("94%");
+      expect(view.pickupPaused?.body).toContain("90%");
+      expect(view.pickupPaused?.body).toMatch(/5-hour window/);
+      // What is *not* held is the other half of the answer
+      expect(view.pickupPaused?.body).toMatch(/in flight continues/i);
+    });
+
+    it("words an outright rejection as the wall it is", () => {
+      const view = buildFleetView(
+        baseRows({ quota: walled({ status: "rejected", utilization: null }) })
+      );
+
+      expect(view.pickupPaused?.reason).toBe("quota-gate");
+      expect(view.pickupPaused?.body).toMatch(/being rejected/i);
+    });
+
+    it("holds nothing once the observed window has reset", () => {
+      const view = buildFleetView(
+        baseRows({
+          quota: walled({ resetsAt: new Date(NOW.getTime() - 1) }),
+        })
+      );
+
+      expect(view.pickupPaused).toBeNull();
+    });
+
+    it("follows the threshold in force, not a compiled-in one", () => {
+      expect(
+        buildFleetView(
+          baseRows({ quota: walled(), quotaThresholdPercent: 95 })
+        ).pickupPaused
+      ).toBeNull();
+    });
+
+    it("names the cap ahead of the gate when both hold", () => {
+      // Of the two self-lifting holds, the cap's ceiling is the one a human
+      // chose. The Quota tile keeps saying its own piece either way.
+      const view = buildFleetView(
+        baseRows({
+          quota: walled(),
+          runs: [makeRun({ id: "r1", totalCostUsd: 512 })],
+        })
+      );
+
+      expect(view.pickupPaused?.reason).toBe("daily-cap");
+      expect(view.quota?.utilization).toBe(94);
+    });
   });
 });
 
