@@ -43,6 +43,9 @@ export interface LaneRoutingRow {
   /** USD per Mtok of a representative pass, or null on a lane that declares
    * no prices (where the harness's own figure stands). */
   rateUsdPerMTok: number | null;
+  /** Whether the ranking chose this lane, or it is the fall-back — where the
+   * pass runs, but only because nothing qualified. */
+  chosen: boolean;
 }
 
 /** Which routing row belongs beside which floor. Keyed by the field rather
@@ -91,16 +94,18 @@ export function LaneRoutingPanel({
         <em>minimum lane</em> is a floor on that choice, not a choice of lane:
         routing may pick anything at or above the lane you name, so naming a
         paid lane for implement work still leaves the subscription available
-        above it.
+        above it. It bounds where routing may <em>send</em> a pass and never
+        excludes the lane the fleet is already on.
       </p>
 
       {pinned && (
         <p className="text-[13px] text-fl-ink-3">
           Cost routing is off: the fleet is pinned to{" "}
           <span className="font-plex-mono">{lanes.primaryLaneId}</span> by the
-          lane choice above. A walled lane still fails over rather than waiting
-          — the pin is honoured, but a lane that cannot serve the request is a
-          different thing from one you would rather not use.
+          lane choice above, so no pass is moved for cheapness. A{" "}
+          <em>walled</em> pinned lane still fails over rather than waiting the
+          window out — the pin is honoured right up to the point where the lane
+          cannot serve the request at all.
         </p>
       )}
 
@@ -171,19 +176,21 @@ export function LaneRoutingPanel({
 /**
  * What this kind would run on right now, and what that costs.
  *
- * "no lane" is a real state and says so plainly: every declared lane is
- * unavailable, walled, below the floor or holding for a confirmation, and the
- * pass would be left on the lane in force to be refused there.
+ * Two states worth keeping apart. A lane the ranking *chose* is the cost case
+ * working. A lane it fell back to is the lane in force with nothing qualifying
+ * above it — the pass still runs there, and saying "no lane" would leave this
+ * row claiming a refusal that is not going to happen.
  */
 function routedNote(routed: LaneRoutingRow | null): string {
-  if (routed === null || routed.laneId === null) return "routes to: no lane";
+  if (routed === null || routed.laneId === null) return "no lane resolves";
   const rate =
     routed.rateUsdPerMTok === null
       ? routed.billing === "metered"
         ? ", priced by the harness"
         : ""
       : `, ${usdPerMTok(routed.rateUsdPerMTok)}/Mtok`;
-  return `routes to ${routed.laneId}${rate}`;
+  const lead = routed.chosen ? "routes to" : "nothing qualifies — runs on";
+  return `${lead} ${routed.laneId}${rate}`;
 }
 
 /** Two significant figures, because these span three orders of magnitude and

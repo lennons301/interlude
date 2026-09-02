@@ -128,6 +128,9 @@ function input(over: Partial<LaneSelectionInput> = {}): LaneSelectionInput {
     kind: "implement",
     tier: "standard",
     pinnedLaneId: null,
+    // The lane in force. Named on every case, because two rules turn on it:
+    // the floor never excludes it, and it is what a pass falls back to.
+    primaryLaneId: "subscription",
     minLaneId: null,
     observations: {},
     config: { meteredDailyCapUsd: 20 } as AppConfig,
@@ -305,6 +308,32 @@ describe("a pass kind's minimum lane", () => {
     );
   });
 
+  it("never excludes the lane in force — a floor bounds where routing *sends* a pass", () => {
+    // Without this the floor would either silently be ignored (the pass runs
+    // on the lane in force anyway, making the setting a lie) or refuse a pass
+    // with nowhere else to go. The lane in force still answers to everything
+    // about whether it can *serve* the request.
+    // The deployment's only credential is the third party's, so open-weights
+    // is the lane in force and the floor above it is unsatisfiable.
+    const onlyThirdParty = {
+      primaryLaneId: "open-weights",
+      minLaneId: "direct-api",
+      env: { THIRD_PARTY_KEY: "sk-tp" },
+    };
+    expect(chosen(onlyThirdParty)).toBe("open-weights");
+    expect(reason("open-weights", onlyThirdParty)).toBeNull();
+    // The floor still bites on everything that *is* a routing choice.
+    expect(reason("third-party", onlyThirdParty)).toBe("below-floor");
+    // ...but it is excluded once it cannot serve the pass, floor or no floor.
+    expect(
+      chosen({
+        primaryLaneId: "subscription",
+        minLaneId: "direct-api",
+        observations: { subscription: WALL },
+      })
+    ).toBe("direct-api");
+  });
+
   it("ignores a floor naming no declared lane rather than stopping the fleet", () => {
     // The file is version-controlled and the setting is not, so a lane renamed
     // in a deploy must not read as "nothing qualifies". The settings screen
@@ -376,14 +405,33 @@ describe("the escape hatch: a pinned fleet", () => {
     );
   });
 
-  it("selects nothing when the pinned lane cannot serve the pass", () => {
-    // Which is what leaves #172 to report an unavailable lane and #168 to park
-    // a walled one — routing around an operator's decision is refused, and
-    // saying "no lane" is how that refusal is expressed here.
+  it("selects nothing when the pinned lane is unavailable — that is #172's report", () => {
+    // Routing around an operator's decision is what that ticket refuses, and
+    // papering over a missing credential by spending at another provider is
+    // the worst version of it.
     expect(
-      selectLane(input({ pinnedLaneId: "subscription", observations: { subscription: WALL } }))
-        .laneId
+      selectLane(
+        input({
+          pinnedLaneId: "subscription",
+          env: { ANTHROPIC_API_KEY: "sk-ant", THIRD_PARTY_KEY: "sk-tp" },
+        })
+      ).laneId
     ).toBeNull();
+  });
+
+  it("is released by a wall, because a wall is not a preference", () => {
+    // #173 crossed an attended session off a walled lane whether or not it was
+    // pinned, and that keeps being true: a pin says "do not choose for me",
+    // where a wall says the chosen lane cannot serve the request at all.
+    expect(
+      chosen({ pinnedLaneId: "subscription", observations: { subscription: WALL } })
+    ).toBe("open-weights");
+  });
+
+  it("still holds while the pinned lane can serve the pass", () => {
+    // Released only by a wall — not by a cheaper lane existing, which is the
+    // whole point of pinning.
+    expect(chosen({ pinnedLaneId: "direct-api" })).toBe("direct-api");
   });
 
   it("reports the pin so a caller can say why nothing was chosen", () => {
@@ -447,11 +495,23 @@ describe("the failover a wall buys", () => {
     expect(move).toBeNull();
   });
 
-  it("is off for a pinned fleet, which is what makes the pin mean something", () => {
+  it("keeps a pinned fleet on its lane when that lane is not the one that refused", () => {
+    // The pin is released by *this* lane's wall and nothing else, so a pinned
+    // run refused somewhere else moves back onto the lane it was pinned to.
+    const move = planLaneFailover({
+      ...input({ pinnedLaneId: "direct-api" }),
+      fromLaneId: "open-weights",
+    });
+    expect(move?.toLaneId).toBe("direct-api");
+  });
+
+  it("still fires for a pinned fleet, because the pinned lane is the walled one", () => {
+    // The pin is honoured right up to the point where the lane cannot serve
+    // the request; past it, waiting five hours is not what pinning asked for.
     const move = planLaneFailover({
       ...input({ ...walled, pinnedLaneId: "subscription" }),
       fromLaneId: "subscription",
     });
-    expect(move).toBeNull();
+    expect(move?.toLaneId).toBe("open-weights");
   });
 });

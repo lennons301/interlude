@@ -91,19 +91,28 @@ function routingState(now: Date) {
   const settings = readFleetSettings();
   return AGENT_PASS_KINDS.filter((kind) => kind !== "repair").map((kind) => {
     const selection = readLaneSelection(kind, null, now, settings);
+    // The lane the pass would run on — the ranking's pick, or the lane in
+    // force it falls back to, which is what the crossing does. Reporting "no
+    // lane" for the fall-back would leave this row claiming a pass would be
+    // refused while it ran perfectly well, which is the disagreement the
+    // shared ranking exists to prevent.
+    const lane = selection.chosen ?? selection.inForce;
     return {
       kind,
-      laneId: selection.laneId,
-      label: selection.chosen?.label ?? null,
-      billing: selection.chosen?.effectiveBilling ?? null,
-      rateUsdPerMTok: selection.chosen?.rateUsdPerMTok ?? null,
+      laneId: lane?.id ?? null,
+      label: lane?.label ?? null,
+      billing: lane?.effectiveBilling ?? null,
+      rateUsdPerMTok: lane?.rateUsdPerMTok ?? null,
+      /** Whether the ranking chose it, or it is the fall-back — where the pass
+       * runs, but only because nothing qualified. */
+      chosen: selection.chosen !== null,
       /** Every lane it passed over and why — the cost case, in order. */
       passedOver: selection.candidates
-        .filter((lane) => lane.ineligible !== null)
-        .map((lane) => ({
-          id: lane.id,
-          reason: lane.ineligible,
-          rateUsdPerMTok: lane.rateUsdPerMTok,
+        .filter((candidate) => candidate.ineligible !== null)
+        .map((candidate) => ({
+          id: candidate.id,
+          reason: candidate.ineligible,
+          rateUsdPerMTok: candidate.rateUsdPerMTok,
         })),
     };
   });

@@ -261,11 +261,11 @@ describe("the crossing an attended session would make", () => {
 
     const state = await (await GET()).json();
 
-    // Overage spend is cash at a rate nothing writes down, so cost routing
-    // (issue #176) prefers a lane whose price *is* declared and capped — but
-    // the news the human is given is still the cause they are looking at,
-    // which is that the plan's quota is gone and the card is being charged.
-    expect(state.crossing.laneId).toBe("openrouter-glm");
+    // No overflow while it is held: the lane in force is already the paid one,
+    // so the refusal is about *it* and names the cause the human is looking at
+    // — the plan's quota is gone and the card is being charged.
+    expect(state.crossing.laneId).toBe("claude-subscription");
+    expect(state.crossing.overflowedFrom).toBeNull();
     expect(state.crossing.overage).toBe(true);
     expect(state.crossing.refusal.reason).toBe("unconfirmed");
     expect(state.crossing.refusal.message).toContain("overage is covering it");
@@ -277,6 +277,25 @@ describe("the crossing an attended session would make", () => {
     expect(state.hold).toBe("unconfirmed");
     // ...while the lane itself still declares what it is.
     expect(state.lane.billing).toBe("subscription");
+  });
+
+  it("moves off an overage-paying lane once the day's cash is confirmed", async () => {
+    // Overage spend is cash at a rate nothing writes down, so cost routing
+    // (issue #176) prefers a lane whose price *is* declared and capped. It only
+    // gets to make that choice once #174's press has been given.
+    observe({
+      status: "rejected",
+      utilization: null,
+      overageStatus: "allowed",
+      overageInUse: true,
+    });
+
+    const state = (await (await PATCH(patch({ confirmed: true }))).json()).crossing;
+
+    expect(state.refusal).toBeNull();
+    expect(state.laneId).toBe("openrouter-glm");
+    expect(state.billing).toBe("metered");
+    expect(state.notice).toContain("overage is covering it");
   });
 
   it("leaves overage merely being available alone", async () => {

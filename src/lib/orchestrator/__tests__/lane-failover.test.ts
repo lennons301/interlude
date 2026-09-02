@@ -425,10 +425,12 @@ describe("an implement pass refused on a wall its lane cannot get past (issue #1
     expect(retryTasks()).toHaveLength(0);
   });
 
-  it("pauses instead when the fleet is pinned to the lane that refused it", async () => {
-    // The escape hatch, honoured: an explicit choice is never routed around
-    // (#172), so pinning the fleet turns cost routing — and with it the
-    // failover's choice of target — off.
+  it("still moves when the fleet is pinned to the lane that refused it", async () => {
+    // The pin turns cost *routing* off — nothing chooses a lane while the
+    // pinned one can serve the work — but it is released by a wall, because a
+    // lane that cannot serve the request at all is a different thing from one
+    // the operator would rather not use. #173 crossed an attended session off
+    // a pinned walled lane too, and that keeps being true.
     writeSettings({
       overrides: {
         maxResumesPerAttempt: "2",
@@ -438,9 +440,10 @@ describe("an implement pass refused on a wall its lane cannot get past (issue #1
 
     const decision = await turns.evaluatePassOutcome(taskId, walledOn("five_hour"));
 
-    expect(decision).toBe("paused");
-    expect(retryTasks()).toHaveLength(0);
+    expect(decision).toBe("failed-over");
+    expect(retryTasks()).toHaveLength(1);
   });
+
 
   it("pauses instead once the attempt's continuations are spent", async () => {
     testDb

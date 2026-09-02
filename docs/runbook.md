@@ -499,10 +499,14 @@ Three practical consequences:
   that lane charges per million tokens, so a surprising choice is readable
   rather than guessable.
 - **Pinning turns routing off.** Pick a primary lane on the settings screen (or
-  set `AGENT_LANE`) and every pass runs there. A walled lane still fails over
-  rather than waiting the window out — the pin is honoured, but a lane that
-  cannot serve the request at all is a different thing from one you would
-  rather not use.
+  set `AGENT_LANE`) and every pass runs there, however cheap another lane is.
+  A **walled** pinned lane still fails over rather than waiting the window out:
+  the pin is honoured right up to the point where the lane cannot serve the
+  request at all, which is a different thing from one you would rather not use.
+- **A minimum lane never excludes the lane you are on.** It bounds where
+  routing may *send* a pass. So a floor the deployment's own lane cannot meet
+  does not stop work — the pass runs there, and the settings row says which
+  lane it would run on rather than claiming none.
 
 Routing never spends money the fleet is not permitted: a paid lane is only a
 candidate inside the day's real-money cap and its confirm-once press, judged

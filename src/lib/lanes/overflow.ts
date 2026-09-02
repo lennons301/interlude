@@ -329,6 +329,7 @@ export function decideLaneCrossing({
     kind,
     tier,
     pinnedLaneId,
+    primaryLaneId: primary.id,
     minLaneId,
     // One reading of the lane in force's row: whatever the caller passed for
     // every other lane, this module's own `observation` decides for the
@@ -342,23 +343,32 @@ export function decideLaneCrossing({
     now,
   });
 
-  const target = selection.chosen;
-  if (target === null) return refusedCrossing(base, selection, {
-    kind,
-    primary,
-    catalog,
-    env,
-    observation,
-    overage,
-    walled,
-  });
+  // The lane this pass runs on: the ranking's pick, or — when it picked nothing
+  // — the lane in force, which is where the pass was sent and where #172's
+  // report or #168's pause will answer for it. Either way it is a *judged*
+  // candidate, so its money guards are read from the same evaluation the
+  // ranking made rather than skipped: falling back must never be a way onto a
+  // paid lane the fleet is not permitted to spend on.
+  const target = selection.chosen ?? selection.inForce;
+  if (target === null) return base;
 
   const billing = target.effectiveBilling;
   const overflowedFrom = target.id === primary.id ? null : primary.id;
   if (billing === "subscription") {
     // Nothing here costs money, so nothing here is guarded: subscription-lane
     // work is exactly as exempt from the cash cap as it was.
-    return { ...base, laneId: target.id, billing, overflowedFrom };
+    const crossed = { ...base, laneId: target.id, billing, overflowedFrom };
+    return selection.chosen === null
+      ? refusedCrossing(crossed, selection, {
+          kind,
+          primary,
+          catalog,
+          env,
+          observation,
+          overage,
+          walled,
+        })
+      : crossed;
   }
 
   // From here the pass spends real money, however it got there — a failover, an
@@ -366,7 +376,7 @@ export function decideLaneCrossing({
   // guards decided it, inside the ranking and over that lane's own cap, so the
   // sentence this pass shows the human quotes the same numbers the settings
   // panel does.
-  return {
+  const crossed: LaneCrossing = {
     ...base,
     laneId: target.id,
     billing,
@@ -382,21 +392,39 @@ export function decideLaneCrossing({
       target.money!
     ),
   };
+
+  return target.money?.hold === null && selection.chosen !== null
+    ? crossed
+    : refusedCrossing(crossed, selection, {
+        kind,
+        primary,
+        catalog,
+        env,
+        observation,
+        overage,
+        walled,
+      });
 }
 
 /**
- * What to say when no lane may serve this pass.
+ * What to say when the pass cannot run where it is pointed.
  *
  * An **attended** pass is held and told why, because the two things holding it
  * are a press away and a midnight away. An autonomous one is not: refusing it
  * here would stop work the reducer has already decided to run, and #174's
- * guards hold *pickup* rather than a pass under way — so it is left on the
- * lane it was sent to, refused there in about two seconds, and parked on the
- * window's clock by #168 (or moved by #176's failover, which asks this same
- * ranking where to go).
+ * guards hold *pickup* rather than a pass under way — so it is left where it
+ * was sent, refused there in about two seconds, and parked on the window's
+ * clock by #168 (or moved by #176's failover, which asks this same ranking
+ * where to go).
+ *
+ * `crossed` is the pass as routed — the lane it would run on and that lane's
+ * own money state — so the refusal is *about* that lane unless the thing a
+ * press would free is a different one, which is the walled case: there the
+ * lane in force cannot serve the request at all and the news is the lane the
+ * session would move onto.
  */
 function refusedCrossing(
-  base: LaneCrossing,
+  crossed: LaneCrossing,
   selection: LaneSelection,
   at: {
     kind: AgentPassKind;
@@ -408,17 +436,30 @@ function refusedCrossing(
     walled: boolean;
   }
 ): LaneCrossing {
-  if (!isAttendedPass(at.kind)) return base;
+  if (!isAttendedPass(at.kind)) return crossed;
 
-  const held = selection.heldForMoney;
+  // The lane the pass would run on, when a press or a midnight is what stands
+  // between it and running — otherwise the best lane that a press *would*
+  // free, which is what a walled session needs told.
+  const onTarget = crossed.money?.hold != null;
+  const held = onTarget
+    ? { id: crossed.laneId!, label: laneLabel(selection, crossed.laneId), money: crossed.money! }
+    : selection.heldForMoney === null
+      ? null
+      : {
+          id: selection.heldForMoney.id,
+          label: selection.heldForMoney.label,
+          money: selection.heldForMoney.money!,
+        };
+
   if (held === null) {
-    // Nothing was held for money, so nothing is a press away. Only a wall is
-    // worth a refusal here: any other reason a lane could not serve the pass
-    // is #172's to report as the pass starts, and inventing a hold on top
-    // would only hide it.
-    if (!at.walled) return base;
+    // Nothing is a press away. Only a wall is worth a refusal here: any other
+    // reason a lane could not serve the pass is #172's to report as the pass
+    // starts, and inventing a hold on top would only hide it.
+    if (!at.walled) return crossed;
     return {
-      ...base,
+      ...crossed,
+      notice: null,
       refusal: {
         reason: "no-metered-lane",
         message:
@@ -428,18 +469,21 @@ function refusedCrossing(
     };
   }
 
-  const money = held.money!;
-  const crossed: LaneCrossing = {
-    ...base,
-    laneId: held.id,
-    billing: held.effectiveBilling,
-    overflowedFrom: held.id === at.primary.id ? null : at.primary.id,
-    money,
-  };
+  const money = held.money;
+  const about: LaneCrossing = onTarget
+    ? { ...crossed, notice: null }
+    : {
+        ...crossed,
+        notice: null,
+        laneId: held.id,
+        billing: "metered",
+        overflowedFrom: held.id === at.primary.id ? null : at.primary.id,
+        money,
+      };
 
   if (money.hold === "cap-reached") {
     return {
-      ...crossed,
+      ...about,
       refusal: {
         reason: "cap-reached",
         message:
@@ -454,18 +498,19 @@ function refusedCrossing(
   // The lead names the cause the human is looking at: a wall they can see on
   // the dashboard, or — with the lane in force still serving — why the work in
   // front of them costs money at all.
-  const lead = at.walled
-    ? `${wallSentence(at.primary, at.observation)}, so this session would ` +
-      `continue on ${held.label} — which bills per token`
-    : whyPaid(
-        held,
-        at.primary,
-        at.observation,
-        at.overage,
-        held.id === at.primary.id
-      );
+  const lead =
+    at.walled && held.id !== at.primary.id
+      ? `${wallSentence(at.primary, at.observation)}, so this session would ` +
+        `continue on ${held.label} — which bills per token`
+      : whyPaid(
+          { label: held.label, billing: laneBilling(selection, held.id) },
+          at.primary,
+          at.observation,
+          at.overage,
+          held.id === at.primary.id
+        );
   return {
-    ...crossed,
+    ...about,
     refusal: {
       reason: "unconfirmed",
       message:
@@ -475,6 +520,25 @@ function refusedCrossing(
         `runs without asking, up to the cap.`,
     },
   };
+}
+
+/** A ranked lane's human-facing name, from the ranking that judged it — never
+ * a second lookup, so the sentence names the lane the decision was about. */
+function laneLabel(selection: LaneSelection, laneId: string | null): string {
+  return (
+    selection.candidates.find((lane) => lane.id === laneId)?.label ??
+    laneId ??
+    "the lane in force"
+  );
+}
+
+/** What a ranked lane *declares* it bills, as opposed to what it costs now —
+ * the question `overageIsThePayer` asks. */
+function laneBilling(selection: LaneSelection, laneId: string): LaneBilling {
+  return (
+    selection.candidates.find((lane) => lane.id === laneId)?.billing ??
+    "metered"
+  );
 }
 
 /**

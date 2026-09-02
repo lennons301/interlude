@@ -227,8 +227,28 @@ export interface LaneSelectionInput {
    * because routing around an operator's decision is how a fleet spends money
    * nobody authorised) from the *unset* default that walks the file's
    * preference order. Cost routing replaces that walk and nothing else.
+   *
+   * A **wall releases it**, and only a wall. #173 crossed an attended session
+   * off a walled lane whether or not it was pinned, and that must keep being
+   * true: a pin says "do not choose for me", where a wall says the chosen lane
+   * cannot serve the request at all — different in kind, which is the same
+   * distinction `laneIsWalled` draws against a merely unavailable lane. So a
+   * pinned fleet still fails over rather than waiting hours, and still never
+   * has a lane picked for it while its own can serve the work.
    */
   pinnedLaneId: string | null;
+  /**
+   * The lane in force (#172's primary) — the one a pass would run on if the
+   * ranking chose nothing.
+   *
+   * It is never excluded by the floor below. A floor bounds where routing may
+   * *send* a pass; the lane in force is not a routing choice, it is the lane
+   * the deployment is on, and excluding it would either silently run the pass
+   * there anyway (which would make the setting a lie) or refuse a pass with
+   * nowhere else to go. It is still subject to everything about whether it can
+   * serve the request — a wall, and #174's money guards.
+   */
+  primaryLaneId: string | null;
   /** The capability floor for this pass kind, or null for none. */
   minLaneId: string | null;
   /**
@@ -272,6 +292,13 @@ export interface LaneSelection {
   heldForMoney: LaneCandidate | null;
   /** The floor that was applied, echoed for the message that names it. */
   minLaneId: string | null;
+  /**
+   * The lane in force, judged like any other candidate — what a pass falls
+   * back to when the ranking chose nothing, so its caller reads that lane's
+   * money guards from here rather than reasoning about them a second time.
+   * Null when the lane in force names no declared lane.
+   */
+  inForce: LaneCandidate | null;
 }
 
 /**
@@ -317,6 +344,13 @@ export function rankLanes(input: LaneSelectionInput): LaneCandidate[] {
 
   const excluded = new Set(input.excludeLaneIds ?? []);
   const keys = orderingKeys(catalog);
+  // A wall releases the pin — see `pinnedLaneId`. Asked once, up front, because
+  // it is a fact about the fleet rather than about each candidate.
+  const pinned =
+    input.pinnedLaneId === null ? null : findLane(catalog, input.pinnedLaneId);
+  const pinHolds =
+    pinned !== null &&
+    !laneIsWalled(pinned, input.observations[pinned.id] ?? null, input.now);
   const floor =
     input.minLaneId === null ? null : findLane(catalog, input.minLaneId);
   // A floor naming no declared lane is ignored rather than obeyed as "nothing
@@ -365,7 +399,9 @@ export function rankLanes(input: LaneSelectionInput): LaneCandidate[] {
       money,
       ineligible: judge({
         laneId: lane.id,
-        pinnedLaneId: input.pinnedLaneId,
+        pinnedLaneId: pinHolds ? input.pinnedLaneId : null,
+        // The lane in force answers to everything except the floor.
+        exemptFromFloor: lane.id === input.primaryLaneId,
         excluded,
         missingEnvVars,
         capabilityRank,
@@ -395,6 +431,7 @@ export function rankLanes(input: LaneSelectionInput): LaneCandidate[] {
 function judge(args: {
   laneId: string;
   pinnedLaneId: string | null;
+  exemptFromFloor: boolean;
   excluded: Set<string>;
   missingEnvVars: string[];
   capabilityRank: number;
@@ -410,7 +447,11 @@ function judge(args: {
   // A *lower* capability rank is a cheaper — and so, by this proxy, a weaker —
   // lane than the floor names. Equal passes: the floor is inclusive, which is
   // what makes naming a lane in it mean "this one, or better".
-  if (args.floorRank !== null && args.capabilityRank < args.floorRank) {
+  if (
+    !args.exemptFromFloor &&
+    args.floorRank !== null &&
+    args.capabilityRank < args.floorRank
+  ) {
     return "below-floor";
   }
   if (args.walled) return "walled";
@@ -443,6 +484,8 @@ export function selectLane(input: LaneSelectionInput): LaneSelection {
     pinnedLaneId: input.pinnedLaneId,
     heldForMoney: candidates.find(heldForMoneyOnly) ?? null,
     minLaneId: input.minLaneId,
+    inForce:
+      candidates.find((lane) => lane.id === input.primaryLaneId) ?? null,
   };
 }
 
@@ -469,6 +512,18 @@ export function planLaneFailover(
   const { fromLaneId } = input;
   const selection = selectLane({
     ...input,
+    // Being called at all *is* the wall, for this lane: the caller is holding
+    // the turn's own rejection, which is a fresher and more authoritative
+    // reading than the recorded observation `rankLanes` would consult. So a
+    // pin naming the lane that just refused the pass is released here rather
+    // than left to that row — which the stream parser does write at the moment
+    // of observation (#167), but relying on the timing of a second reading of
+    // a fact already in hand is how a pinned fleet would silently lose its
+    // failover.
+    pinnedLaneId:
+      input.pinnedLaneId !== null && input.pinnedLaneId === fromLaneId
+        ? null
+        : input.pinnedLaneId,
     excludeLaneIds: [
       ...(input.excludeLaneIds ?? []),
       ...(fromLaneId === null ? [] : [fromLaneId]),

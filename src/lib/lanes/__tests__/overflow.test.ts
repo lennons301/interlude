@@ -400,6 +400,66 @@ describe("the at-the-keyboard confirmation", () => {
   });
 });
 
+describe("falling back to the lane in force never skips the money guards", () => {
+  // The hole cost routing opened and closed: when the ranking picks nothing,
+  // the pass runs where it was sent — and if *that* lane bills per token, its
+  // spend still answers to #174's cap and confirm-once press. Before this it
+  // fell through with `money: null` and no refusal, which was a way onto a
+  // paid lane the fleet had not been permitted to spend on.
+  function onMeteredPrimary(over: Partial<LaneCrossingInput> = {}) {
+    return crossing({
+      primary: METERED_PRIMARY,
+      pinnedLaneId: "direct-api",
+      observation: null,
+      ...over,
+    });
+  }
+
+  it("asks for the day's confirmation even when nothing else was eligible", () => {
+    const decision = onMeteredPrimary({ confirmedAt: null });
+
+    expect(decision.laneId).toBe("direct-api");
+    expect(decision.billing).toBe("metered");
+    expect(decision.refusal?.reason).toBe("unconfirmed");
+    expect(decision.money?.hold).toBe("unconfirmed");
+  });
+
+  it("reports the cap even when nothing else was eligible", () => {
+    const decision = onMeteredPrimary({ spentTodayUsd: 99 });
+
+    expect(decision.refusal?.reason).toBe("cap-reached");
+    expect(decision.money?.capReached).toBe(true);
+  });
+
+  it("holds a metered lane the pass kind's own floor put out of reach", () => {
+    // The floor never excludes the lane in force — it bounds where routing may
+    // *send* a pass — so the session runs there, and running there costs money,
+    // so the guards decide. Excluding it instead would have meant either
+    // silently running below the floor or refusing a pass with nowhere to go.
+    const decision = crossing({
+      primary: METERED_PRIMARY,
+      observation: null,
+      minLaneId: "openrouter",
+      env: { ANTHROPIC_API_KEY: "sk-ant" },
+      confirmedAt: null,
+    });
+
+    expect(decision.laneId).toBe("direct-api");
+    expect(decision.refusal?.reason).toBe("unconfirmed");
+  });
+
+  it("still runs an autonomous pass there, booked as the cash it is", () => {
+    // #174's guards hold *pickup*, never a pass already under way, so an
+    // autonomous pass is routed rather than held — but its dollars are booked
+    // to a metered lane and its money state is reported rather than dropped.
+    const decision = onMeteredPrimary({ kind: "implement", confirmedAt: null });
+
+    expect(decision.refusal).toBeNull();
+    expect(decision.billing).toBe("metered");
+    expect(decision.money?.hold).toBe("unconfirmed");
+  });
+});
+
 describe("the cap", () => {
   it("tells an attended session it is capped rather than overflowing", () => {
     const decision = crossing({ spentTodayUsd: 20 });

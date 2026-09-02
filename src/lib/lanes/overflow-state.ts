@@ -68,8 +68,14 @@ function laneSelectionInput(
     tier: resolveAgentModelChoice(kind, config, ticketModel, settings.overrides)
       .tier,
     // An operator's explicit choice pins the fleet and turns the ranking off
-    // (issue #172's own distinction, not a new setting).
+    // (issue #172's own distinction, not a new setting) — until a wall, which
+    // releases it, because a lane that cannot serve the request is a different
+    // thing from one the operator would rather not use.
     pinnedLaneId: guards.pinnedLaneId,
+    // The lane in force, which the floor below never excludes: a floor bounds
+    // where routing may *send* a pass, and this is the lane the deployment is
+    // already on.
+    primaryLaneId: guards.lane?.id ?? null,
     minLaneId: resolveMinLane(kind, config, settings.overrides).laneId,
     // Every lane's window, because whether a lane can serve a request is a
     // fact about that lane (issue #175's per-lane keying). A lane with no row
