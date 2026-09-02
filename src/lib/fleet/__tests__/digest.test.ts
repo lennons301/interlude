@@ -75,6 +75,7 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     ciRepairCount: 0,
     reviewVerdict: null,
     reviewResult: null,
+    resumeAfter: null,
     claimedAt: aug(1, 9),
     startedAt: aug(1, 9),
     finishedAt: null,
@@ -416,6 +417,42 @@ describe("renderDailyDigest — in flight", () => {
 
     expect(section(content, "In flight")).toEqual([
       "interlude · Grill a fresh idea · session grill-me · $2.40",
+    ]);
+  });
+
+  it("says a quota-paused run is paused, and when its window resets (#168)", () => {
+    // The digest reads the same `paused` field the dashboard does, so the two
+    // cannot disagree about whether a run is being worked. The reset is stated
+    // rather than counted down: a digest is read hours after it is written.
+    const content = render({
+      projects: [makeProject({ id: "p1", name: "lemons" })],
+      runs: [
+        makeRun({
+          id: "r1",
+          projectId: "p1",
+          attempt: 2,
+          status: "rate_limited",
+          resumeAfter: aug(1, 17),
+          totalCostUsd: 7.8,
+          budgetUsd: 20,
+        }),
+      ],
+      tasks: [
+        makeTask({
+          id: "t-impl",
+          projectId: "p1",
+          runId: "r1",
+          kind: "implement",
+          title: "Add pagination to the list",
+          status: "failed",
+          containerStatus: null,
+        }),
+      ],
+    });
+
+    expect(section(content, "In flight")).toEqual([
+      "lemons #34 · Add pagination to the list · attempt 2/3 · $7.80 of $20.00 · " +
+        "paused, quota resets Sat 1 Aug 17:00",
     ]);
   });
 

@@ -138,7 +138,9 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
   stale queue heartbeat; issue #152: a slot count no real container
   corroborates), each with a link where one applies.
 - **running** — each active run's ticket, attempt (n/3), turn, spend vs budget,
-  and phase (implement ▸ review ▸ merge).
+  and phase (implement ▸ review ▸ merge). A run the account's quota refused sits
+  here too, labelled **paused** with when its window resets (issue #168) — it is
+  deliberately *not* in **needs you**, because a quota window asks nothing of you.
 - **recent** — the last 7 days of completions.
 - **spend** — today's autonomous spend vs the $500/day cap.
 
@@ -270,6 +272,17 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   eventually routes to `ready-for-human` like an exhausted one. A review pass that
   dies the same way re-queues a fresh replacement instead of burning its one
   format-retry.
+- **A quota wall is neither an attempt nor an interruption** (issue #168). If the
+  account's rate limit *refuses* a pass — the five-hour or weekly window, on the
+  subscription lane — the run goes `rate_limited` with a `resumeAfter` taken from
+  the limit event's own reset time, its container is torn down, and both counters
+  stay where they were. The issue gets a comment saying so.
+  **Until #169 lands, a paused run stays paused**: nothing resumes it, and because
+  a `rate_limited` run still holds its ticket, the sweep will not claim a fresh run
+  over it either. To move it by hand, cancel it (below) or drive the run row
+  terminal — the branch is pushed, so nothing is lost. A rejection whose event
+  carried *no* reset time is not paused at all: with no clock to wait on, the pass
+  takes its ordinary path and spends the attempt, as before.
 - **$500/day** estate-wide autonomous cap pauses pickup (announced once, shown on
   the dashboard, resets at local midnight). Interactive work is exempt by
   construction (it has no run).

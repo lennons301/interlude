@@ -98,6 +98,10 @@ export interface FleetRunRow {
     | "failed"
     | "exhausted"
     | "interrupted"
+    /** Parked on the account's quota clock (issue #168) — not a failure, and
+     * not finished: the pass was refused on the account-wide rate-limit window
+     * and waits for `resumeAfter`. */
+    | "rate_limited"
     | "cancelled";
   budgetUsd: number;
   totalCostUsd: number;
@@ -125,6 +129,9 @@ export interface FleetRunRow {
     | { kind: "approve" | "request-changes" | "escalate"; body: string }
     | { kind: "unparseable"; reason: string }
     | null;
+  /** When a `rate_limited` run's window resets (issue #168) — the "resumes in"
+   * the paused card shows. Null on every other status. */
+  resumeAfter: Date | null;
   claimedAt: Date;
   startedAt: Date | null;
   finishedAt: Date | null;
@@ -259,6 +266,17 @@ export interface RunningCard {
   startedAt: string | null;
   /** budgetUsd null = unbudgeted (interactive sessions) */
   spend: { usd: number; budgetUsd: number | null };
+  /**
+   * Why this run is waiting on a clock rather than working, or null while it
+   * is actually running (issue #168).
+   *
+   * A paused run stays *here*, labelled in place, and deliberately never
+   * reaches `needsYou`: nobody has to do anything about a quota window, and
+   * that section means "a human decision is required". `resumeAfter` is an ISO
+   * string like every other time in this view, so the surfaces count down
+   * against their own clock rather than a value frozen at the last push.
+   */
+  paused: { reason: "rate-limited"; resumeAfter: string } | null;
 }
 
 export interface RecentItem {
@@ -802,6 +820,12 @@ export function buildFleetView(rows: FleetRows): FleetView {
     "implementing",
     "reviewing",
     "blocked",
+    // A quota-paused run (issue #168) is still the fleet's work in progress —
+    // it holds its ticket and its branch, and only a clock stands between it
+    // and its next turn — so it belongs here, shown paused, rather than
+    // vanishing from the dashboard between the wall and the reset. It holds no
+    // slot: the pause tore its container down, so `slots.used` is untouched.
+    "rate_limited",
   ]);
   // The review stage is live for both the armed path (status `reviewing`) and a
   // gated run whose review is still in flight (the only gated runs that reach
@@ -828,6 +852,11 @@ export function buildFleetView(rows: FleetRows): FleetView {
     .sort((a, b) => a.claimedAt.getTime() - b.claimedAt.getTime())
     .map((run) => {
       const pass = currentPassOf(run);
+      // A `rate_limited` run paused during an implement-shaped pass — the only
+      // kind #168 pauses, not the only kind a wall can refuse: a walled review
+      // pass still fails closed to a human, and #171 is the ticket that stops a
+      // pass starting under a wall at all. So it reads with implement current,
+      // which is where it resumes from.
       const reviewing = run.status === "reviewing" || run.status === "gated";
       // An in-flight review pass reads with its own spend against the review
       // budget (issue #90); the run's rolled-up spend against the attempt
@@ -849,6 +878,17 @@ export function buildFleetView(rows: FleetRows): FleetView {
         turns: pass?.turns ?? 0,
         startedAt: (run.startedAt ?? run.claimedAt).toISOString(),
         spend,
+        // Only a run the ledger calls paused reads as paused, and only with the
+        // clock it is actually waiting on: a `rate_limited` row that somehow
+        // carries no resumeAfter would be a run waiting on nothing, which is a
+        // claim this view refuses to make on a screen an operator trusts.
+        paused:
+          run.status === "rate_limited" && run.resumeAfter
+            ? {
+                reason: "rate-limited" as const,
+                resumeAfter: run.resumeAfter.toISOString(),
+              }
+            : null,
       };
     });
 
@@ -880,6 +920,9 @@ export function buildFleetView(rows: FleetRows): FleetView {
         usd: task.totalCostUsd,
         budgetUsd: triage ? DEFAULT_TRIAGE_BUDGET_USD : null,
       },
+      // A standalone session or triage pass has no run to pause: the quota
+      // pause is a run-ledger state (issue #168).
+      paused: null,
     });
   }
 

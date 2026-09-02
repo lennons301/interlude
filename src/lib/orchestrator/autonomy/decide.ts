@@ -19,6 +19,7 @@ import {
   selectWorkflow,
   type WorkflowSelection,
 } from "./ticket";
+import type { QuotaRejection } from "../../quota/rate-limit-rejection";
 import type { TriageExitKind, TriageResult } from "./triage";
 import {
   buildFeedbackTurn,
@@ -143,6 +144,17 @@ export interface PassOutcome {
    * #106). Only ever false for a genuine implement pass — a repair always
    * operates on an existing PR, so its callers report `true`. */
   producedPr: boolean;
+  /**
+   * The account-wide quota wall this turn hit, or null when it hit none
+   * (issue #168) — read off the turn's own result by `detectQuotaRejection`,
+   * never re-derived here.
+   *
+   * Non-null outranks every other reading of the pass: a refused turn ran no
+   * agent, so its final message is the CLI's own "you've hit your session
+   * limit" and its empty diff is the wall's, not the work's. Judging either
+   * would charge the account's quota to the ticket's attempt budget.
+   */
+  rateLimited: QuotaRejection | null;
 }
 
 /** An open issue awaiting triage (`needs-triage`), as gathered by the sweep. */
@@ -608,6 +620,23 @@ export type Action =
       issueRef: string;
     }
   | {
+      // A pass the account's quota refused (issue #168): the run parks on the
+      // window's reset time instead of failing, consuming neither an attempt
+      // (the work was never tried) nor an interruption (the platform did not
+      // die). The executor tears the container down — a parked container holds
+      // memory without holding a slot, which is what wedged the host on
+      // 2026-08-04 — and a paused run then waits: resuming is its own ticket.
+      type: "pauseRunOnRateLimit";
+      runId: string;
+      taskId: string;
+      /** "owner/repo#n" */
+      issueRef: string;
+      /** When the refusing window resets — the run's `resumeAfter` */
+      resumeAfter: Date;
+      /** Which window refused it, verbatim, or null when the event named none */
+      limitType: string | null;
+    }
+  | {
       type: "startTriage";
       issueRef: string;
       projectId: string;
@@ -748,16 +777,33 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
 
   // A finished pass that leads with the blocked marker is parked and its
   // question escalated; a healthy pass gets no action here — the turn
-  // manager proceeds to completion. A run escalated as blocked is driven by
-  // exactly one thing — its question: the executors never gather a blocked
-  // run into the review pipeline (it leaves the reviewing/gated set), but
-  // the combination is representable in a snapshot, so the reducer refuses
-  // to double-drive it rather than trusting the callers.
-  const blockedRunIds = new Set<string>();
+  // manager proceeds to completion. A run parked by its pass outcome is driven
+  // by exactly one thing — its question, or its quota clock: the executors
+  // never gather such a run into the review pipeline (it leaves the
+  // reviewing/gated set), but the combination is representable in a snapshot,
+  // so the reducer refuses to double-drive it rather than trusting the callers.
+  const parkedRunIds = new Set<string>();
   for (const pass of snapshot.completedPasses) {
+    // The quota wall first, ahead of every other reading of the turn (issue
+    // #168). A refused pass never reached the model: the "final message" is the
+    // CLI's own session-limit line and the empty diff is the wall's, so both
+    // the blocked-marker detector and the empty-pass check below would be
+    // judging the account's quota as if it were the work.
+    if (pass.rateLimited) {
+      parkedRunIds.add(pass.runId);
+      actions.push({
+        type: "pauseRunOnRateLimit",
+        runId: pass.runId,
+        taskId: pass.taskId,
+        issueRef: pass.issueRef,
+        resumeAfter: pass.rateLimited.resumeAfter,
+        limitType: pass.rateLimited.limitType,
+      });
+      continue;
+    }
     const question = detectBlockedQuestion(pass.finalMessage);
     if (question) {
-      blockedRunIds.add(pass.runId);
+      parkedRunIds.add(pass.runId);
       actions.push({
         type: "escalate",
         reason: "blocked",
@@ -786,7 +832,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // Settled PRs first: pure ledger bookkeeping for work that already landed
   // (or was closed by a human) — nothing downstream depends on it this sweep.
   for (const settled of snapshot.settledPrs) {
-    if (blockedRunIds.has(settled.runId)) continue;
+    if (parkedRunIds.has(settled.runId)) continue;
     actions.push({
       type: "finalizeRun",
       runId: settled.runId,
@@ -806,7 +852,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // mergeability is still `unknown` never reaches this list — it is re-polled.
   let repairsQueuedThisSweep = 0;
   for (const conflicting of snapshot.conflictingPrs) {
-    if (blockedRunIds.has(conflicting.runId)) continue;
+    if (parkedRunIds.has(conflicting.runId)) continue;
     if (conflicting.integrationsMade >= snapshot.maxIntegrationAttempts) {
       if (!snapshot.announcedIntegrationEscalations.includes(conflicting.runId)) {
         actions.push({
@@ -835,7 +881,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // so a later, unrelated conflict earns its own repairs rather than being
   // judged against a stale count.
   for (const resolved of snapshot.resolvedConflicts) {
-    if (blockedRunIds.has(resolved.runId)) continue;
+    if (parkedRunIds.has(resolved.runId)) continue;
     actions.push({
       type: "clearIntegration",
       runId: resolved.runId,
@@ -854,7 +900,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // the rollup is green, so no review pass is ever queued against a branch that
   // does not compile.
   for (const failing of snapshot.checksFailingPrs) {
-    if (blockedRunIds.has(failing.runId)) continue;
+    if (parkedRunIds.has(failing.runId)) continue;
     // The flake guard: a red rollup must be seen on consecutive sweeps before
     // it costs anything at all — neither a repair nor an escalation.
     if (failing.sweepsFailing < snapshot.minCheckFailureSweeps) continue;
@@ -889,7 +935,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // A parked run whose rollup is green again after a CI-repair episode: reset
   // the counter so a later, unrelated failure earns its own repair.
   for (const resolved of snapshot.resolvedCheckFailures) {
-    if (blockedRunIds.has(resolved.runId)) continue;
+    if (parkedRunIds.has(resolved.runId)) continue;
     actions.push({
       type: "clearCiRepair",
       runId: resolved.runId,
@@ -906,7 +952,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // green, so no review pass is ever queued against a branch that does not
   // compile.
   for (const stale of snapshot.staleReviews) {
-    if (blockedRunIds.has(stale.runId)) continue;
+    if (parkedRunIds.has(stale.runId)) continue;
     // Two ways a moved head stops being re-reviewable. A withdrawal GitHub
     // refused is checked first: it names a fixable permission problem, and the
     // loop must not re-arm over a review it could not remove. Otherwise the
@@ -1024,7 +1070,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // work out how many slots remain.
   let reviewsQueuedThisSweep = 0;
   for (const pending of snapshot.pendingVerdicts) {
-    if (blockedRunIds.has(pending.runId)) continue;
+    if (parkedRunIds.has(pending.runId)) continue;
     const { result } = pending;
 
     if (result.kind === "unparseable") {
@@ -1137,7 +1183,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // capacity check, so emitting one here only reserves intent, not a slot.
   // (reviewsQueuedThisSweep was seeded above by any unparseable re-queues.)
   for (const awaiting of snapshot.awaitingReview) {
-    if (blockedRunIds.has(awaiting.runId)) continue;
+    if (parkedRunIds.has(awaiting.runId)) continue;
     if (awaiting.hasReviewTask) continue;
     reviewsQueuedThisSweep++;
     actions.push({
