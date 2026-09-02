@@ -13,9 +13,9 @@ import {
   buildTurnEnv,
   buildClaudeTurnCommand,
   claudeCodeAdapter,
-  getHarnessAdapter,
   CLAUDE_CODE_BASE_URL_ENV,
 } from "../claude-code";
+import { getHarnessAdapter } from "../registry";
 
 /**
  * The Claude Code adapter (issues #74, #81, #172): what one turn's exec
@@ -270,6 +270,5 @@ describe("the adapter registry (issue #172)", () => {
     expect(typeof claudeCodeAdapter.buildExecEnv).toBe("function");
     expect(typeof claudeCodeAdapter.buildCommand).toBe("function");
     expect(typeof claudeCodeAdapter.createOutputHandler).toBe("function");
-    expect(claudeCodeAdapter.baseUrlEnvVar).toBe(CLAUDE_CODE_BASE_URL_ENV);
   });
 });

@@ -30,6 +30,19 @@ interface OverridesState {
   updatedAt: string | null;
 }
 
+/** The one field the lane panel owns; every other key belongs to the tiers. */
+const LANE_KEY = "primaryLane";
+
+/** The save error, shown only by the panel that owns the field it failed on. */
+export function errorFor(
+  error: { key: string; message: string } | null,
+  panel: "lane" | "tiers"
+): string | null {
+  if (error === null) return null;
+  const owner = error.key === LANE_KEY ? "lane" : "tiers";
+  return owner === panel ? error.message : null;
+}
+
 /** The option that means "no override" — the fall-through every field starts
  * in, offered beside the real choices so clearing is one press. */
 export const FALL_THROUGH = "environment";
@@ -42,7 +55,11 @@ export function SettingsOverrides() {
     setData,
   } = useLoad<OverridesState>("/api/settings/overrides");
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  // The failed field, not just the message: a rejected lane save must not put
+  // a red alert under Models, where nothing went wrong.
+  const [saveError, setSaveError] = useState<{ key: string; message: string } | null>(
+    null
+  );
 
   async function choose(key: string, choice: string) {
     setBusyKey(key);
@@ -68,9 +85,10 @@ export function SettingsOverrides() {
       // what the fleet would actually run, not what was asked for.
       setData(body as OverridesState);
     } catch (err) {
-      setSaveError(
-        `That didn't stick — ${err instanceof Error ? err.message : "the request failed"}`
-      );
+      setSaveError({
+        key,
+        message: `That didn't stick — ${err instanceof Error ? err.message : "the request failed"}`,
+      });
     }
     setBusyKey(null);
   }
@@ -99,16 +117,16 @@ export function SettingsOverrides() {
         updatedAt={state.updatedAt}
         busyKey={busyKey}
         disabled={busyKey !== null}
-        saveError={saveError}
+        saveError={errorFor(saveError, "tiers")}
         onChoose={choose}
       />
       <ExecutionLanePanel
         lanes={state.lanes}
         laneError={state.laneError}
-        busy={busyKey === "primaryLane"}
+        busy={busyKey === LANE_KEY}
         disabled={busyKey !== null}
-        saveError={saveError}
-        onChoose={(choice) => choose("primaryLane", choice)}
+        saveError={errorFor(saveError, "lane")}
+        onChoose={(choice) => choose(LANE_KEY, choice)}
       />
     </Sections>
   );

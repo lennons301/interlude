@@ -198,6 +198,26 @@ export function ChipRadio({
   );
 }
 
+/**
+ * Where a setting would land if its override were cleared — the variable name
+ * and its value, said the same way by every settings panel (issues #166,
+ * #172). Named rather than "environment default", because a default without
+ * the variable's name is not something an operator can go and check.
+ */
+export function fallbackNote({
+  envVar,
+  envValue,
+  overridden,
+}: {
+  envVar: string;
+  envValue: string | null;
+  /** Whether a UI override is in force, making the environment value moot. */
+  overridden: boolean;
+}): string {
+  const value = envValue === null ? "unset" : `= ${envValue}`;
+  return overridden ? `${envVar} ${value}, unused` : `from ${envVar} ${value}`;
+}
+
 /** The standing-underline text link: cool ink under a hairline that firms up on
  * hover, for a reference you are meant to see is a reference (a ticket, a PR, a
  * "needs you" action). The atom owns where the link goes as well as how it reads

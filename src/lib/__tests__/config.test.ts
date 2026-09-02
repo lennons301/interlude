@@ -8,7 +8,7 @@ import {
   type AgentPassKind,
 } from "../config";
 import type { SettingsOverrides } from "../settings-resolver";
-import { tierModelId } from "../model-tiers";
+import { TIER_MODEL_IDS } from "../model-tiers";
 
 /** No UI overrides stored — the state a fresh install is in, where every
  * field falls through to the environment. */
@@ -34,7 +34,7 @@ function modelOn(
     ticketModel,
     overrides
   );
-  return tier !== null ? tierModelId(tier) : pinnedModel;
+  return tier !== null ? TIER_MODEL_IDS[tier] : pinnedModel;
 }
 
 /** A config carrying only the fields the model tier reads. */
@@ -216,6 +216,45 @@ describe("getConfig effort env validation (issue #81)", () => {
     resetConfig();
     expect(getConfig().agentEffort).toBeNull();
     expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("effort"));
+  });
+});
+
+describe("AGENT_LANE (issue #172)", () => {
+  const saved = {
+    AGENT_LANE: process.env.AGENT_LANE,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+  };
+
+  beforeEach(() => {
+    process.env.ANTHROPIC_API_KEY = "test-key"; // silence the no-auth warning
+  });
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    resetConfig();
+  });
+
+  it("is null when unset, so the lane file's preference order decides", () => {
+    delete process.env.AGENT_LANE;
+    resetConfig();
+    expect(getConfig().agentLane).toBeNull();
+  });
+
+  it("normalises casing and whitespace, so the env and the UI agree", () => {
+    // The UI path lowercases before storing. Without the same treatment here,
+    // AGENT_LANE=OpenRouter would read as a dangling choice rather than a lane.
+    process.env.AGENT_LANE = "  OpenRouter ";
+    resetConfig();
+    expect(getConfig().agentLane).toBe("openrouter");
+  });
+
+  it("treats a blank value as unset rather than as a lane named \"\"", () => {
+    process.env.AGENT_LANE = "   ";
+    resetConfig();
+    expect(getConfig().agentLane).toBeNull();
   });
 });
 

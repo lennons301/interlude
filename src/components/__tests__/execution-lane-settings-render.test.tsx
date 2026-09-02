@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { LaneSettingsView, LaneView } from "@/lib/lanes/resolve";
 import { ExecutionLanePanel } from "../execution-lane-settings";
+import { errorFor } from "../settings-overrides";
 
 /**
  * The execution-lane panel (issue #172). Its single control is which lane is
@@ -150,5 +151,28 @@ describe("the execution-lane settings panel", () => {
 
     expect(html).toContain("CLAUDE_CODE_OAUTH_TOKEN");
     expect(html).not.toContain("sk-");
+  });
+});
+
+describe("a save error belongs to the panel whose field failed", () => {
+  // The two panels share one piece of state, because a tier's model id is
+  // whatever the lane resolves it to — but not one error line: a refused lane
+  // must not raise a red alert under Models, where nothing went wrong.
+  const laneFailure = { key: "primaryLane", message: "That didn't stick — nope" };
+  const tierFailure = { key: "modelTierReview", message: "That didn't stick — nope" };
+
+  it("shows a refused lane only on the lane panel", () => {
+    expect(errorFor(laneFailure, "lane")).toBe(laneFailure.message);
+    expect(errorFor(laneFailure, "tiers")).toBeNull();
+  });
+
+  it("shows a refused tier only on the model panel", () => {
+    expect(errorFor(tierFailure, "tiers")).toBe(tierFailure.message);
+    expect(errorFor(tierFailure, "lane")).toBeNull();
+  });
+
+  it("shows nothing on either when the last save succeeded", () => {
+    expect(errorFor(null, "lane")).toBeNull();
+    expect(errorFor(null, "tiers")).toBeNull();
   });
 });

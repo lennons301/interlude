@@ -69,9 +69,11 @@ lanes:
       standard: sonnet
       light: haiku
     caps:
-      # Real money. Declared here and reported on the settings screen;
-      # enforcement (confirm-once-per-day, then capped) is issue #175's
-      # overflow guardrail, which is the only thing that may route work here.
+      # Real money. Declared here and reported on the settings screen, but
+      # NOT yet enforced: spending against it is issue #175's overflow
+      # guardrail (confirm-once-per-day, then capped). Until that lands, the
+      # cap is a stated intent, and the only way work reaches this lane is an
+      # operator deliberately making it primary.
       daily_budget_usd: 20
 
   - id: openrouter

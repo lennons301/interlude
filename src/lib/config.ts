@@ -164,7 +164,11 @@ export function getConfig(): AppConfig {
     agentModel: process.env.AGENT_MODEL ?? null,
     agentModelReview: process.env.AGENT_MODEL_REVIEW ?? null,
     agentModelTriage: process.env.AGENT_MODEL_TRIAGE ?? null,
-    agentLane: process.env.AGENT_LANE ?? null,
+    // Trimmed and lowercased, so the environment and the settings screen speak
+    // the same vocabulary: the UI path normalises before storing, and an
+    // `AGENT_LANE=OpenRouter` that read as a dangling choice rather than the
+    // lane would be an unhelpful way to learn that ids are slugs (issue #172).
+    agentLane: normalizeLaneId(process.env.AGENT_LANE),
     agentEffort: normalizeEffort(process.env.AGENT_EFFORT),
     agentEffortReview: normalizeEffort(process.env.AGENT_EFFORT_REVIEW),
     agentEffortTriage: normalizeEffort(process.env.AGENT_EFFORT_TRIAGE),
@@ -237,6 +241,13 @@ export type AgentPassKind =
  * it, and the ticket chooses the model its work runs on, not the reviewer's.
  * Named once here because the model and effort resolvers both draw the line
  * and it must be the same line. */
+/** `AGENT_LANE` as a lane id, or null when unset or blank. Membership in the
+ * catalog is `resolveLane`'s answer; this only settles the casing. */
+function normalizeLaneId(raw: string | undefined): string | null {
+  const value = raw?.trim().toLowerCase();
+  return value ? value : null;
+}
+
 function isWorkPassKind(kind: AgentPassKind): boolean {
   return kind !== "review" && kind !== "triage";
 }

@@ -52,10 +52,11 @@ function laneState(overrides: SettingsOverrides): {
 }
 
 function state(overrides: SettingsOverrides, updatedAt: Date | null) {
-  const { tierModels, ...lanes } = laneState(overrides);
+  const { tierModels, lanes, laneError } = laneState(overrides);
   return {
     fields: describeModelTierSettings(getConfig(), overrides, tierModels),
-    ...lanes,
+    lanes,
+    laneError,
     updatedAt: updatedAt?.toISOString() ?? null,
   };
 }

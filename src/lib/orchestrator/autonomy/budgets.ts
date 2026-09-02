@@ -22,7 +22,7 @@ export const MAX_TURNS_CEILING = 100;
  * and a body is semi-trusted input that may only choose from it — never name
  * an arbitrary model string — mirroring the reasoning behind the $75 budget
  * clamp. Clamped in the directive parser, resolved through
- * `resolveAgentModel`. */
+ * `resolveAgentModelChoice`. */
 
 /** Reasoning-effort levels a ticket's `effort:` directive may select (issue
  * #81), the exact set the headless CLI's `--effort` flag accepts. A ticket

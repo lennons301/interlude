@@ -18,8 +18,10 @@
  *   variable a harness reads is the harness's fact and which secret goes in it
  *   is the lane's; a second adapter changes the former without touching
  *   `lanes.yaml`'s shape.
- * - `baseUrlEnvVar` is the adapter's, not the lane's, for the same reason: a
- *   lane knows *which endpoint*, an adapter knows *how to be told*.
+ * - A lane's `baseUrl` is handed over as a *value*, not as a variable name: a
+ *   lane knows *which endpoint*, and how a harness is told about it — Claude
+ *   Code's `ANTHROPIC_BASE_URL`, some other harness's flag or config file — is
+ *   the adapter's own business, settled inside `buildExecEnv`.
  * - `createOutputHandler` is part of the interface rather than a shared
  *   utility because a different harness emits a different stream format. It is
  *   the member most likely to be mistaken for orchestrator code, and the one a
@@ -73,8 +75,6 @@ export interface HarnessOutputHandler {
 
 export interface HarnessAdapter {
   readonly id: LaneAdapterId;
-  /** The environment variable a lane's base URL is conveyed through. */
-  readonly baseUrlEnvVar: string;
   /** The environment one `docker exec` of a turn runs with. */
   buildExecEnv(input: HarnessExecEnvInput): string[];
   /** The shell command that runs one turn inside the container. */

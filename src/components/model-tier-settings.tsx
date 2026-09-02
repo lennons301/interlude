@@ -1,6 +1,12 @@
 "use client";
 
-import { Chip, ChipRadio, PANEL_PLAIN, formatChanged } from "@/components/fleet/fleet-bits";
+import {
+  Chip,
+  ChipRadio,
+  PANEL_PLAIN,
+  fallbackNote,
+  formatChanged,
+} from "@/components/fleet/fleet-bits";
 import { FALL_THROUGH } from "@/components/settings-overrides";
 import type { SettingFieldView } from "@/lib/settings-resolver";
 
@@ -126,7 +132,13 @@ function TierRow({
         </Chip>
         <span>{effective(field)}</span>
         <span aria-hidden>·</span>
-        <span>{fallback(field)}</span>
+        <span>
+          {fallbackNote({
+            envVar: field.envVar,
+            envValue: field.envValue,
+            overridden: field.source === "override",
+          })}
+        </span>
       </p>
     </fieldset>
   );
@@ -139,15 +151,4 @@ function effective(field: SettingFieldView): string {
   return field.tier === null
     ? `runs ${field.model}`
     : `runs ${field.tier} (${field.model})`;
-}
-
-/** Where the row would land if the override were cleared — named variable and
- * all, because "environment default" without the name is not something an
- * operator can go and check. */
-function fallback(field: SettingFieldView): string {
-  const value =
-    field.envValue === null ? "unset" : `= ${field.envValue}`;
-  return field.source === "override"
-    ? `${field.envVar} ${value}, unused`
-    : `from ${field.envVar} ${value}`;
 }

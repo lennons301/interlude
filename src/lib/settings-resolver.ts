@@ -203,16 +203,6 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
   },
 };
 
-/** Every settable key, for a rejection message that tells the operator what
- * *would* have been accepted. */
-export const SETTINGS_FIELD_ORDER: readonly SettingKey[] = [
-  "modelTierImplement",
-  "modelTierReview",
-  "modelTierTriage",
-  "modelTierInteractive",
-  "primaryLane",
-];
-
 /** Display order for the model-tier panel. Kept beside the registry so a new
  * field is placed deliberately rather than wherever object iteration puts it.
  * The lane field is deliberately not here: it needs the lane catalog to render
@@ -222,6 +212,14 @@ export const MODEL_TIER_FIELD_ORDER: readonly ModelTierSettingKey[] = [
   "modelTierReview",
   "modelTierTriage",
   "modelTierInteractive",
+];
+
+/** Every settable key, for a rejection message that tells the operator what
+ * *would* have been accepted. Derived, so a field added to the registry cannot
+ * be left out of the message that is supposed to enumerate them. */
+export const SETTABLE_KEYS: readonly SettingKey[] = [
+  ...MODEL_TIER_FIELD_ORDER,
+  "primaryLane",
 ];
 
 /**
@@ -308,7 +306,7 @@ export function parseSettingsPatch(
         ok: false,
         error:
           `"${key}" is not a settable setting. Settable: ` +
-          `${SETTINGS_FIELD_ORDER.join(", ")}.`,
+          `${SETTABLE_KEYS.join(", ")}.`,
       };
     }
     if (value === null) {

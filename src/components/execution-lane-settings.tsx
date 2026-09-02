@@ -1,6 +1,11 @@
 "use client";
 
-import { Chip, ChipRadio, PANEL_PLAIN } from "@/components/fleet/fleet-bits";
+import {
+  Chip,
+  ChipRadio,
+  PANEL_PLAIN,
+  fallbackNote,
+} from "@/components/fleet/fleet-bits";
 import { FALL_THROUGH } from "@/components/settings-overrides";
 import { MODEL_TIERS } from "@/lib/model-tiers";
 import type { LaneSettingsView, LaneView } from "@/lib/lanes/resolve";
@@ -105,9 +110,11 @@ export function ExecutionLanePanel({
           </span>
           <span aria-hidden>·</span>
           <span>
-            {lanes.source === "override"
-              ? `${lanes.envVar} ${envValue(lanes)}, unused`
-              : `from ${lanes.envVar} ${envValue(lanes)}`}
+            {fallbackNote({
+              envVar: lanes.envVar,
+              envValue: lanes.envValue,
+              overridden: lanes.source === "override",
+            })}
           </span>
         </p>
       </fieldset>
@@ -154,10 +161,6 @@ const SOURCE_LABEL: Record<LaneSettingsView["source"], string> = {
   environment: "environment",
   preference: "default order",
 };
-
-function envValue(lanes: LaneSettingsView): string {
-  return lanes.envValue === null ? "unset" : `= ${lanes.envValue}`;
-}
 
 /** One lane, as a fact sheet: whether it can run, who pays, where it points,
  * and what each tier means on it. */

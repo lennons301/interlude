@@ -116,28 +116,7 @@ export function buildClaudeTurnCommand(input: HarnessCommandInput): string {
 
 export const claudeCodeAdapter: HarnessAdapter = {
   id: "claude-code",
-  baseUrlEnvVar: CLAUDE_CODE_BASE_URL_ENV,
   buildExecEnv: buildTurnEnv,
   buildCommand: buildClaudeTurnCommand,
   createOutputHandler,
 };
-
-const ADAPTERS: Readonly<Record<string, HarnessAdapter>> = {
-  [claudeCodeAdapter.id]: claudeCodeAdapter,
-};
-
-/**
- * The adapter a resolved lane names. Throws rather than defaulting: a lane
- * whose adapter does not exist is a config error the parser already refuses,
- * so reaching here means the two have drifted and guessing would run the pass
- * on a harness nobody chose.
- */
-export function getHarnessAdapter(id: string): HarnessAdapter {
-  const adapter = ADAPTERS[id];
-  if (!adapter) {
-    throw new Error(
-      `no harness adapter for "${id}" — known adapters: ${Object.keys(ADAPTERS).join(", ")}`
-    );
-  }
-  return adapter;
-}

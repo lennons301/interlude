@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { createTestDb } from "@/test/create-test-db";
+import { SETTINGS_ROW_ID, settings } from "@/db/schema";
 
 // The UI-editable settings endpoint (issue #166) against a from-migrations DB:
 // what the settings screen calls, and what the next pass then reads. The route
@@ -279,5 +280,35 @@ describe("execution lanes on /api/settings/overrides", () => {
       primaryLaneId: "claude-subscription",
     });
     expect(getSettingsOverrides()).toEqual({});
+  });
+
+  it("reports a stored lane a deploy has since removed, rather than erasing it", async () => {
+    // The row outlives the file: a lane renamed or dropped in a deploy leaves
+    // the operator's choice naming nothing. Sanitising it away on read would
+    // show the screen as if the choice had never been made, and the next PATCH
+    // of any other field would write that erasure back permanently — so the
+    // choice is kept and *reported*, and the fleet meanwhile falls through.
+    testDb
+      .insert(settings)
+      .values({
+        id: SETTINGS_ROW_ID,
+        overrides: { primaryLane: "retired-lane" },
+        updatedAt: new Date(),
+      })
+      .run();
+
+    const state = await (await GET()).json();
+    expect(state.lanes).toMatchObject({
+      unknownChoice: "retired-lane",
+      primaryLaneId: "claude-subscription",
+      source: "preference",
+    });
+
+    // And an unrelated write does not take the dangling choice with it.
+    await PATCH(patch({ modelTierReview: "light" }));
+    expect(getSettingsOverrides()).toEqual({
+      primaryLane: "retired-lane",
+      modelTierReview: "light",
+    });
   });
 });

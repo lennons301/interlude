@@ -2,14 +2,14 @@ import { describe, expect, it } from "vitest";
 import type { AppConfig } from "../config";
 import {
   MODEL_TIERS,
+  TIER_MODEL_IDS,
   normalizeModelTier,
-  tierModelId,
 } from "../model-tiers";
 import {
   FIXED_CEILINGS,
   MODEL_TIER_FIELD_ORDER,
   SETTINGS_FIELDS,
-  SETTINGS_FIELD_ORDER,
+  SETTABLE_KEYS,
   applySettingsPatch,
   describeModelTierSettings,
   parseSettingsPatch,
@@ -60,7 +60,11 @@ describe("model tier vocabulary", () => {
   });
 
   it("maps every tier to a model id the CLI accepts", () => {
-    expect(MODEL_TIERS.map(tierModelId)).toEqual(["opus", "sonnet", "haiku"]);
+    expect(MODEL_TIERS.map((tier) => TIER_MODEL_IDS[tier])).toEqual([
+      "opus",
+      "sonnet",
+      "haiku",
+    ]);
   });
 });
 
@@ -201,10 +205,10 @@ describe("provenance — every field says where its value came from", () => {
     // a length check alone would pass a swapped-out key. The lane field has
     // its own panel (it needs the lane catalog to render), so it is in the
     // settable set without being in the tier panel's order.
-    expect([...SETTINGS_FIELD_ORDER].sort()).toEqual(
+    expect([...SETTABLE_KEYS].sort()).toEqual(
       Object.keys(SETTINGS_FIELDS).sort()
     );
-    expect(SETTINGS_FIELD_ORDER).toContain("primaryLane");
+    expect(SETTABLE_KEYS).toContain("primaryLane");
     expect(MODEL_TIER_FIELD_ORDER).not.toContain("primaryLane");
   });
 });
@@ -274,7 +278,7 @@ describe("ceiling — a UI override may never widen a safety ceiling", () => {
 
   it("keeps every ceiling out of the settable allowlist", () => {
     for (const key of Object.keys(FIXED_CEILINGS)) {
-      expect(SETTINGS_FIELD_ORDER).not.toContain(key);
+      expect(SETTABLE_KEYS).not.toContain(key);
     }
   });
 
@@ -377,10 +381,11 @@ describe("the primary-lane setting", () => {
     ).toEqual({});
   });
 
-  it("keeps a stored lane id the catalog cannot vouch for, on the read path", () => {
-    // The defensive read has no catalog, deliberately: an unreadable lane file
-    // must not erase the operator's choice. Whether the lane still exists is
-    // the *resolver's* question, and it reports rather than deletes.
+  it("keeps a stored lane id when no catalog is supplied, and drops one when it is", () => {
+    // Which of the two the read path wants is settled in `settings.ts`: it
+    // omits the catalog, so an operator's choice survives a lane the deploy
+    // renamed and the *resolver* reports it. The catalog form is the write
+    // path's, where an undeclared lane is refused by name.
     expect(sanitizeOverrides({ primaryLane: "openrouter" })).toEqual({
       primaryLane: "openrouter",
     });

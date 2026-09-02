@@ -37,7 +37,7 @@ import {
 import { getSettingsOverrides } from "../settings";
 import { getLaneCatalog } from "../lanes/catalog";
 import { resolveLane, type ResolvedLane } from "../lanes/resolve";
-import { getHarnessAdapter } from "../harness/claude-code";
+import { getHarnessAdapter } from "../harness/registry";
 import { getDocker } from "../docker/client";
 import { getInstallationToken } from "../github/client";
 import { commentOnIssue, parseIssueRef } from "../github/issues";
@@ -696,6 +696,40 @@ function requireLane(
 }
 
 /**
+ * The lane a follow-up turn runs on, or null with the reason on the task's
+ * feed (issue #172).
+ *
+ * The note is written at most once per stretch of failure: this is called from
+ * a two-second poll, so an unfixed misconfiguration would otherwise bury the
+ * conversation under thousands of identical lines. Comparing against the
+ * latest message is enough — anything the owner or the agent says in between
+ * makes the note current news again.
+ */
+function laneForFollowUp(
+  taskId: string,
+  kind: AgentPassKind,
+  ticketModel: string | null
+): ResolvedLane | null {
+  try {
+    return requireLane(kind, ticketModel);
+  } catch (err) {
+    const text = `Cannot start this turn — ${err instanceof Error ? err.message : String(err)}`;
+    const latest = db
+      .select({ content: messages.content })
+      .from(messages)
+      .where(eq(messages.taskId, taskId))
+      .orderBy(desc(messages.createdAt))
+      .limit(1)
+      .get();
+    if (latest?.content !== JSON.stringify({ text })) {
+      insertSystemMessage(taskId, text);
+      console.error(`[orchestrator] ${taskId}: ${text}`);
+    }
+    return null;
+  }
+}
+
+/**
  * How long the recorder will wait for the daemon to say what an exec exited
  * with (issue #165). Deliberately *not* the shared `DOCKER_PROBE_TIMEOUT_MS`,
  * and shorter than it: every other bounded Docker probe in the fleet is
@@ -870,9 +904,19 @@ export async function processQueuedMessages(
     // Resolve the lane before anything is consumed (issue #172). Fresh on
     // every follow-up turn, so a tier or lane changed mid-session applies from
     // the next one (issue #166) — and *before* the dequeue below, because a
-    // throw after a message is marked delivered would burn the owner's turn on
-    // a misconfiguration and strand the task non-terminal.
-    const passLane = requireLane(task.kind, run?.model ?? null);
+    // failure after a message is marked delivered would burn the owner's turn
+    // on a misconfiguration and strand the task non-terminal.
+    //
+    // Reported rather than thrown, unlike `startTask`'s. There is no failure
+    // path to fall into here: the only caller is the poll loop's resume, whose
+    // `.catch` logs to the console, so a throw would leave the task `running`
+    // with its message queued and nothing on the feed while the loop retried
+    // every two seconds forever — the "dies with Not logged in" failure this
+    // ticket removes, re-created one layer up. Leaving the turn for a later
+    // poll is right (the fix is an env var away, and the session is otherwise
+    // healthy); saying so on the feed once is what was missing.
+    const passLane = laneForFollowUp(taskId, task.kind, run?.model ?? null);
+    if (passLane === null) break;
 
     // Find oldest undelivered user message
     const queued = db
