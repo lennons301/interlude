@@ -1,6 +1,8 @@
 import { db } from "@/db";
 import { tasks, messages } from "@/db/schema";
-import { eq, and, isNull, asc, sql } from "drizzle-orm";
+import { eq, and, isNull, asc, ne, sql } from "drizzle-orm";
+import { readLaneCrossing } from "../lanes/overflow-state";
+import { noteOnceOnFeed } from "../tasks/feed-note";
 import { startTask } from "./turn-manager";
 import {
   abandonSessionWithoutContainer,
@@ -199,6 +201,61 @@ async function reconcileSlotsAgainstDaemon(): Promise<boolean> {
   return released;
 }
 
+/**
+ * The head of the queue: interactive tasks the owner dispatched first (issue
+ * #15), then review passes (they finish in-flight work rather than starting
+ * more — issue #17), then triage (shaping the backlog is cheap and new issues
+ * get met on arrival — issue #23), then implements; oldest first within a
+ * kind.
+ *
+ * `skipInteractive` is issue #173's hold: the same ordering over everything
+ * else, so the kind that cannot start is stepped over rather than starving
+ * the rest.
+ */
+function nextQueuedTask(skipInteractive: boolean) {
+  return db
+    .select()
+    .from(tasks)
+    .where(
+      skipInteractive
+        ? and(eq(tasks.status, "queued"), ne(tasks.kind, "interactive"))
+        : eq(tasks.status, "queued")
+    )
+    .orderBy(
+      sql`case ${tasks.kind} when 'interactive' then 0 when 'review' then 1 when 'triage' then 2 else 3 end`,
+      asc(tasks.createdAt)
+    )
+    .get();
+}
+
+/**
+ * Whether the money guards refuse to let an attended session start (issue
+ * #173), telling the human why on the task's own feed.
+ *
+ * The refusal is the crossing's, evaluated through the one function the turn
+ * manager routes a pass with and the task screen offers the confirmation
+ * from, so the queue can never decline a pass the screen says is fine. Only
+ * the task at the head is told: it is the one that would have started, and
+ * every other queued session gets its own line when it gets there — a note
+ * per queued task per poll would be a message storm on a fleet that is walled
+ * for five hours.
+ *
+ * The task is left `queued`, not failed: a confirmation is a press away and
+ * the cap lifts itself at midnight, so there is work here to start rather
+ * than work to abandon.
+ */
+function attendedPickupIsHeld(taskId: string): boolean {
+  const { refusal } = readLaneCrossing("interactive");
+  if (refusal === null) return false;
+
+  if (noteOnceOnFeed(taskId, refusal.message)) {
+    console.log(
+      `[orchestrator] Task ${taskId} waits in queue — ${refusal.reason} (issue #173)`
+    );
+  }
+  return true;
+}
+
 export function startQueue(): void {
   if (pollInterval) return;
 
@@ -222,15 +279,18 @@ export function startQueue(): void {
       // in-flight work rather than starting more (issue #17); triage passes
       // outrank implements because shaping the backlog is cheap and new
       // issues get met on arrival (issue #23); within a kind, oldest first.
-      const next = db
-        .select()
-        .from(tasks)
-        .where(eq(tasks.status, "queued"))
-        .orderBy(
-          sql`case ${tasks.kind} when 'interactive' then 0 when 'review' then 1 when 'triage' then 2 else 3 end`,
-          asc(tasks.createdAt)
-        )
-        .get();
+      let next = nextQueuedTask(false);
+
+      // An attended session the money guards refuse must not start — and must
+      // not sit at the head of the queue holding everything behind it either
+      // (issue #173). Interactive work sorts first, so a fleet waiting on one
+      // press would otherwise stop starting the review passes and resumes that
+      // finish work already paid for. The hold is fleet-wide for interactive
+      // passes, so skipping the whole kind is exactly the right width; the
+      // task stays `queued` and starts on the poll after the press.
+      if (next?.kind === "interactive" && attendedPickupIsHeld(next.id)) {
+        next = nextQueuedTask(true);
+      }
 
       if (next && !inFlightTasks.has(next.id)) {
         if (!capacityProvider) {

@@ -195,6 +195,19 @@ export interface ResolveLaneInput extends LaneSettingsInput {
   /** A ticket's `model:` directive, already normalised to a tier by the
    * directive parser; null for a pass that carries none. */
   ticketModel: string | null;
+  /**
+   * Resolve *this* lane rather than the primary — the overflow target an
+   * attended session crosses onto when the subscription window is walled
+   * (issue #173). Absent (the normal case) resolves the primary.
+   *
+   * A parameter rather than a second resolver, because everything below it is
+   * identical whichever lane is being resolved — the availability report, the
+   * tier lookup, the one and only read of a credential — and a copy of it
+   * would be a second place for "which variables does this lane need?" to be
+   * answered. `choice` still describes the *primary* choice, so a caller can
+   * always say which lane the fleet is nominally on.
+   */
+  laneId?: string | null;
 }
 
 /**
@@ -216,10 +229,11 @@ export function resolveLane({
   ticketModel,
   overrides,
   env,
+  laneId,
 }: ResolveLaneInput): LaneResolution {
   const choice = choosePrimaryLane(primaryLaneInput({ catalog, config, overrides, env }));
 
-  const lane = findLane(catalog, choice.laneId);
+  const lane = findLane(catalog, laneId ?? choice.laneId);
   if (lane === null) {
     return {
       ok: false,
