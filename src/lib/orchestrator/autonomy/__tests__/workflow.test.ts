@@ -406,7 +406,10 @@ describe("buildReviewPrompt", () => {
 
 describe("buildResumePrompt — reopening a paused pass (issue #169)", () => {
   const RESUMED = {
-    originalPrompt: buildImplementPrompt({ ...TICKET, workflow: { skill: null } }),
+    originalPrompt: buildImplementPrompt({
+      ...TICKET,
+      workflow: { source: "default" as const },
+    }),
     branch: "agent/issue-7",
     resume: 1,
     maxResumes: 3,

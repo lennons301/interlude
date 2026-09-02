@@ -2568,6 +2568,18 @@ async function executeResumeRun(
   const run = db.select().from(runs).where(eq(runs.id, action.runId)).get();
   if (!run || run.status !== "rate_limited") return;
 
+  // Re-read the idempotency fact the decision was made on. The run stays
+  // `rate_limited` while its resume is queued, so status alone cannot say
+  // whether one is already under way — and two sweeps can be in flight at once
+  // (a webhook-triggered one runs on the app router's module graph, issue
+  // #159), which would otherwise mean two containers for one run.
+  const alreadyResuming = db
+    .select({ id: tasks.id })
+    .from(tasks)
+    .where(and(eq(tasks.runId, run.id), inArray(tasks.status, ["queued", "running"])))
+    .all();
+  if (alreadyResuming.length > 0) return;
+
   // The pass that was paused — its prompt, its kind and its session. The run's
   // most recent work-carrying task: a repair pass can be walled exactly as an
   // implement pass can, and resuming it as an implement pass would hand a
