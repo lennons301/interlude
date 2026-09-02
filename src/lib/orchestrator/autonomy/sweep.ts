@@ -10,7 +10,7 @@ import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { newId } from "../../ulid";
 import { getConfig, PLATFORM_REPO_URL } from "../../config";
-import { isGlobalAutonomyPaused } from "../../settings";
+import { getFleetSettings } from "../../settings";
 import { getOctokit, isGitHubConfigured } from "../../github/client";
 import { fetchFileFromDefaultBranch } from "../../github/contents";
 import {
@@ -34,6 +34,8 @@ import { parseRepoFromGitUrl } from "../../github/repo";
 import {
   notifyAttemptsExhausted,
   notifyDailyCapReached,
+  notifyMeteredCapReached,
+  notifyMeteredConfirmationRequired,
   notifyChecksEscalation,
   notifyGateConfigError,
   notifyIntegrationEscalation,
@@ -58,9 +60,12 @@ import {
   type QueuedTaskObservation,
 } from "../../fleet/health";
 import { recordFleetHealth } from "../../fleet/health-store";
+import { getLaneCatalog } from "../../lanes/catalog";
+import { primaryLaneOf } from "../../lanes/resolve";
+import { resolveMeteredCap } from "../../lanes/money";
 import { getCapacity } from "../capacity";
 import { getQueueLastProgress, isQueueRunning, occupiedSlots } from "../queue";
-import { startOfLocalDay, todayAutonomousSpendUsd } from "../spend";
+import { startOfLocalDay, todayAutonomousSpendUsd, todayMeteredSpendUsd } from "../spend";
 import { getActiveTasks, isParked, releaseParkedImplementTask } from "../turn-manager";
 import {
   decideNext,
@@ -155,6 +160,13 @@ let fleetHealthState: FleetHealthState = EMPTY_FLEET_HEALTH_STATE;
 // The local day (startOfLocalDay ms) whose cap pause was announced — keyed by
 // day rather than a boolean so the announcement re-arms itself at midnight.
 let dailyCapAnnouncedDay: number | null = null;
+// Same, for the two money guards (issue #174): the local day whose real-money
+// cap pause was announced, and the day whose spend confirmation was asked for.
+// Separate from each other and from the cap above because they are separate
+// news — a fleet told about its cash cap has not been asked to confirm
+// anything, and vice versa.
+let meteredCapAnnouncedDay: number | null = null;
+let meteredConfirmationAnnouncedDay: number | null = null;
 const inFlightClaims = new Set<string>();
 // Run IDs whose gate-config failure the owner has already been told about —
 // once per failure, not once per sweep. Pruned as runs leave the pending set.
@@ -437,6 +449,33 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
   const config = getConfig();
   const capacity = await getCapacity();
 
+  // The durable settings row, read once per tick and never cached — the same
+  // freshness rule the kill switch has always had, now carrying the money
+  // guards' confirmation too (issue #174). One read, because the two must
+  // describe the same instant.
+  const fleetSettings = getFleetSettings();
+
+  // Which lane work would run on, and who pays for it. Resolved every tick
+  // from the checked-in catalog plus the *current* overrides, which is what
+  // makes switching the primary lane between billing kinds take effect at the
+  // next sweep with no restart. Null when nothing resolves — an unreadable
+  // lane file, or a choice naming no declared lane — which the money guards
+  // treat as deciding nothing, since such a fleet spends nothing at all.
+  const catalog = getLaneCatalog();
+  const primaryLane = catalog.ok
+    ? primaryLaneOf({
+        catalog: catalog.catalog,
+        config,
+        overrides: fleetSettings.overrides,
+        env: process.env,
+      })
+    : null;
+  const meteredCap = resolveMeteredCap(
+    config,
+    fleetSettings.overrides,
+    primaryLane?.caps.dailyBudgetUsd ?? null
+  );
+
   const registered = db
     .select()
     .from(projects)
@@ -626,7 +665,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     // Read fresh on every tick, never cached or captured at boot: that is what
     // makes the kill switch (issue #118) take effect at the next sweep rather
     // than at the next restart.
-    globalPaused: isGlobalAutonomyPaused(),
+    globalPaused: fleetSettings.globalAutonomyPaused,
     // MAX_BUDGET_USD is the per-attempt default since Phase 5 (a ticket's
     // budget: directive may raise a single attempt to the $75 ceiling)
     attemptBudgetUsd: config.maxBudgetUsd,
@@ -638,6 +677,16 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     todayAutonomousSpendUsd: todayAutonomousSpendUsd(now),
     dailyCapUsd: DAILY_AUTONOMOUS_CAP_USD,
     dailyCapAnnounced: dailyCapAnnouncedDay === startOfLocalDay(now).getTime(),
+    primaryLaneId: primaryLane?.id ?? null,
+    primaryLaneBilling: primaryLane?.billing ?? null,
+    meteredSpendTodayUsd: todayMeteredSpendUsd(now),
+    meteredCapUsd: meteredCap.capUsd,
+    meteredSpendConfirmedAt: fleetSettings.meteredSpendConfirmedAt,
+    // Both keyed by local day rather than by a boolean, exactly as the daily
+    // cap's is, so each announcement re-arms itself at midnight.
+    meteredCapAnnounced: meteredCapAnnouncedDay === startOfLocalDay(now).getTime(),
+    meteredConfirmationAnnounced:
+      meteredConfirmationAnnouncedDay === startOfLocalDay(now).getTime(),
     allowedAuthors: config.autonomyAllowedAuthors,
     slots: { total: capacity.slots, occupied: occupiedSlots(), occupants },
     queuedInteractiveCount: queuedTasks.filter((t) => t.kind === "interactive").length,
@@ -1321,6 +1370,27 @@ async function executeActions(actions: Action[]): Promise<void> {
           );
           dailyCapAnnouncedDay = startOfLocalDay(new Date()).getTime();
           await notifyDailyCapReached(getConfig().discordFleetChannelId, action.payload);
+        } else if (action.event === "metered-cap-reached") {
+          console.log(
+            `[autonomy] Real-money cap reached ($${action.payload.spentUsd.toFixed(2)} / ` +
+              `$${action.payload.capUsd.toFixed(2)} on ${action.payload.laneId ?? "a metered lane"}) ` +
+              `— pickup paused until local midnight`
+          );
+          meteredCapAnnouncedDay = startOfLocalDay(new Date()).getTime();
+          await notifyMeteredCapReached(
+            getConfig().discordFleetChannelId,
+            action.payload
+          );
+        } else if (action.event === "metered-confirmation-required") {
+          console.log(
+            `[autonomy] Pickup held: ${action.payload.laneId ?? "the primary lane"} bills real ` +
+              `money and today's spend is unconfirmed (cap $${action.payload.capUsd.toFixed(2)})`
+          );
+          meteredConfirmationAnnouncedDay = startOfLocalDay(new Date()).getTime();
+          await notifyMeteredConfirmationRequired(
+            getConfig().discordFleetChannelId,
+            action.payload
+          );
         } else if (action.event === "gate-config-error") {
           await executeGateConfigError(action.payload);
         } else if (action.event === "verdict-unparseable") {
