@@ -65,9 +65,16 @@ export interface QuotaRejection {
   limitType: string | null;
 }
 
-/** The two fields of a `TurnResult` this reads — narrowed so a caller cannot
- * accidentally pass a stale, re-read turn. */
-export interface RateLimitedTurn {
+/**
+ * The two fields of a `TurnResult` the decision reads.
+ *
+ * Named for the signals rather than the conclusion — a turn carrying these is
+ * one that *might* have been refused, which is the question — and narrowed to
+ * exactly them so the type states what the decision depends on: nothing about
+ * cost, session or subtype is consulted, and a caller reading this signature
+ * does not have to take that on trust.
+ */
+export interface TurnQuotaSignals {
   terminalResult: Record<string, unknown> | null;
   rateLimit: QuotaObservation | null;
 }
@@ -104,7 +111,7 @@ function exitedOnApiError(terminal: Record<string, unknown> | null): boolean {
  * ticket can find it, so the pass takes its ordinary path and the attempt is
  * spent, exactly as before this ticket.
  */
-export function detectQuotaRejection(turn: RateLimitedTurn): QuotaRejection | null {
+export function detectQuotaRejection(turn: TurnQuotaSignals): QuotaRejection | null {
   const observed = turn.rateLimit;
   if (observed === null || observed.status !== REJECTED_STATUS) return null;
   if (!exitedOnApiError(turn.terminalResult)) return null;

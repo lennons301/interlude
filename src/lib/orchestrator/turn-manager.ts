@@ -41,13 +41,13 @@ import { commentOnIssue, parseIssueRef } from "../github/issues";
 import { parseRepoFromGitUrl } from "../github/repo";
 import { createDraftPr, markPrReady, shouldOpenDraftPr } from "../github/pull-requests";
 import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed, notifyTaskIdle, notifyRunBlocked } from "../discord/notifications";
-import { decideNext, passOutcomeSnapshot } from "./autonomy/decide";
+import { decideNext, passOutcomeSnapshot, type Action } from "./autonomy/decide";
 import { composeSeed, composeSessionTurn } from "../sessions/seed";
 import { processSingleton } from "../process-singleton";
 import { storedTaskStatus, taskIsFinished } from "../tasks/stored-status";
 import {
   detectQuotaRejection,
-  type RateLimitedTurn,
+  type TurnQuotaSignals,
 } from "../quota/rate-limit-rejection";
 import { describeRateLimitType } from "../quota/rate-limit-event";
 
@@ -519,10 +519,12 @@ export async function startTask(taskId: string): Promise<void> {
           return;
         }
       }
-      // The pass's turn is over: park it blocked if its final message carries
-      // the BLOCKED marker on any line (issue #107) — container kept alive,
-      // question escalated to the owner (issue #19); or fail the attempt if it
-      // left no PR and no question, so the run cannot dangle as a ghost (issue
+      // The pass's turn is over: park the run on the quota clock if the account
+      // refused the pass (issue #168) — container torn down, no attempt spent;
+      // park it blocked if its final message carries the BLOCKED marker on any
+      // line (issue #107) — container kept alive, question escalated to the
+      // owner (issue #19); or fail the attempt if it left no PR and no
+      // question, so the run cannot dangle as a ghost (issue
       // #106). Otherwise the initial turn is the whole pass: mark the PR ready
       // and park the container awaiting review — it stays alive (holding no
       // slot) so a request-changes verdict can deliver a fix-up turn into the
@@ -1424,14 +1426,16 @@ function lastAgentTextMessage(taskId: string): string | null {
 
 /**
  * What the reducer decided about an implement pass whose turn just ended:
+ * - `paused`    — the account's quota refused the pass, so the run waits on the
+ *                 window's reset; container torn down (issue #168)
  * - `blocked`   — parked on a question (issue #19); container preserved (#93)
  * - `finalized` — no PR and no question, so the run was failed to a terminal
  *                 status rather than left dangling (issue #106)
  * - `proceed`   — healthy; the caller finishes the pass (park awaiting review,
  *                 or complete the task when there is a PR to hand over)
  *
- * The first two are fully handled inside `evaluatePassOutcome`; only `proceed`
- * leaves anything for the caller.
+ * The first three are fully handled inside `evaluatePassOutcome`; only
+ * `proceed` leaves anything for the caller.
  */
 type PassDecision = "blocked" | "finalized" | "paused" | "proceed";
 
@@ -1456,7 +1460,7 @@ type PassDecision = "blocked" | "finalized" | "paused" | "proceed";
  */
 export async function evaluatePassOutcome(
   taskId: string,
-  turn: Pick<TurnResult, "finalMessage"> & RateLimitedTurn
+  turn: Pick<TurnResult, "finalMessage"> & TurnQuotaSignals
 ): Promise<PassDecision> {
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
   if (!task?.runId || !task.githubIssue) return "proceed";
@@ -1484,7 +1488,7 @@ export async function evaluatePassOutcome(
 
   for (const action of actions) {
     if (action.type === "pauseRunOnRateLimit") {
-      await pauseRunOnRateLimit(taskId, action);
+      await pauseRunOnRateLimit(action);
       return "paused";
     }
     if (action.type === "escalate" && action.reason === "blocked") {
@@ -1529,9 +1533,9 @@ export async function evaluatePassOutcome(
  * paused, and the run is where the resume will be decided.
  */
 async function pauseRunOnRateLimit(
-  taskId: string,
-  pause: { runId: string; resumeAfter: Date; limitType: string | null }
+  pause: Extract<Action, { type: "pauseRunOnRateLimit" }>
 ): Promise<void> {
+  const taskId = pause.taskId;
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
   const run = db.select().from(runs).where(eq(runs.id, pause.runId)).get();
 
