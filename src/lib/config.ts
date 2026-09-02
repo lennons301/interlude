@@ -1,6 +1,7 @@
 import {
   ALLOWED_TICKET_EFFORTS,
   DEFAULT_ATTEMPT_BUDGET_USD,
+  DEFAULT_METERED_DAILY_CAP_USD,
   DEFAULT_OCCUPANCY_DIVERGED_MS,
   DEFAULT_OWED_REVIEW_STALL_MS,
   DEFAULT_PICKUP_WEDGED_MS,
@@ -20,6 +21,25 @@ function minutesEnvMs(raw: string | undefined, defaultMs: number): number {
   if (raw == null || raw === "") return defaultMs;
   const mins = parseFloat(raw);
   return Number.isFinite(mins) && mins > 0 ? mins * 60_000 : defaultMs;
+}
+
+/** Parse an env value expressed in dollars, falling back to a default. A
+ * blank, non-numeric or non-positive value keeps the default: a mistyped cash
+ * ceiling must never silently become 0 (which would read as "never spend" and
+ * hold the fleet) or NaN (which compares false against everything, and would
+ * read as "spend without limit"). */
+function positiveEnvNumber(
+  envVar: string,
+  raw: string | undefined,
+  fallback: number
+): number {
+  if (raw == null || raw === "") return fallback;
+  const value = parseFloat(raw);
+  if (Number.isFinite(value) && value > 0) return value;
+  console.warn(
+    `Warning: ignoring non-positive ${envVar} "${raw}" — keeping $${fallback}.`
+  );
+  return fallback;
 }
 
 /**
@@ -93,6 +113,16 @@ export interface AppConfig {
    * passes carry their own ~$5 allowance instead.
    */
   maxBudgetUsd: number;
+  /**
+   * The deployment's real-money daily cap in USD (issue #174): how much cash
+   * the fleet may spend through a **metered** execution lane in one local day.
+   * Distinct from `maxBudgetUsd` (per attempt) and from the $500 estate cap
+   * (which measures quota-funded autonomous work): this one measures money, so
+   * subscription-lane work never touches it. The settings UI may override it up
+   * to MAX_METERED_DAILY_CAP_USD; a lane's own declared `caps.daily_budget_usd`
+   * binds on top of whichever value is in force.
+   */
+  meteredDailyCapUsd: number;
   /** Explicit agent slot count, overriding the boot-time derivation. Null = derive from the Docker daemon */
   capacitySlots: number | null;
   /** Per-agent memory allocation in MiB (container cap + slot divisor). Null = default */
@@ -190,6 +220,11 @@ export function getConfig(): AppConfig {
     maxTurns: parseInt(process.env.MAX_TURNS ?? "50", 10),
     maxBudgetUsd: parseFloat(
       process.env.MAX_BUDGET_USD ?? String(DEFAULT_ATTEMPT_BUDGET_USD)
+    ),
+    meteredDailyCapUsd: positiveEnvNumber(
+      "METERED_DAILY_CAP_USD",
+      process.env.METERED_DAILY_CAP_USD,
+      DEFAULT_METERED_DAILY_CAP_USD
     ),
     capacitySlots: process.env.CAPACITY_SLOTS
       ? parseInt(process.env.CAPACITY_SLOTS, 10)

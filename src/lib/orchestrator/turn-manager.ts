@@ -36,6 +36,7 @@ import {
 } from "../config";
 import { getSettingsOverrides } from "../settings";
 import { getLaneCatalog } from "../lanes/catalog";
+import { recordMeteredSpend } from "./spend";
 import { resolveLane, type ResolvedLane } from "../lanes/resolve";
 import { getHarnessAdapter } from "../harness/registry";
 import { getDocker } from "../docker/client";
@@ -338,8 +339,19 @@ export async function startTask(taskId: string): Promise<void> {
     // every turn as `--effort` and recorded on the run row below.
     const passEffort = resolveAgentEffort(task.kind, getConfig(), run?.effort ?? null);
 
-    // Update task status
-    updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
+    // Update task status, and record the lane this pass runs on with it
+    // (issues #172, #174). The billing kind is written *here*, on the task,
+    // because the task is the unit money is spent by: a run's lane covers its
+    // implement pass, but triage owns no run and an interactive session never
+    // has one, and the real-money cap has to see every dollar that went
+    // through a metered lane today or it is not measuring money.
+    updateTask(taskId, {
+      status: "running",
+      branch,
+      containerStatus: "setup",
+      lane: passLane.id,
+      laneBilling: passLane.billing,
+    });
     insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
 
     // Only an implement-shaped pass moves the run to `implementing` — a review
@@ -368,6 +380,7 @@ export async function startTask(taskId: string): Promise<void> {
           status: "implementing",
           startedAt: run.startedAt ?? new Date(),
           lane: passLane.id,
+          laneBilling: passLane.billing,
           model: passLane.tier ?? passModel,
           effort: passEffort,
         })
@@ -924,6 +937,12 @@ export async function processQueuedMessages(
     // healthy); saying so on the feed once is what was missing.
     const passLane = laneForFollowUp(taskId, task.kind, run?.model ?? null);
     if (passLane === null) break;
+    // Re-recorded per turn, latest wins (issue #174). A session whose lane was
+    // switched mid-flight has spent on both, and the task carries one figure;
+    // attributing the lot to the lane it is on *now* is the direction that
+    // fails safe, since over-reporting real money pauses pickup early while
+    // under-reporting spends past the cap.
+    updateTask(taskId, { lane: passLane.id, laneBilling: passLane.billing });
 
     // Find oldest undelivered user message
     const queued = db
@@ -1964,8 +1983,28 @@ function updateTask(
     pullRequestUrl: string | null;
     discordMessageId: string | null;
     triageResult: (typeof tasks.$inferSelect)["triageResult"];
+    lane: string | null;
+    laneBilling: "subscription" | "metered" | null;
   }>
 ): void {
+  // The one funnel every task-cost write goes through, which is why the
+  // real-money ledger (issue #174) is booked here rather than at the two call
+  // sites: a later third caller cannot forget it. Only the *increment* is
+  // booked, and only when the pass in hand ran on a metered lane — so a
+  // session whose lane was switched mid-flight has each turn's dollars
+  // attributed to the lane that actually spent them, which no single column on
+  // the row could say.
+  if (fields.totalCostUsd !== undefined) {
+    const before = db
+      .select({ total: tasks.totalCostUsd, billing: tasks.laneBilling })
+      .from(tasks)
+      .where(eq(tasks.id, taskId))
+      .get();
+    if (before?.billing === "metered") {
+      recordMeteredSpend(before.total ?? 0, fields.totalCostUsd);
+    }
+  }
+
   db.update(tasks)
     .set({ ...fields, updatedAt: new Date() })
     .where(eq(tasks.id, taskId))

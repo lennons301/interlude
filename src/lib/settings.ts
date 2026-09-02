@@ -22,6 +22,12 @@ import {
 export interface FleetSettings {
   /** The global autonomy kill switch: engaged, no sweep claims new work */
   globalAutonomyPaused: boolean;
+  /** When a human last confirmed that the fleet may spend real money (issue
+   * #174); null = never. Whether that confirmation covers *today* is the
+   * reader's judgement (`sameLocalDay`), not a stored boolean — a boolean
+   * would need someone to clear it at local midnight, and nothing here runs at
+   * midnight. */
+  meteredSpendConfirmedAt: Date | null;
   /** Env-config overrides set from the UI (issue #166). A field absent here
    * falls through to the environment default — see `settings-resolver.ts`,
    * which owns the allowlist, the validation and the merge. */
@@ -32,6 +38,7 @@ export interface FleetSettings {
 
 const DEFAULTS: FleetSettings = {
   globalAutonomyPaused: false,
+  meteredSpendConfirmedAt: null,
   overrides: {},
   updatedAt: null,
 };
@@ -47,6 +54,7 @@ export function getFleetSettings(): FleetSettings {
   if (!row) return { ...DEFAULTS };
   return {
     globalAutonomyPaused: row.globalAutonomyPaused,
+    meteredSpendConfirmedAt: row.meteredSpendConfirmedAt,
     // Defensive: the column is JSON an older build wrote, so a retired key or
     // a value a since-narrowed vocabulary no longer accepts falls through to
     // the environment rather than reaching the CLI.
@@ -101,6 +109,34 @@ export function setGlobalAutonomyPaused(
     .onConflictDoUpdate({
       target: settings.id,
       set: { globalAutonomyPaused: paused, updatedAt: now },
+    })
+    .run();
+  return getFleetSettings();
+}
+
+/**
+ * Record (or withdraw) the fleet's confirmation that it may spend real money
+ * today (issue #174). Upserts the single row like the kill switch does.
+ *
+ * Withdrawing writes null rather than an older timestamp: "confirmed, but for
+ * a day that has passed" and "not confirmed" are the same state to every
+ * reader, and keeping a stale stamp would only invite a reader to treat it as
+ * evidence of something.
+ */
+export function setMeteredSpendConfirmed(
+  confirmed: boolean,
+  now: Date = new Date()
+): FleetSettings {
+  const at = confirmed ? now : null;
+  db.insert(settings)
+    .values({
+      id: SETTINGS_ROW_ID,
+      meteredSpendConfirmedAt: at,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: settings.id,
+      set: { meteredSpendConfirmedAt: at, updatedAt: now },
     })
     .run();
   return getFleetSettings();

@@ -1,7 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import * as schema from "@/db/schema";
 import { createTestDb } from "@/test/create-test-db";
-import { todayAutonomousSpendUsd, startOfLocalDay } from "../spend";
+import {
+  localDayKey,
+  recordMeteredSpend,
+  todayAutonomousSpendUsd,
+  todayMeteredSpendUsd,
+  startOfLocalDay,
+} from "../spend";
 
 // Use an in-memory SQLite database for tests
 let testDb: ReturnType<typeof createTestDb>["db"];
@@ -138,5 +144,71 @@ describe("startOfLocalDay", () => {
     const input = new Date(NOW);
     startOfLocalDay(input);
     expect(input.getTime()).toBe(NOW.getTime());
+  });
+});
+
+/**
+ * The real-money ledger (issue #174). What makes it a ledger rather than a sum
+ * is the thing tested hardest here: an increment is booked to the day it
+ * lands on, so a task whose running total spans days is attributed exactly
+ * rather than guessed at from a column on its row.
+ */
+describe("the real-money ledger", () => {
+  beforeEach(() => {
+    testDb = createTestDb().db;
+  });
+
+  it("reads zero on a day nothing was charged", () => {
+    expect(todayMeteredSpendUsd(NOW)).toBe(0);
+  });
+
+  it("keys days by the local calendar, not UTC", () => {
+    expect(localDayKey(new Date(2026, 7, 1, 0, 0, 0))).toBe("2026-08-01");
+    expect(localDayKey(new Date(2026, 7, 1, 23, 59, 59))).toBe("2026-08-01");
+    expect(localDayKey(new Date(2026, 6, 31, 23, 0, 0))).toBe("2026-07-31");
+  });
+
+  it("books only the increment, so a running total is never re-counted", () => {
+    recordMeteredSpend(0, 4, TODAY_9AM);
+    recordMeteredSpend(4, 6.5, NOW);
+
+    expect(todayMeteredSpendUsd(NOW)).toBeCloseTo(6.5);
+  });
+
+  it("is idempotent — the same total written twice adds nothing", () => {
+    recordMeteredSpend(0, 4, NOW);
+    recordMeteredSpend(4, 4, NOW);
+
+    expect(todayMeteredSpendUsd(NOW)).toBeCloseTo(4);
+  });
+
+  it("treats a decrease as no spend, never as a refund", () => {
+    recordMeteredSpend(0, 10, NOW);
+    recordMeteredSpend(10, 3, NOW);
+
+    expect(todayMeteredSpendUsd(NOW)).toBeCloseTo(10);
+  });
+
+  it("splits a task's spend across the days it actually spent on", () => {
+    // The case no column on the task row could answer: a session opened
+    // yesterday, driven again today. Yesterday keeps its $9; today owes $2.
+    recordMeteredSpend(0, 9, YESTERDAY_11PM);
+    recordMeteredSpend(9, 11, NOW);
+
+    expect(todayMeteredSpendUsd(YESTERDAY_11PM)).toBeCloseTo(9);
+    expect(todayMeteredSpendUsd(NOW)).toBeCloseTo(2);
+  });
+
+  it("keeps a past day readable, so the digest reports the day it covers", () => {
+    recordMeteredSpend(0, 12, YESTERDAY_11PM);
+
+    expect(todayMeteredSpendUsd(NOW)).toBe(0);
+    expect(todayMeteredSpendUsd(YESTERDAY_11PM)).toBeCloseTo(12);
+  });
+
+  it("counts a spend at the very start of the day into that day", () => {
+    recordMeteredSpend(0, 1, MIDNIGHT);
+
+    expect(todayMeteredSpendUsd(NOW)).toBeCloseTo(1);
   });
 });

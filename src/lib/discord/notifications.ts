@@ -810,6 +810,73 @@ export async function notifyQuotaGateClosed(
 }
 
 /**
+ * The real-money cap (issue #174). Its own embed rather than a variant of the
+ * daily-cap one below, because the reader's question is different: that cap is
+ * a plan being pushed hard, this one is a card being charged, and the lane
+ * doing the charging is the fact that makes it actionable.
+ */
+export async function notifyMeteredCapReached(
+  channelId: string | null,
+  payload: { spentUsd: number; capUsd: number; laneId: string | null }
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await fetchTextChannel(channelId);
+
+    const embed = new EmbedBuilder()
+      .setTitle("Real-money daily cap reached")
+      .setDescription(
+        `$${payload.spentUsd.toFixed(2)} of the $${payload.capUsd.toFixed(2)} real-money ` +
+          `cap is spent on ${payload.laneId ?? "a metered lane"} — autonomous pickup is ` +
+          `paused until local midnight. Raise the cap in Settings if this was expected.`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send metered-cap notification:`, err);
+  }
+}
+
+/**
+ * The confirm-once-per-day gate (issue #174), asked out loud. Nobody is at the
+ * keyboard when an autonomous pass crosses into billing, so a fleet that only
+ * *waited* would read exactly like an idle one — the silent-wedge failure this
+ * platform has been bitten by before. One ping per local day, deduped on the
+ * day by the sweep, the same discipline every other announcement here keeps.
+ */
+export async function notifyMeteredConfirmationRequired(
+  channelId: string | null,
+  payload: { capUsd: number; laneId: string | null }
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await fetchTextChannel(channelId);
+
+    const embed = new EmbedBuilder()
+      .setTitle("Real-money spend needs confirming")
+      .setDescription(
+        `${payload.laneId ?? "The primary lane"} bills per token, and today's spend ` +
+          `hasn't been confirmed — autonomous pickup is held. Confirm it once in ` +
+          `Settings and the fleet runs unattended up to $${payload.capUsd.toFixed(2)} ` +
+          `for the rest of the day. In-flight runs and interactive work are unaffected.`
+      )
+      .setColor(0xf59e0b);
+
+    await sendWithRetry(channel, embed);
+  } catch (err) {
+    console.error(
+      `[discord] Failed to send metered-confirmation notification:`,
+      err
+    );
+  }
+}
+
+/**
  * Announce (once per day — the sweep tracks the flag) that the daily
  * autonomous spend cap paused pickup. Interactive work is unaffected and the
  * pause lifts at local midnight. No-op when no fleet channel is configured.

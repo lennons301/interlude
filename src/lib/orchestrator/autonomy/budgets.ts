@@ -149,3 +149,29 @@ export const DEFAULT_QUEUE_HEARTBEAT_STALE_MS = 2 * 60_000;
  * ping with over an hour left. Warming the image at boot would let this drop.
  */
 export const DEFAULT_OCCUPANCY_DIVERGED_MS = 20 * 60_000;
+
+/**
+ * Default real-money daily cap in USD (issue #174) — the ceiling on cash spent
+ * through a **metered** lane in one local day, whether that lane is primary,
+ * an overflow target or reached by failover. Deliberately a different number
+ * from DAILY_AUTONOMOUS_CAP_USD and not a fraction of it: that cap measures
+ * quota-funded work, where $500/day is a statement about how hard a
+ * fixed-price plan may be pushed, and this one measures a card being charged.
+ * $20 is one full attempt's budget — a metered fleet gets a day's work out of
+ * it and no surprises — and it is the same figure the metered lanes declare in
+ * `lanes.yaml`, so the checked-in file and the compiled-in default agree.
+ * Overridable per deployment via METERED_DAILY_CAP_USD, and from the settings
+ * UI up to the ceiling below.
+ */
+export const DEFAULT_METERED_DAILY_CAP_USD = 20;
+
+/**
+ * Hard ceiling the settings UI may raise the real-money daily cap to (issue
+ * #174). The same rule the per-attempt budget's $75 ceiling states, applied to
+ * the one number that authorises spending actual money: a press on a web page
+ * is not the place to widen a cash ceiling without bound. A deployment that
+ * genuinely wants more sets METERED_DAILY_CAP_USD, which takes a config change
+ * and a restart — the same bar every other safety ceiling here answers to.
+ * Rejected by name in `FIXED_CEILINGS`, never clamped.
+ */
+export const MAX_METERED_DAILY_CAP_USD = 100;

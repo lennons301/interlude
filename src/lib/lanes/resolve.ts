@@ -305,6 +305,22 @@ export interface LaneSettingsView {
 /** The variable the deployment's own lane default comes from. */
 export const LANE_ENV_VAR = "AGENT_LANE";
 
+/**
+ * The lane in force, as a view — id, billing kind and declared caps, with no
+ * credential in sight. What the money guards (issue #174) read: they need to
+ * know who pays and up to how much, and nothing else about the lane. Null when
+ * the choice names no declared lane, which is deliberately *not* a money hold
+ * (see `evaluateMeteredSpend`): such a fleet spends nothing because every pass
+ * refuses to start.
+ *
+ * Deliberately derived from `describeLanes` rather than resolved separately,
+ * so "which lane is primary?" has exactly one answer across the settings
+ * screen, the sweep and the dashboard.
+ */
+export function primaryLaneOf(input: LaneSettingsInput): LaneView | null {
+  return describeLanes(input).lanes.find((lane) => lane.primary) ?? null;
+}
+
 export function describeLanes(input: LaneSettingsInput): LaneSettingsView {
   const { catalog, config, env } = input;
   const overrides = input.overrides;
