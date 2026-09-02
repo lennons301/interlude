@@ -54,13 +54,16 @@ describe("GET/PATCH /api/settings/overrides", () => {
       "modelTierReview",
       "modelTierTriage",
       "modelTierInteractive",
+      "quotaPickupThresholdPercent",
     ]);
-    for (const field of state.fields) {
+    for (const field of state.fields.filter(
+      (f: { detail: { kind: string } }) => f.detail.kind === "model-tier"
+    )) {
       expect(field).toMatchObject({
         source: "environment",
         override: null,
         envValue: "claude-opus-4-8",
-        model: "claude-opus-4-8",
+        detail: { model: "claude-opus-4-8" },
       });
     }
   });
@@ -75,8 +78,7 @@ describe("GET/PATCH /api/settings/overrides", () => {
     ).toMatchObject({
       source: "override",
       override: "light",
-      tier: "light",
-      model: "haiku",
+      detail: { kind: "model-tier", tier: "light", model: "haiku" },
       // Named, because clearing the override lands back here — and it names
       // AGENT_MODEL, the variable that would actually supply the value, since
       // AGENT_MODEL_REVIEW is unset on this install.
@@ -100,7 +102,10 @@ describe("GET/PATCH /api/settings/overrides", () => {
     const state = await res.json();
     expect(
       state.fields.find((f: { key: string }) => f.key === "modelTierTriage")
-    ).toMatchObject({ override: "light", model: "haiku" });
+    ).toMatchObject({
+      override: "light",
+      detail: { kind: "model-tier", model: "haiku" },
+    });
   });
 
   it("clears an override back to the environment default", async () => {

@@ -10,7 +10,10 @@ import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { newId } from "../../ulid";
 import { getConfig, PLATFORM_REPO_URL } from "../../config";
-import { isGlobalAutonomyPaused } from "../../settings";
+import { getFleetSettings } from "../../settings";
+import { resolveQuotaThreshold } from "../../settings-resolver";
+import { evaluateQuotaGate } from "../../quota/quota-gate";
+import { getQuotaObservation } from "../../quota/quota-store";
 import { getOctokit, isGitHubConfigured } from "../../github/client";
 import { fetchFileFromDefaultBranch } from "../../github/contents";
 import {
@@ -40,6 +43,7 @@ import {
   notifyOwedReviewStalled,
   notifyPickupWedged,
   notifyQueueStale,
+  notifyQuotaGateClosed,
   notifyReviewBlocked,
   notifySlotsSaturated,
   notifyStaleReviewEscalation,
@@ -155,6 +159,11 @@ let fleetHealthState: FleetHealthState = EMPTY_FLEET_HEALTH_STATE;
 // The local day (startOfLocalDay ms) whose cap pause was announced — keyed by
 // day rather than a boolean so the announcement re-arms itself at midnight.
 let dailyCapAnnouncedDay: number | null = null;
+// Whether the quota gate's current closed spell has been announced (issue
+// #171) — one Discord ping per transition, not one per 30s sweep. In-memory
+// like the saturation and cap flags beside it, and cleared the moment the gate
+// opens, which is what makes the *next* wall audible again.
+let quotaGateAnnounced = false;
 const inFlightClaims = new Set<string>();
 // Run IDs whose gate-config failure the owner has already been told about —
 // once per failure, not once per sweep. Pruned as runs leave the pending set.
@@ -238,6 +247,26 @@ export async function runAutonomySweep(): Promise<void> {
       saturationAnnounced = false;
     } else if (actions.some((a) => a.type === "notify" && a.event === "slots-saturated")) {
       saturationAnnounced = true;
+    }
+
+    // The quota gate's announcement, on the same pattern (issue #171) — but
+    // cleared from the *gate*, not from whether the reducer paused anything.
+    // The reducer only pauses when there is eligible work to hold, so clearing
+    // on "no pause emitted" would re-arm the ping every time the backlog
+    // emptied under a standing wall and fire it again when the next ticket was
+    // armed. The gate re-opening is the transition; nothing else is.
+    if (
+      !evaluateQuotaGate(
+        snapshot.quota,
+        snapshot.quotaThresholdPercent,
+        snapshot.now
+      ).closed
+    ) {
+      quotaGateAnnounced = false;
+    } else if (
+      actions.some((a) => a.type === "notify" && a.event === "quota-gate-closed")
+    ) {
+      quotaGateAnnounced = true;
     }
 
     // Fleet-health watchdog (issue #126): surface silent pickup/review stalls.
@@ -435,6 +464,11 @@ async function reapOrphanedReviewPasses(): Promise<void> {
 
 async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
   const config = getConfig();
+  // One read of the settings row per tick, for both the runtime flags it
+  // carries: the kill switch (issue #118) and the quota threshold override
+  // (issue #171). Read here rather than cached anywhere, which is what makes a
+  // change on the settings screen take effect at the next sweep.
+  const settings = getFleetSettings();
   const capacity = await getCapacity();
 
   const registered = db
@@ -623,10 +657,18 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
   return {
     now,
     autonomyEnabledGlobal: config.autonomyEnabled,
-    // Read fresh on every tick, never cached or captured at boot: that is what
-    // makes the kill switch (issue #118) take effect at the next sweep rather
-    // than at the next restart.
-    globalPaused: isGlobalAutonomyPaused(),
+    // From the row read fresh above, never cached or captured at boot: that is
+    // what makes the kill switch (issue #118) take effect at the next sweep
+    // rather than at the next restart.
+    globalPaused: settings.globalAutonomyPaused,
+    // The last observation any pass wrote (issue #167), and the threshold in
+    // force. Both read fresh each tick, never captured at boot: that is what
+    // lets a wall observed mid-sweep, or a threshold changed on the settings
+    // screen, take effect at the next tick rather than at the next restart.
+    quota: getQuotaObservation(),
+    quotaThresholdPercent: resolveQuotaThreshold(config, settings.overrides)
+      .percent,
+    quotaGateAnnounced,
     // MAX_BUDGET_USD is the per-attempt default since Phase 5 (a ticket's
     // budget: directive may raise a single attempt to the $75 ceiling)
     attemptBudgetUsd: config.maxBudgetUsd,
@@ -1321,6 +1363,19 @@ async function executeActions(actions: Action[]): Promise<void> {
           );
           dailyCapAnnouncedDay = startOfLocalDay(new Date()).getTime();
           await notifyDailyCapReached(getConfig().discordFleetChannelId, action.payload);
+        } else if (action.event === "quota-gate-closed") {
+          const { utilization, thresholdPercent, status, heldTickets } =
+            action.payload;
+          console.log(
+            `[autonomy] Quota gate closed (${status}` +
+              `${utilization === null ? "" : `, ${utilization}% used`}` +
+              `, threshold ${thresholdPercent}%) — ${heldTickets} armed ` +
+              `ticket(s) held; work in flight continues`
+          );
+          await notifyQuotaGateClosed(
+            getConfig().discordFleetChannelId,
+            action.payload
+          );
         } else if (action.event === "gate-config-error") {
           await executeGateConfigError(action.payload);
         } else if (action.event === "verdict-unparseable") {

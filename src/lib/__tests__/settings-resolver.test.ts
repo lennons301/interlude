@@ -173,8 +173,7 @@ describe("provenance — every field says where its value came from", () => {
       override: null,
       envVar: "AGENT_MODEL",
       envValue: "sonnet",
-      tier: "standard",
-      model: "sonnet",
+      detail: { kind: "model-tier", tier: "standard", model: "sonnet" },
     });
   });
 
@@ -185,7 +184,7 @@ describe("provenance — every field says where its value came from", () => {
     expect(fields.find((f) => f.key === "modelTierImplement")).toMatchObject({
       source: "override",
       override: "heavy",
-      model: "opus",
+      detail: { kind: "model-tier", tier: "heavy", model: "opus" },
       envValue: "sonnet",
     });
   });
