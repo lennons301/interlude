@@ -14,6 +14,7 @@ import {
   type ChecksFailingPr,
   type ConflictingPr,
   type PassOutcome,
+  type PausedRun,
   type PendingGateEvaluation,
   type PendingTriage,
   type PendingVerdict,
@@ -99,6 +100,23 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     pendingTriageResults: [],
     queuedTriageCount: 0,
     announcedTriageErrors: [],
+    pausedRuns: [],
+    maxResumesPerAttempt: 3,
+    // No jitter by default: a table test asserts what is decided, and the
+    // spread has its own tests. Given one, the tests below say so.
+    resumeJitterMs: 0,
+    ...overrides,
+  };
+}
+
+function makePausedRun(overrides: Partial<PausedRun> = {}): PausedRun {
+  return {
+    runId: "run-1",
+    issueRef: "acme/widgets#7",
+    // An hour before the snapshot's clock: the window has reset.
+    resumeAfter: new Date(NOW.getTime() - 60 * 60_000),
+    resumesMade: 0,
+    hasLiveTask: false,
     ...overrides,
   };
 }
@@ -3144,5 +3162,229 @@ describe("decideNext — ordering and slots", () => {
 
     expect(claims(actions)).toHaveLength(1);
     expect(claims(actions)[0]).toMatchObject({ issueRef: "acme/widgets#7" });
+  });
+});
+
+describe("decideNext — resuming a paused run (issue #169)", () => {
+  function resumes(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "resumeRun");
+  }
+
+  function exhausted(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "exhaustPausedRun");
+  }
+
+  it("resumes a run whose window has reset", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], pausedRuns: [makePausedRun()] })
+    );
+
+    expect(resumes(actions)).toEqual([
+      {
+        type: "resumeRun",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        resume: 1,
+        maxResumes: 3,
+      },
+    ]);
+  });
+
+  it("leaves a run whose window has not reset alone", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pausedRuns: [
+          makePausedRun({ resumeAfter: new Date(NOW.getTime() + 60 * 60_000) }),
+        ],
+      })
+    );
+
+    expect(resumes(actions)).toEqual([]);
+    expect(exhausted(actions)).toEqual([]);
+  });
+
+  it("holds a run back through its own jittered offset, then resumes it", () => {
+    // The stampede guard: every run the fleet paused was refused by the same
+    // account-wide window and carries the same reset, so they would otherwise
+    // all become eligible on one tick.
+    const resetAt = new Date(NOW.getTime() - 60_000);
+    const jittered = makeSnapshot({
+      candidates: [],
+      resumeJitterMs: 10 * 60_000,
+      pausedRuns: [makePausedRun({ resumeAfter: resetAt })],
+    });
+
+    expect(resumes(decideNext(jittered))).toEqual([]);
+    // Same run, same offset — a later sweep past it resumes. The offset is a
+    // function of the run id, so it does not move between sweeps.
+    expect(
+      resumes(decideNext({ ...jittered, now: new Date(resetAt.getTime() + 10 * 60_000) }))
+    ).toHaveLength(1);
+  });
+
+  it("spreads two runs off one window across the jitter", () => {
+    const resetAt = new Date(NOW.getTime() - 60_000);
+    const snapshot = makeSnapshot({
+      candidates: [],
+      resumeJitterMs: 10 * 60_000,
+      slots: { total: 4, occupied: 0, occupants: [] },
+      pausedRuns: [
+        makePausedRun({ runId: "run-a", resumeAfter: resetAt }),
+        makePausedRun({ runId: "run-b", issueRef: "acme/widgets#8", resumeAfter: resetAt }),
+      ],
+    });
+
+    // Sampled across the window: the two runs must not become eligible on the
+    // same tick — that they *both* eventually do is the other half of it.
+    const eligibleOver = Array.from({ length: 41 }, (_, step) =>
+      resumes(
+        decideNext({ ...snapshot, now: new Date(resetAt.getTime() + step * 15_000) })
+      ).length
+    );
+
+    expect(eligibleOver[0]).toBe(0);
+    expect(eligibleOver[eligibleOver.length - 1]).toBe(2);
+    expect(eligibleOver.some((count) => count === 1)).toBe(true);
+  });
+
+  it("resumes a run parked with no clock at all rather than stranding it", () => {
+    // #168 never writes one — a rejection with no reset time takes the ordinary
+    // failure path — but a paused run nothing can reach is the failure this
+    // ticket exists to prevent, so a clockless row is eligible now.
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], pausedRuns: [makePausedRun({ resumeAfter: null })] })
+    );
+
+    expect(resumes(actions)).toHaveLength(1);
+  });
+
+  it("does not queue a second pass for a run already resuming", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], pausedRuns: [makePausedRun({ hasLiveTask: true })] })
+    );
+
+    expect(resumes(actions)).toEqual([]);
+  });
+
+  it("counts each resume against the bound", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxResumesPerAttempt: 3,
+        pausedRuns: [makePausedRun({ resumesMade: 2 })],
+      })
+    );
+
+    expect(resumes(actions)).toEqual([
+      {
+        type: "resumeRun",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        resume: 3,
+        maxResumes: 3,
+      },
+    ]);
+  });
+
+  it("hands the ticket to a human once the bound is spent", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxResumesPerAttempt: 3,
+        pausedRuns: [makePausedRun({ resumesMade: 3 })],
+      })
+    );
+
+    expect(resumes(actions)).toEqual([]);
+    expect(exhausted(actions)).toEqual([
+      {
+        type: "exhaustPausedRun",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        resumesMade: 3,
+      },
+    ]);
+  });
+
+  it("does not make a spent run wait out its window first", () => {
+    // A run with no resumes left is never going to resume, so waiting five
+    // hours would only delay telling the human the ticket is theirs.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxResumesPerAttempt: 1,
+        pausedRuns: [
+          makePausedRun({
+            resumesMade: 1,
+            resumeAfter: new Date(NOW.getTime() + 5 * 60 * 60_000),
+          }),
+        ],
+      })
+    );
+
+    expect(exhausted(actions)).toHaveLength(1);
+  });
+
+  it("never resumes when the bound is zero", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxResumesPerAttempt: 0,
+        pausedRuns: [makePausedRun()],
+      })
+    );
+
+    expect(resumes(actions)).toEqual([]);
+    expect(exhausted(actions)).toHaveLength(1);
+  });
+
+  it("prefers resuming existing work over claiming a new ticket", () => {
+    // One slot, one paused run and one armed ticket: the resume takes it.
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 1, occupied: 0, occupants: [] },
+        pausedRuns: [makePausedRun({ issueRef: "acme/widgets#3" })],
+      })
+    );
+
+    expect(resumes(actions)).toHaveLength(1);
+    expect(claims(actions)).toEqual([]);
+    expect(actions.some((a) => a.type === "pausePickup" && a.reason === "no-slots")).toBe(
+      true
+    );
+  });
+
+  it("still claims when a resume leaves a slot spare", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 2, occupied: 0, occupants: [] },
+        pausedRuns: [makePausedRun({ issueRef: "acme/widgets#3" })],
+      })
+    );
+
+    expect(resumes(actions)).toHaveLength(1);
+    expect(claims(actions)).toHaveLength(1);
+  });
+
+  it("resumes in-flight work while the kill switch holds new pickup", () => {
+    // The switch (and the daily cap) gate *pickup*; everything already in
+    // flight is decided as it would be otherwise. A paused run is the middle of
+    // an attempt the fleet already started.
+    const held = decideNext(
+      makeSnapshot({ globalPaused: true, pausedRuns: [makePausedRun()] })
+    );
+    const capped = decideNext(
+      makeSnapshot({
+        todayAutonomousSpendUsd: 500,
+        dailyCapUsd: 500,
+        pausedRuns: [makePausedRun()],
+      })
+    );
+
+    expect(resumes(held)).toHaveLength(1);
+    expect(claims(held)).toEqual([]);
+    expect(resumes(capped)).toHaveLength(1);
+    expect(claims(capped)).toEqual([]);
   });
 });
