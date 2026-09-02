@@ -33,7 +33,7 @@ import {
   type LaneSelection,
   type LaneSelectionInput,
 } from "./lane-selection";
-import { readMoneyGuards } from "./money-state";
+import { readMoneyGuards, type MoneyGuards } from "./money-state";
 import { decideLaneCrossing, type LaneCrossing } from "./overflow";
 
 /**
@@ -48,17 +48,16 @@ function laneSelectionInput(
   kind: AgentPassKind,
   ticketModel: string | null,
   now: Date,
-  settings: FleetSettings
+  settings: FleetSettings,
+  /** The money guards, already read. Passed in rather than read here so a
+   * caller that also needs them — `readLaneCrossing`, which describes the wall
+   * on the lane in force — makes exactly one read: two would each count the
+   * day's cash separately, and a booking landing between them would leave the
+   * ranking and the sentence describing it disagreeing by a few cents. */
+  guards: MoneyGuards
 ): LaneSelectionInput {
   const config = getConfig();
   const catalog = getLaneCatalog();
-  // Read for its facts — which lane is in force, whether that choice pins the
-  // fleet, and what the card has been charged today — rather than for its
-  // verdict: the guards judge the *primary* lane, and routing may be about a
-  // different one, whose own declared cap binds. The ranking therefore
-  // re-evaluates #174's own functions per lane, which is the same pair of pure
-  // calls, not a second policy.
-  const guards = readMoneyGuards(now, settings);
 
   return {
     catalog: catalog.ok ? catalog.catalog : null,
@@ -96,7 +95,15 @@ export function readLaneSelection(
   now: Date = new Date(),
   settings: FleetSettings = getFleetSettings()
 ): LaneSelection {
-  return selectLane(laneSelectionInput(kind, ticketModel, now, settings));
+  return selectLane(
+    laneSelectionInput(
+      kind,
+      ticketModel,
+      now,
+      settings,
+      readMoneyGuards(now, settings)
+    )
+  );
 }
 
 /**
@@ -117,7 +124,13 @@ export function readLaneFailover(
   settings: FleetSettings = getFleetSettings()
 ): LaneFailoverOption | null {
   return planLaneFailover({
-    ...laneSelectionInput(kind, ticketModel, now, settings),
+    ...laneSelectionInput(
+      kind,
+      ticketModel,
+      now,
+      settings,
+      readMoneyGuards(now, settings)
+    ),
     fromLaneId,
   });
 }
@@ -137,8 +150,13 @@ export function readLaneCrossing(
   now: Date = new Date(),
   settings: FleetSettings = getFleetSettings()
 ): LaneCrossing {
-  const selection = laneSelectionInput(kind, ticketModel, now, settings);
+  // One read of the guards, shared with the ranking below: the lane in force,
+  // whether that choice pins the fleet, that lane's quota row and the day's
+  // cash all have to describe the same instant, or the wall this crossing
+  // writes a sentence about and the wall the ranking excludes a lane for could
+  // be two different readings.
   const guards = readMoneyGuards(now, settings);
+  const selection = laneSelectionInput(kind, ticketModel, now, settings, guards);
 
   return decideLaneCrossing({
     kind,

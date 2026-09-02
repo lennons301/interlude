@@ -4256,6 +4256,55 @@ describe("decideNext — cross-lane failover (issue #176)", () => {
     expect(actions.map((a) => a.type)).toEqual(["failOverRunLane"]);
   });
 
+  it("never becomes a route around a human's stop", () => {
+    // Routing decides *where* work runs, never *whether*: the kill switch and
+    // the per-project toggle gate pickup exactly as they did, and a run moving
+    // lanes must not read as a claim they would have refused.
+    const held = decideNext(
+      makeSnapshot({
+        globalPaused: true,
+        maxResumesPerAttempt: 2,
+        completedPasses: [
+          makePass({
+            tier: "light",
+            laneId: "claude-subscription",
+            laneFailover: CHEAPER,
+            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "five_hour" },
+          }),
+        ],
+        candidates: [makeCandidate()],
+      })
+    );
+
+    expect(moves(held)).toHaveLength(1);
+    expect(claims(held)).toEqual([]);
+    expect(held).toContainEqual({ type: "pausePickup", reason: "kill-switch" });
+
+    const off = decideNext(
+      makeSnapshot({
+        maxResumesPerAttempt: 2,
+        projects: [makeProject({ autonomyEnabled: false })],
+        completedPasses: [
+          makePass({
+            tier: "light",
+            laneId: "claude-subscription",
+            laneFailover: CHEAPER,
+            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "five_hour" },
+          }),
+        ],
+        candidates: [makeCandidate()],
+      })
+    );
+
+    expect(moves(off)).toHaveLength(1);
+    expect(claims(off)).toEqual([]);
+    expect(off).toContainEqual({
+      type: "pausePickup",
+      reason: "autonomy-off-project",
+      detail: "acme/widgets",
+    });
+  });
+
   it("leaves the ticket's attempt and interruption accounting untouched", () => {
     const actions = decideNext(
       makeSnapshot({
