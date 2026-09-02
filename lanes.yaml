@@ -69,11 +69,14 @@ lanes:
       standard: sonnet
       light: haiku
     caps:
-      # Real money. Declared here and reported on the settings screen, but
-      # NOT yet enforced: spending against it is issue #175's overflow
-      # guardrail (confirm-once-per-day, then capped). Until that lands, the
-      # cap is a stated intent, and the only way work reaches this lane is an
-      # operator deliberately making it primary.
+      # Real money, and enforced (issue #174). This is a *ceiling on the
+      # ceiling*: the operator's own real-money cap (METERED_DAILY_CAP_USD, or
+      # the settings screen) is bound down by whatever is declared here, the
+      # lower of the two always winning. Reaching it pauses autonomous pickup
+      # until local midnight, and the first metered spend of each day needs one
+      # fleet-level confirmation before anything starts at all — so a
+      # deployment cannot spend real money unknowingly, whether this lane is
+      # primary, an overflow target (#173) or reached by failover (#176).
       daily_budget_usd: 20
 
   - id: openrouter
@@ -99,4 +102,6 @@ lanes:
       standard: anthropic/claude-sonnet-4.5
       light: anthropic/claude-haiku-4.5
     caps:
+      # Enforced as above (issue #174) — the lower of this and the operator's
+      # own real-money cap binds.
       daily_budget_usd: 20
