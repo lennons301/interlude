@@ -531,9 +531,13 @@ describe("renderDailyDigest — in flight", () => {
       ],
     });
 
+    // The minute is the run's own: the reset plus its jitter (issue #169, a
+    // five-minute window), so the digest names the moment the sweep would
+    // actually resume it rather than one it has already passed.
     expect(section(content, "In flight")).toEqual([
-      "lemons #34 · Add pagination to the list · attempt 2/3 · $7.80 of $20.00 · " +
-        "paused, quota resets Sat 1 Aug 17:00",
+      expect.stringMatching(
+        /^lemons #34 · Add pagination to the list · attempt 2\/3 · \$7\.80 of \$20\.00 · paused, quota resets Sat 1 Aug 17:0\d$/
+      ),
     ]);
   });
 

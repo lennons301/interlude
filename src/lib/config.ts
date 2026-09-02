@@ -10,9 +10,39 @@ import {
 import type { FleetHealthThresholds } from "./fleet/health";
 import { normalizeModelTier, type ModelTier } from "./model-tiers";
 import {
+  SETTINGS_FIELDS,
   resolveModelTier,
+  type SettingKey,
   type SettingsOverrides,
 } from "./settings-resolver";
+
+/**
+ * Parse a settable count from the environment against the *same* rules the
+ * settings screen writes it by — the field's own `normalize` from the registry
+ * (issue #166), not a second copy of the digits-and-ceiling logic. That is what
+ * makes "the environment and the UI accept exactly the same values" true rather
+ * than asserted, so an operator cannot set through Doppler a value the screen
+ * would refuse.
+ *
+ * Null covers both "unset" and "unusable": a blank, non-numeric, negative or
+ * over-ceiling value falls through to the built-in default rather than reaching
+ * a bound as a NaN — the same defensiveness `normalizeEffort` applies to a
+ * closed enum, and for the same reason (this value decides when a ticket goes
+ * to a human).
+ */
+function countEnv(raw: string | undefined, key: SettingKey): number | null {
+  if (raw == null || raw === "") return null;
+  const spec = SETTINGS_FIELDS[key];
+  const normalized = spec.normalize(raw, {});
+  if (normalized === null) {
+    console.warn(
+      `Warning: ignoring "${raw}" — expected ${spec.vocabulary({})}. ` +
+        "Using the default."
+    );
+    return null;
+  }
+  return Number(normalized);
+}
 
 /** Parse an env value expressed in minutes into ms, falling back to a default.
  * A blank, non-numeric or non-positive value keeps the default (a mistyped
@@ -153,6 +183,14 @@ export interface AppConfig {
   reviewerGithubToken: string | null;
   /** Global autonomy kill switch — autonomous pickup runs only when true */
   autonomyEnabled: boolean;
+  /**
+   * Resumes one attempt may have after a quota pause before its ticket routes
+   * to a human (issue #169). Null = the variable is unset and the built-in
+   * default (`DEFAULT_MAX_RESUMES_PER_ATTEMPT`) applies — kept as null rather
+   * than pre-defaulted so the settings screen can say "unset" honestly instead
+   * of naming a variable the operator would find empty.
+   */
+  maxResumesPerAttempt: number | null;
   /** Extra GitHub logins allowed to author claimable issues (repo owners always are) */
   autonomyAllowedAuthors: string[];
   /** Discord channel for fleet-level events (e.g. slot saturation). Null = log only */
@@ -242,6 +280,10 @@ export function getConfig(): AppConfig {
     discordGuildId: process.env.DISCORD_GUILD_ID ?? null,
     reviewerGithubToken: process.env.REVIEWER_GH_TOKEN ?? null,
     autonomyEnabled: process.env.AUTONOMY_ENABLED === "true",
+    maxResumesPerAttempt: countEnv(
+      process.env.MAX_RESUMES_PER_ATTEMPT,
+      "maxResumesPerAttempt"
+    ),
     autonomyAllowedAuthors: (process.env.AUTONOMY_ALLOWED_AUTHORS ?? "")
       .split(",")
       .map((a) => a.trim())

@@ -11,7 +11,9 @@ import {
   MAX_ATTEMPTS,
   MAX_CI_REPAIR_ATTEMPTS,
   MAX_INTEGRATION_ATTEMPTS,
+  RESUME_JITTER_WINDOW_MS,
 } from "../orchestrator/autonomy/budgets";
+import { resumeEligibleAt } from "../orchestrator/autonomy/resume-jitter";
 import { formatDuration, type FleetHealthSignals } from "./health";
 import type { LaneBilling } from "../lanes/lane-config";
 import { evaluateMeteredSpend, type MeteredHold } from "../lanes/money";
@@ -1049,11 +1051,21 @@ export function buildFleetView(rows: FleetRows): FleetView {
         // clock it is actually waiting on: a `rate_limited` row that somehow
         // carries no resumeAfter would be a run waiting on nothing, which is a
         // claim this view refuses to make on a screen an operator trusts.
+        //
+        // The instant shown is the run's *eligible* one — the window's reset
+        // plus this run's own jitter (issue #169) — through the same function
+        // the reducer decides with. A countdown that hit zero minutes before
+        // anything moved would be the screen and the fleet disagreeing about
+        // the one number the card exists to show.
         paused:
           run.status === "rate_limited" && run.resumeAfter
             ? {
                 reason: "rate-limited" as const,
-                resumeAfter: run.resumeAfter.toISOString(),
+                resumeAfter: resumeEligibleAt(
+                  run.id,
+                  run.resumeAfter,
+                  RESUME_JITTER_WINDOW_MS
+                ).toISOString(),
               }
             : null,
       };

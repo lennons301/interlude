@@ -6,6 +6,8 @@ import {
   type FleetRunRow,
   type FleetTaskRow,
 } from "../fleet-view";
+import { RESUME_JITTER_WINDOW_MS } from "../../orchestrator/autonomy/budgets";
+import { resumeEligibleAt } from "../../orchestrator/autonomy/resume-jitter";
 
 // Fixed clock: noon local time, so "today" and the 7-day window are unambiguous
 const NOW = new Date(2026, 7, 1, 12, 0, 0);
@@ -1504,6 +1506,10 @@ describe("buildFleetView — running", () => {
     // progress — it holds its ticket and its branch — so it stays on the board
     // rather than vanishing between the wall and the reset. The card carries
     // the clock it is waiting on; the countdown is the client's.
+    //
+    // The instant is the run's *eligible* one — the reset plus this run's own
+    // jitter (issue #169) — read through the same function the reducer decides
+    // with, so the countdown cannot hit zero minutes before anything moves.
     const resumeAfter = new Date(2026, 7, 1, 17, 0, 0);
     const view = buildFleetView(
       baseRows({
@@ -1522,7 +1528,14 @@ describe("buildFleetView — running", () => {
     expect(view.running).toHaveLength(1);
     expect(view.running[0]).toMatchObject({
       runId: "r1",
-      paused: { reason: "rate-limited", resumeAfter: resumeAfter.toISOString() },
+      paused: {
+        reason: "rate-limited",
+        resumeAfter: resumeEligibleAt(
+          "r1",
+          resumeAfter,
+          RESUME_JITTER_WINDOW_MS
+        ).toISOString(),
+      },
       // It resumes from where it stopped, which is the implement pass.
       phases: [
         { name: "implement", state: "current" },

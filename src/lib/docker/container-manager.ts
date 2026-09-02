@@ -8,7 +8,7 @@ import {
   AGENT_CONTAINER_NAME_PREFIX,
   DOCKER_PROBE_TIMEOUT_MS,
 } from "./agent-containers";
-import { runBoundedProbe } from "../timeout";
+import { raceWithTimeout, runBoundedProbe, TIMED_OUT } from "../timeout";
 
 /**
  * How setup gets onto `$GIT_BRANCH`:
@@ -387,6 +387,219 @@ export async function execAgentTurn(options: {
   stderr.on("end", onEnd);
 
   return { stream: merged, exec };
+}
+
+/**
+ * How long a single-file transfer in or out of a container may take before the
+ * caller stops waiting on it (issue #151's rule, applied to #169's copies).
+ *
+ * Generous, because the work is real: a long pass's transcript is megabytes
+ * moving through an exec on a 2-vCPU box. The bound exists for the other case —
+ * a daemon that stops answering — because both callers sit on paths that must
+ * not freeze: the pause path, which is protecting a ticket's attempt, and the
+ * start of a resumed pass.
+ */
+const FILE_TRANSFER_TIMEOUT_MS = 60_000;
+
+/**
+ * Wait for an exec to finish and report its exit code.
+ *
+ * Both signals, for the reason every exec in this file uses both: the stream
+ * ending is the fast path, and the poll is what covers a stream that never
+ * ends (which is the normal case for a demuxed or hijacked attach — the socket
+ * outlives the process).
+ */
+async function awaitExecExit(
+  exec: Docker.Exec,
+  stream: NodeJS.ReadableStream
+): Promise<number | null> {
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let poll: ReturnType<typeof setInterval> | null = null;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      if (poll) clearInterval(poll);
+      resolve();
+    };
+    stream.on("end", done);
+    stream.on("close", done);
+    stream.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      if (poll) clearInterval(poll);
+      reject(err);
+    });
+    poll = setInterval(async () => {
+      try {
+        const info = await exec.inspect();
+        if (!info.Running) setTimeout(done, 200);
+      } catch {
+        done();
+      }
+    }, 250);
+    // Nothing may sit unread: a paused stream never ends, and a caller that
+    // does not want the output (the write below) would otherwise wait out the
+    // poll on every call.
+    stream.resume();
+  });
+
+  return (await exec.inspect()).ExitCode ?? null;
+}
+
+/** What the read command exits with when the file is past the caller's ceiling
+ * — distinguished from an ordinary failure so the reason can be logged. */
+const OVERSIZE_EXIT_CODE = 3;
+
+/**
+ * Read one file out of a container, verbatim (issue #169).
+ *
+ * Null means "no such file", "unreadable", or "not read whole" — one state,
+ * because the caller has one answer for all three: a paused pass whose
+ * transcript cannot be copied out resumes on the same branch with its context
+ * declared lost. So this reports rather than throws, and a partial read is
+ * reported as no read at all.
+ *
+ * Three details make the bytes trustworthy:
+ *
+ * - The exec runs with `Tty: true`, so the daemon hands back a **raw** stream
+ *   rather than Docker's multiplexed frames, which no caller here could safely
+ *   strip out of file content.
+ * - A TTY rewrites newlines, so the file is read as `base64` and decoded on
+ *   this side: one long line, no newlines to rewrite, byte-exact either way.
+ * - The command prints the file's **size** after the payload, and the decode is
+ *   checked against it. Waiting on an exec is a race between the process
+ *   exiting and its output arriving, and `Buffer.from(halfALine, "base64")`
+ *   decodes happily — so without the check a large transcript could be stored
+ *   half-copied and restored into the next container, which is precisely the
+ *   failure the fallback exists to avoid. A truncated read loses the trailing
+ *   size and fails the check.
+ *
+ * `maxBytes` is refused **inside the container**, before a byte is emitted.
+ * The caller has a ceiling of its own, but enforcing it here would mean the
+ * base64 line, the JS string and the decoded buffer — roughly 3x the file —
+ * already materialised in the orchestrator's heap on a box with a documented
+ * OOM history. An over-size file is one more way of reading nothing.
+ *
+ * The path travels in the environment rather than the command line, so nothing
+ * in a session id can reach `bash` as syntax.
+ */
+export async function readContainerFile(
+  container: Docker.Container,
+  filePath: string,
+  maxBytes?: number
+): Promise<Buffer | null> {
+  const exec = await container.exec({
+    Cmd: [
+      "bash",
+      "-c",
+      'size=$(wc -c < "$INTERLUDE_FILE") || exit 1; ' +
+        'if [ -n "$INTERLUDE_MAX" ] && [ "$size" -gt "$INTERLUDE_MAX" ]; then ' +
+        `printf "%s\n" "$size"; exit ${OVERSIZE_EXIT_CODE}; fi; ` +
+        'base64 -w0 -- "$INTERLUDE_FILE" && printf "\n%s\n" "$size"',
+    ],
+    Env: [
+      `INTERLUDE_FILE=${filePath}`,
+      `INTERLUDE_MAX=${maxBytes === undefined ? "" : maxBytes}`,
+    ],
+    AttachStdout: true,
+    AttachStderr: true,
+    Tty: true,
+  });
+
+  const stream = await exec.start({});
+  const chunks: Buffer[] = [];
+  stream.on("data", (chunk: Buffer) => chunks.push(chunk));
+
+  // Bounded like every other outbound call the orchestrator awaits (issue
+  // #151): a daemon that stops answering must not hold the pause that is
+  // protecting a ticket's attempt. A read that timed out is a read that
+  // produced nothing, which is a state this function already reports.
+  const exitCode = await raceWithTimeout(
+    awaitExecExit(exec, stream),
+    FILE_TRANSFER_TIMEOUT_MS
+  );
+  if (exitCode === TIMED_OUT) {
+    console.warn(`[docker] Reading ${filePath} out of the container timed out`);
+    return null;
+  }
+  if (exitCode === OVERSIZE_EXIT_CODE) {
+    // The one exit worth naming: nothing was emitted, and the operator wants to
+    // know a transcript was dropped for its size rather than lost to a daemon.
+    const size = Buffer.concat(chunks).toString("utf8").trim();
+    console.warn(
+      `[docker] ${filePath} is ${size} bytes, past the ${maxBytes}-byte ` +
+        "ceiling — not copying it out"
+    );
+    return null;
+  }
+  if (exitCode !== 0) return null;
+
+  // Whitespace is the TTY's, never the payload's: `base64 -w0` emits one line,
+  // and the size follows it on its own.
+  const parts = Buffer.concat(chunks).toString("utf8").trim().split(/\s+/);
+  const declaredSize = Number(parts.pop());
+  const encoded = parts.join("");
+  if (encoded === "" || !Number.isInteger(declaredSize)) return null;
+
+  const bytes = Buffer.from(encoded, "base64");
+  if (bytes.length !== declaredSize) {
+    console.warn(
+      `[docker] Read ${bytes.length} of ${declaredSize} bytes of ${filePath} — ` +
+        "discarding a partial copy"
+    );
+    return null;
+  }
+  return bytes;
+}
+
+/**
+ * Write one file into a container, creating its directory (issue #169).
+ *
+ * The content goes in over the exec's **stdin** rather than through the
+ * command line or the environment: a transcript is unbounded (a long pass's is
+ * megabytes) and both of those have a limit the caller could not see coming.
+ * Writing through a process that runs as the container's own user is also what
+ * makes the file the agent's to append to — the harness appends to the same
+ * transcript when it resumes the session, so ownership is not cosmetic.
+ *
+ * Throws on failure, unlike the read: a caller that asked for a file to exist
+ * and did not get one has nothing to fall back to at this level.
+ */
+export async function writeContainerFile(
+  container: Docker.Container,
+  filePath: string,
+  contents: Buffer | string
+): Promise<void> {
+  const exec = await container.exec({
+    Cmd: [
+      "bash",
+      "-c",
+      'mkdir -p -- "$(dirname -- "$INTERLUDE_FILE")" && cat > "$INTERLUDE_FILE"',
+    ],
+    Env: [`INTERLUDE_FILE=${filePath}`],
+    AttachStdin: true,
+    AttachStdout: true,
+    AttachStderr: true,
+  });
+
+  const stream = (await exec.start({
+    hijack: true,
+    stdin: true,
+  })) as NodeJS.ReadWriteStream;
+  stream.write(contents);
+  stream.end();
+
+  const exitCode = await raceWithTimeout(
+    awaitExecExit(exec, stream),
+    FILE_TRANSFER_TIMEOUT_MS
+  );
+  if (exitCode === TIMED_OUT) {
+    throw new Error(`Writing ${filePath} into the container timed out`);
+  }
+  if (exitCode !== 0) {
+    throw new Error(`Writing ${filePath} into the container failed (exit ${exitCode})`);
+  }
 }
 
 /**

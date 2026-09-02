@@ -32,6 +32,10 @@
 
 import type { AgentPassKind, AppConfig } from "./config";
 import {
+  DEFAULT_MAX_RESUMES_PER_ATTEMPT,
+  MAX_RESUMES_CEILING,
+} from "./orchestrator/autonomy/budgets";
+import {
   DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT,
   QUOTA_THRESHOLD_OPTIONS,
 } from "./quota/quota-gate";
@@ -62,13 +66,14 @@ export type ModelTierSettingKey =
   | "modelTierTriage"
   | "modelTierInteractive";
 
-/** The settings a human may override from the UI. A later ticket in issue #164
- * (the per-attempt pause bound) adds a member here and an entry to
+/** The settings a human may override from the UI. Later tickets in issue #164
+ * (the overflow daily cap) add members here and an entry to
  * `SETTINGS_FIELDS`. */
 export type SettingKey =
   | ModelTierSettingKey
   | "primaryLane"
   | "quotaPickupThresholdPercent"
+  | "maxResumesPerAttempt"
   | "meteredDailyCapUsd";
 
 /** What is stored on the settings row: a sparse map, because absent means
@@ -153,6 +158,14 @@ function cheaperTierEnv(
   return base.value !== null ? base : { envVar, value: null };
 }
 
+/** The counts the screen offers, derived from the ceiling so the chips and the
+ * validator cannot drift. Zero is a real choice: it means a quota pause hands
+ * the ticket straight to a human. */
+export const RESUME_BOUND_OPTIONS: readonly string[] = Array.from(
+  { length: MAX_RESUMES_CEILING + 1 },
+  (_, n) => String(n)
+);
+
 /**
  * The allowlist. A key absent from here cannot be overridden, whatever a
  * request says — which is the mechanism, not a policy check that could be
@@ -235,6 +248,34 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
         : "a lane id declared in lanes.yaml",
     envDefault: (config) => ({ envVar: "AGENT_LANE", value: config.agentLane }),
   },
+  maxResumesPerAttempt: {
+    key: "maxResumesPerAttempt",
+    label: "Quota resumes per attempt",
+    help:
+      "How many times one attempt may pause on the account's quota and be resumed. Past it the ticket goes to a human the way an exhausted one does. A pause spends no attempt, so this bounds latency, not money.",
+    options: RESUME_BOUND_OPTIONS,
+    // A count, not an enum, but held to exactly the vocabulary the screen
+    // offers: the environment variable is bounded by the same ceiling, so
+    // there is one answer to "what may this be" wherever it is set.
+    normalize: (raw) => {
+      // Digits only, checked before Number(): "" and " " both convert to 0,
+      // and reading a blank field as "never resume" is exactly the kind of
+      // quiet reinterpretation this layer refuses to do.
+      const text = raw.trim();
+      if (!/^\d+$/.test(text)) return null;
+      const value = Number(text);
+      if (value > MAX_RESUMES_CEILING) return null;
+      return String(value);
+    },
+    vocabulary: () => `a whole number of resumes from 0 to ${MAX_RESUMES_CEILING}`,
+    envDefault: (config) => ({
+      envVar: "MAX_RESUMES_PER_ATTEMPT",
+      value:
+        config.maxResumesPerAttempt === null
+          ? null
+          : String(config.maxResumesPerAttempt),
+    }),
+  },
   quotaPickupThresholdPercent: {
     key: "quotaPickupThresholdPercent",
     label: "Quota pickup threshold",
@@ -279,6 +320,7 @@ export const SETTABLE_KEYS: readonly SettingKey[] = [
   ...MODEL_TIER_FIELD_ORDER,
   "primaryLane",
   "quotaPickupThresholdPercent",
+  "maxResumesPerAttempt",
   "meteredDailyCapUsd",
 ];
 
@@ -598,6 +640,63 @@ export function resolveQuotaThreshold(
     percent:
       inForce === null
         ? DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT
+        : parseInt(inForce, 10),
+    source: override !== null ? "override" : "environment",
+    override,
+    options: spec.options ?? [],
+    label: spec.label,
+    help: spec.help,
+    envVar,
+    envValue,
+  };
+}
+
+/**
+ * How many times one attempt may pause on the account's quota and be resumed
+ * (issue #169), and where that number came from.
+ *
+ * Its own resolver and its own view, for the reason the threshold above has
+ * one: it shares the registry — the allowlist, and so the mechanism that
+ * decides what is settable at all — but asking a count "what tier is in
+ * force?" is not a meaningful question.
+ *
+ * Three layers like the threshold's: a stored override, then the environment
+ * variable, then a built-in default, because a bound needs a number and
+ * "unset" is not one. The environment is read through the same `normalize` an
+ * override is, so a typo there falls through rather than reaching the bound as
+ * a NaN, while still being shown verbatim.
+ */
+export interface ResumeBoundView {
+  /** The bound in force — what the reducer actually counts against. */
+  resumes: number;
+  source: SettingSource;
+  /** The stored override, or null when the field falls through. */
+  override: string | null;
+  /** The values an override may take, in display order. */
+  options: readonly string[];
+  label: string;
+  help: string;
+  envVar: string;
+  /** The environment default, verbatim (null = unset, so the built-in default
+   * is what is in force). */
+  envValue: string | null;
+}
+
+export function resolveResumeBound(
+  config: AppConfig,
+  overrides: SettingsOverrides
+): ResumeBoundView {
+  const spec = SETTINGS_FIELDS.maxResumesPerAttempt;
+  const { envVar, value: envValue } = spec.envDefault(config);
+  const stored = overrides.maxResumesPerAttempt ?? null;
+  const override = stored === null ? null : spec.normalize(stored, {});
+  const fromEnv = envValue === null ? null : spec.normalize(envValue, {});
+  const inForce = override ?? fromEnv;
+
+  return {
+    resumes:
+      inForce === null
+        ? DEFAULT_MAX_RESUMES_PER_ATTEMPT
         : parseInt(inForce, 10),
     source: override !== null ? "override" : "environment",
     override,

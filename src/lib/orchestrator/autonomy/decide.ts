@@ -15,6 +15,7 @@ import { evaluateMeteredSpend } from "../../lanes/money";
 import { evaluateQuotaGate } from "../../quota/quota-gate";
 import type { QuotaObservation } from "../../quota/rate-limit-event";
 import { detectBlockedQuestion } from "./blocked";
+import { resumeEligibleAt } from "./resume-jitter";
 import { evaluateGates, type GateConfig } from "./gates";
 import {
   NEEDS_INFO_LABEL,
@@ -159,6 +160,38 @@ export interface PassOutcome {
    * would charge the account's quota to the ticket's attempt budget.
    */
   rateLimited: QuotaRejection | null;
+}
+
+/**
+ * A run parked on the account's quota clock (issue #168), up for the decision
+ * this ticket adds: resume it, or hand its ticket to a human because the
+ * attempt has paused more often than the bound allows.
+ *
+ * Gathered every sweep, because the sweep is the resume driver — no new
+ * scheduler, exactly as the 30-second reconciliation loop already drives every
+ * other waiting thing.
+ */
+export interface PausedRun {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  /**
+   * When the refusing window resets — the run's `resumeAfter`.
+   *
+   * Null means the row carries no clock, which #168 never writes (a rejection
+   * with no reset time takes the ordinary failure path precisely so a run is
+   * never parked on a window nobody knows the length of). If one appears
+   * anyway it is treated as eligible now rather than left waiting forever:
+   * stranding a run where no later ticket can find it is the failure this
+   * whole ticket exists to prevent, and a wall that is still up simply pauses
+   * it again — which the bound below counts.
+   */
+  resumeAfter: Date | null;
+  /** Resumes this attempt has already had (runs.resumeCount) */
+  resumesMade: number;
+  /** A task of this run already queued or running — the idempotency fact, so
+   * re-deciding across sweeps cannot queue a second resumed pass */
+  hasLiveTask: boolean;
 }
 
 /** An open issue awaiting triage (`needs-triage`), as gathered by the sweep. */
@@ -443,6 +476,16 @@ export interface AutonomySnapshot {
   queuedTriageCount: number;
   /** Task IDs whose unparseable triage exit was already announced */
   announcedTriageErrors: string[];
+  /** Runs parked on the quota clock (issue #169) — resumed once their window
+   * has reset, or handed to a human once the resume bound is spent */
+  pausedRuns: PausedRun[];
+  /** Resumes one attempt may have after a quota pause before its ticket is
+   * routed to a human. UI-settable (issue #166's layer), so it is a snapshot
+   * field rather than a constant read inside the reducer. */
+  maxResumesPerAttempt: number;
+  /** The window a paused run's own offset is spread across, so a fleet-wide
+   * pause does not put every run on the same tick — see resume-jitter.ts */
+  resumeJitterMs: number;
 }
 
 export type PauseReason =
@@ -731,6 +774,35 @@ export type Action =
       limitType: string | null;
     }
   | {
+      // A paused run whose window has reset (issue #169): queue its pass again
+      // in a fresh container, on the same branch, continuing the same
+      // conversation where the transcript survived the teardown. Consumes no
+      // attempt — the pause did not either — but does count against the resume
+      // bound, which is what stops a ticket looping across quota windows.
+      type: "resumeRun";
+      runId: string;
+      /** "owner/repo#n" */
+      issueRef: string;
+      /** Which resume this is (resumesMade + 1) — recorded on the run and
+       * named on the issue, so a ticket crossing several windows reads as one
+       * attempt rather than as several */
+      resume: number;
+      /** The bound it is counted against, for the issue comment */
+      maxResumes: number;
+    }
+  | {
+      // A run that has paused more often than one attempt may (issue #169):
+      // the ticket goes to a human the way an exhausted one does. Deliberately
+      // not a failed attempt — the pauses spent none — so a human who re-arms
+      // the ticket still gets the attempts it never used.
+      type: "exhaustPausedRun";
+      runId: string;
+      /** "owner/repo#n" */
+      issueRef: string;
+      /** Resumes spent before giving up — named in the escalation */
+      resumesMade: number;
+    }
+  | {
       type: "startTriage";
       issueRef: string;
       projectId: string;
@@ -857,6 +929,11 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     pendingTriageResults: [],
     queuedTriageCount: 0,
     announcedTriageErrors: [],
+    // A pass that just ended is not a paused run: the run it belongs to may be
+    // *about* to become one, decided below from this very outcome.
+    pausedRuns: [],
+    maxResumesPerAttempt: 0,
+    resumeJitterMs: 0,
   };
 }
 
@@ -1288,6 +1365,58 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     });
   }
 
+  // Paused runs next (issue #169) — before review pickup and well before any
+  // claim, because resuming existing work outranks starting new work: a run
+  // parked on the quota clock already holds its ticket, has a branch with work
+  // on it, and is one pass from a PR, while a claim is all of that still to
+  // buy. Each resume reserves a slot against new claims exactly as a queued
+  // review does (see claimableSlots below).
+  //
+  // Deliberately *not* held by the daily cap or the kill switch. Both of those
+  // gate pickup — "no claim, no triage pass" — and everything already in
+  // flight is decided regardless: a verdict is posted, a fix-up turn is
+  // delivered, a conflict is repaired. A paused run is in flight; it is the
+  // middle of an attempt the fleet already started, and abandoning it at a
+  // window boundary would spend the very attempt the pause protected.
+  let resumesQueuedThisSweep = 0;
+  for (const paused of snapshot.pausedRuns) {
+    if (parkedRunIds.has(paused.runId)) continue;
+    // Already resuming — a queued or running task of this run *is* the resume
+    // — so the run is not up for a decision at all. First, ahead of the bound
+    // as well as the clock: a resume is counted when it is queued, so the run
+    // whose last permitted resume is in flight reads as spent while its pass
+    // is still starting, and judging the bound here would cancel the very pass
+    // just queued.
+    if (paused.hasLiveTask) continue;
+    // The bound before the clock, on purpose: a run with no resumes left is
+    // never going to resume, so making it wait out a five-hour window first
+    // would only delay telling the human it is theirs.
+    if (paused.resumesMade >= snapshot.maxResumesPerAttempt) {
+      actions.push({
+        type: "exhaustPausedRun",
+        runId: paused.runId,
+        issueRef: paused.issueRef,
+        resumesMade: paused.resumesMade,
+      });
+      continue;
+    }
+    if (
+      paused.resumeAfter !== null &&
+      snapshot.now <
+        resumeEligibleAt(paused.runId, paused.resumeAfter, snapshot.resumeJitterMs)
+    ) {
+      continue;
+    }
+    resumesQueuedThisSweep++;
+    actions.push({
+      type: "resumeRun",
+      runId: paused.runId,
+      issueRef: paused.issueRef,
+      resume: paused.resumesMade + 1,
+      maxResumes: snapshot.maxResumesPerAttempt,
+    });
+  }
+
   // Review passes are queued before gate decisions and claims: they finish
   // work already in flight. The queue starts them under the ordinary
   // capacity check, so emitting one here only reserves intent, not a slot.
@@ -1642,7 +1771,13 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       snapshot.queuedRepairCount -
       repairsQueuedThisSweep -
       snapshot.queuedTriageCount -
-      triagesQueuedThisSweep
+      triagesQueuedThisSweep -
+      // A resumed run's pass is queued work like any other, and it is the one
+      // the ticket asks to be preferred: subtracting it here is what makes
+      // "resuming existing work outranks claiming new work" true when slots
+      // are scarce, rather than a matter of which action happens to be
+      // executed first.
+      resumesQueuedThisSweep
   );
 
   if (claimableSlots === 0) {

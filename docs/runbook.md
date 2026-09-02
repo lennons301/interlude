@@ -140,7 +140,8 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
 - **running** — each active run's ticket, attempt (n/3), turn, spend vs budget,
   and phase (implement ▸ review ▸ merge). A run the account's quota refused sits
   here too, labelled **paused** with when its window resets (issue #168) — it is
-  deliberately *not* in **needs you**, because a quota window asks nothing of you.
+  deliberately *not* in **needs you**, because a quota window asks nothing of you:
+  the sweep resumes it by itself once the clock runs out (issue #169).
 - **recent** — the last 7 days of completions.
 - **spend** — today's autonomous spend vs the $500/day cap.
 
@@ -307,12 +308,26 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   subscription lane — the run goes `rate_limited` with a `resumeAfter` taken from
   the limit event's own reset time, its container is torn down, and both counters
   stay where they were. The issue gets a comment saying so.
-  **Until #169 lands, a paused run stays paused**: nothing resumes it, and because
-  a `rate_limited` run still holds its ticket, the sweep will not claim a fresh run
-  over it either. To move it by hand, cancel it (below) or drive the run row
-  terminal — the branch is pushed, so nothing is lost. A rejection whose event
-  carried *no* reset time is not paused at all: with no clock to wait on, the pass
-  takes its ordinary path and spends the attempt, as before.
+  A `rate_limited` run still holds its ticket, so the sweep will not claim a fresh
+  run over it. A rejection whose event carried *no* reset time is not paused at
+  all: with no clock to wait on, the pass takes its ordinary path and spends the
+  attempt, as before.
+- **A paused run resumes itself** (issue #169). Once the window resets — plus up to
+  five minutes of jitter, so a fleet-wide pause does not stampede — the ordinary
+  30-second sweep queues the pass again in a fresh container on the same branch,
+  ahead of any new claim when slots are scarce. Where the paused pass's session
+  transcript was copied out before its container went, the resumed pass continues
+  the *same conversation*; where it could not be, the pass starts again on the same
+  branch with the work already pushed, and the issue comment says which happened.
+  Nothing to do either way — but two things worth knowing:
+    - the resume is **not** held by the kill switch, the daily cap or the quota
+      admission gate. All three gate *pickup*, and a paused run is the middle of
+      an attempt already started. To stop one, cancel the run (below);
+    - one attempt gets **3 resumes** by default (`MAX_RESUMES_PER_ATTEMPT`,
+      settable under **Settings ▸ Quota** without a restart; `0` sends a quota pause
+      straight to a human). Past the bound the ticket is labelled
+      `ready-for-human` — and because the pauses spent no attempts, re-arming it
+      once there is quota picks the work back up with the attempts it never used.
 - **$500/day** estate-wide autonomous cap pauses pickup (announced once, shown on
   the dashboard, resets at local midnight). Interactive work is exempt by
   construction (it has no run).
