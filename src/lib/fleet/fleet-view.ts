@@ -95,11 +95,32 @@ export interface FleetRows {
    * reads, so the banner and the reducer judge the same observation against the
    * same number. */
   quotaThresholdPercent: number;
-  /** The fleet's last observed quota state (issue #167), from the durable row;
-   * null = no pass has ever reported one, which is also the permanent state of
-   * a fleet running on API-key auth, where the CLI emits no quota telemetry at
-   * all. */
+  /** The **primary lane's** last observed quota state (issue #167, per-lane
+   * since #175), from the durable row; null = no pass on that lane has ever
+   * reported one, which is also the permanent state of every metered lane,
+   * where the provider emits no quota telemetry at all. */
   quota: QuotaObservation | null;
+  /** The lane work would run on right now (issue #175) — what the quota above
+   * is an observation *of*, and what a missing observation means. null when no
+   * lane resolves (an unusable `lanes.yaml`), which is its own kind of quiet. */
+  quotaLane: FleetLaneRow | null;
+}
+
+/**
+ * The primary execution lane, as much of it as the dashboard needs (issue
+ * #175).
+ *
+ * Deliberately three fields and no credential: this crosses an API route, and
+ * a lane's auth is variable *names* even on the settings screen.
+ */
+export interface FleetLaneRow {
+  id: string;
+  label: string;
+  /** Which billing posture — and so, whether quota telemetry is even possible.
+   * The unified-window machinery is subscription-only (#165), so `metered` is
+   * exactly the set of lanes for which "no observation" is permanent rather
+   * than pending. */
+  billing: LaneBilling;
 }
 
 export interface FleetProjectRow {
@@ -427,9 +448,30 @@ export interface FleetView {
   };
   /** True when any project has autonomy enabled */
   autonomyOn: boolean;
-  /** The account's quota as last observed (issue #167), or null when nothing
-   * has been observed yet. Pure display: nothing in the fleet acts on it. */
+  /** The primary lane's quota as last observed (issue #167, per-lane since
+   * #175), or null when that lane has reported nothing. Pure display: nothing
+   * in the fleet acts on it. */
   quota: QuotaGlance | null;
+  /** Which lane that quota belongs to, and whether the lane can report one at
+   * all (issue #175) — so a null above reads as "this lane is bounded by
+   * spend" rather than as "we have not looked yet". */
+  quotaLane: QuotaLaneGlance | null;
+}
+
+/**
+ * The lane the quota tile is speaking about (issue #175).
+ *
+ * `reportsQuota` is the whole point of carrying it. A metered lane's quota is
+ * null forever, and the tile must say something different from what it says on
+ * a subscription lane that simply has not run a pass yet — one is "bounded by
+ * spend, by design", the other is "not observed yet".
+ */
+export interface QuotaLaneGlance {
+  id: string;
+  label: string;
+  billing: LaneBilling;
+  /** Whether this lane's provider emits rate-limit telemetry at all. */
+  reportsQuota: boolean;
 }
 
 /**
@@ -474,6 +516,30 @@ function quotaGlance(observation: QuotaObservation | null): QuotaGlance | null {
     utilization: observation.utilization,
     resetsAt: observation.resetsAt?.toISOString() ?? null,
     observedAt: observation.observedAt.toISOString(),
+  };
+}
+
+/**
+ * The primary lane, in the terms the quota tile renders.
+ *
+ * `reportsQuota` is derived from the billing kind rather than stored, because
+ * that *is* the discriminator: the unified-window machinery is an
+ * Anthropic-subscription construct (#165's finding 6), so a metered lane —
+ * Anthropic's own API included — emits nothing. Confirmed against OpenRouter on
+ * 2026-09-02: no `anthropic-ratelimit-*` response headers, and no
+ * `rate_limit_event` on a full harness turn.
+ */
+function quotaLaneGlance(lane: FleetLaneRow | null): QuotaLaneGlance | null {
+  if (!lane) return null;
+  return {
+    id: lane.id,
+    label: lane.label,
+    billing: lane.billing,
+    // Only `subscription`, positively — a billing kind added later reads as
+    // "reports nothing", which is the fail-safe direction: it costs a tile its
+    // colour, where the reverse would have the fleet waiting on a reading that
+    // never comes.
+    reportsQuota: lane.billing === "subscription",
   };
 }
 
@@ -1237,5 +1303,6 @@ export function buildFleetView(rows: FleetRows): FleetView {
     },
     autonomyOn: rows.projects.some((p) => p.autonomyEnabled),
     quota: quotaGlance(rows.quota),
+    quotaLane: quotaLaneGlance(rows.quotaLane),
   };
 }

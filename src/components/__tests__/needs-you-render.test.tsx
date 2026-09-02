@@ -41,6 +41,7 @@ function render(overrides: Partial<FleetRows> = {}): string {
     fleetHealth: null,
     failingChecksByRun: null,
     quota: null,
+    quotaLane: null,
     quotaThresholdPercent: 90,
     ...overrides,
   });

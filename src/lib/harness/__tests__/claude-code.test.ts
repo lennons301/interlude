@@ -36,6 +36,8 @@ function lane(overrides: Partial<ResolvedLane> = {}): ResolvedLane {
     baseUrl: null,
     tier: "heavy",
     model: "opus",
+    prices: null,
+    declaresPrices: false,
     caps: { dailyBudgetUsd: null },
     ...overrides,
   };
@@ -187,6 +189,62 @@ describe("buildClaudeTurnCommand", () => {
     });
     expect(cmd).toContain("--max-turns 100");
     expect(cmd).toContain("--max-budget-usd 75");
+  });
+
+  it("gives no spend ceiling to a lane whose prices the CLI does not know", () => {
+    // Issue #175: `--max-budget-usd` is enforced against the CLI's own cost
+    // figure, which off an Anthropic-direct endpoint is Anthropic list prices
+    // applied to a model that was never billed at them — measured at 67x the
+    // lane's real price. A $20 ceiling would stop the turn at about $0.30 of
+    // real spend, mid-work, and the orchestrator would park the pass as
+    // finished because a budget stop is not `error_max_turns`.
+    const cmd = buildClaudeTurnCommand({
+      maxBudgetUsd: 20,
+      lane: lane({
+        id: "openrouter-glm",
+        model: "z-ai/glm-5.3-flash",
+        declaresPrices: true,
+        prices: {
+          inputPerMTok: 0.075,
+          outputPerMTok: 0.25,
+          cacheReadPerMTok: 0.015,
+          cacheWritePerMTok: null,
+        },
+      }),
+    });
+
+    expect(cmd).not.toContain("--max-budget-usd");
+    // What still bounds the turn: the turn ceiling here, and the fleet's own
+    // accounting between turns, which charges the lane's real prices.
+    expect(cmd).toContain("--max-turns 50");
+  });
+
+  it("gives no ceiling to a priced lane even when no tier resolved", () => {
+    // The pinned-model case: `AGENT_MODEL` names a raw identifier, so no tier
+    // resolves and there is no per-tier price to read — but the *provider* is
+    // still one the CLI does not price, so the ceiling is still one it would
+    // misapply. Keying this branch on the resolved `prices` rather than on the
+    // lane definition put the invisible mid-work truncation straight back.
+    const cmd = buildClaudeTurnCommand({
+      maxBudgetUsd: 20,
+      lane: lane({
+        id: "openrouter-glm",
+        tier: null,
+        model: "some/pinned-model",
+        declaresPrices: true,
+        prices: null,
+      }),
+    });
+
+    expect(cmd).not.toContain("--max-budget-usd");
+  });
+
+  it("keeps the ceiling on a lane whose reported cost is its own list price", () => {
+    // The live path is untouched: the subscription lane declares no prices,
+    // so the CLI's figure is correct there and the flag still guards a turn.
+    const cmd = buildClaudeTurnCommand({ maxBudgetUsd: 20, lane: lane() });
+
+    expect(cmd).toContain("--max-budget-usd 20");
   });
 
   it("omits --model entirely when the lane resolved none (issue #74)", () => {

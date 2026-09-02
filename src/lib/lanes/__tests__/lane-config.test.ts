@@ -66,6 +66,7 @@ describe("parseLaneConfig", () => {
       ],
       baseUrl: null,
       models: { heavy: "opus", standard: "sonnet", light: "haiku" },
+      prices: null,
       caps: { dailyBudgetUsd: null },
     });
     expect(api.billing).toBe("metered");
@@ -248,6 +249,27 @@ describe("the shipped lanes.yaml", () => {
     ]);
   });
 
+  it("prices every lane that is not Anthropic-direct", () => {
+    // The rule issue #175 exists for: off an Anthropic-direct endpoint the
+    // CLI's reported cost is Anthropic list prices applied to a model that was
+    // never billed at them (measured: $0.194985 for a turn on a free model).
+    // A lane with a base_url and no prices would charge the fleet that number.
+    for (const lane of catalog.lanes) {
+      if (lane.baseUrl === null) continue;
+      expect(lane.prices, `lane "${lane.id}" declares no prices`).not.toBeNull();
+    }
+  });
+
+  it("carries the OpenRouter credential on more than one lane, unduplicated", () => {
+    // The ticket's own thesis, as a fact about the file: changing *model* on a
+    // third-party provider is a tier-map edit, not a new credential.
+    const openrouterLanes = catalog.lanes.filter((lane) =>
+      lane.auth.some((ref) => ref.fromEnv === "OPENROUTER_API_KEY")
+    );
+    expect(openrouterLanes.length).toBeGreaterThan(1);
+    expect(new Set(openrouterLanes.map((lane) => lane.baseUrl)).size).toBe(1);
+  });
+
   it("contains no value that could be a secret", () => {
     // Belt and braces over the parser's own rule: the file is version
     // controlled, so a credential in it is a credential in git forever.
@@ -257,5 +279,102 @@ describe("the shipped lanes.yaml", () => {
         expect(ref.fromEnv).toMatch(/^[A-Z][A-Z0-9_]*$/);
       }
     }
+  });
+});
+
+/**
+ * Lane prices (issue #175) — the numbers a metered lane's spend is actually
+ * derived from, so the parser is as strict about them as it is about auth.
+ */
+describe("parseLaneConfig — prices", () => {
+  function withPrices(prices: string): string {
+    return VALID.replace(
+      `    caps:
+      daily_budget_usd: 20`,
+      prices
+    );
+  }
+
+  it("reads a priced tier into USD per million tokens", () => {
+    const catalog = parse(
+      withPrices(`    prices:
+      heavy: { input: 1.4, output: 4.4, cache_read: 0.26 }
+      standard: { input: 0.075, output: 0.25, cache_read: 0.015 }
+      light: { input: 0.06, output: 0.4, cache_read: 0.01, cache_write: 0.5 }`)
+    );
+    const lane = catalog.lanes.find((l) => l.id === "anthropic-api")!;
+
+    expect(lane.prices?.standard).toEqual({
+      inputPerMTok: 0.075,
+      outputPerMTok: 0.25,
+      cacheReadPerMTok: 0.015,
+      // Absent is null, not zero: the cost calculation reads it as the input
+      // rate, because a provider publishing no cache price charges full price.
+      cacheWritePerMTok: null,
+    });
+    expect(lane.prices?.light.cacheWritePerMTok).toBe(0.5);
+  });
+
+  it("takes no prices at all as an intentional choice, not an omission", () => {
+    // An Anthropic-direct lane: the harness's own figure is the right one
+    // there, and re-declaring list prices would create a second copy to rot.
+    const catalog = parse(VALID);
+    expect(catalog.lanes.every((lane) => lane.prices === null)).toBe(true);
+  });
+
+  it("refuses prices that cover only some tiers", () => {
+    // A lane that could price `standard` but not `light` would fall silently
+    // back to the untrusted harness figure the moment the degrade ladder
+    // stepped down — the one moment nobody is watching the number.
+    const reason = reasonFor(
+      withPrices(`    prices:
+      heavy: { input: 1.4, output: 4.4 }
+      standard: { input: 0.075, output: 0.25 }`)
+    );
+    expect(reason).toContain('"light"');
+  });
+
+  it("refuses a negative price and a non-numeric one", () => {
+    expect(
+      reasonFor(
+        withPrices(`    prices:
+      heavy: { input: -1, output: 4.4 }
+      standard: { input: 0.075, output: 0.25 }
+      light: { input: 0.06, output: 0.4 }`)
+      )
+    ).toContain("prices.heavy.input");
+
+    expect(
+      reasonFor(
+        withPrices(`    prices:
+      heavy: { input: cheap, output: 4.4 }
+      standard: { input: 0.075, output: 0.25 }
+      light: { input: 0.06, output: 0.4 }`)
+      )
+    ).toContain("prices.heavy.input");
+  });
+
+  it("accepts a zero price — a free model really is free", () => {
+    const catalog = parse(
+      withPrices(`    prices:
+      heavy: { input: 0, output: 0 }
+      standard: { input: 0, output: 0 }
+      light: { input: 0, output: 0 }`)
+    );
+    expect(
+      catalog.lanes.find((l) => l.id === "anthropic-api")!.prices?.heavy
+        .inputPerMTok
+    ).toBe(0);
+  });
+
+  it("refuses a tier it does not know, exactly as `models` does", () => {
+    const reason = reasonFor(
+      withPrices(`    prices:
+      heavy: { input: 1, output: 1 }
+      standard: { input: 1, output: 1 }
+      light: { input: 1, output: 1 }
+      medium: { input: 1, output: 1 }`)
+    );
+    expect(reason).toContain("medium");
   });
 });

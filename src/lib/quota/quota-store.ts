@@ -1,12 +1,23 @@
 /**
- * The fleet's quota state, as one durable row (issue #167).
+ * A lane's quota state, as one durable row per lane (issue #167, made per-lane
+ * by #175).
  *
  * Latest observation wins, with no history kept: the CLI emits a
  * `rate_limit_event` per API attempt, so a table of them would grow with the
- * fleet's traffic to answer a question — "where is the quota now?" — that only
- * ever needs the last row. When a later ticket wants the shape of a window over
- * time, the passive recorder (`orchestrator/stream-recorder.ts`) already has
- * every event verbatim on disk to build it from.
+ * fleet's traffic to answer a question — "where is this lane's quota now?" —
+ * that only ever needs the last row. When a later ticket wants the shape of a
+ * window over time, the passive recorder (`orchestrator/stream-recorder.ts`)
+ * already has every event verbatim on disk to build it from.
+ *
+ * **Per lane, and never fleet-wide.** A rate limit is a fact about one account
+ * at one provider. The unified-window machinery is subscription-only (#165's
+ * finding 6, re-confirmed against OpenRouter on 2026-09-02 — no
+ * `anthropic-ratelimit-*` response headers, no `rate_limit_event` anywhere on
+ * the stream), so a metered lane never produces an observation at all. Keyed by
+ * lane, that reads as null, which is the truth: nothing to gate on, and the
+ * lane is bounded by spend instead. Keyed by the fleet, the subscription's last
+ * reading would stand in for it — and a lane that cannot report a wall would be
+ * held behind somebody else's.
  *
  * **The row is stored in the wire's own encoding**, so there is exactly one
  * reader of a quota observation in the codebase: writing projects the
@@ -22,7 +33,7 @@
  */
 
 import { db } from "@/db";
-import { QUOTA_STATE_ROW_ID, quotaState } from "@/db/schema";
+import { quotaState } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { parseRateLimitEvent, type QuotaObservation } from "./rate-limit-event";
 
@@ -47,20 +58,24 @@ function toStoredInfo(observation: QuotaObservation): Record<string, unknown> {
 }
 
 /**
- * Record an observation as the fleet's current quota state. Upserts the single
- * row, so the first observation on a long-lived install creates it.
+ * Record an observation as the current quota state **of the lane it was seen
+ * on**. Upserts that lane's row, so the first observation on a long-lived
+ * install creates it.
  */
-export function recordQuotaObservation(observation: QuotaObservation): void {
+export function recordQuotaObservation(
+  lane: string,
+  observation: QuotaObservation
+): void {
   try {
     const info = toStoredInfo(observation);
     db.insert(quotaState)
       .values({
-        id: QUOTA_STATE_ROW_ID,
+        lane,
         observation: info,
         observedAt: observation.observedAt,
       })
       .onConflictDoUpdate({
-        target: quotaState.id,
+        target: quotaState.lane,
         set: { observation: info, observedAt: observation.observedAt },
       })
       .run();
@@ -70,20 +85,28 @@ export function recordQuotaObservation(observation: QuotaObservation): void {
 }
 
 /**
- * The fleet's last observed quota state, or null when no pass has reported one.
+ * A lane's last observed quota state, or null when no pass on that lane has
+ * reported one.
  *
- * Null is a real answer the tile renders, not a failure: a fresh install has
- * never seen an event, and neither has one whose passes all authenticate with
- * an API key — the unified-window machinery is subscription-only (#165's
- * finding 6), so a metered lane reports no quota at all. A row written by a
- * since-changed build reads as null too, rather than breaking the dashboard.
+ * Null is a real answer the tile renders, not a failure, and it has three
+ * causes worth keeping apart in the reader's head: a fresh install; a lane
+ * whose id no longer names anything (renamed in a deploy); and — permanently —
+ * any metered lane, which the provider gives no quota telemetry for. A row
+ * written by a since-changed build reads as null too, rather than breaking the
+ * dashboard.
+ *
+ * `lane` may be null (nothing resolved as primary), which is null in, null out:
+ * there is no lane to have a quota.
  */
-export function getQuotaObservation(): QuotaObservation | null {
+export function getQuotaObservation(
+  lane: string | null
+): QuotaObservation | null {
+  if (lane === null) return null;
   try {
     const row = db
       .select()
       .from(quotaState)
-      .where(eq(quotaState.id, QUOTA_STATE_ROW_ID))
+      .where(eq(quotaState.lane, lane))
       .get();
     if (!row) return null;
 

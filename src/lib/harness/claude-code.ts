@@ -71,6 +71,8 @@ export function buildTurnEnv(input: HarnessExecEnvInput): string[] {
  * `maxTurns`/`maxBudgetUsd` fall back to the configured defaults; a lane with
  * no model identifier for the pass passes no `--model` at all, leaving the
  * harness to resolve its own default exactly as before any of this existed.
+ * A lane that declares its own prices passes no `--max-budget-usd` — see the
+ * note at that branch, which is a finding rather than a preference.
  */
 export function buildClaudeTurnCommand(input: HarnessCommandInput): string {
   const config = getConfig();
@@ -91,9 +93,53 @@ export function buildClaudeTurnCommand(input: HarnessCommandInput): string {
     "--dangerously-skip-permissions",
     "--max-turns",
     String(input.maxTurns ?? config.maxTurns),
-    "--max-budget-usd",
-    String(input.maxBudgetUsd ?? config.maxBudgetUsd),
   ];
+
+  // The harness's own spend ceiling, and only where it means anything (issue
+  // #175).
+  //
+  // `--max-budget-usd` is enforced by the CLI against the CLI's *own* cost
+  // figure, and that figure is Anthropic list prices applied to whatever model
+  // it was handed: measured, it billed a turn on a free model $0.194985, 67x
+  // what the same tokens cost on the lane's published prices. Handing it a
+  // ceiling in the fleet's currency would therefore stop a turn at roughly a
+  // sixtieth of the budget the operator set — and the orchestrator would not
+  // see a failure, because a budget-stopped turn is not `error_max_turns`: the
+  // pass would end early, mid-work, and be parked as though it had finished.
+  // "A lane that is cheap and fails every ticket is not cheap" is exactly that
+  // failure.
+  //
+  // So a lane that declares prices is not given a ceiling the harness would
+  // misapply. A lane with no prices — Anthropic-direct, where the CLI's figure
+  // is its own list price and correct — keeps the flag and is unchanged by any
+  // of this.
+  //
+  // What still bounds a priced turn, exactly: `--max-turns` inside it, and
+  // between turns the fleet's own accounting, which since this ticket charges
+  // the lane's real prices — `attemptExhaustion` for an implement or repair
+  // pass, and the daily autonomous cap, which counts every autonomous pass
+  // kind. **A review or triage pass has no in-turn ceiling on a priced lane**:
+  // its `DEFAULT_REVIEW_BUDGET_USD` / `DEFAULT_TRIAGE_BUDGET_USD` reached the
+  // harness through this flag and nowhere else. That is a real loss and it is
+  // still the better trade: enforced against the CLI's figure those ceilings
+  // cut a review off at a fraction of themselves — roughly $0.08 of real spend
+  // for a $5 budget at the measured 67x — mid-work and invisibly, which is a
+  // review pass that silently reviews half a PR. Converting the ceiling into
+  // the CLI's currency would mean modelling its pricing, and a wrong ratio is
+  // that same invisible truncation back again.
+  //
+  // The question is asked of the lane *definition* (`declaresPrices`), never
+  // of this pass's resolved tier: "does the CLI price this provider?" is a
+  // fact about the endpoint, true before any tier resolves. Keying it on the
+  // per-tier `prices` would put the ceiling back the moment no tier resolved —
+  // the pinned-model case — which is precisely the invisible mid-work
+  // truncation this branch exists to remove.
+  if (!input.lane.declaresPrices) {
+    cmdParts.push(
+      "--max-budget-usd",
+      String(input.maxBudgetUsd ?? config.maxBudgetUsd)
+    );
+  }
 
   if (input.lane.model) {
     // Single-quote the model id: real ids can carry shell glob metacharacters
@@ -122,5 +168,8 @@ export const claudeCodeAdapter: HarnessAdapter = {
   id: "claude-code",
   buildExecEnv: buildTurnEnv,
   buildCommand: buildClaudeTurnCommand,
-  createOutputHandler,
+  // The lane's id, not the lane: the parser only needs to know which account's
+  // quota an observed `rate_limit_event` describes (issue #175), and handing it
+  // the auth values as well would put credentials on the logging path.
+  createOutputHandler: (taskId, lane) => createOutputHandler(taskId, lane.id),
 };

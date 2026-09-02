@@ -68,6 +68,11 @@ lanes:
       heavy: opus
       standard: sonnet
       light: haiku
+    # No `prices`: this lane talks to Anthropic's own endpoint, where the CLI
+    # prices a model it recognises at that model's list rates and says so
+    # (`costBasis: "list"` on the result event's modelUsage). Its figure is the
+    # one the fleet has always charged against, and re-declaring those prices
+    # here would only create a second copy to fall out of date.
     caps:
       # Real money, and enforced (issue #174). This is a *ceiling on the
       # ceiling*: the operator's own real-money cap (METERED_DAILY_CAP_USD, or
@@ -104,6 +109,64 @@ lanes:
       heavy: anthropic/claude-opus-4.1
       standard: anthropic/claude-sonnet-4.5
       light: anthropic/claude-haiku-4.5
+    # USD per million tokens, from OpenRouter's own model listing on
+    # 2026-09-02. Declared because the CLI's reported cost is NOT usable off an
+    # Anthropic-direct endpoint (issue #175): measured, it priced a turn on a
+    # free model at $0.194985, having applied Anthropic list rates to a model
+    # it had never heard of. These figures happen to match Anthropic's list
+    # prices, which is the point — the lane is only worth having if what it
+    # charges is written down rather than guessed at by the harness.
+    prices:
+      heavy: { input: 15.0, output: 75.0, cache_read: 1.5, cache_write: 18.75 }
+      standard: { input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 3.75 }
+      light: { input: 1.0, output: 5.0, cache_read: 0.1, cache_write: 1.25 }
+    caps:
+      # Enforced as above (issue #174) — the lower of this and the operator's
+      # own real-money cap binds.
+      daily_budget_usd: 20
+
+  # The same credential and the same endpoint as the lane above, pointed at
+  # open-weights models (issue #175). Two lanes rather than one retuned one, on
+  # purpose: this file's whole claim is that changing provider is configuration
+  # and changing *model* is a tier-map edit, and the cheapest way to show that
+  # is a second lane whose only differences from its neighbour are three model
+  # slugs and three rows of prices. Nothing else — no new credential, no new
+  # adapter, no code.
+  #
+  # What was verified, and on what (2026-09-02, issue #175). The *endpoint* was
+  # exercised with the real Claude Code harness: tool use, extended thinking,
+  # `--resume` and prompt caching all passed through, and the pass did the work
+  # it was asked to do. That run used a free model
+  # (`minimax/minimax-m2.7:free`), because the OpenRouter account holds no
+  # credits and every paid model answers 402 — so the three slugs below are
+  # verified only as far as OpenRouter's model listing, which is where their
+  # prices come from. Re-check them with
+  # `node scripts/openrouter-lane-check.mjs --model z-ai/glm-5.3-flash` once
+  # the account is funded, and read the findings on issue #175 for what did not
+  # carry over: the harness's own cost figure, and quota telemetry.
+  - id: openrouter-glm
+    label: OpenRouter (GLM open weights)
+    adapter: claude-code
+    billing: metered
+    auth:
+      ANTHROPIC_AUTH_TOKEN: OPENROUTER_API_KEY
+    base_url: https://openrouter.ai/api
+    models:
+      # GLM 5.3 is the current open-weights coder family; Flash is the cheap
+      # variant, roughly two orders of magnitude under the top Claude tier.
+      # `standard` is Flash rather than full 5.3 deliberately: this lane exists
+      # to be cheap, and a lane's default tier is where its cost actually lands.
+      heavy: z-ai/glm-5.3
+      standard: z-ai/glm-5.3-flash
+      light: z-ai/glm-4.7-flash
+    # USD per million tokens, from OpenRouter's model listing on 2026-09-02.
+    # `cache_write` is deliberately absent across the family: OpenRouter
+    # publishes no cache-write price for these models, and the cost calculation
+    # reads an absent cache price as the input rate rather than as free.
+    prices:
+      heavy: { input: 1.4, output: 4.4, cache_read: 0.26 }
+      standard: { input: 0.075, output: 0.25, cache_read: 0.015 }
+      light: { input: 0.06, output: 0.4, cache_read: 0.01 }
     caps:
       # Enforced as above (issue #174) — the lower of this and the operator's
       # own real-money cap binds.

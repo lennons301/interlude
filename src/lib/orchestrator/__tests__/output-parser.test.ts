@@ -28,6 +28,8 @@ const fixtureLines = fs
 
 describe("output-parser with real Claude Code stream-json", () => {
   const TASK_ID = "test-task-001";
+  /** Any lane id: these tests are about parsing, not whose quota it is. */
+  const LANE_ID = "claude-subscription";
 
   beforeEach(() => {
     testDb = createTestDb().db;
@@ -54,7 +56,7 @@ describe("output-parser with real Claude Code stream-json", () => {
   });
 
   it("parses assistant text messages", () => {
-    const handler = createOutputHandler(TASK_ID);
+    const handler = createOutputHandler(TASK_ID, LANE_ID);
 
     // Feed all fixture lines
     for (const line of fixtureLines) {
@@ -85,7 +87,7 @@ describe("output-parser with real Claude Code stream-json", () => {
   });
 
   it("parses tool_use messages from assistant content blocks", () => {
-    const handler = createOutputHandler(TASK_ID);
+    const handler = createOutputHandler(TASK_ID, LANE_ID);
 
     for (const line of fixtureLines) {
       handler.write(line + "\n");
@@ -112,7 +114,7 @@ describe("output-parser with real Claude Code stream-json", () => {
   });
 
   it("updates tool_use messages with tool_result output", () => {
-    const handler = createOutputHandler(TASK_ID);
+    const handler = createOutputHandler(TASK_ID, LANE_ID);
 
     for (const line of fixtureLines) {
       handler.write(line + "\n");
@@ -139,7 +141,7 @@ describe("output-parser with real Claude Code stream-json", () => {
   });
 
   it("returns session_id and cost from result event", () => {
-    const handler = createOutputHandler(TASK_ID);
+    const handler = createOutputHandler(TASK_ID, LANE_ID);
 
     for (const line of fixtureLines) {
       handler.write(line + "\n");
@@ -153,7 +155,7 @@ describe("output-parser with real Claude Code stream-json", () => {
   });
 
   it("fires onDone callback when result event is received", () => {
-    const handler = createOutputHandler(TASK_ID);
+    const handler = createOutputHandler(TASK_ID, LANE_ID);
     let doneFired = false;
     handler.onDone(() => { doneFired = true; });
 
@@ -169,7 +171,7 @@ describe("output-parser with real Claude Code stream-json", () => {
   });
 
   it("returns the turn's final text message for a turn ending normally", () => {
-    const handler = createOutputHandler(TASK_ID);
+    const handler = createOutputHandler(TASK_ID, LANE_ID);
 
     for (const line of fixtureLines) {
       handler.write(line + "\n");
@@ -180,7 +182,7 @@ describe("output-parser with real Claude Code stream-json", () => {
   });
 
   it("returns a blocked question as the final message of a turn ending blocked", () => {
-    const handler = createOutputHandler(TASK_ID);
+    const handler = createOutputHandler(TASK_ID, LANE_ID);
 
     const blockedTurn = [
       JSON.stringify({
@@ -206,7 +208,7 @@ describe("output-parser with real Claude Code stream-json", () => {
   });
 
   it("returns a null final message for a turn with no text at all", () => {
-    const handler = createOutputHandler(TASK_ID);
+    const handler = createOutputHandler(TASK_ID, LANE_ID);
 
     handler.write(
       JSON.stringify({ type: "result", session_id: "s-1", total_cost_usd: 0.01 }) + "\n"
@@ -217,7 +219,7 @@ describe("output-parser with real Claude Code stream-json", () => {
   });
 
   it("handles partial line buffering", () => {
-    const handler = createOutputHandler(TASK_ID);
+    const handler = createOutputHandler(TASK_ID, LANE_ID);
 
     // Feed a line in chunks
     const resultLine = fixtureLines[fixtureLines.length - 1];

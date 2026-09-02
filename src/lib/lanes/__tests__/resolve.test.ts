@@ -53,6 +53,10 @@ lanes:
       heavy: anthropic/claude-opus-4.1
       standard: anthropic/claude-sonnet-4.5
       light: anthropic/claude-haiku-4.5
+    prices:
+      heavy: { input: 15, output: 75, cache_read: 1.5, cache_write: 18.75 }
+      standard: { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 }
+      light: { input: 1, output: 5, cache_read: 0.1, cache_write: 1.25 }
 `;
 
 const catalog: LaneCatalog = (() => {
@@ -241,6 +245,32 @@ describe("what a resolved lane carries", () => {
     expect(Object.keys(result.lane.auth)).toEqual(["ANTHROPIC_AUTH_TOKEN"]);
   });
 
+  it("carries the priced tier, not the whole price table", () => {
+    // The pass runs at one tier, and what it costs is that tier's prices —
+    // handing the adapter all three would leave the choice open past the point
+    // it was made (issue #175).
+    const result = resolve({
+      overrides: { primaryLane: "openrouter", modelTierReview: "light" },
+      kind: "review",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.lane.tier).toBe("light");
+    expect(result.lane.prices).toEqual({
+      inputPerMTok: 1,
+      outputPerMTok: 5,
+      cacheReadPerMTok: 0.1,
+      cacheWritePerMTok: 1.25,
+    });
+  });
+
+  it("prices nothing on a lane that declares no prices", () => {
+    // An Anthropic-direct lane: the harness's own figure is charged, so there
+    // is nothing here to override it with.
+    const result = resolve({ overrides: { primaryLane: "direct-api" } });
+    expect(result.ok && result.lane.prices).toBeNull();
+  });
+
   it("carries the lane's caps through for the guardrails that enforce them", () => {
     const result = resolve({ overrides: { primaryLane: "direct-api" } });
     expect(result.ok && result.lane.caps).toEqual({ dailyBudgetUsd: 20 });
@@ -334,12 +364,53 @@ describe("what a resolved lane carries", () => {
     expect(result.ok && result.lane.model).toBe("claude-opus-4-8");
   });
 
-  it("passes no model at all when nothing names one", () => {
+  it("passes no model at all when nothing names one, on an unpriced lane", () => {
     // The pre-#74 behaviour: no `--model`, the harness resolves its own
     // default. An install that has configured nothing must keep working.
     const result = resolve();
     expect(result.ok && result.lane.model).toBeNull();
+    expect(result.ok && result.lane.tier).toBeNull();
     expect(result.ok && result.lane.id).toBe("subscription");
+  });
+
+  it("falls back to a priced lane's own default tier when nothing names one", () => {
+    // The default state — no `AGENT_MODEL`, no stored tier — and therefore the
+    // one a fresh deployment is in (issue #175 review). "Let the harness pick"
+    // cannot mean anything here: the identifier it would pick belongs to
+    // Anthropic's catalogue, so the endpoint either refuses it or quietly
+    // serves a Claude model at a price this lane's table does not hold, and
+    // the fleet would charge the CLI's fiction for it.
+    const result = resolve({ overrides: { primaryLane: "openrouter" } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.lane.tier).toBe("standard");
+    expect(result.lane.model).toBe("anthropic/claude-sonnet-4.5");
+    expect(result.lane.prices).toEqual({
+      inputPerMTok: 3,
+      outputPerMTok: 15,
+      cacheReadPerMTok: 0.3,
+      cacheWritePerMTok: 3.75,
+    });
+  });
+
+  it("reports a lane's declared prices apart from this pass's tier prices", () => {
+    // Two different questions (issue #175 review): "what does this tier cost?"
+    // and "does the CLI price this lane's provider at all?". The second is
+    // what decides whether the harness may be handed `--max-budget-usd`, and
+    // it still has an answer in the pinned-model case where the first does not.
+    const pinned = resolve({
+      config: cfg({ agentModel: "claude-opus-4-8" }),
+      overrides: { primaryLane: "openrouter" },
+    });
+    expect(pinned.ok).toBe(true);
+    if (!pinned.ok) return;
+    expect(pinned.lane.tier).toBeNull();
+    expect(pinned.lane.model).toBe("claude-opus-4-8");
+    expect(pinned.lane.prices).toBeNull();
+    expect(pinned.lane.declaresPrices).toBe(true);
+
+    const subscription = resolve();
+    expect(subscription.ok && subscription.lane.declaresPrices).toBe(false);
   });
 
   it("keeps the subscription lane's mapping identical to the pre-lane one", () => {
