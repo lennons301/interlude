@@ -704,8 +704,12 @@ export async function startTask(taskId: string): Promise<void> {
  *
  * The task's `sessionId` is set only by the resume executor, so an ordinary
  * first pass never reaches past the first line.
+ *
+ * Exported as the seam it is, like `evaluatePassOutcome`: whether a resumed
+ * pass continues its session or falls back is decided here, and a test that
+ * wanted to assert it otherwise would have to provision a container.
  */
-async function restoreSessionTranscript(
+export async function restoreSessionTranscript(
   task: typeof tasks.$inferSelect,
   running: RunningContainer
 ): Promise<string | undefined> {

@@ -3,6 +3,7 @@ import {
   buildCiRepairPrompt,
   buildImplementPrompt,
   buildRepairPrompt,
+  buildResumePrompt,
   buildReviewPrompt,
   resolveWorkflowSkill,
 } from "../workflow";
@@ -400,5 +401,44 @@ describe("buildReviewPrompt", () => {
     expect(prompt.indexOf("blocks the merge and pages the owner")).toBeLessThan(
       prompt.indexOf("this is a retry")
     );
+  });
+});
+
+describe("buildResumePrompt — reopening a paused pass (issue #169)", () => {
+  const RESUMED = {
+    originalPrompt: buildImplementPrompt({ ...TICKET, workflow: { skill: null } }),
+    branch: "agent/issue-7",
+    resume: 1,
+    maxResumes: 3,
+  };
+
+  it("explains the gap the pass is about to notice", () => {
+    const prompt = buildResumePrompt(RESUMED);
+
+    expect(prompt).toContain("the account's quota refused it");
+    expect(prompt).toContain("agent/issue-7");
+    expect(prompt).toContain("resume 1 of 3");
+  });
+
+  it("carries the original brief, so it stands without the conversation", () => {
+    // The declared fallback — same branch, prior context lost — only works if
+    // the prompt does not depend on a restored transcript being there.
+    const prompt = buildResumePrompt(RESUMED);
+
+    expect(prompt).toContain(TICKET.issueBody);
+    expect(prompt).toContain("--- END TICKET ---");
+  });
+
+  it("leads with the preamble, so the brief reads as the work and not as new work", () => {
+    const prompt = buildResumePrompt(RESUMED);
+
+    expect(prompt.indexOf("This pass was paused")).toBeLessThan(
+      prompt.indexOf("--- TICKET")
+    );
+  });
+
+  it("tells the pass to look at what is already done", () => {
+    // The one instruction that stops a resumed pass redoing work it pushed.
+    expect(buildResumePrompt(RESUMED)).toContain("git log");
   });
 });
