@@ -8,15 +8,22 @@ import {
 import {
   FIXED_CEILINGS,
   MODEL_TIER_FIELD_ORDER,
+  RESUME_BOUND_OPTIONS,
   SETTINGS_FIELDS,
   SETTABLE_KEYS,
   applySettingsPatch,
   describeModelTierSettings,
+  describeResumeBoundSetting,
   parseSettingsPatch,
   resolveModelTier,
+  resolveResumeBound,
   sanitizeOverrides,
   type SettingsOverrides,
 } from "../settings-resolver";
+import {
+  DEFAULT_MAX_RESUMES_PER_ATTEMPT,
+  MAX_RESUMES_CEILING,
+} from "../orchestrator/autonomy/budgets";
 
 /**
  * The settings resolver (issue #166) — the layer that lets a UI override sit
@@ -398,5 +405,99 @@ describe("the primary-lane setting", () => {
     expect(
       SETTINGS_FIELDS.primaryLane.envDefault(cfg({ agentLane: "openrouter" }))
     ).toEqual({ envVar: "AGENT_LANE", value: "openrouter" });
+  });
+});
+
+describe("the quota resume bound (issue #169)", () => {
+  /** A config carrying only the field this setting reads. */
+  function boundCfg(maxResumesPerAttempt: number | null): AppConfig {
+    return { maxResumesPerAttempt } as AppConfig;
+  }
+
+  it("falls through to the built-in default with nothing set", () => {
+    const resolved = resolveResumeBound(boundCfg(null), NONE);
+
+    expect(resolved.value).toBe(DEFAULT_MAX_RESUMES_PER_ATTEMPT);
+    expect(resolved.source).toBe("environment");
+    expect(resolved.override).toBeNull();
+    // Named as unset, not as the default's number: a provenance line claiming
+    // the variable holds 3 would send an operator looking for something that
+    // is not there.
+    expect(resolved.envValue).toBeNull();
+    expect(resolved.envVar).toBe("MAX_RESUMES_PER_ATTEMPT");
+  });
+
+  it("takes the environment when the variable is set", () => {
+    const resolved = resolveResumeBound(boundCfg(1), NONE);
+
+    expect(resolved.value).toBe(1);
+    expect(resolved.source).toBe("environment");
+    expect(resolved.envValue).toBe("1");
+  });
+
+  it("lets a UI override win, and says so", () => {
+    const resolved = resolveResumeBound(boundCfg(1), { maxResumesPerAttempt: "4" });
+
+    expect(resolved.value).toBe(4);
+    expect(resolved.source).toBe("override");
+    expect(resolved.override).toBe(4);
+    // The environment it would fall back to is still reported, which is what
+    // makes clearing the override a predictable press.
+    expect(resolved.envValue).toBe("1");
+  });
+
+  it("accepts zero — a quota pause going straight to a human is a real choice", () => {
+    const parsed = parseSettingsPatch({ maxResumesPerAttempt: "0" });
+
+    expect(parsed).toEqual({ ok: true, patch: { maxResumesPerAttempt: "0" } });
+    expect(resolveResumeBound(boundCfg(null), { maxResumesPerAttempt: "0" }).value).toBe(0);
+  });
+
+  it("rejects a value past the ceiling with a message, never clamping it", () => {
+    const parsed = parseSettingsPatch({
+      maxResumesPerAttempt: String(MAX_RESUMES_CEILING + 1),
+    });
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.ok === false && parsed.error).toContain(
+      `from 0 to ${MAX_RESUMES_CEILING}`
+    );
+  });
+
+  it("rejects anything that is not a whole count", () => {
+    for (const bad of ["-1", "1.5", "three", ""]) {
+      expect(parseSettingsPatch({ maxResumesPerAttempt: bad }).ok).toBe(false);
+    }
+  });
+
+  it("offers exactly the counts the validator accepts", () => {
+    // The chips and the rejection message are derived from one ceiling, so a
+    // screen can never offer a press the route would refuse.
+    expect(RESUME_BOUND_OPTIONS).toEqual(["0", "1", "2", "3", "4", "5"]);
+    for (const option of RESUME_BOUND_OPTIONS) {
+      expect(parseSettingsPatch({ maxResumesPerAttempt: option }).ok).toBe(true);
+    }
+  });
+
+  it("drops a stored value a narrowed vocabulary no longer accepts", () => {
+    expect(sanitizeOverrides({ maxResumesPerAttempt: "99" })).toEqual({});
+    expect(sanitizeOverrides({ maxResumesPerAttempt: "2" })).toEqual({
+      maxResumesPerAttempt: "2",
+    });
+  });
+
+  it("is listed among the settable keys a rejection enumerates", () => {
+    expect(SETTABLE_KEYS).toContain("maxResumesPerAttempt");
+  });
+
+  it("describes itself for the screen with the number in force", () => {
+    const view = describeResumeBoundSetting(boundCfg(null), {
+      maxResumesPerAttempt: "2",
+    });
+
+    expect(view.label).toBe(SETTINGS_FIELDS.maxResumesPerAttempt.label);
+    expect(view.value).toBe(2);
+    expect(view.builtIn).toBe(DEFAULT_MAX_RESUMES_PER_ATTEMPT);
+    expect(view.options).toEqual(RESUME_BOUND_OPTIONS);
   });
 });

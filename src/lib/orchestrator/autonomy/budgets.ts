@@ -116,6 +116,42 @@ export const MAX_REVIEW_CYCLES_PER_ATTEMPT = 2;
  * review that dies or slips its format once is retried, twice is a human's. */
 export const MAX_UNPARSEABLE_REVIEW_RETRIES = 1;
 
+/**
+ * Resumes one attempt may have after a quota pause before its ticket is routed
+ * to a human (issue #169) — the default the `MAX_RESUMES_PER_ATTEMPT`
+ * environment variable and the settings screen both override.
+ *
+ * Three is the number of five-hour windows an attempt may span, and it is set
+ * by what a pause *costs* rather than by what it risks: a pause spends no
+ * attempt and no money, so the only thing an unbounded one wastes is the
+ * ticket's own latency — while the thing the bound guards against is a
+ * pathological ticket that walls the account on every single pass and would
+ * otherwise cross windows forever. Three lets a genuinely long attempt run
+ * overnight through consecutive windows; a fourth pause says the work is not
+ * finishing on quota and a human should look.
+ */
+export const DEFAULT_MAX_RESUMES_PER_ATTEMPT = 3;
+
+/** The most one attempt may be allowed, whatever the environment or the
+ * settings screen says. Not a safety ceiling in the `FIXED_CEILINGS` sense —
+ * nothing here spends money — but a bound on a bound, so a mistyped 50 cannot
+ * turn a wedged ticket into a permanent one. It is also the vocabulary the
+ * settings screen offers, so the environment and the UI accept exactly the
+ * same values. */
+export const MAX_RESUMES_CEILING = 5;
+
+/**
+ * How far past its window's reset a paused run's own offset may fall (issue
+ * #169) — see resume-jitter.ts for why the offset is derived from the run id.
+ *
+ * Five minutes: long enough that a fleet-wide pause does not put every run on
+ * one sweep tick, competing for the same slots against a window that has only
+ * just reopened, and short enough that nobody watching a countdown wonders
+ * whether the fleet has forgotten. Finer than the 30-second sweep would be
+ * meaningless — the sweep is the resolution the whole spread is observed at.
+ */
+export const RESUME_JITTER_WINDOW_MS = 5 * 60_000;
+
 /** Estate-wide daily autonomous spend cap in USD. Reaching it pauses pickup
  * until local midnight; interactive tasks (no run row) are exempt by
  * construction. */

@@ -3,6 +3,7 @@ import { getConfig } from "@/lib/config";
 import { getFleetSettings, updateSettingsOverrides } from "@/lib/settings";
 import {
   describeModelTierSettings,
+  describeResumeBoundSetting,
   parseSettingsPatch,
   type SettingsOverrides,
   type TierModelIds,
@@ -57,6 +58,9 @@ function state(overrides: SettingsOverrides, updatedAt: Date | null) {
     fields: describeModelTierSettings(getConfig(), overrides, tierModels),
     lanes,
     laneError,
+    // The quota bound (issue #169) needs no lane: it is a count, not a tier,
+    // and resolves to itself.
+    resumeBound: describeResumeBoundSetting(getConfig(), overrides),
     updatedAt: updatedAt?.toISOString() ?? null,
   };
 }

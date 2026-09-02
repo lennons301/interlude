@@ -31,6 +31,10 @@
  */
 
 import type { AgentPassKind, AppConfig } from "./config";
+import {
+  DEFAULT_MAX_RESUMES_PER_ATTEMPT,
+  MAX_RESUMES_CEILING,
+} from "./orchestrator/autonomy/budgets";
 import { isLaneIdShaped } from "./lanes/lane-id";
 import {
   MODEL_TIERS,
@@ -58,9 +62,12 @@ export type ModelTierSettingKey =
   | "modelTierInteractive";
 
 /** The settings a human may override from the UI. Later tickets in issue #164
- * (the quota admission threshold, the overflow daily cap, the per-attempt
- * pause bound) add members here and an entry to `SETTINGS_FIELDS`. */
-export type SettingKey = ModelTierSettingKey | "primaryLane";
+ * (the quota admission threshold, the overflow daily cap) add members here and
+ * an entry to `SETTINGS_FIELDS`. */
+export type SettingKey =
+  | ModelTierSettingKey
+  | "primaryLane"
+  | "maxResumesPerAttempt";
 
 /** What is stored on the settings row: a sparse map, because absent means
  * "fall through to the environment", which is a different thing from any
@@ -144,6 +151,14 @@ function cheaperTierEnv(
   return base.value !== null ? base : { envVar, value: null };
 }
 
+/** The counts the screen offers, derived from the ceiling so the chips and the
+ * validator cannot drift. Zero is a real choice: it means a quota pause hands
+ * the ticket straight to a human. */
+export const RESUME_BOUND_OPTIONS: readonly string[] = Array.from(
+  { length: MAX_RESUMES_CEILING + 1 },
+  (_, n) => String(n)
+);
+
 /**
  * The allowlist. A key absent from here cannot be overridden, whatever a
  * request says — which is the mechanism, not a policy check that could be
@@ -201,7 +216,36 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
         : "a lane id declared in lanes.yaml",
     envDefault: (config) => ({ envVar: "AGENT_LANE", value: config.agentLane }),
   },
+  maxResumesPerAttempt: {
+    key: "maxResumesPerAttempt",
+    label: "Quota resumes per attempt",
+    help:
+      "How many times one attempt may pause on the account's quota and be resumed. Past it the ticket goes to a human the way an exhausted one does. A pause spends no attempt, so this bounds latency, not money.",
+    options: RESUME_BOUND_OPTIONS,
+    // A count, not an enum, but held to exactly the vocabulary the screen
+    // offers: the environment variable is bounded by the same ceiling, so
+    // there is one answer to "what may this be" wherever it is set.
+    normalize: (raw) => {
+      // Digits only, checked before Number(): "" and " " both convert to 0,
+      // and reading a blank field as "never resume" is exactly the kind of
+      // quiet reinterpretation this layer refuses to do.
+      const text = raw.trim();
+      if (!/^\d+$/.test(text)) return null;
+      const value = Number(text);
+      if (value > MAX_RESUMES_CEILING) return null;
+      return String(value);
+    },
+    vocabulary: () => `a whole number of resumes from 0 to ${MAX_RESUMES_CEILING}`,
+    envDefault: (config) => ({
+      envVar: "MAX_RESUMES_PER_ATTEMPT",
+      value:
+        config.maxResumesPerAttempt === null
+          ? null
+          : String(config.maxResumesPerAttempt),
+    }),
+  },
 };
+
 
 /** Display order for the model-tier panel. Kept beside the registry so a new
  * field is placed deliberately rather than wherever object iteration puts it.
@@ -220,6 +264,7 @@ export const MODEL_TIER_FIELD_ORDER: readonly ModelTierSettingKey[] = [
 export const SETTABLE_KEYS: readonly SettingKey[] = [
   ...MODEL_TIER_FIELD_ORDER,
   "primaryLane",
+  "maxResumesPerAttempt",
 ];
 
 /**
@@ -443,6 +488,86 @@ export function resolveModelTierField(
     override: null,
     envVar,
     envValue,
+  };
+}
+
+/**
+ * A count field, resolved: the number in force, where it came from, and what
+ * clearing the override would fall back to.
+ *
+ * Its own shape rather than the tier view's, because the two answer different
+ * questions — a tier resolves to a model identifier the operator wants named
+ * beside it, a count resolves to itself — and folding them into one view type
+ * would mean a `model: null` on every count row for no one's benefit.
+ */
+export interface ResolvedCount {
+  key: SettingKey;
+  value: number;
+  source: SettingSource;
+  /** The stored override, or null when the field falls through. */
+  override: number | null;
+  envVar: string;
+  /** The environment default, verbatim (null = unset, so the built-in default
+   * below is what is actually in force). */
+  envValue: string | null;
+  /** What the field falls back to with neither an override nor a variable —
+   * stated, because otherwise the screen shows a number from nowhere. */
+  builtIn: number;
+}
+
+/**
+ * How many times one attempt may pause on the quota and be resumed (issue
+ * #169) — override, then environment, then the built-in default, exactly the
+ * order every other field in this module resolves in.
+ *
+ * Read at the point of use (the sweep, each tick), never from a cached config:
+ * the whole point of the layer is that a change takes effect at the next sweep
+ * with no restart.
+ */
+export function resolveResumeBound(
+  config: AppConfig,
+  overrides: SettingsOverrides
+): ResolvedCount {
+  const key: SettingKey = "maxResumesPerAttempt";
+  const spec = SETTINGS_FIELDS[key];
+  const { envVar, value: envValue } = spec.envDefault(config);
+  const stored = overrides[key];
+  const override =
+    stored !== undefined && spec.normalize(stored, {}) !== null
+      ? Number(stored)
+      : null;
+
+  return {
+    key,
+    value:
+      override ?? config.maxResumesPerAttempt ?? DEFAULT_MAX_RESUMES_PER_ATTEMPT,
+    source: override !== null ? "override" : "environment",
+    override,
+    envVar,
+    envValue,
+    builtIn: DEFAULT_MAX_RESUMES_PER_ATTEMPT,
+  };
+}
+
+/** One count field as the settings screen shows it. */
+export interface SettingCountView extends ResolvedCount {
+  label: string;
+  help: string;
+  options: readonly string[];
+}
+
+/** The resume bound, resolved for display — read by the settings route and
+ * rendered by the panel, so the screen shows the number the sweep would use. */
+export function describeResumeBoundSetting(
+  config: AppConfig,
+  overrides: SettingsOverrides
+): SettingCountView {
+  const spec = SETTINGS_FIELDS.maxResumesPerAttempt;
+  return {
+    ...resolveResumeBound(config, overrides),
+    label: spec.label,
+    help: spec.help,
+    options: spec.options ?? [],
   };
 }
 
