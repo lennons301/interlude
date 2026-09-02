@@ -72,10 +72,13 @@ lanes:
       # Real money, and enforced (issue #174). This is a *ceiling on the
       # ceiling*: the operator's own real-money cap (METERED_DAILY_CAP_USD, or
       # the settings screen) is bound down by whatever is declared here, the
-      # lower of the two always winning. Reaching it pauses autonomous pickup
-      # until local midnight, and the first metered spend of each day needs one
-      # fleet-level confirmation before anything starts at all — so a
-      # deployment cannot spend real money unknowingly, whether this lane is
+      # lower of the two always winning. Both guards hold **new autonomous
+      # pickup** — a claim or a triage pass — so the fleet never starts
+      # unattended work on this lane until the day's spend has been confirmed
+      # once, and stops claiming when the cap is spent. In-flight runs,
+      # follow-up turns and interactive sessions are not held (an interactive
+      # dispatch is attended, and its own confirmation UX is issue #173's);
+      # their spend still counts against the cap. Applies whether this lane is
       # primary, an overflow target (#173) or reached by failover (#176).
       daily_budget_usd: 20
 

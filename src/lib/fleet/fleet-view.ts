@@ -32,6 +32,13 @@ export interface FleetRows {
   /** The real-money daily cap in force (issue #174): the operator's dial,
    * bound down by the primary lane's own declared cap. */
   meteredCapUsd: number;
+  /** Real money spent on the local day containing `now`, from the per-day
+   * ledger (`todayMeteredSpendUsd`) rather than summed here. Passed in for the
+   * reason the cap is: it is the *same* number the reducer gates on, and a
+   * second implementation of "what has the card been charged today?" would
+   * eventually disagree with the first. A task's stored cost is a running
+   * total carrying no day, so it cannot be attributed to one here anyway. */
+  meteredSpendTodayUsd: number;
   /** The id of the lane work would run on; null = none resolves. */
   primaryLaneId: string | null;
   /** Who pays for that lane. Null = it could not be resolved, which is not a
@@ -168,11 +175,6 @@ export interface FleetTaskRow {
   status: "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled";
   containerStatus: "setup" | "running" | "idle" | "completing" | null;
   totalCostUsd: number;
-  /** Who paid for this pass (issue #174), as recorded when it ran. Null for a
-   * task that predates lanes. The real-money split is summed off this rather
-   * than off the lane in force now, so switching lanes cannot rewrite what
-   * yesterday's work cost. */
-  laneBilling: LaneBilling | null;
   /** Claude turns run so far — counted by the caller from delivered messages */
   turns: number;
   githubIssue: string | null;
@@ -565,20 +567,12 @@ export function buildFleetView(rows: FleetRows): FleetView {
     .reduce((sum, r) => sum + r.totalCostUsd, 0);
   const capPaused = todayUsd >= rows.dailyCapUsd;
 
-  // Real money (issue #174), summed over *tasks* rather than runs and filtered
-  // by the billing kind each one recorded when it ran. Nothing is exempt by
-  // kind here — a chat session on a metered lane charges the same card an
-  // implement pass does — which is exactly how this differs from the figure
-  // above, where interactive work is exempt by construction. Attributed to the
-  // day the task was created, the same rule the autonomous sum uses.
-  const meteredTodayUsd = rows.tasks
-    .filter(
-      (t) =>
-        t.laneBilling === "metered" &&
-        t.createdAt.getTime() >= dayStart &&
-        t.createdAt.getTime() <= rows.now.getTime()
-    )
-    .reduce((sum, t) => sum + t.totalCostUsd, 0);
+  // Real money (issue #174), taken from the per-day ledger rather than derived
+  // here. Nothing is exempt by kind — a chat session on a metered lane charges
+  // the same card an implement pass does — which is exactly how it differs
+  // from the figure above, where interactive work is exempt by construction.
+  // The two overlap and must never be added.
+  const meteredTodayUsd = rows.meteredSpendTodayUsd;
   // The same pure evaluation the reducer runs, over the same facts: the tile
   // and the sweep cannot disagree about whether money is holding the fleet.
   const meteredState = evaluateMeteredSpend({

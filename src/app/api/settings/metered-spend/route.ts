@@ -1,9 +1,5 @@
 import { NextResponse } from "next/server";
-import { getConfig } from "@/lib/config";
-import { getLaneCatalog } from "@/lib/lanes/catalog";
-import { evaluateMeteredSpend, resolveMeteredCap } from "@/lib/lanes/money";
-import { primaryLaneOf } from "@/lib/lanes/resolve";
-import { todayMeteredSpendUsd } from "@/lib/orchestrator/spend";
+import { readMoneyGuards } from "@/lib/lanes/money-state";
 import {
   getFleetSettings,
   setMeteredSpendConfirmed,
@@ -29,39 +25,20 @@ import { parseSettingsPatch } from "@/lib/settings-resolver";
  * project route once broke.
  */
 function state() {
-  const config = getConfig();
   const settings = getFleetSettings();
-  const catalog = getLaneCatalog();
-  const lane = catalog.ok
-    ? primaryLaneOf({
-        catalog: catalog.catalog,
-        config,
-        overrides: settings.overrides,
-        env: process.env,
-      })
-    : null;
-  const cap = resolveMeteredCap(
-    config,
-    settings.overrides,
-    lane?.caps.dailyBudgetUsd ?? null
+  // The same read the sweep and the dashboard make, so the panel cannot report
+  // a fleet other than the one being gated.
+  const { lane, laneError, cap, spentTodayUsd, state: guards } = readMoneyGuards(
+    new Date(),
+    settings
   );
-  const spentTodayUsd = todayMeteredSpendUsd(new Date());
-  // The same evaluation the reducer runs, over the same facts — the panel
-  // reports the fleet's state rather than deciding a second one.
-  const guards = evaluateMeteredSpend({
-    billing: lane?.billing ?? null,
-    spentUsd: spentTodayUsd,
-    capUsd: cap.capUsd,
-    confirmedAt: settings.meteredSpendConfirmedAt,
-    now: new Date(),
-  });
 
   return {
     lane:
       lane === null
         ? null
         : { id: lane.id, label: lane.label, billing: lane.billing },
-    laneError: catalog.ok ? null : catalog.reason,
+    laneError,
     cap,
     spentTodayUsd,
     confirmedAt: settings.meteredSpendConfirmedAt?.toISOString() ?? null,

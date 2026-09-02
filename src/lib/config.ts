@@ -28,13 +28,16 @@ function minutesEnvMs(raw: string | undefined, defaultMs: number): number {
  * ceiling must never silently become 0 (which would read as "never spend" and
  * hold the fleet) or NaN (which compares false against everything, and would
  * read as "spend without limit"). */
-function positiveEnvNumber(raw: string | undefined, fallback: number): number {
+function positiveEnvNumber(
+  envVar: string,
+  raw: string | undefined,
+  fallback: number
+): number {
   if (raw == null || raw === "") return fallback;
   const value = parseFloat(raw);
   if (Number.isFinite(value) && value > 0) return value;
   console.warn(
-    `Warning: ignoring non-positive METERED_DAILY_CAP_USD "${raw}" — ` +
-      `keeping $${fallback}.`
+    `Warning: ignoring non-positive ${envVar} "${raw}" — keeping $${fallback}.`
   );
   return fallback;
 }
@@ -207,6 +210,7 @@ export function getConfig(): AppConfig {
       process.env.MAX_BUDGET_USD ?? String(DEFAULT_ATTEMPT_BUDGET_USD)
     ),
     meteredDailyCapUsd: positiveEnvNumber(
+      "METERED_DAILY_CAP_USD",
       process.env.METERED_DAILY_CAP_USD,
       DEFAULT_METERED_DAILY_CAP_USD
     ),

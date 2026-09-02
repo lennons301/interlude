@@ -363,12 +363,14 @@ things the dashboard does:
   The lower of the two always wins, and the panel says which one is binding.
   Reaching it pauses autonomous pickup until local midnight, exactly like the
   $500 cap, with one Discord announcement.
-- **What counts.** Every task that ran on a metered lane today — implement,
+- **What counts.** Every dollar spent on a metered lane today — implement,
   review, repair, triage *and* interactive. A chat session on a metered lane
   charges the same card an implement pass does, so it counts; the $500
   autonomous cap's "interactive is exempt" rule deliberately does not apply
-  here. The two figures overlap and are shown separately (the dashboard's
-  second gauge, the digest's second Spend line); never add them.
+  here. Each turn's cost is booked to the day it landed on, so a session left
+  open across days is split across them rather than heaped onto one. The two
+  figures overlap and are shown separately (the dashboard's second gauge, the
+  digest's second Spend line); never add them.
 - **What is never held.** In-flight runs, follow-up turns and interactive
   sessions. Both guards hold *new autonomous pickup* only — a claim or a triage
   pass — which is the same thing the daily cap and the kill switch hold.

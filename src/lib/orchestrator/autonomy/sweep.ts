@@ -60,12 +60,10 @@ import {
   type QueuedTaskObservation,
 } from "../../fleet/health";
 import { recordFleetHealth } from "../../fleet/health-store";
-import { getLaneCatalog } from "../../lanes/catalog";
-import { primaryLaneOf } from "../../lanes/resolve";
-import { resolveMeteredCap } from "../../lanes/money";
+import { readMoneyGuards } from "../../lanes/money-state";
 import { getCapacity } from "../capacity";
 import { getQueueLastProgress, isQueueRunning, occupiedSlots } from "../queue";
-import { startOfLocalDay, todayAutonomousSpendUsd, todayMeteredSpendUsd } from "../spend";
+import { startOfLocalDay, todayAutonomousSpendUsd } from "../spend";
 import { getActiveTasks, isParked, releaseParkedImplementTask } from "../turn-manager";
 import {
   decideNext,
@@ -455,26 +453,12 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
   // describe the same instant.
   const fleetSettings = getFleetSettings();
 
-  // Which lane work would run on, and who pays for it. Resolved every tick
-  // from the checked-in catalog plus the *current* overrides, which is what
-  // makes switching the primary lane between billing kinds take effect at the
-  // next sweep with no restart. Null when nothing resolves — an unreadable
-  // lane file, or a choice naming no declared lane — which the money guards
-  // treat as deciding nothing, since such a fleet spends nothing at all.
-  const catalog = getLaneCatalog();
-  const primaryLane = catalog.ok
-    ? primaryLaneOf({
-        catalog: catalog.catalog,
-        config,
-        overrides: fleetSettings.overrides,
-        env: process.env,
-      })
-    : null;
-  const meteredCap = resolveMeteredCap(
-    config,
-    fleetSettings.overrides,
-    primaryLane?.caps.dailyBudgetUsd ?? null
-  );
+  // Which lane work would run on, who pays for it, and what it has cost today
+  // — read every tick from the checked-in catalog plus the *current*
+  // overrides, which is what makes switching the primary lane between billing
+  // kinds take effect at the next sweep with no restart. The same read the
+  // dashboard and the settings panel make, so all three describe one fleet.
+  const money = readMoneyGuards(now, fleetSettings);
 
   const registered = db
     .select()
@@ -677,10 +661,10 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     todayAutonomousSpendUsd: todayAutonomousSpendUsd(now),
     dailyCapUsd: DAILY_AUTONOMOUS_CAP_USD,
     dailyCapAnnounced: dailyCapAnnouncedDay === startOfLocalDay(now).getTime(),
-    primaryLaneId: primaryLane?.id ?? null,
-    primaryLaneBilling: primaryLane?.billing ?? null,
-    meteredSpendTodayUsd: todayMeteredSpendUsd(now),
-    meteredCapUsd: meteredCap.capUsd,
+    primaryLaneId: money.lane?.id ?? null,
+    primaryLaneBilling: money.lane?.billing ?? null,
+    meteredSpendTodayUsd: money.spentTodayUsd,
+    meteredCapUsd: money.cap.capUsd,
     meteredSpendConfirmedAt: fleetSettings.meteredSpendConfirmedAt,
     // Both keyed by local day rather than by a boolean, exactly as the daily
     // cap's is, so each announcement re-arms itself at midnight.

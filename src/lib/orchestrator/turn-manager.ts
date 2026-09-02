@@ -36,6 +36,7 @@ import {
 } from "../config";
 import { getSettingsOverrides } from "../settings";
 import { getLaneCatalog } from "../lanes/catalog";
+import { recordMeteredSpend } from "./spend";
 import { resolveLane, type ResolvedLane } from "../lanes/resolve";
 import { getHarnessAdapter } from "../harness/registry";
 import { getDocker } from "../docker/client";
@@ -1874,6 +1875,24 @@ function updateTask(
     laneBilling: "subscription" | "metered" | null;
   }>
 ): void {
+  // The one funnel every task-cost write goes through, which is why the
+  // real-money ledger (issue #174) is booked here rather than at the two call
+  // sites: a later third caller cannot forget it. Only the *increment* is
+  // booked, and only when the pass in hand ran on a metered lane — so a
+  // session whose lane was switched mid-flight has each turn's dollars
+  // attributed to the lane that actually spent them, which no single column on
+  // the row could say.
+  if (fields.totalCostUsd !== undefined) {
+    const before = db
+      .select({ total: tasks.totalCostUsd, billing: tasks.laneBilling })
+      .from(tasks)
+      .where(eq(tasks.id, taskId))
+      .get();
+    if (before?.billing === "metered") {
+      recordMeteredSpend(before.total ?? 0, fields.totalCostUsd);
+    }
+  }
+
   db.update(tasks)
     .set({ ...fields, updatedAt: new Date() })
     .where(eq(tasks.id, taskId))

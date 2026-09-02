@@ -9,9 +9,7 @@ import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, eq, gte, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { getConfig } from "../config";
 import { getFleetSettings } from "../settings";
-import { getLaneCatalog } from "../lanes/catalog";
-import { primaryLaneOf } from "../lanes/resolve";
-import { resolveMeteredCap } from "../lanes/money";
+import { readMoneyGuards } from "../lanes/money-state";
 import { getCapacity } from "../orchestrator/capacity";
 import { getBacklogByProject } from "./backlog";
 import { getNeedsHumanByProject } from "./needs-human";
@@ -30,25 +28,13 @@ const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 export async function loadFleetRows(now: Date): Promise<FleetRows> {
   const windowStart = new Date(now.getTime() - RECENT_WINDOW_MS);
 
-  // The settings row and the lane in force, read on every view build exactly
-  // as the sweep reads them each tick (issues #118, #172, #174): a lane
-  // switched between billing kinds, or a cap raised, shows on the next SSE
-  // push with no restart.
+  // The settings row and the money guards, read on every view build exactly as
+  // the sweep reads them each tick (issues #118, #172, #174): a lane switched
+  // between billing kinds, or a cap raised, shows on the next SSE push with no
+  // restart. Keyed on `now`, so the digest's view of a past day reports that
+  // day's cash rather than this morning's.
   const fleetSettings = getFleetSettings();
-  const catalog = getLaneCatalog();
-  const primaryLane = catalog.ok
-    ? primaryLaneOf({
-        catalog: catalog.catalog,
-        config: getConfig(),
-        overrides: fleetSettings.overrides,
-        env: process.env,
-      })
-    : null;
-  const meteredCap = resolveMeteredCap(
-    getConfig(),
-    fleetSettings.overrides,
-    primaryLane?.caps.dailyBudgetUsd ?? null
-  );
+  const money = readMoneyGuards(now, fleetSettings);
 
   // Slots come from the boot-time derivation; if the Docker daemon is
   // unreachable the dashboard should still render, so fall back to the
@@ -110,9 +96,10 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     now,
     slots,
     dailyCapUsd: DAILY_AUTONOMOUS_CAP_USD,
-    meteredCapUsd: meteredCap.capUsd,
-    primaryLaneId: primaryLane?.id ?? null,
-    primaryLaneBilling: primaryLane?.billing ?? null,
+    meteredCapUsd: money.cap.capUsd,
+    meteredSpendTodayUsd: money.spentTodayUsd,
+    primaryLaneId: money.lane?.id ?? null,
+    primaryLaneBilling: money.lane?.billing ?? null,
     meteredSpendConfirmedAt: fleetSettings.meteredSpendConfirmedAt,
     // Read on every view build, exactly as the sweep reads it each tick — the
     // dashboard reflects a flip on its next SSE push, with no restart.
@@ -142,7 +129,6 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
       status: t.status,
       containerStatus: t.containerStatus,
       totalCostUsd: t.totalCostUsd,
-      laneBilling: t.laneBilling,
       turns:
         t.status === "queued" ? 0 : 1 + (deliveredCounts.get(t.id) ?? 0),
       githubIssue: t.githubIssue,

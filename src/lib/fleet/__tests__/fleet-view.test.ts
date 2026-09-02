@@ -19,6 +19,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     // The money guards (issue #174) idle by default: a subscription lane, so
     // nothing here costs cash and the guards decide nothing.
     meteredCapUsd: 20,
+    meteredSpendTodayUsd: 0,
     primaryLaneId: "claude-subscription",
     primaryLaneBilling: "subscription",
     meteredSpendConfirmedAt: null,
@@ -87,7 +88,6 @@ function makeTask(overrides: Partial<FleetTaskRow> = {}): FleetTaskRow {
     status: "running",
     containerStatus: "idle",
     totalCostUsd: 0,
-    laneBilling: null,
     turns: 1,
     githubIssue: null,
     pullRequestNumber: null,
@@ -344,9 +344,9 @@ describe("buildFleetView — spend", () => {
 
 /**
  * The real-money split (issue #174). It is a different number from the one
- * above and answers to different rules: summed over tasks by the billing kind
- * each recorded, with nothing exempt by kind, because a chat session on a
- * metered lane charges the same card an implement pass does.
+ * above and answers to different rules: it comes from the per-day ledger, not
+ * from anything derived here, and nothing is exempt by kind — a chat session
+ * on a metered lane charges the same card an implement pass does.
  */
 describe("buildFleetView — metered spend", () => {
   const METERED = { primaryLaneId: "openrouter", primaryLaneBilling: "metered" as const };
@@ -355,7 +355,6 @@ describe("buildFleetView — metered spend", () => {
     const view = buildFleetView(
       baseRows({
         projects: [makeProject()],
-        tasks: [makeTask({ totalCostUsd: 9, laneBilling: "subscription" })],
         runs: [makeRun({ id: "r1", totalCostUsd: 9 })],
       })
     );
@@ -366,26 +365,14 @@ describe("buildFleetView — metered spend", () => {
     expect(view.spend.todayUsd).toBeCloseTo(9);
   });
 
-  it("counts every task that ran on a metered lane, interactive included", () => {
+  it("reports the day's cash beside the autonomous figure, never folded into it", () => {
     const view = buildFleetView(
       baseRows({
         ...METERED,
+        meteredSpendTodayUsd: 10,
         meteredSpendConfirmedAt: TODAY_9AM,
         projects: [makeProject()],
-        tasks: [
-          makeTask({ id: "t1", totalCostUsd: 4, laneBilling: "metered" }),
-          makeTask({
-            id: "t2",
-            kind: "implement",
-            runId: "r1",
-            totalCostUsd: 6,
-            laneBilling: "metered",
-          }),
-          // Subscription work on the same day is not cash.
-          makeTask({ id: "t3", totalCostUsd: 99, laneBilling: "subscription" }),
-          // A pass that predates lanes records nothing, and is not guessed at.
-          makeTask({ id: "t4", totalCostUsd: 99, laneBilling: null }),
-        ],
+        runs: [makeRun({ id: "r1", totalCostUsd: 6 })],
       })
     );
 
@@ -393,35 +380,13 @@ describe("buildFleetView — metered spend", () => {
     expect(view.spend.metered.active).toBe(true);
     expect(view.spend.metered.laneId).toBe("openrouter");
     expect(view.spend.metered.hold).toBeNull();
-  });
-
-  it("attributes metered spend to the day the task was created", () => {
-    const view = buildFleetView(
-      baseRows({
-        ...METERED,
-        meteredSpendConfirmedAt: TODAY_9AM,
-        projects: [makeProject()],
-        tasks: [
-          makeTask({
-            id: "yesterday",
-            totalCostUsd: 15,
-            laneBilling: "metered",
-            createdAt: new Date(2026, 6, 31, 23, 0, 0),
-          }),
-          makeTask({ id: "today", totalCostUsd: 2, laneBilling: "metered" }),
-        ],
-      })
-    );
-
-    expect(view.spend.metered.todayUsd).toBeCloseTo(2);
+    // The two overlap by construction and are deliberately not added.
+    expect(view.spend.todayUsd).toBeCloseTo(6);
   });
 
   it("still reports cash spent today after a switch back to a subscription lane", () => {
     const view = buildFleetView(
-      baseRows({
-        projects: [makeProject()],
-        tasks: [makeTask({ totalCostUsd: 7, laneBilling: "metered" })],
-      })
+      baseRows({ meteredSpendTodayUsd: 7, projects: [makeProject()] })
     );
 
     expect(view.spend.metered.active).toBe(false);
@@ -435,9 +400,9 @@ describe("buildFleetView — metered spend", () => {
       baseRows({
         ...METERED,
         meteredCapUsd: 20,
+        meteredSpendTodayUsd: 20,
         meteredSpendConfirmedAt: TODAY_9AM,
         projects: [makeProject()],
-        tasks: [makeTask({ totalCostUsd: 20, laneBilling: "metered" })],
       })
     );
 

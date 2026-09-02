@@ -740,11 +740,6 @@ export async function notifyAttemptsExhausted(
 }
 
 /**
- * Announce (once per day — the sweep tracks the flag) that the daily
- * autonomous spend cap paused pickup. Interactive work is unaffected and the
- * pause lifts at local midnight. No-op when no fleet channel is configured.
- */
-/**
  * The real-money cap (issue #174). Its own embed rather than a variant of the
  * daily-cap one below, because the reader's question is different: that cap is
  * a plan being pushed hard, this one is a card being charged, and the lane
@@ -811,6 +806,11 @@ export async function notifyMeteredConfirmationRequired(
   }
 }
 
+/**
+ * Announce (once per day — the sweep tracks the flag) that the daily
+ * autonomous spend cap paused pickup. Interactive work is unaffected and the
+ * pause lifts at local midnight. No-op when no fleet channel is configured.
+ */
 export async function notifyDailyCapReached(
   channelId: string | null,
   payload: { spentUsd: number; capUsd: number }

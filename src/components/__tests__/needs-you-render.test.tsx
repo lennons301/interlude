@@ -17,6 +17,7 @@ function render(overrides: Partial<FleetRows> = {}): string {
     // The money guards (issue #174) idle by default: a subscription lane, so
     // nothing here costs cash and the guards decide nothing.
     meteredCapUsd: 20,
+    meteredSpendTodayUsd: 0,
     primaryLaneId: "claude-subscription",
     primaryLaneBilling: "subscription",
     meteredSpendConfirmedAt: null,

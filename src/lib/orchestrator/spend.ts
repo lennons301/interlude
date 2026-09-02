@@ -1,5 +1,5 @@
 import { db } from "@/db";
-import { runs, tasks } from "@/db/schema";
+import { meteredSpend, runs, tasks } from "@/db/schema";
 import { and, eq, gte, sql } from "drizzle-orm";
 
 /** Start of the local calendar day containing `now` — the daily autonomous
@@ -40,33 +40,72 @@ export function todayAutonomousSpendUsd(now: Date): number {
 }
 
 /**
- * Today's **real money**: a sum over every task whose recorded execution lane
- * bills per token (issue #174), created since local midnight.
+ * The local calendar day an instant falls in, as `YYYY-MM-DD` — the key the
+ * real-money ledger is written under (issue #174). Local, not UTC, because
+ * that is the day boundary every other daily figure here resets at.
+ */
+export function localDayKey(now: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+/**
+ * Add a turn's real-money cost to the day it was spent on (issue #174).
  *
- * Deliberately a different shape from the sum above, because it answers a
- * different question. That one measures autonomous work against a
+ * The *delta* is what a caller has that is unambiguous: a task's stored cost is
+ * a running total carrying no day, so a session spanning three days cannot be
+ * attributed by any field on its row without either under-counting (spending
+ * past the cash cap) or double-counting (holding the fleet over money it did
+ * not spend today). Booking each increment as it lands sidesteps the guess
+ * entirely, and books it to the lane that turn actually ran on.
+ *
+ * Idempotent by construction: the caller passes the old and new totals, so
+ * writing the same total twice adds nothing. A decrease adds nothing either —
+ * costs only ever accumulate, so a lower figure is a reset or a bug, and
+ * neither is a refund.
+ */
+export function recordMeteredSpend(
+  previousUsd: number,
+  totalUsd: number,
+  now: Date = new Date()
+): void {
+  const delta = totalUsd - previousUsd;
+  if (!Number.isFinite(delta) || delta <= 0) return;
+  const day = localDayKey(now);
+  db.insert(meteredSpend)
+    .values({ day, usd: delta, updatedAt: now })
+    .onConflictDoUpdate({
+      target: meteredSpend.day,
+      set: {
+        usd: sql`${meteredSpend.usd} + ${delta}`,
+        updatedAt: now,
+      },
+    })
+    .run();
+}
+
+/**
+ * Real money spent on the local day containing `now` — the figure both the
+ * cash cap and the dashboard's second gauge read.
+ *
+ * Deliberately a different shape from `todayAutonomousSpendUsd`, because it
+ * answers a different question. That one measures autonomous work against a
  * quota-funded plan, so interactive tasks are exempt by construction. This one
  * measures a card being charged, so nothing is exempt by kind: a chat session
- * on a metered primary lane spends the same dollars an implement pass does,
- * and a cap that ignored them would not be measuring money. What *is* exempt
- * is subscription work — every task run on a subscription lane, and every task
- * that predates lanes (null billing), neither of which cost cash.
+ * on a metered lane spends the same dollars an implement pass does, and a cap
+ * that ignored them would not be measuring money. What *is* exempt is
+ * subscription work, which never reaches the ledger at all.
  *
- * Summed over tasks rather than runs because the task is the unit money is
- * spent by: a run's cost is the sum of its tasks' anyway (`syncRunCost`), and
- * triage and interactive tasks own no run at all. Attributed to the day the
- * task was created, matching the rule above — each unit's cost is bounded by
- * the budget resolved at that moment, so cross-midnight drift is at most one
- * budget.
+ * Reads a past day as readily as today, which is what lets the daily digest
+ * report the day it covers rather than the day it is sent on.
  *
  * `now` is passed in, never read inside.
  */
 export function todayMeteredSpendUsd(now: Date): number {
-  const start = startOfLocalDay(now);
   const row = db
-    .select({ total: sql<number>`coalesce(sum(${tasks.totalCostUsd}), 0)` })
-    .from(tasks)
-    .where(and(eq(tasks.laneBilling, "metered"), gte(tasks.createdAt, start)))
+    .select()
+    .from(meteredSpend)
+    .where(eq(meteredSpend.day, localDayKey(now)))
     .get();
-  return row?.total ?? 0;
+  return row?.usd ?? 0;
 }

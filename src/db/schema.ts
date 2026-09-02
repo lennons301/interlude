@@ -339,6 +339,34 @@ export const QUOTA_STATE_ROW_ID = "fleet";
  * ticket reading one more of them should be a code change and not a migration.
  * Written by `lib/quota/quota-store.ts`, which never trusts it verbatim on read.
  */
+/**
+ * Real money spent per local day (issue #174), one row per day the fleet has
+ * charged a card.
+ *
+ * A ledger rather than a sum over tasks, because a task's `totalCostUsd` is a
+ * *running total* with no day in it: a chat session opened on Monday and driven
+ * all week carries one figure, and any attempt to attribute it to a day —
+ * creation, last update — is a guess that either under-counts (spending past
+ * the cap) or double-counts (holding the fleet over money it did not spend
+ * today). What is unambiguous is the **delta** at the moment a turn's cost
+ * lands, and the lane that turn ran on, so that is what is written here.
+ *
+ * Keyed by the local day (`YYYY-MM-DD`), which is the reset every other daily
+ * figure here answers to. Rows are tiny and never rewritten once the day turns,
+ * so the history stays readable — the daily digest reports the day it covers
+ * rather than the day it is sent on.
+ *
+ * Written by `recordMeteredSpend` (`src/lib/orchestrator/spend.ts`), which is
+ * idempotent by construction: it adds `new total - old total`, so writing the
+ * same total twice adds nothing.
+ */
+export const meteredSpend = sqliteTable("metered_spend", {
+  /** Local calendar day, `YYYY-MM-DD`. */
+  day: text("day").primaryKey(),
+  usd: real("usd").notNull().default(0),
+  updatedAt: int("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export const quotaState = sqliteTable("quota_state", {
   id: text("id").primaryKey(),
   observation: text("observation", { mode: "json" }).notNull(),

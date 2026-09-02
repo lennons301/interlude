@@ -32,6 +32,7 @@ function baseRows(overrides: Partial<FleetRows> = {}): FleetRows {
     // The money guards (issue #174) idle by default: a subscription lane, so
     // nothing here costs cash and the guards decide nothing.
     meteredCapUsd: 20,
+    meteredSpendTodayUsd: 0,
     primaryLaneId: "claude-subscription",
     primaryLaneBilling: "subscription",
     meteredSpendConfirmedAt: null,
@@ -100,7 +101,6 @@ function makeTask(overrides: Partial<FleetTaskRow> = {}): FleetTaskRow {
     status: "running",
     containerStatus: "idle",
     totalCostUsd: 0,
-    laneBilling: null,
     turns: 1,
     githubIssue: null,
     pullRequestNumber: null,
@@ -270,8 +270,8 @@ describe("renderDailyDigest — autonomous pickup", () => {
       primaryLaneBilling: "metered",
       meteredCapUsd: 20,
       meteredSpendConfirmedAt: aug(1, 9),
+      meteredSpendTodayUsd: 21,
       projects: [makeProject({ id: "proj-1" })],
-      tasks: [makeTask({ totalCostUsd: 21, laneBilling: "metered" })],
     });
     expect(section(capped, "Autonomous pickup")[0]).toContain("lifted at midnight");
     expect(section(capped, "Autonomous pickup")[0]).toContain("openrouter");
@@ -294,8 +294,8 @@ describe("renderDailyDigest — autonomous pickup", () => {
       primaryLaneBilling: "metered",
       meteredCapUsd: 20,
       meteredSpendConfirmedAt: aug(1, 9),
+      meteredSpendTodayUsd: 8.5,
       projects: [makeProject({ id: "proj-1" })],
-      tasks: [makeTask({ totalCostUsd: 8.5, laneBilling: "metered" })],
     });
 
     expect(section(cash, "Spend")).toEqual([
