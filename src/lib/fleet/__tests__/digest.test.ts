@@ -185,6 +185,31 @@ describe("renderDailyDigest — autonomous pickup", () => {
     ]);
   });
 
+  it("states a closed quota gate as it stands when the digest is written", () => {
+    // Like the switch and the boot master above it, the gate has no history:
+    // the row records only the latest observation, so the line says how the
+    // fleet stands now rather than implying anything about yesterday.
+    const content = render({
+      quota: {
+        status: "allowed_warning",
+        rateLimitType: "five_hour",
+        utilization: 96,
+        resetsAt: new Date(VIEW_AT.getTime() + 60 * 60_000),
+        overageStatus: null,
+        overageResetsAt: null,
+        isUsingOverage: null,
+        overageInUse: null,
+        observedAt: new Date(VIEW_AT.getTime() - 60_000),
+      },
+      projects: [makeProject({ id: "proj-1" })],
+    });
+
+    const line = section(content, "Autonomous pickup")[0];
+    expect(line).toContain("96%");
+    expect(line).toContain("90%");
+    expect(line).toContain("nothing to press");
+  });
+
   it("names the switch when both holds apply, and still reports the breach", () => {
     const content = render({
       globalAutonomyPaused: true,
