@@ -244,7 +244,7 @@ describe("an implement pass refused by the account's quota (issue #168)", () => 
     expect(github.comments[0]).toContain("5-hour window");
     expect(github.comments[0]).toContain("neither an attempt nor an interruption");
     expect(github.comments[0]).toContain(RESUME_AFTER.toUTCString());
-    expect(systemMessages().join("\n")).toContain("Paused on 5-hour window");
+    expect(systemMessages().join("\n")).toContain("Paused on the 5-hour window");
   });
 
   it("leaves a healthy pass on its ordinary path", async () => {

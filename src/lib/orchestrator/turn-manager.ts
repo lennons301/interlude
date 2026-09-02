@@ -1542,7 +1542,7 @@ async function pauseRunOnRateLimit(
   const container = activeTasks.get(taskId)?.container ?? null;
 
   const window = pause.limitType
-    ? describeRateLimitType(pause.limitType)
+    ? `the ${describeRateLimitType(pause.limitType)}`
     : "the account's rate limit";
   // Said as a wall-clock instant rather than an ISO stamp: these two lines are
   // read by a human on an issue thread, and the dashboard is where the live
