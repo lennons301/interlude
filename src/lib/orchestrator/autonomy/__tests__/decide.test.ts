@@ -2426,6 +2426,184 @@ describe("decideNext — finalizing an empty implement pass (issue #106)", () =>
   });
 });
 
+describe("decideNext — pausing a pass on a quota wall (issue #168)", () => {
+  const RESUME_AFTER = new Date(2026, 7, 1, 17, 0, 0);
+  const WALL = { resumeAfter: RESUME_AFTER, limitType: "five_hour" };
+
+  function pauses(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "pauseRunOnRateLimit");
+  }
+
+  const PAUSE_ACTION = {
+    type: "pauseRunOnRateLimit",
+    runId: "run-1",
+    taskId: "task-1",
+    issueRef: "acme/widgets#7",
+    resumeAfter: RESUME_AFTER,
+    limitType: "five_hour",
+  };
+
+  it("parks the run on the window's reset instead of failing it", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [makePass({ rateLimited: WALL })],
+      })
+    );
+
+    expect(actions).toEqual([PAUSE_ACTION]);
+  });
+
+  it("carries a window it has never heard of through verbatim", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [
+          makePass({
+            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "thirty_day_haiku" },
+          }),
+        ],
+      })
+    );
+
+    expect(pauses(actions)).toEqual([
+      { ...PAUSE_ACTION, limitType: "thirty_day_haiku" },
+    ]);
+  });
+
+  it("does not finalize a walled pass as an empty attempt", () => {
+    // The defect this ticket exists for: a refused pass leaves no PR, so before
+    // #168 it fell straight into #106's empty-pass path and spent a strike on a
+    // turn the model never saw.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [makePass({ producedPr: false, rateLimited: WALL })],
+      })
+    );
+
+    expect(actions).toEqual([PAUSE_ACTION]);
+  });
+
+  it("does not read a walled pass's final message as a blocked question", () => {
+    // A refused turn's "final message" is the CLI's own synthesised line, not
+    // the agent's — it never ran. Reading it would park the run on a question
+    // no one asked and page the owner for it.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [
+          makePass({
+            rateLimited: WALL,
+            finalMessage: "BLOCKED: which database?",
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([PAUSE_ACTION]);
+  });
+
+  it("drives nothing else for a run it just paused", () => {
+    // Same guard a blocked run gets: the executors never gather a paused run
+    // into the review pipeline, but the combination is representable, so the
+    // reducer refuses to double-drive it rather than trusting its callers.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [makePass({ rateLimited: WALL })],
+        conflictingPrs: [makeConflictingPr()],
+        awaitingReview: [makeAwaitingReview()],
+        settledPrs: [
+          { runId: "run-1", issueRef: "acme/widgets#7", prNumber: 41, merged: true },
+        ],
+      })
+    );
+
+    expect(actions).toEqual([PAUSE_ACTION]);
+  });
+
+  it("leaves the ticket's attempt and interruption accounting untouched", () => {
+    // The pause is *not* a failed attempt and *not* an interruption: nothing
+    // the reducer emits routes the ticket to a human or re-claims it, so the
+    // two counters keep measuring what they say they measure. (The run row's
+    // own counters are the executor's business — it writes neither.)
+    const actions = decideNext(
+      makeSnapshot({
+        completedPasses: [makePass({ rateLimited: WALL })],
+        candidates: [
+          makeCandidate({ attemptsMade: 2, interruptionsMade: 4, hasActiveRun: true }),
+        ],
+      })
+    );
+
+    expect(actions.some((a) => a.type === "exhaust")).toBe(false);
+    expect(actions.some((a) => a.type === "failAttempt")).toBe(false);
+    expect(claims(actions)).toHaveLength(0);
+  });
+
+  it("holds the ticket while it is paused — no second run is claimed over it", () => {
+    // A `rate_limited` run is one of ACTIVE_RUN_STATUSES, so the gatherer
+    // reports hasActiveRun; claiming a second run here would spend the very
+    // attempt the pause protects.
+    const actions = decideNext(
+      makeSnapshot({ candidates: [makeCandidate({ hasActiveRun: true })] })
+    );
+
+    expect(claims(actions)).toHaveLength(0);
+  });
+
+  it("still pauses a pass that finished while the kill switch was engaged", () => {
+    // The switch holds new *pickup*, never a turn that already ran — the same
+    // rule the blocked and empty-pass paths follow. Failing this pass instead
+    // would spend an attempt on a quota wall because a human had paused the
+    // fleet, which is the opposite of what either control is for.
+    const actions = decideNext(
+      makeSnapshot({
+        globalPaused: true,
+        completedPasses: [makePass({ rateLimited: WALL })],
+        candidates: [makeCandidate()],
+      })
+    );
+
+    expect(pauses(actions)).toEqual([PAUSE_ACTION]);
+    expect(claims(actions)).toHaveLength(0);
+    expect(actions).toContainEqual({ type: "pausePickup", reason: "kill-switch" });
+  });
+
+  it("still stops pickup for a project whose autonomy is off", () => {
+    // The per-project toggle is unaffected by a pause anywhere: a paused run on
+    // one ticket must not become a route around it for another.
+    const actions = decideNext(
+      makeSnapshot({
+        projects: [makeProject({ autonomyEnabled: false })],
+        completedPasses: [makePass({ rateLimited: WALL })],
+        candidates: [makeCandidate()],
+      })
+    );
+
+    expect(pauses(actions)).toEqual([PAUSE_ACTION]);
+    expect(claims(actions)).toHaveLength(0);
+    expect(actions).toContainEqual({
+      type: "pausePickup",
+      reason: "autonomy-off-project",
+      detail: "acme/widgets",
+    });
+  });
+
+  it("decides a single walled pass via passOutcomeSnapshot", () => {
+    // The turn manager's own path: one pass, decided the moment its turn ends,
+    // with every pickup and pipeline input inert.
+    expect(
+      decideNext(passOutcomeSnapshot(NOW, makePass({ rateLimited: WALL })))
+    ).toEqual([PAUSE_ACTION]);
+  });
+
+  it("leaves a healthy pass alone — a pass is paused only when it was refused", () => {
+    expect(pauses(decideNext(passOutcomeSnapshot(NOW, makePass())))).toEqual([]);
+  });
+});
+
 describe("decideNext — triage pickup", () => {
   it("starts a triage pass for a stray needs-triage issue", () => {
     const actions = decideNext(

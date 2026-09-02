@@ -1448,8 +1448,13 @@ type PassDecision = "blocked" | "finalized" | "paused" | "proceed";
  * quota wall is only legible from the terminal event and the rate-limit event
  * together — and by design the reducer, not this function, decides which of
  * the three readings wins.
+ *
+ * Exported as the seam it is: this is where a finished turn becomes a ledger
+ * outcome, and it is the only honest entry point for a test that wants to
+ * assert what a walled or blocked turn does to the run row without
+ * provisioning a container to produce one.
  */
-async function evaluatePassOutcome(
+export async function evaluatePassOutcome(
   taskId: string,
   turn: Pick<TurnResult, "finalMessage"> & RateLimitedTurn
 ): Promise<PassDecision> {

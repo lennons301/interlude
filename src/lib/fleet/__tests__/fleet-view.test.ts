@@ -1304,6 +1304,107 @@ describe("buildFleetView — running", () => {
     expect(view.running[0].mode).toBe("afk");
   });
 
+  it("shows a quota-paused run in place, with when it resumes (issue #168)", () => {
+    // A run walled by the account's quota is still the fleet's work in
+    // progress — it holds its ticket and its branch — so it stays on the board
+    // rather than vanishing between the wall and the reset. The card carries
+    // the clock it is waiting on; the countdown is the client's.
+    const resumeAfter = new Date(2026, 7, 1, 17, 0, 0);
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "rate_limited",
+            resumeAfter,
+          }),
+        ],
+      })
+    );
+
+    expect(view.running).toHaveLength(1);
+    expect(view.running[0]).toMatchObject({
+      runId: "r1",
+      paused: { reason: "rate-limited", resumeAfter: resumeAfter.toISOString() },
+      // It resumes from where it stopped, which is the implement pass.
+      phases: [
+        { name: "implement", state: "current" },
+        { name: "review", state: "todo" },
+        { name: "merge", state: "todo" },
+      ],
+    });
+  });
+
+  it("never puts a quota-paused run in needs-you", () => {
+    // The deliberate omission: nobody has to do anything about a quota window,
+    // and "needs you" means a human decision is required. A paused run leaking
+    // in there would train the owner to ignore the section.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "rate_limited",
+            resumeAfter: new Date(2026, 7, 1, 17, 0, 0),
+          }),
+        ],
+      })
+    );
+
+    expect(view.needsYou).toEqual([]);
+  });
+
+  it("holds no slot while it is paused", () => {
+    // The pause tore the container down (a parked one holds memory without
+    // holding a slot — the 2026-08-04 wedge), so the run's task is terminal and
+    // occupancy is untouched. A paused card next to a used slot would be the
+    // dashboard reporting a container that no longer exists.
+    const view = buildFleetView(
+      baseRows({
+        slots: 2,
+        projects: [makeProject({ id: "p1" })],
+        runs: [
+          makeRun({
+            id: "r1",
+            projectId: "p1",
+            status: "rate_limited",
+            resumeAfter: new Date(2026, 7, 1, 17, 0, 0),
+          }),
+        ],
+        tasks: [
+          makeTask({
+            id: "t1",
+            projectId: "p1",
+            runId: "r1",
+            kind: "implement",
+            status: "failed",
+            containerStatus: null,
+          }),
+        ],
+      })
+    );
+
+    expect(view.running).toHaveLength(1);
+    expect(view.slots.used).toBe(0);
+  });
+
+  it("shows no pause on a rate-limited row carrying no reset time", () => {
+    // Defensive: a row that says it is paused but names no clock is a run
+    // waiting on nothing, and the card refuses to claim otherwise.
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", status: "rate_limited" })],
+      })
+    );
+
+    expect(view.running[0].paused).toBeNull();
+  });
+
   it("marks a supervised run's mode chip", () => {
     const view = buildFleetView(
       baseRows({
