@@ -1,0 +1,1 @@
+ALTER TABLE `runs` ADD `resume_after` integer;
