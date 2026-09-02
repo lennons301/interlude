@@ -38,3 +38,35 @@ export function todayAutonomousSpendUsd(now: Date): number {
     .get();
   return (runRow?.total ?? 0) + (triageRow?.total ?? 0);
 }
+
+/**
+ * Today's **real money**: a sum over every task whose recorded execution lane
+ * bills per token (issue #174), created since local midnight.
+ *
+ * Deliberately a different shape from the sum above, because it answers a
+ * different question. That one measures autonomous work against a
+ * quota-funded plan, so interactive tasks are exempt by construction. This one
+ * measures a card being charged, so nothing is exempt by kind: a chat session
+ * on a metered primary lane spends the same dollars an implement pass does,
+ * and a cap that ignored them would not be measuring money. What *is* exempt
+ * is subscription work — every task run on a subscription lane, and every task
+ * that predates lanes (null billing), neither of which cost cash.
+ *
+ * Summed over tasks rather than runs because the task is the unit money is
+ * spent by: a run's cost is the sum of its tasks' anyway (`syncRunCost`), and
+ * triage and interactive tasks own no run at all. Attributed to the day the
+ * task was created, matching the rule above — each unit's cost is bounded by
+ * the budget resolved at that moment, so cross-midnight drift is at most one
+ * budget.
+ *
+ * `now` is passed in, never read inside.
+ */
+export function todayMeteredSpendUsd(now: Date): number {
+  const start = startOfLocalDay(now);
+  const row = db
+    .select({ total: sql<number>`coalesce(sum(${tasks.totalCostUsd}), 0)` })
+    .from(tasks)
+    .where(and(eq(tasks.laneBilling, "metered"), gte(tasks.createdAt, start)))
+    .get();
+  return row?.total ?? 0;
+}

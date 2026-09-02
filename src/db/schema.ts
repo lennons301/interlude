@@ -64,6 +64,19 @@ export const settings = sqliteTable("settings", {
   // Read through `sanitizeOverrides` — never trusted verbatim, because this is
   // JSON written by an older build of the app.
   overrides: text("overrides", { mode: "json" }).$type<SettingsOverrides>(),
+  // When a human last confirmed that the fleet may spend real money (issue
+  // #174). The confirm-once-per-day gate compares this against the local day:
+  // the first metered spend of a day needs one press, and everything after it
+  // that day proceeds automatically until the real-money cap.
+  //
+  // Durable, and a column rather than an in-memory flag, for the reason the
+  // kill switch is: a restart must not re-ask (the fleet would sit held until
+  // someone noticed) and must not silently forget that nobody ever asked. A
+  // timestamp rather than a day string so the screen can say *when* it was
+  // confirmed; the day comparison is the reader's (`sameLocalDay`).
+  meteredSpendConfirmedAt: int("metered_spend_confirmed_at", {
+    mode: "timestamp_ms",
+  }),
   updatedAt: int("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 
@@ -122,6 +135,13 @@ export const runs = sqliteTable("runs", {
   // the fact. Set when the implement pass starts; null for a run that predates
   // lanes, and for an interactive task (which has no run row at all).
   lane: text("lane"),
+  // Who paid for that lane (issue #174) — recorded beside the id rather than
+  // looked up from `lanes.yaml` at read time, because the file is
+  // version-controlled configuration that changes under a deployment: a lane
+  // retired or re-pointed at a different provider would silently rewrite the
+  // billing history of every past run. The ledger's job is to say what was
+  // true when the work ran. Null for a run that predates lanes.
+  laneBilling: text("lane_billing", { enum: ["subscription", "metered"] }),
   // Model the implement pass ran on (issue #74), so this run's spend is
   // interpretable against its tier. A ticket's `model:` directive (issue #80)
   // pins it from claim time; otherwise it is set when the implement pass
@@ -240,6 +260,15 @@ export const tasks = sqliteTable("tasks", {
   // trigger.
   sessionIssue: text("session_issue"),
   runId: text("run_id").references(() => runs.id),
+  // The execution lane this pass ran on, and who paid for it (issues #172,
+  // #174). Recorded per task as well as per run because a task is the unit
+  // money is actually spent by: a run's lane covers its implement pass, but
+  // triage owns no run at all and an interactive session never has one, and
+  // the real-money cap has to measure *every* dollar that went through a
+  // metered lane today or it is not measuring money. Null for a pass that
+  // predates lanes.
+  lane: text("lane"),
+  laneBilling: text("lane_billing", { enum: ["subscription", "metered"] }),
   containerId: text("container_id"),
   branch: text("branch"),
   sessionId: text("session_id"),
