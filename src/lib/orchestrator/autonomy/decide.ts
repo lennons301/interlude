@@ -12,6 +12,8 @@
 import type { FailedCheck } from "../../github/pull-requests";
 import type { LaneBilling } from "../../lanes/lane-config";
 import { evaluateMeteredSpend } from "../../lanes/money";
+import { evaluateQuotaGate } from "../../quota/quota-gate";
+import type { QuotaObservation } from "../../quota/rate-limit-event";
 import { detectBlockedQuestion } from "./blocked";
 import { evaluateGates, type GateConfig } from "./gates";
 import {
@@ -21,6 +23,7 @@ import {
   selectWorkflow,
   type WorkflowSelection,
 } from "./ticket";
+import type { QuotaRejection } from "../../quota/rate-limit-rejection";
 import type { TriageExitKind, TriageResult } from "./triage";
 import {
   buildFeedbackTurn,
@@ -145,6 +148,17 @@ export interface PassOutcome {
    * #106). Only ever false for a genuine implement pass — a repair always
    * operates on an existing PR, so its callers report `true`. */
   producedPr: boolean;
+  /**
+   * The account-wide quota wall this turn hit, or null when it hit none
+   * (issue #168) — read off the turn's own result by `detectQuotaRejection`,
+   * never re-derived here.
+   *
+   * Non-null outranks every other reading of the pass: a refused turn ran no
+   * agent, so its final message is the CLI's own "you've hit your session
+   * limit" and its empty diff is the wall's, not the work's. Judging either
+   * would charge the account's quota to the ticket's attempt budget.
+   */
+  rateLimited: QuotaRejection | null;
 }
 
 /** An open issue awaiting triage (`needs-triage`), as gathered by the sweep. */
@@ -351,6 +365,19 @@ export interface AutonomySnapshot {
   meteredCapAnnounced: boolean;
   /** Whether today's request for a spend confirmation was already announced */
   meteredConfirmationAnnounced: boolean;
+  /**
+   * The fleet's last quota observation (issue #171), from the durable row the
+   * stream parser writes (#167). Null when nothing has ever been observed —
+   * a fresh install, or one on API-key auth, where the CLI emits no quota
+   * telemetry at all; that silence must never read as a wall.
+   */
+  quota: QuotaObservation | null;
+  /** The utilization at or above which new pickup stops, already resolved
+   * through the settings override / environment / built-in default chain, so
+   * the reducer stays pure and a UI change takes effect at the next tick. */
+  quotaThresholdPercent: number;
+  /** Whether the current closed-gate transition was already announced */
+  quotaGateAnnounced: boolean;
   /** Extra allow-listed authors beyond each repo's owner (lowercase) */
   allowedAuthors: string[];
   slots: { total: number; occupied: number; occupants: string[] };
@@ -433,7 +460,10 @@ export type PauseReason =
   /** A metered lane has not been confirmed for this local day (issue #174).
    * Its own reason rather than the cap's, because the remedy is opposite: the
    * cap lifts itself at midnight and this one waits for a human press. */
-  | "metered-unconfirmed";
+  | "metered-unconfirmed"
+  /** Quota is spent or nearly spent (issue #171) — the fleet stops starting
+   * work it could not finish. Lifted by the window resetting, not by a human */
+  | "quota-gate";
 
 export type Action =
   | {
@@ -493,6 +523,26 @@ export type Action =
       type: "notify";
       event: "metered-confirmation-required";
       payload: { capUsd: number; laneId: string | null };
+    }
+  | {
+      type: "notify";
+      event: "quota-gate-closed";
+      payload: {
+        /** The status verbatim, as the CLI said it */
+        status: string;
+        /** The window closest to tripping, verbatim; null when unreported */
+        rateLimitType: string | null;
+        /** Percent of that window consumed; null when the event carried none */
+        utilization: number | null;
+        thresholdPercent: number;
+        /** Whether the account is already rejecting, or the fleet stopped
+         * short of that on purpose — different news, same hold */
+        reason: "rejected" | "utilization";
+        resetsAt: Date | null;
+        /** How many armed tickets the gate is holding. The whole fleet being
+         * stalled is what earns a Discord ping, so the count is the claim. */
+        heldTickets: number;
+      };
     }
   | {
       type: "gatePr";
@@ -664,6 +714,23 @@ export type Action =
       issueRef: string;
     }
   | {
+      // A pass the account's quota refused (issue #168): the run parks on the
+      // window's reset time instead of failing, consuming neither an attempt
+      // (the work was never tried) nor an interruption (the platform did not
+      // die). The executor tears the container down — a parked container holds
+      // memory without holding a slot, which is what wedged the host on
+      // 2026-08-04 — and a paused run then waits: resuming is its own ticket.
+      type: "pauseRunOnRateLimit";
+      runId: string;
+      taskId: string;
+      /** "owner/repo#n" */
+      issueRef: string;
+      /** When the refusing window resets — the run's `resumeAfter` */
+      resumeAfter: Date;
+      /** Which window refused it, verbatim, or null when the event named none */
+      limitType: string | null;
+    }
+  | {
       type: "startTriage";
       issueRef: string;
       projectId: string;
@@ -754,6 +821,12 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     meteredSpendConfirmedAt: null,
     meteredCapAnnounced: true,
     meteredConfirmationAnnounced: true,
+    // No pickup is decided here, so the quota gate has nothing to hold: an
+    // absent observation is an open gate, and the announcement is marked spent
+    // so nothing could be said even if one were reached.
+    quota: null,
+    quotaThresholdPercent: 100,
+    quotaGateAnnounced: true,
     allowedAuthors: [],
     slots: { total: 0, occupied: 0, occupants: [] },
     queuedInteractiveCount: 0,
@@ -814,16 +887,33 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
 
   // A finished pass that leads with the blocked marker is parked and its
   // question escalated; a healthy pass gets no action here — the turn
-  // manager proceeds to completion. A run escalated as blocked is driven by
-  // exactly one thing — its question: the executors never gather a blocked
-  // run into the review pipeline (it leaves the reviewing/gated set), but
-  // the combination is representable in a snapshot, so the reducer refuses
-  // to double-drive it rather than trusting the callers.
-  const blockedRunIds = new Set<string>();
+  // manager proceeds to completion. A run parked by its pass outcome is driven
+  // by exactly one thing — its question, or its quota clock: the executors
+  // never gather such a run into the review pipeline (it leaves the
+  // reviewing/gated set), but the combination is representable in a snapshot,
+  // so the reducer refuses to double-drive it rather than trusting the callers.
+  const parkedRunIds = new Set<string>();
   for (const pass of snapshot.completedPasses) {
+    // The quota wall first, ahead of every other reading of the turn (issue
+    // #168). A refused pass never reached the model: the "final message" is the
+    // CLI's own session-limit line and the empty diff is the wall's, so both
+    // the blocked-marker detector and the empty-pass check below would be
+    // judging the account's quota as if it were the work.
+    if (pass.rateLimited) {
+      parkedRunIds.add(pass.runId);
+      actions.push({
+        type: "pauseRunOnRateLimit",
+        runId: pass.runId,
+        taskId: pass.taskId,
+        issueRef: pass.issueRef,
+        resumeAfter: pass.rateLimited.resumeAfter,
+        limitType: pass.rateLimited.limitType,
+      });
+      continue;
+    }
     const question = detectBlockedQuestion(pass.finalMessage);
     if (question) {
-      blockedRunIds.add(pass.runId);
+      parkedRunIds.add(pass.runId);
       actions.push({
         type: "escalate",
         reason: "blocked",
@@ -852,7 +942,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // Settled PRs first: pure ledger bookkeeping for work that already landed
   // (or was closed by a human) — nothing downstream depends on it this sweep.
   for (const settled of snapshot.settledPrs) {
-    if (blockedRunIds.has(settled.runId)) continue;
+    if (parkedRunIds.has(settled.runId)) continue;
     actions.push({
       type: "finalizeRun",
       runId: settled.runId,
@@ -872,7 +962,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // mergeability is still `unknown` never reaches this list — it is re-polled.
   let repairsQueuedThisSweep = 0;
   for (const conflicting of snapshot.conflictingPrs) {
-    if (blockedRunIds.has(conflicting.runId)) continue;
+    if (parkedRunIds.has(conflicting.runId)) continue;
     if (conflicting.integrationsMade >= snapshot.maxIntegrationAttempts) {
       if (!snapshot.announcedIntegrationEscalations.includes(conflicting.runId)) {
         actions.push({
@@ -901,7 +991,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // so a later, unrelated conflict earns its own repairs rather than being
   // judged against a stale count.
   for (const resolved of snapshot.resolvedConflicts) {
-    if (blockedRunIds.has(resolved.runId)) continue;
+    if (parkedRunIds.has(resolved.runId)) continue;
     actions.push({
       type: "clearIntegration",
       runId: resolved.runId,
@@ -920,7 +1010,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // the rollup is green, so no review pass is ever queued against a branch that
   // does not compile.
   for (const failing of snapshot.checksFailingPrs) {
-    if (blockedRunIds.has(failing.runId)) continue;
+    if (parkedRunIds.has(failing.runId)) continue;
     // The flake guard: a red rollup must be seen on consecutive sweeps before
     // it costs anything at all — neither a repair nor an escalation.
     if (failing.sweepsFailing < snapshot.minCheckFailureSweeps) continue;
@@ -955,7 +1045,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // A parked run whose rollup is green again after a CI-repair episode: reset
   // the counter so a later, unrelated failure earns its own repair.
   for (const resolved of snapshot.resolvedCheckFailures) {
-    if (blockedRunIds.has(resolved.runId)) continue;
+    if (parkedRunIds.has(resolved.runId)) continue;
     actions.push({
       type: "clearCiRepair",
       runId: resolved.runId,
@@ -972,7 +1062,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // green, so no review pass is ever queued against a branch that does not
   // compile.
   for (const stale of snapshot.staleReviews) {
-    if (blockedRunIds.has(stale.runId)) continue;
+    if (parkedRunIds.has(stale.runId)) continue;
     // Two ways a moved head stops being re-reviewable. A withdrawal GitHub
     // refused is checked first: it names a fixable permission problem, and the
     // loop must not re-arm over a review it could not remove. Otherwise the
@@ -1090,7 +1180,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // work out how many slots remain.
   let reviewsQueuedThisSweep = 0;
   for (const pending of snapshot.pendingVerdicts) {
-    if (blockedRunIds.has(pending.runId)) continue;
+    if (parkedRunIds.has(pending.runId)) continue;
     const { result } = pending;
 
     if (result.kind === "unparseable") {
@@ -1203,7 +1293,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // capacity check, so emitting one here only reserves intent, not a slot.
   // (reviewsQueuedThisSweep was seeded above by any unparseable re-queues.)
   for (const awaiting of snapshot.awaitingReview) {
-    if (blockedRunIds.has(awaiting.runId)) continue;
+    if (parkedRunIds.has(awaiting.runId)) continue;
     if (awaiting.hasReviewTask) continue;
     reviewsQueuedThisSweep++;
     actions.push({
@@ -1273,7 +1363,9 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // triage spend is autonomous spend. Skipped for the same reason while the
   // global kill switch is engaged (issue #118) — a triage pass is autonomous
   // pickup that takes a container and spends money, so "stop the fleet" stops
-  // it too. Registered is the only project gate — triage writes no code and
+  // it too — and, for that same reason, while the quota gate is closed
+  // (issue #171): a pass that cannot finish is not worth starting whatever it
+  // costs. Registered is the only project gate — triage writes no code and
   // pushes nothing, so pickup preflight does not apply — and the author
   // allow-list bounds whose issues can spend triage money.
   //
@@ -1290,9 +1382,22 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     now: snapshot.now,
   });
 
+  // The quota admission gate (issue #171), evaluated once and consulted twice
+  // — here for triage and below for claims — so the fleet cannot hold one kind
+  // of pickup and start the other on the same tick. Everything above this line
+  // is work already in flight and is deliberately unaffected: refusing to
+  // *finish* a run would waste the quota already spent on it, and a parked run
+  // resuming is that same work continuing.
+  const quotaGate = evaluateQuotaGate(
+    snapshot.quota,
+    snapshot.quotaThresholdPercent,
+    snapshot.now
+  );
+
   let triagesQueuedThisSweep = 0;
   if (
     !snapshot.globalPaused &&
+    !quotaGate.closed &&
     snapshot.todayAutonomousSpendUsd < snapshot.dailyCapUsd &&
     // Held by the money guards for the same reason the daily cap holds it: a
     // triage pass takes a container and spends money, and on a metered lane
@@ -1446,10 +1551,32 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     return actions;
   }
 
+  // The operator's global kill switch (issue #118), read from the settings row
+  // each tick. It sits beside the env master far above — that one stops sweeps
+  // from ever starting, this one stops what a running sweep would claim, at the
+  // next tick and with no restart. Placed here, at the cap's own gate, so the
+  // two paused fleets behave identically: everything in flight was already
+  // decided above (verdicts, gate decisions, repairs, review passes), a burnt
+  // ticket still routes back to a human, a running turn is left to finish, and
+  // only new claims stop. Triage pickup is held by the same flag further up.
+  // When both holds apply the cap returns first, so the cap is what the sweep
+  // logs and announces (that announcement must not be swallowed by a switch);
+  // the dashboard names the switch instead, being the hold a human can lift.
+  if (snapshot.globalPaused) {
+    actions.push({ type: "pausePickup", reason: "kill-switch" });
+    return actions;
+  }
+
   // The confirm-once gate. A fleet-level press, not a per-session one: nobody
   // is at the keyboard when an autonomous pass crosses into billing. Once
   // given it stands for the local day, so the second claim of the day and
   // every one after it proceeds automatically until the cap above.
+  //
+  // Below the kill switch, unlike its own cap directly above: this one *asks
+  // for a press*, and asking under a switch a human has engaged would point
+  // them at a control that would change nothing — the same reasoning the quota
+  // gate below is placed here for. The cap stays above because its
+  // announcement is news either way, exactly as the daily cap's is.
   if (metered.hold === "unconfirmed") {
     if (!snapshot.meteredConfirmationAnnounced) {
       actions.push({
@@ -1466,19 +1593,36 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     return actions;
   }
 
-  // The operator's global kill switch (issue #118), read from the settings row
-  // each tick. It sits beside the env master far above — that one stops sweeps
-  // from ever starting, this one stops what a running sweep would claim, at the
-  // next tick and with no restart. Placed here, at the cap's own gate, so the
-  // two paused fleets behave identically: everything in flight was already
-  // decided above (verdicts, gate decisions, repairs, review passes), a burnt
-  // ticket still routes back to a human, a running turn is left to finish, and
-  // only new claims stop. Triage pickup is held by the same flag further up.
-  // When both holds apply the cap returns first, so the cap is what the sweep
-  // logs and announces (that announcement must not be swallowed by a switch);
-  // the dashboard names the switch instead, being the hold a human can lift.
-  if (snapshot.globalPaused) {
-    actions.push({ type: "pausePickup", reason: "kill-switch" });
+  // The quota admission gate (issue #171). Placed after the switch because the
+  // ticket is explicit that a human's hold outranks an observation — under an
+  // engaged switch nothing would be claimed anyway, and naming quota there
+  // would point the owner at a wall instead of at the control they hold — and
+  // before the slot check because "we are out of quota" is the more useful of
+  // the two answers when both are true: a full box empties by itself in
+  // minutes, a spent window does not.
+  //
+  // Announced once per transition, like saturation and the cap: the executor
+  // holds the flag and clears it the moment the gate opens. And announced only
+  // from here, past the eligibility filter, which is what makes the ping mean
+  // "the fleet is stalled on quota" rather than "a run paused" — there is
+  // armed, eligible work that would otherwise be claimed right now.
+  if (quotaGate.closed) {
+    if (!snapshot.quotaGateAnnounced) {
+      actions.push({
+        type: "notify",
+        event: "quota-gate-closed",
+        payload: {
+          status: quotaGate.status ?? "rejected",
+          rateLimitType: quotaGate.rateLimitType,
+          utilization: quotaGate.utilization,
+          thresholdPercent: quotaGate.thresholdPercent,
+          reason: quotaGate.reason ?? "rejected",
+          resetsAt: quotaGate.resetsAt,
+          heldTickets: eligible.length,
+        },
+      });
+    }
+    actions.push({ type: "pausePickup", reason: "quota-gate" });
     return actions;
   }
 

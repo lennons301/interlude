@@ -45,10 +45,15 @@ import { commentOnIssue, parseIssueRef } from "../github/issues";
 import { parseRepoFromGitUrl } from "../github/repo";
 import { createDraftPr, markPrReady, shouldOpenDraftPr } from "../github/pull-requests";
 import { notifyTaskQueued, notifyTaskCompleted, notifyTaskFailed, notifyTaskIdle, notifyRunBlocked } from "../discord/notifications";
-import { decideNext, passOutcomeSnapshot } from "./autonomy/decide";
+import { decideNext, passOutcomeSnapshot, type Action } from "./autonomy/decide";
 import { composeSeed, composeSessionTurn } from "../sessions/seed";
 import { processSingleton } from "../process-singleton";
 import { storedTaskStatus, taskIsFinished } from "../tasks/stored-status";
+import {
+  detectQuotaRejection,
+  type TurnQuotaSignals,
+} from "../quota/rate-limit-rejection";
+import { describeRateLimitType } from "../quota/rate-limit-event";
 
 /**
  * Track all active task containers for cancellation and idle polling.
@@ -550,16 +555,18 @@ export async function startTask(taskId: string): Promise<void> {
           return;
         }
       }
-      // The pass's turn is over: park it blocked if its final message carries
-      // the BLOCKED marker on any line (issue #107) — container kept alive,
-      // question escalated to the owner (issue #19); or fail the attempt if it
-      // left no PR and no question, so the run cannot dangle as a ghost (issue
+      // The pass's turn is over: park the run on the quota clock if the account
+      // refused the pass (issue #168) — container torn down, no attempt spent;
+      // park it blocked if its final message carries the BLOCKED marker on any
+      // line (issue #107) — container kept alive, question escalated to the
+      // owner (issue #19); or fail the attempt if it left no PR and no
+      // question, so the run cannot dangle as a ghost (issue
       // #106). Otherwise the initial turn is the whole pass: mark the PR ready
       // and park the container awaiting review — it stays alive (holding no
       // slot) so a request-changes verdict can deliver a fix-up turn into the
       // same attempt. The run stays `implementing`; the sweep's gate evaluation
       // takes over from here.
-      const decision = await evaluatePassOutcome(taskId, turnResult.finalMessage);
+      const decision = await evaluatePassOutcome(taskId, turnResult);
       if (decision === "proceed") await finishImplementPass(taskId);
       return;
     }
@@ -1053,7 +1060,13 @@ export async function processQueuedMessages(
       // initial turn: PR marked ready, run recorded, or completed outright
       // when there is no PR. A reviewer's fix-up turn needs neither — its
       // new commits re-enter gate evaluation from the parked state.
-      const decision = await evaluatePassOutcome(taskId, turnResult.finalMessage);
+      const decision = await evaluatePassOutcome(taskId, turnResult);
+      if (decision === "paused") {
+        // Refused by the account's quota (issue #168): the run is parked on the
+        // window's reset and its container is gone, so there is nothing left to
+        // drain a queued turn into.
+        break;
+      }
       if (decision === "blocked") {
         // Re-blocked mid-drain: parkBlockedRun stopped the container (#93).
         // Stop draining — the next answer resumes it on a fresh poll, which
@@ -1548,29 +1561,41 @@ function lastAgentTextMessage(taskId: string): string | null {
 
 /**
  * What the reducer decided about an implement pass whose turn just ended:
+ * - `paused`    — the account's quota refused the pass, so the run waits on the
+ *                 window's reset; container torn down (issue #168)
  * - `blocked`   — parked on a question (issue #19); container preserved (#93)
  * - `finalized` — no PR and no question, so the run was failed to a terminal
  *                 status rather than left dangling (issue #106)
  * - `proceed`   — healthy; the caller finishes the pass (park awaiting review,
  *                 or complete the task when there is a PR to hand over)
  *
- * The first two are fully handled inside `evaluatePassOutcome`; only `proceed`
- * leaves anything for the caller.
+ * The first three are fully handled inside `evaluatePassOutcome`; only
+ * `proceed` leaves anything for the caller.
  */
-type PassDecision = "blocked" | "finalized" | "proceed";
+type PassDecision = "blocked" | "finalized" | "paused" | "proceed";
 
 /**
  * Park-or-proceed for an implement pass whose turn just ended (issue #19):
- * ask the reducer about the turn's final message — this turn's, from its
- * TurnResult, never an earlier turn's re-read — and the PR the pass left (if
- * any). Blocked — park the run (its container stopped to free memory but
- * preserved, #93) and post the question. Empty (no PR, no question) — fail the
- * attempt so the run reaches a terminal status (issue #106). Otherwise the
- * caller proceeds.
+ * ask the reducer about the turn's result — this turn's, never an earlier
+ * turn's re-read — and the PR the pass left (if any). Rate-limited — park the
+ * run on the quota window's clock, consuming no attempt (issue #168). Blocked
+ * — park the run (its container stopped to free memory but preserved, #93) and
+ * post the question. Empty (no PR, no question) — fail the attempt so the run
+ * reaches a terminal status (issue #106). Otherwise the caller proceeds.
+ *
+ * The whole turn result is passed, not just its final message, because the
+ * quota wall is only legible from the terminal event and the rate-limit event
+ * together — and by design the reducer, not this function, decides which of
+ * the three readings wins.
+ *
+ * Exported as the seam it is: this is where a finished turn becomes a ledger
+ * outcome, and it is the only honest entry point for a test that wants to
+ * assert what a walled or blocked turn does to the run row without
+ * provisioning a container to produce one.
  */
-async function evaluatePassOutcome(
+export async function evaluatePassOutcome(
   taskId: string,
-  finalMessage: string | null
+  turn: Pick<TurnResult, "finalMessage"> & TurnQuotaSignals
 ): Promise<PassDecision> {
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
   if (!task?.runId || !task.githubIssue) return "proceed";
@@ -1587,12 +1612,20 @@ async function evaluatePassOutcome(
       runId: task.runId,
       taskId,
       issueRef: task.githubIssue,
-      finalMessage,
+      finalMessage: turn.finalMessage,
       producedPr,
+      // Read from this turn's own result, at the one seam that has it: whether
+      // the account refused the pass is not recoverable from the task row
+      // afterwards (issue #168).
+      rateLimited: detectQuotaRejection(turn),
     })
   );
 
   for (const action of actions) {
+    if (action.type === "pauseRunOnRateLimit") {
+      await pauseRunOnRateLimit(action);
+      return "paused";
+    }
     if (action.type === "escalate" && action.reason === "blocked") {
       await parkBlockedRun(taskId, action.runId, action.question);
       return "blocked";
@@ -1611,6 +1644,85 @@ async function evaluatePassOutcome(
     }
   }
   return "proceed";
+}
+
+/**
+ * Park a run the account's quota refused (issue #168).
+ *
+ * A quota wall is not a failure of the work, so nothing here counts against
+ * the ticket: the run goes `rate_limited` carrying the window's reset time,
+ * and neither `attempt` (which measures how hard the work was) nor
+ * `interruptionCount` (which measures orchestrator restarts) moves. Both
+ * bounds keep meaning what they say — that is the whole point of the state.
+ *
+ * The container is **torn down**, not parked as a blocked run's is. A parked
+ * container holds ~2 GiB of host memory while holding no slot, which is how the
+ * box OOM-wedged on 2026-08-04; a five-hour window is far too long to hold one
+ * for. The branch was pushed after the turn, so nothing is lost — the pass was
+ * refused before it ran, so on the initial turn there is nothing to lose at
+ * all.
+ *
+ * The task is failed for the same reason an interrupted pass's is: its
+ * container is gone and its exec is over, so leaving it live would hold a slot
+ * against a run that is doing nothing. The run, not the task, is what is
+ * paused, and the run is where the resume will be decided.
+ */
+async function pauseRunOnRateLimit(
+  pause: Extract<Action, { type: "pauseRunOnRateLimit" }>
+): Promise<void> {
+  const taskId = pause.taskId;
+  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+  const run = db.select().from(runs).where(eq(runs.id, pause.runId)).get();
+
+  // Take the container handle before the status goes terminal, for the reason
+  // failImplementAttempt states: from that write on the queue's poll may drop
+  // the session entry (issue #159), and reading the map afterwards would leak
+  // the container until the 5-minute reaper caught it.
+  const container = activeTasks.get(taskId)?.container ?? null;
+
+  const window = pause.limitType
+    ? `the ${describeRateLimitType(pause.limitType)}`
+    : "the account's rate limit";
+  // Said as a wall-clock instant rather than an ISO stamp: these two lines are
+  // read by a human on an issue thread, and the dashboard is where the live
+  // countdown lives.
+  const resumes = pause.resumeAfter.toUTCString();
+
+  insertSystemMessage(
+    taskId,
+    `Paused on ${window} — the account's quota refused this pass. ` +
+      `The window resets at ${resumes}; no attempt or interruption was consumed.`
+  );
+  updateTask(taskId, { status: "failed", containerStatus: null });
+  syncRunCost(pause.runId);
+  db.update(runs)
+    .set({
+      status: "rate_limited",
+      resumeAfter: pause.resumeAfter,
+      // Deliberately not finishedAt: the run has not finished. It is waiting.
+    })
+    .where(eq(runs.id, pause.runId))
+    .run();
+
+  console.log(
+    `[autonomy] Run ${pause.runId} (${run?.githubIssue ?? "?"}) paused on ` +
+      `${window} until ${resumes} — no attempt consumed`
+  );
+
+  if (task?.githubIssue) {
+    // Fire-and-forget, as the interruption path's comment is: one call site
+    // awaits this from inside startTask's try, and a rejected comment must not
+    // throw back into the catch and re-run the whole pause.
+    commentOnIssue(
+      task.githubIssue,
+      `Run paused (attempt ${run?.attempt ?? "?"}): the account's quota ` +
+        `refused this pass on ${window}. The window resets at ${resumes}. ` +
+        `A quota pause consumes neither an attempt nor an interruption — ` +
+        `work so far is pushed to \`${task.branch}\`.`
+    ).catch(console.error);
+  }
+
+  await removeTaskContainer(taskId, container);
 }
 
 /**

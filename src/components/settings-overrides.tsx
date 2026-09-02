@@ -4,21 +4,26 @@ import { useState } from "react";
 import { Eyebrow, LoadFailure, PANEL_PLAIN } from "@/components/fleet/fleet-bits";
 import { ModelTierPanel } from "@/components/model-tier-settings";
 import { ExecutionLanePanel } from "@/components/execution-lane-settings";
+import { QuotaGatePanel } from "@/components/quota-gate-settings";
 import { useLoad } from "@/lib/use-load";
 import type { SettingFieldView } from "@/lib/settings-resolver";
 import type { LaneSettingsView } from "@/lib/lanes/resolve";
+import type { QuotaThresholdView } from "@/lib/settings-resolver";
 
 /**
- * The UI-editable settings (issues #166, #172): which tier each kind of pass
- * runs at, and which execution lane it runs on.
+ * The UI-editable settings (issues #166, #172, #171): which tier each kind of
+ * pass runs at, which execution lane it runs on, and how full the account's
+ * quota may get before the fleet stops claiming.
  *
- * Two panels, **one** piece of state, deliberately. They are not independent:
- * a tier's model identifier is whatever the primary lane says it is, so
- * changing the lane changes every row of the panel above it. Fetched twice
- * they would drift the moment a lane was picked, and the screen would name
- * models no pass would run — the exact failure the provenance work exists to
- * prevent. The endpoint answers a PATCH with the whole resolved state, so one
- * write refreshes both.
+ * Panels, **one** piece of state, deliberately. The first two are not
+ * independent: a tier's model identifier is whatever the primary lane says it
+ * is, so changing the lane changes every row of the panel above it. Fetched
+ * twice they would drift the moment a lane was picked, and the screen would
+ * name models no pass would run — the exact failure the provenance work exists
+ * to prevent. The quota threshold is independent of both, and joins the same
+ * state anyway rather than fetching its own: the endpoint answers a PATCH with
+ * the whole resolved settings state, so one write here would leave a
+ * separately-fetched panel showing a row that is no longer the row.
  */
 
 interface OverridesState {
@@ -26,20 +31,28 @@ interface OverridesState {
   lanes: LaneSettingsView | null;
   /** Why the lane file could not be read, when it could not be. */
   laneError: string | null;
+  quota: QuotaThresholdView;
   /** ISO-8601; null = no setting has ever been written on this install. */
   updatedAt: string | null;
 }
 
-/** The one field the lane panel owns; every other key belongs to the tiers. */
+/** The one field the lane panel owns. */
 const LANE_KEY = "primaryLane";
+/** The one field the quota panel owns. */
+const QUOTA_KEY = "quotaPickupThresholdPercent";
 
 /** The save error, shown only by the panel that owns the field it failed on. */
 export function errorFor(
   error: { key: string; message: string } | null,
-  panel: "lane" | "tiers"
+  panel: "lane" | "tiers" | "quota"
 ): string | null {
   if (error === null) return null;
-  const owner = error.key === LANE_KEY ? "lane" : "tiers";
+  const owner =
+    error.key === LANE_KEY
+      ? "lane"
+      : error.key === QUOTA_KEY
+        ? "quota"
+        : "tiers";
   return owner === panel ? error.message : null;
 }
 
@@ -106,6 +119,9 @@ export function SettingsOverrides() {
         <div className={PANEL_PLAIN}>
           <p className="font-plex-mono text-[11px] text-fl-ink-3">—</p>
         </div>
+        <div className={PANEL_PLAIN}>
+          <p className="font-plex-mono text-[11px] text-fl-ink-3">—</p>
+        </div>
       </Sections>
     );
   }
@@ -128,14 +144,25 @@ export function SettingsOverrides() {
         saveError={errorFor(saveError, "lane")}
         onChoose={(choice) => choose(LANE_KEY, choice)}
       />
+      <QuotaGatePanel
+        quota={state.quota}
+        busy={busyKey === QUOTA_KEY}
+        disabled={busyKey !== null}
+        saveError={errorFor(saveError, "quota")}
+        onChoose={(choice) => choose(QUOTA_KEY, choice)}
+      />
     </Sections>
   );
 }
 
-/** The two headed sections the control room reads as. Kept here rather than on
- * the page so both panels can share one client-side state. */
-function Sections({ children }: { children: [React.ReactNode, React.ReactNode] }) {
-  const [models, lanes] = children;
+/** The headed sections the control room reads as. Kept here rather than on the
+ * page so every panel can share one client-side state. */
+function Sections({
+  children,
+}: {
+  children: [React.ReactNode, React.ReactNode, React.ReactNode];
+}) {
+  const [models, lanes, quota] = children;
   return (
     <>
       <section aria-label="Models" className="space-y-3">
@@ -145,6 +172,10 @@ function Sections({ children }: { children: [React.ReactNode, React.ReactNode] }
       <section aria-label="Execution lane" className="space-y-3">
         <Eyebrow>Execution lane</Eyebrow>
         {lanes}
+      </section>
+      <section aria-label="Quota" className="space-y-3">
+        <Eyebrow>Quota</Eyebrow>
+        {quota}
       </section>
     </>
   );

@@ -21,9 +21,30 @@ import {
   type StaleReview,
   type TriageCandidate,
 } from "../decide";
+import type { QuotaObservation } from "../../../quota/rate-limit-event";
 
 // Fixed clock — time arrives in the snapshot, never read inside the reducer
 const NOW = new Date(2026, 7, 1, 12, 0, 0);
+/** An hour out, so the default observation is one the gate still trusts. */
+const RESETS_AT = new Date(2026, 7, 1, 13, 0, 0);
+
+/** A quota observation as the stream parser would have written it (#167). */
+function quotaObservation(
+  overrides: Partial<QuotaObservation> = {}
+): QuotaObservation {
+  return {
+    status: "allowed",
+    rateLimitType: "five_hour",
+    utilization: 10,
+    resetsAt: RESETS_AT,
+    overageStatus: null,
+    overageResetsAt: null,
+    isUsingOverage: null,
+    overageInUse: null,
+    observedAt: new Date(NOW.getTime() - 60_000),
+    ...overrides,
+  };
+}
 const ARMED_EARLY = new Date(2026, 7, 1, 9, 0, 0);
 
 function makeProject(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
@@ -79,6 +100,9 @@ function makeSnapshot(overrides: Partial<AutonomySnapshot> = {}): AutonomySnapsh
     meteredSpendConfirmedAt: null,
     meteredCapAnnounced: false,
     meteredConfirmationAnnounced: false,
+    quota: null,
+    quotaThresholdPercent: 90,
+    quotaGateAnnounced: false,
     allowedAuthors: [],
     slots: { total: 2, occupied: 0, occupants: [] },
     queuedInteractiveCount: 0,
@@ -198,6 +222,7 @@ function makePass(overrides: Partial<PassOutcome> = {}): PassOutcome {
     issueRef: "acme/widgets#7",
     finalMessage: "Implemented the frobnicator; tests and lint pass.",
     producedPr: true,
+    rateLimited: null,
     ...overrides,
   };
 }
@@ -1051,6 +1076,220 @@ describe("decideNext — pause reasons", () => {
     expect(actions).toEqual([
       { type: "pausePickup", reason: "autonomy-off-global" },
     ]);
+  });
+
+  // The quota admission gate (issue #171). The daily cap's pause is the model
+  // again: new pickup stops, everything already in flight is decided as usual,
+  // and the hold lifts itself — here when the window resets rather than at
+  // midnight.
+  describe("the quota admission gate", () => {
+    const walled = (over: Partial<QuotaObservation> = {}): QuotaObservation =>
+      quotaObservation({ status: "allowed_warning", utilization: 94, ...over });
+
+    it.each([
+      { utilization: 80, threshold: 90, claimed: 1 },
+      { utilization: 89.9, threshold: 90, claimed: 1 },
+      { utilization: 90, threshold: 90, claimed: 0 },
+      { utilization: 94, threshold: 90, claimed: 0 },
+      { utilization: 94, threshold: 95, claimed: 1 },
+      { utilization: 94, threshold: 50, claimed: 0 },
+    ])(
+      "claims $claimed ticket(s) at $utilization% against a $threshold% threshold",
+      ({ utilization, threshold, claimed }) => {
+        const actions = decideNext(
+          makeSnapshot({
+            quota: walled({ utilization }),
+            quotaThresholdPercent: threshold,
+            quotaGateAnnounced: true,
+          })
+        );
+
+        expect(claims(actions)).toHaveLength(claimed);
+        expect(pauses(actions)).toEqual(
+          claimed === 0
+            ? [{ type: "pausePickup", reason: "quota-gate" }]
+            : []
+        );
+      }
+    );
+
+    it("stops pickup on an account-wide rejection, whatever the threshold", () => {
+      const actions = decideNext(
+        makeSnapshot({
+          quota: walled({ status: "rejected", utilization: 3 }),
+          quotaThresholdPercent: 100,
+          quotaGateAnnounced: true,
+        })
+      );
+
+      expect(claims(actions)).toEqual([]);
+      expect(pauses(actions)).toEqual([
+        { type: "pausePickup", reason: "quota-gate" },
+      ]);
+    });
+
+    it("claims normally when no pass has ever observed a quota event", () => {
+      // An API-key lane emits no rate_limit_event at all (#165's finding 6);
+      // silence must not gate a fleet that can never break it.
+      const actions = decideNext(
+        makeSnapshot({ quota: null, quotaThresholdPercent: 50 })
+      );
+
+      expect(claims(actions)).toHaveLength(1);
+    });
+
+    it("keeps driving in-flight work while the gate holds pickup", () => {
+      // The gate stops starting work, never finishing it: a stored verdict
+      // still posts, a finished pass is still armed, a parked run's review
+      // still starts, and a burnt ticket still routes back to a human.
+      const actions = decideNext(
+        makeSnapshot({
+          quota: walled(),
+          quotaGateAnnounced: true,
+          pendingVerdicts: [makeVerdict()],
+          pendingGateEvaluations: [makePending()],
+          awaitingReview: [makeAwaitingReview({ runId: "run-9" })],
+          candidates: [
+            makeCandidate(),
+            makeCandidate({
+              issueRef: "acme/widgets#9",
+              number: 9,
+              attemptsMade: 3,
+            }),
+          ],
+        })
+      );
+
+      expect(actions.map((a) => a.type)).toEqual([
+        "postVerdict",
+        "startReview",
+        "armAutoMerge",
+        "exhaust",
+        "pausePickup",
+      ]);
+    });
+
+    it("starts no triage pass while the gate is closed", () => {
+      // Triage is autonomous pickup too: its own container, its own spend, and
+      // a pass that cannot finish is not worth starting whatever it costs.
+      const actions = decideNext(
+        makeSnapshot({
+          quota: walled(),
+          quotaGateAnnounced: true,
+          candidates: [],
+          triageCandidates: [makeTriageCandidate()],
+        })
+      );
+
+      expect(actions).toEqual([]);
+    });
+
+    it("claims again as soon as the window resets — no restart in between", () => {
+      const closed = makeSnapshot({
+        quota: walled({ resetsAt: new Date(NOW.getTime() + 60_000) }),
+        quotaGateAnnounced: true,
+      });
+
+      expect(claims(decideNext(closed))).toEqual([]);
+      expect(
+        claims(
+          decideNext({
+            ...closed,
+            quota: walled({ resetsAt: new Date(NOW.getTime() - 1) }),
+          })
+        )
+      ).toHaveLength(1);
+    });
+
+    it("announces the closed gate once, with the numbers it judged", () => {
+      const actions = decideNext(
+        makeSnapshot({ quota: walled(), quotaThresholdPercent: 90 })
+      );
+
+      expect(actions).toEqual([
+        {
+          type: "notify",
+          event: "quota-gate-closed",
+          payload: {
+            status: "allowed_warning",
+            rateLimitType: "five_hour",
+            utilization: 94,
+            thresholdPercent: 90,
+            reason: "utilization",
+            resetsAt: RESETS_AT,
+            heldTickets: 1,
+          },
+        },
+        { type: "pausePickup", reason: "quota-gate" },
+      ]);
+    });
+
+    it("does not re-announce a gate that was already announced", () => {
+      const actions = decideNext(
+        makeSnapshot({ quota: walled(), quotaGateAnnounced: true })
+      );
+
+      expect(actions).toEqual([
+        { type: "pausePickup", reason: "quota-gate" },
+      ]);
+    });
+
+    it("says nothing at all when there is nothing eligible to claim", () => {
+      // The ping means "the fleet is stalled on quota", so it needs armed work
+      // actually being held — not merely a wall nobody is waiting behind.
+      const actions = decideNext(
+        makeSnapshot({ quota: walled(), candidates: [] })
+      );
+
+      expect(actions).toEqual([]);
+    });
+
+    it("names the kill switch ahead of the gate when both hold", () => {
+      // A human's hold outranks an observation: under an engaged switch
+      // nothing would be claimed anyway, and naming quota would point the
+      // owner at a wall instead of at the control they hold.
+      const actions = decideNext(
+        makeSnapshot({ globalPaused: true, quota: walled() })
+      );
+
+      expect(actions).toEqual([{ type: "pausePickup", reason: "kill-switch" }]);
+    });
+
+    it("names the gate ahead of a full box when both hold", () => {
+      // A saturated box empties by itself in minutes; a spent window does not,
+      // so quota is the more useful of the two answers.
+      const actions = decideNext(
+        makeSnapshot({
+          quota: walled(),
+          quotaGateAnnounced: true,
+          slots: { total: 1, occupied: 1, occupants: ["implement: acme/widgets#1"] },
+        })
+      );
+
+      expect(pauses(actions)).toEqual([
+        { type: "pausePickup", reason: "quota-gate" },
+      ]);
+    });
+
+    it("leaves a project's own holds saying their own piece", () => {
+      // Per-project holds are decided above the gate, so a repo failing
+      // preflight is still named as such rather than swallowed by the wall.
+      const actions = decideNext(
+        makeSnapshot({
+          quota: walled(),
+          quotaGateAnnounced: true,
+          projects: [makeProject({ preflightStatus: "failing", preflightReason: "no app" })],
+        })
+      );
+
+      expect(pauses(actions)).toEqual([
+        {
+          type: "pausePickup",
+          reason: "preflight-failing",
+          detail: "acme/widgets: no app",
+        },
+      ]);
+    });
   });
 });
 
@@ -2684,6 +2923,184 @@ describe("decideNext — finalizing an empty implement pass (issue #106)", () =>
         issueRef: "acme/widgets#7",
       },
     ]);
+  });
+});
+
+describe("decideNext — pausing a pass on a quota wall (issue #168)", () => {
+  const RESUME_AFTER = new Date(2026, 7, 1, 17, 0, 0);
+  const WALL = { resumeAfter: RESUME_AFTER, limitType: "five_hour" };
+
+  function pauses(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "pauseRunOnRateLimit");
+  }
+
+  const PAUSE_ACTION = {
+    type: "pauseRunOnRateLimit",
+    runId: "run-1",
+    taskId: "task-1",
+    issueRef: "acme/widgets#7",
+    resumeAfter: RESUME_AFTER,
+    limitType: "five_hour",
+  };
+
+  it("parks the run on the window's reset instead of failing it", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [makePass({ rateLimited: WALL })],
+      })
+    );
+
+    expect(actions).toEqual([PAUSE_ACTION]);
+  });
+
+  it("carries a window it has never heard of through verbatim", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [
+          makePass({
+            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "thirty_day_haiku" },
+          }),
+        ],
+      })
+    );
+
+    expect(pauses(actions)).toEqual([
+      { ...PAUSE_ACTION, limitType: "thirty_day_haiku" },
+    ]);
+  });
+
+  it("does not finalize a walled pass as an empty attempt", () => {
+    // The defect this ticket exists for: a refused pass leaves no PR, so before
+    // #168 it fell straight into #106's empty-pass path and spent a strike on a
+    // turn the model never saw.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [makePass({ producedPr: false, rateLimited: WALL })],
+      })
+    );
+
+    expect(actions).toEqual([PAUSE_ACTION]);
+  });
+
+  it("does not read a walled pass's final message as a blocked question", () => {
+    // A refused turn's "final message" is the CLI's own synthesised line, not
+    // the agent's — it never ran. Reading it would park the run on a question
+    // no one asked and page the owner for it.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [
+          makePass({
+            rateLimited: WALL,
+            finalMessage: "BLOCKED: which database?",
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([PAUSE_ACTION]);
+  });
+
+  it("drives nothing else for a run it just paused", () => {
+    // Same guard a blocked run gets: the executors never gather a paused run
+    // into the review pipeline, but the combination is representable, so the
+    // reducer refuses to double-drive it rather than trusting its callers.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [makePass({ rateLimited: WALL })],
+        conflictingPrs: [makeConflictingPr()],
+        awaitingReview: [makeAwaitingReview()],
+        settledPrs: [
+          { runId: "run-1", issueRef: "acme/widgets#7", prNumber: 41, merged: true },
+        ],
+      })
+    );
+
+    expect(actions).toEqual([PAUSE_ACTION]);
+  });
+
+  it("leaves the ticket's attempt and interruption accounting untouched", () => {
+    // The pause is *not* a failed attempt and *not* an interruption: nothing
+    // the reducer emits routes the ticket to a human or re-claims it, so the
+    // two counters keep measuring what they say they measure. (The run row's
+    // own counters are the executor's business — it writes neither.)
+    const actions = decideNext(
+      makeSnapshot({
+        completedPasses: [makePass({ rateLimited: WALL })],
+        candidates: [
+          makeCandidate({ attemptsMade: 2, interruptionsMade: 4, hasActiveRun: true }),
+        ],
+      })
+    );
+
+    expect(actions.some((a) => a.type === "exhaust")).toBe(false);
+    expect(actions.some((a) => a.type === "failAttempt")).toBe(false);
+    expect(claims(actions)).toHaveLength(0);
+  });
+
+  it("holds the ticket while it is paused — no second run is claimed over it", () => {
+    // A `rate_limited` run is one of ACTIVE_RUN_STATUSES, so the gatherer
+    // reports hasActiveRun; claiming a second run here would spend the very
+    // attempt the pause protects.
+    const actions = decideNext(
+      makeSnapshot({ candidates: [makeCandidate({ hasActiveRun: true })] })
+    );
+
+    expect(claims(actions)).toHaveLength(0);
+  });
+
+  it("still pauses a pass that finished while the kill switch was engaged", () => {
+    // The switch holds new *pickup*, never a turn that already ran — the same
+    // rule the blocked and empty-pass paths follow. Failing this pass instead
+    // would spend an attempt on a quota wall because a human had paused the
+    // fleet, which is the opposite of what either control is for.
+    const actions = decideNext(
+      makeSnapshot({
+        globalPaused: true,
+        completedPasses: [makePass({ rateLimited: WALL })],
+        candidates: [makeCandidate()],
+      })
+    );
+
+    expect(pauses(actions)).toEqual([PAUSE_ACTION]);
+    expect(claims(actions)).toHaveLength(0);
+    expect(actions).toContainEqual({ type: "pausePickup", reason: "kill-switch" });
+  });
+
+  it("still stops pickup for a project whose autonomy is off", () => {
+    // The per-project toggle is unaffected by a pause anywhere: a paused run on
+    // one ticket must not become a route around it for another.
+    const actions = decideNext(
+      makeSnapshot({
+        projects: [makeProject({ autonomyEnabled: false })],
+        completedPasses: [makePass({ rateLimited: WALL })],
+        candidates: [makeCandidate()],
+      })
+    );
+
+    expect(pauses(actions)).toEqual([PAUSE_ACTION]);
+    expect(claims(actions)).toHaveLength(0);
+    expect(actions).toContainEqual({
+      type: "pausePickup",
+      reason: "autonomy-off-project",
+      detail: "acme/widgets",
+    });
+  });
+
+  it("decides a single walled pass via passOutcomeSnapshot", () => {
+    // The turn manager's own path: one pass, decided the moment its turn ends,
+    // with every pickup and pipeline input inert.
+    expect(
+      decideNext(passOutcomeSnapshot(NOW, makePass({ rateLimited: WALL })))
+    ).toEqual([PAUSE_ACTION]);
+  });
+
+  it("leaves a healthy pass alone — a pass is paused only when it was refused", () => {
+    expect(pauses(decideNext(passOutcomeSnapshot(NOW, makePass())))).toEqual([]);
   });
 });
 

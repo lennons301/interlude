@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "e42b2c01-4730-446e-8f35-15f86a02862b",
-  "prevId": "aac54981-79f4-4f94-8278-4ccb618de950",
+  "id": "82ec3323-cd27-4d51-b699-e2b8fb04f8c3",
+  "prevId": "d04c4303-c2cc-4b4a-920d-aa39e072d980",
   "tables": {
     "messages": {
       "name": "messages",
@@ -414,6 +414,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": 0
+        },
+        "resume_after": {
+          "name": "resume_after",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "blocked_question": {
           "name": "blocked_question",

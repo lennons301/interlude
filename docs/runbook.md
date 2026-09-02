@@ -138,7 +138,9 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
   stale queue heartbeat; issue #152: a slot count no real container
   corroborates), each with a link where one applies.
 - **running** — each active run's ticket, attempt (n/3), turn, spend vs budget,
-  and phase (implement ▸ review ▸ merge).
+  and phase (implement ▸ review ▸ merge). A run the account's quota refused sits
+  here too, labelled **paused** with when its window resets (issue #168) — it is
+  deliberately *not* in **needs you**, because a quota window asks nothing of you.
 - **recent** — the last 7 days of completions.
 - **spend** — today's autonomous spend vs the $500/day cap.
 
@@ -176,11 +178,12 @@ chat/preview is never affected.
   restart.
 
   **Confirm it took** from the row itself, not from the log: the dashboard's
-  live dot turns amber and reads `held` (`paused` is a cap or a money guard —
-  the daily cap, the real-money cap, or a metered lane whose day is
-  unconfirmed — and `off` is the boot master: deliberately different words for
-  deliberately different states, because none of them is lifted the same way),
-  with a *Kill switch engaged* banner above the panels, and `GET /api/settings/autonomy` answers
+  live dot turns amber and reads `held` (`paused` covers every self-lifting or
+  money hold — the daily cap, the quota gate, the real-money cap, and a metered
+  lane whose day is unconfirmed — and `off` is the boot master: deliberately
+  different words for deliberately different states, because none of them is
+  lifted the same way), with a *Kill switch engaged* banner above the panels,
+  and `GET /api/settings/autonomy` answers
   the same row headless. The sweep's `Pickup paused (kill-switch)` line
   is **not** the confirmation: the hold is evaluated only on a tick that found
   an eligible ticket it would otherwise have claimed, so engaging the switch
@@ -190,6 +193,34 @@ chat/preview is never affected.
   the fleet is held.) The next
   morning's Discord digest leads with the hold too, so a fleet you held and
   forgot never reads there as a quiet day.
+- **Automatically, when quota runs out (quota gate):** nothing to press. Above
+  the **Settings → Quota** threshold (default 90% of the account's quota
+  window), or once the account is already being *rejected*, the fleet stops
+  claiming new tickets and starting triage passes — it will not start work it
+  cannot finish. In-flight runs, parked runs resuming, and interactive chat are
+  all unaffected.
+
+  The dot reads `paused` with a banner naming both numbers (what the window is
+  at, and the threshold it crossed), and Discord gets **one** ping per closed
+  spell — fleet-level, saying how many armed tickets are being held, never one
+  per run. It re-arms only when the gate opens again.
+
+  The gate **lifts itself**: an observation stops holding pickup once its stated
+  reset has passed (or, for one that reported no reset, once it is more than
+  five hours old). That expiry is load-bearing, not tidiness — only a pass
+  making an API call produces a fresh quota observation, so a gate held forever
+  by a stale rejection would suppress the very traffic that would lift it. When
+  the window reopens the fleet claims one ticket, observes the quota again, and
+  re-closes the gate within seconds if the wall is still there.
+
+  A fleet on API-key auth is **never** gated: the unified-window telemetry is
+  subscription-only, so such an install reports no quota at all, and silence it
+  cannot break must not read as a wall.
+
+  Raise or lower the threshold in **Settings → Quota** (100 = only ever gate on
+  an outright rejection), or set `QUOTA_PICKUP_THRESHOLD_PERCENT`. There is
+  deliberately **no headroom reserved** for your own Claude Code sessions: the
+  fleet and you draw on one pool and the fleet takes what it takes.
 - **Globally, hard off (boot master):** set `AUTONOMY_ENABLED=false` in Doppler
   `interlude/prd` and restart. Sweeps never start at all. Use this to stand the
   fleet down for a while; use the kill switch to stop it now.
@@ -271,6 +302,17 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   eventually routes to `ready-for-human` like an exhausted one. A review pass that
   dies the same way re-queues a fresh replacement instead of burning its one
   format-retry.
+- **A quota wall is neither an attempt nor an interruption** (issue #168). If the
+  account's rate limit *refuses* a pass — the five-hour or weekly window, on the
+  subscription lane — the run goes `rate_limited` with a `resumeAfter` taken from
+  the limit event's own reset time, its container is torn down, and both counters
+  stay where they were. The issue gets a comment saying so.
+  **Until #169 lands, a paused run stays paused**: nothing resumes it, and because
+  a `rate_limited` run still holds its ticket, the sweep will not claim a fresh run
+  over it either. To move it by hand, cancel it (below) or drive the run row
+  terminal — the branch is pushed, so nothing is lost. A rejection whose event
+  carried *no* reset time is not paused at all: with no clock to wait on, the pass
+  takes its ordinary path and spends the attempt, as before.
 - **$500/day** estate-wide autonomous cap pauses pickup (announced once, shown on
   the dashboard, resets at local midnight). Interactive work is exempt by
   construction (it has no run).
@@ -316,6 +358,12 @@ agent-doable-but-risky work you want to eyeball before merge.
 Model choice is a **tier** — `heavy`, `standard` or `light` — not a vendor model
 id, so the choice survives a change of provider. The old names still work as
 aliases: `opus` = heavy, `sonnet` = standard, `haiku` = light.
+
+**Settings → Quota** holds the quota admission threshold (issue #171) on the
+same layer: an unset row follows `QUOTA_PICKUP_THRESHOLD_PERCENT`, a set one
+wins, a value outside the offered set is refused with the list rather than
+clamped, and the change takes effect at the next sweep with no restart. See
+*Pause pickup → the quota gate* above for what the threshold actually does.
 
 **The standing default** for each kind of pass — implement, review, triage,
 interactive — is set in **Settings → Models**. Each row shows the tier in force,
@@ -415,6 +463,7 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 | `AGENT_MODEL`, `AGENT_MODEL_REVIEW`, `AGENT_MODEL_TRIAGE` | Default model per pass kind, as a tier (`heavy`/`standard`/`light`, or the `opus`/`sonnet`/`haiku` aliases) or a raw model id. The fall-through for a Settings → Models row left on `environment`; unset means no `--model` and the CLI resolves the account default. |
 | `CAPACITY_SLOTS`, `AGENT_MEMORY_MB` | Override derived capacity — only when the derivation is wrong. |
 | `OWED_REVIEW_STALL_MINUTES`, `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES` | Fleet-health watchdog thresholds in minutes (issue #126). Defaults 30 / 3 / 2. |
+| `QUOTA_PICKUP_THRESHOLD_PERCENT` | Quota utilization at or above which no new ticket is claimed (issue #171). One of 50/70/80/85/90/95/100; default 90. The fall-through for Settings → Quota when that row is left on `environment`. |
 | `OCCUPANCY_DIVERGED_MINUTES` | How long occupancy may go uncorroborated by real agent containers before it reads as a phantom slot (issue #152). Default 20 — far longer than the pickup debounce because a task provisioning its container is legitimately uncorroborated until the container exists, and a cold agent-image build happens inside that window. The card's remedy is a restart, so a false positive is expensive. |
 
 ### Labels

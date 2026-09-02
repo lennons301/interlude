@@ -21,6 +21,7 @@ import {
   type QuotaObservation,
   type QuotaSeverity,
 } from "../quota/rate-limit-event";
+import { evaluateQuotaGate } from "../quota/quota-gate";
 
 export interface FleetRows {
   /** Current time — passed in, never read inside */
@@ -87,6 +88,11 @@ export interface FleetRows {
    * (the window after a repair pushes, while the new head's checks run, is not a
    * stall). null = never observed (no sweep yet), which renders no such cards. */
   failingChecksByRun: Record<string, string[]> | null;
+  /** The utilization at or above which no new ticket is claimed (issue #171),
+   * resolved through the same override / environment / default chain the sweep
+   * reads, so the banner and the reducer judge the same observation against the
+   * same number. */
+  quotaThresholdPercent: number;
   /** The fleet's last observed quota state (issue #167), from the durable row;
    * null = no pass has ever reported one, which is also the permanent state of
    * a fleet running on API-key auth, where the CLI emits no quota telemetry at
@@ -119,6 +125,10 @@ export interface FleetRunRow {
     | "failed"
     | "exhausted"
     | "interrupted"
+    /** Parked on the account's quota clock (issue #168) — not a failure, and
+     * not finished: the pass was refused on the account-wide rate-limit window
+     * and waits for `resumeAfter`. */
+    | "rate_limited"
     | "cancelled";
   budgetUsd: number;
   totalCostUsd: number;
@@ -146,6 +156,9 @@ export interface FleetRunRow {
     | { kind: "approve" | "request-changes" | "escalate"; body: string }
     | { kind: "unparseable"; reason: string }
     | null;
+  /** When a `rate_limited` run's window resets (issue #168) — the "resumes in"
+   * the paused card shows. Null on every other status. */
+  resumeAfter: Date | null;
   claimedAt: Date;
   startedAt: Date | null;
   finishedAt: Date | null;
@@ -271,7 +284,8 @@ export interface PickupPause {
     | "metered-cap"
     /** A metered lane whose day nobody has confirmed (issue #174). The only
      * hold here lifted by a press *on this screen*. */
-    | "metered-unconfirmed";
+    | "metered-unconfirmed"
+    | "quota-gate";
   /** One-line banner copy */
   body: string;
 }
@@ -316,6 +330,17 @@ export interface RunningCard {
   startedAt: string | null;
   /** budgetUsd null = unbudgeted (interactive sessions) */
   spend: { usd: number; budgetUsd: number | null };
+  /**
+   * Why this run is waiting on a clock rather than working, or null while it
+   * is actually running (issue #168).
+   *
+   * A paused run stays *here*, labelled in place, and deliberately never
+   * reaches `needsYou`: nobody has to do anything about a quota window, and
+   * that section means "a human decision is required". `resumeAfter` is an ISO
+   * string like every other time in this view, so the surfaces count down
+   * against their own clock rather than a value frozen at the last push.
+   */
+  paused: { reason: "rate-limited"; resumeAfter: string } | null;
 }
 
 export interface RecentItem {
@@ -429,6 +454,26 @@ function quotaGlance(observation: QuotaObservation | null): QuotaGlance | null {
     resetsAt: observation.resetsAt?.toISOString() ?? null,
     observedAt: observation.observedAt.toISOString(),
   };
+}
+
+/** The banner's one line for a closed quota gate. It names both numbers,
+ * because "quota" alone leaves the owner to go and find out how close it was —
+ * and it says what is *not* held, since the fleet still looking busy while
+ * claiming nothing is exactly the confusion the field exists to remove. */
+function quotaPauseBody(gate: ReturnType<typeof evaluateQuotaGate>): string {
+  const window =
+    gate.rateLimitType === null
+      ? "the quota window"
+      : `the ${describeRateLimitType(gate.rateLimitType)}`;
+  const lead =
+    gate.reason === "rejected"
+      ? `Quota exhausted — the account is being rejected on ${window}`
+      : `Quota nearly spent — ${gate.utilization}% of ${window}, past the ` +
+        `${gate.thresholdPercent}% pickup threshold`;
+  return (
+    `${lead}. No new tickets are claimed; work in flight continues and ` +
+    "parked runs still resume"
+  );
 }
 
 /** Start of the local calendar day containing `now` — the daily autonomous
@@ -592,13 +637,27 @@ export function buildFleetView(rows: FleetRows): FleetView {
     hold: meteredState.hold,
   };
 
+  // The same gate `decideNext` refuses pickup with (issue #171), from the same
+  // pure function: the banner is not allowed to have its own opinion about
+  // whether work is being claimed. Ranked below the cap for the reason the cap
+  // is ranked below the switch — of the two self-lifting holds, the cap is the
+  // one whose ceiling a human chose, and the Quota tile keeps saying its own
+  // piece whichever wins.
+  const quotaGate = evaluateQuotaGate(
+    rows.quota,
+    rows.quotaThresholdPercent,
+    rows.now
+  );
+
   // What the live dot, the banner and the digest all say (issues #118, #148).
   // Precedence is by what a reader must act on, and it is why the boot master
   // leads: with `AUTONOMY_ENABLED` off no sweep runs at all, so naming the kill
   // switch there would send an owner to press a control that changes nothing.
   // Below it the switch outranks the cap — both can hold, but the switch is the
   // one a human engaged and the one they can lift, while midnight lifts the cap
-  // on its own. Whichever wins, the others keep their own surfaces: the cap's
+  // on its own. The two money holds (issue #174) sit under the cap, in the
+  // order the reducer refuses them: a spent cash cap, then a day nobody has
+  // confirmed. Whichever wins, the others keep their own surfaces: the cap's
   // gauge and needs-you card are untouched by being outranked here.
   const pickupPaused: PickupPause | null = !rows.autonomyEnabledAtBoot
     ? {
@@ -625,7 +684,12 @@ export function buildFleetView(rows: FleetRows): FleetView {
                 reason: "metered-unconfirmed",
                 body: `${metered.laneId ?? "The primary lane"} bills real money — pickup is held until today's spend is confirmed once in Settings`,
               }
-            : null;
+            : quotaGate.closed
+              ? {
+                  reason: "quota-gate",
+                  body: quotaPauseBody(quotaGate),
+                }
+              : null;
 
   const tasksOfRun = (runId: string) =>
     rows.tasks.filter((t) => t.runId === runId);
@@ -923,6 +987,12 @@ export function buildFleetView(rows: FleetRows): FleetView {
     "implementing",
     "reviewing",
     "blocked",
+    // A quota-paused run (issue #168) is still the fleet's work in progress —
+    // it holds its ticket and its branch, and only a clock stands between it
+    // and its next turn — so it belongs here, shown paused, rather than
+    // vanishing from the dashboard between the wall and the reset. It holds no
+    // slot: the pause tore its container down, so `slots.used` is untouched.
+    "rate_limited",
   ]);
   // The review stage is live for both the armed path (status `reviewing`) and a
   // gated run whose review is still in flight (the only gated runs that reach
@@ -949,6 +1019,11 @@ export function buildFleetView(rows: FleetRows): FleetView {
     .sort((a, b) => a.claimedAt.getTime() - b.claimedAt.getTime())
     .map((run) => {
       const pass = currentPassOf(run);
+      // A `rate_limited` run paused during an implement-shaped pass — the only
+      // kind #168 pauses, not the only kind a wall can refuse: a walled review
+      // pass still fails closed to a human, and #171 is the ticket that stops a
+      // pass starting under a wall at all. So it reads with implement current,
+      // which is where it resumes from.
       const reviewing = run.status === "reviewing" || run.status === "gated";
       // An in-flight review pass reads with its own spend against the review
       // budget (issue #90); the run's rolled-up spend against the attempt
@@ -970,6 +1045,17 @@ export function buildFleetView(rows: FleetRows): FleetView {
         turns: pass?.turns ?? 0,
         startedAt: (run.startedAt ?? run.claimedAt).toISOString(),
         spend,
+        // Only a run the ledger calls paused reads as paused, and only with the
+        // clock it is actually waiting on: a `rate_limited` row that somehow
+        // carries no resumeAfter would be a run waiting on nothing, which is a
+        // claim this view refuses to make on a screen an operator trusts.
+        paused:
+          run.status === "rate_limited" && run.resumeAfter
+            ? {
+                reason: "rate-limited" as const,
+                resumeAfter: run.resumeAfter.toISOString(),
+              }
+            : null,
       };
     });
 
@@ -1001,6 +1087,9 @@ export function buildFleetView(rows: FleetRows): FleetView {
         usd: task.totalCostUsd,
         budgetUsd: triage ? DEFAULT_TRIAGE_BUDGET_USD : null,
       },
+      // A standalone session or triage pass has no run to pause: the quota
+      // pause is a run-ledger state (issue #168).
+      paused: null,
     });
   }
 

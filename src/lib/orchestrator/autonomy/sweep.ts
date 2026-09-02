@@ -9,8 +9,12 @@ import { db } from "@/db";
 import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { newId } from "../../ulid";
+import { processSingleton } from "../../process-singleton";
 import { getConfig, PLATFORM_REPO_URL } from "../../config";
 import { getFleetSettings } from "../../settings";
+import { resolveQuotaThreshold } from "../../settings-resolver";
+import { evaluateQuotaGate } from "../../quota/quota-gate";
+import { getQuotaObservation } from "../../quota/quota-store";
 import { getOctokit, isGitHubConfigured } from "../../github/client";
 import { fetchFileFromDefaultBranch } from "../../github/contents";
 import {
@@ -42,6 +46,7 @@ import {
   notifyOwedReviewStalled,
   notifyPickupWedged,
   notifyQueueStale,
+  notifyQuotaGateClosed,
   notifyReviewBlocked,
   notifySlotsSaturated,
   notifyStaleReviewEscalation,
@@ -127,6 +132,7 @@ import {
   MAX_TRIAGE_PASSES_PER_ISSUE,
   MAX_UNPARSEABLE_REVIEW_RETRIES,
 } from "./budgets";
+import { ACTIVE_RUN_STATUSES } from "../run-status";
 
 const SWEEP_INTERVAL_MS = 30_000;
 
@@ -136,15 +142,6 @@ const SWEEP_INTERVAL_MS = 30_000;
  * regardless of depth (selectRetryComments), so older guidance still lands. */
 const RETRY_COMMENT_TAIL = 20;
 
-/** Run statuses that mean "this issue is being worked" — not re-claimable,
- * and (issue #24) its containers are off-limits to the reaper. */
-export const ACTIVE_RUN_STATUSES = [
-  "claimed",
-  "implementing",
-  "reviewing",
-  "gated",
-  "blocked",
-] as const;
 const ACTIVE_RUN_STATUS_SET = new Set<string>(ACTIVE_RUN_STATUSES);
 
 let sweepInterval: ReturnType<typeof setInterval> | null = null;
@@ -165,6 +162,25 @@ let dailyCapAnnouncedDay: number | null = null;
 // anything, and vice versa.
 let meteredCapAnnouncedDay: number | null = null;
 let meteredConfirmationAnnouncedDay: number | null = null;
+// Whether the quota gate's current closed spell has been announced (issue
+// #171) — one Discord ping per transition, not one per 30s sweep, cleared the
+// moment the gate opens so the *next* wall is audible again.
+//
+// On `globalThis` rather than beside the saturation and cap flags above, even
+// though it plays the same role, because a webhook-triggered sweep runs on the
+// app-router module graph (#159) where a plain module-level flag is that
+// graph's own, freshly false — so one webhook arriving under a standing wall
+// would double-post the embed. A Discord call is the one thing this codebase
+// says must never be repeated on a maybe (#151: an abandoned call is never
+// retried, because the attempt may still have landed). The older two flags are
+// deliberately left as they are: they are part of the same known split, and
+// moving one at a time without the sweep's other cross-graph state
+// (`fleetHealthState`, `sweeping`, `inFlightClaims`) would imply a fix that is
+// not there.
+const quotaGateAnnouncement = processSingleton(
+  "autonomy.quotaGateAnnounced",
+  () => ({ announced: false })
+);
 const inFlightClaims = new Set<string>();
 // Run IDs whose gate-config failure the owner has already been told about —
 // once per failure, not once per sweep. Pruned as runs leave the pending set.
@@ -248,6 +264,26 @@ export async function runAutonomySweep(): Promise<void> {
       saturationAnnounced = false;
     } else if (actions.some((a) => a.type === "notify" && a.event === "slots-saturated")) {
       saturationAnnounced = true;
+    }
+
+    // The quota gate's announcement, on the same pattern (issue #171) — but
+    // cleared from the *gate*, not from whether the reducer paused anything.
+    // The reducer only pauses when there is eligible work to hold, so clearing
+    // on "no pause emitted" would re-arm the ping every time the backlog
+    // emptied under a standing wall and fire it again when the next ticket was
+    // armed. The gate re-opening is the transition; nothing else is.
+    if (
+      !evaluateQuotaGate(
+        snapshot.quota,
+        snapshot.quotaThresholdPercent,
+        snapshot.now
+      ).closed
+    ) {
+      quotaGateAnnouncement.announced = false;
+    } else if (
+      actions.some((a) => a.type === "notify" && a.event === "quota-gate-closed")
+    ) {
+      quotaGateAnnouncement.announced = true;
     }
 
     // Fleet-health watchdog (issue #126): surface silent pickup/review stalls.
@@ -445,20 +481,21 @@ async function reapOrphanedReviewPasses(): Promise<void> {
 
 async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
   const config = getConfig();
+  // One read of the settings row per tick, for every runtime flag it carries:
+  // the kill switch (issue #118), the quota threshold override (issue #171)
+  // and the money guards' cap and confirmation (issue #174). One read, because
+  // they must all describe the same instant — and read here rather than cached
+  // anywhere, which is what makes a change on the settings screen take effect
+  // at the next sweep.
+  const settings = getFleetSettings();
   const capacity = await getCapacity();
-
-  // The durable settings row, read once per tick and never cached — the same
-  // freshness rule the kill switch has always had, now carrying the money
-  // guards' confirmation too (issue #174). One read, because the two must
-  // describe the same instant.
-  const fleetSettings = getFleetSettings();
 
   // Which lane work would run on, who pays for it, and what it has cost today
   // — read every tick from the checked-in catalog plus the *current*
   // overrides, which is what makes switching the primary lane between billing
   // kinds take effect at the next sweep with no restart. The same read the
   // dashboard and the settings panel make, so all three describe one fleet.
-  const money = readMoneyGuards(now, fleetSettings);
+  const money = readMoneyGuards(now, settings);
 
   const registered = db
     .select()
@@ -646,10 +683,18 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
   return {
     now,
     autonomyEnabledGlobal: config.autonomyEnabled,
-    // Read fresh on every tick, never cached or captured at boot: that is what
-    // makes the kill switch (issue #118) take effect at the next sweep rather
-    // than at the next restart.
-    globalPaused: fleetSettings.globalAutonomyPaused,
+    // From the row read fresh above, never cached or captured at boot: that is
+    // what makes the kill switch (issue #118) take effect at the next sweep
+    // rather than at the next restart.
+    globalPaused: settings.globalAutonomyPaused,
+    // The last observation any pass wrote (issue #167), and the threshold in
+    // force. Both read fresh each tick, never captured at boot: that is what
+    // lets a wall observed mid-sweep, or a threshold changed on the settings
+    // screen, take effect at the next tick rather than at the next restart.
+    quota: getQuotaObservation(),
+    quotaThresholdPercent: resolveQuotaThreshold(config, settings.overrides)
+      .percent,
+    quotaGateAnnounced: quotaGateAnnouncement.announced,
     // MAX_BUDGET_USD is the per-attempt default since Phase 5 (a ticket's
     // budget: directive may raise a single attempt to the $75 ceiling)
     attemptBudgetUsd: config.maxBudgetUsd,
@@ -665,7 +710,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     primaryLaneBilling: money.lane?.billing ?? null,
     meteredSpendTodayUsd: money.spentTodayUsd,
     meteredCapUsd: money.cap.capUsd,
-    meteredSpendConfirmedAt: fleetSettings.meteredSpendConfirmedAt,
+    meteredSpendConfirmedAt: settings.meteredSpendConfirmedAt,
     // Both keyed by local day rather than by a boolean, exactly as the daily
     // cap's is, so each announcement re-arms itself at midnight.
     meteredCapAnnounced: meteredCapAnnouncedDay === startOfLocalDay(now).getTime(),
@@ -1372,6 +1417,19 @@ async function executeActions(actions: Action[]): Promise<void> {
           );
           meteredConfirmationAnnouncedDay = startOfLocalDay(new Date()).getTime();
           await notifyMeteredConfirmationRequired(
+            getConfig().discordFleetChannelId,
+            action.payload
+          );
+        } else if (action.event === "quota-gate-closed") {
+          const { utilization, thresholdPercent, status, heldTickets } =
+            action.payload;
+          console.log(
+            `[autonomy] Quota gate closed (${status}` +
+              `${utilization === null ? "" : `, ${utilization}% used`}` +
+              `, threshold ${thresholdPercent}%) — ${heldTickets} armed ` +
+              `ticket(s) held; work in flight continues`
+          );
+          await notifyQuotaGateClosed(
             getConfig().discordFleetChannelId,
             action.payload
           );

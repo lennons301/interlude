@@ -10,6 +10,7 @@ import { and, eq, gte, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { getConfig } from "../config";
 import { getFleetSettings } from "../settings";
 import { readMoneyGuards } from "../lanes/money-state";
+import { resolveQuotaThreshold } from "../settings-resolver";
 import { getCapacity } from "../orchestrator/capacity";
 import { getBacklogByProject } from "./backlog";
 import { getNeedsHumanByProject } from "./needs-human";
@@ -27,12 +28,13 @@ const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export async function loadFleetRows(now: Date): Promise<FleetRows> {
   const windowStart = new Date(now.getTime() - RECENT_WINDOW_MS);
-
-  // The settings row and the money guards, read on every view build exactly as
-  // the sweep reads them each tick (issues #118, #172, #174): a lane switched
-  // between billing kinds, or a cap raised, shows on the next SSE push with no
-  // restart. Keyed on `now`, so the digest's view of a past day reports that
-  // day's cash rather than this morning's.
+  // One read of the settings row per view build, for every runtime flag it
+  // carries — the kill switch, the quota threshold override, the money guards'
+  // cap and confirmation — exactly as the sweep reads it each tick, so the
+  // dashboard reflects a change on its next SSE push with no restart. The
+  // money guards are read through the same function the sweep and the settings
+  // panel use, and keyed on `now`, so the digest's view of a past day reports
+  // that day's cash rather than this morning's.
   const fleetSettings = getFleetSettings();
   const money = readMoneyGuards(now, fleetSettings);
 
@@ -154,6 +156,13 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     // the orchestrator's module graph and this read happens in the app
     // router's, which share nothing but the database (issue #159).
     quota: getQuotaObservation(),
+    // The threshold that observation is judged against (issue #171), resolved
+    // from the same row and the same config the sweep reads — so the banner
+    // cannot say "claiming" while the reducer is refusing, or the reverse.
+    quotaThresholdPercent: resolveQuotaThreshold(
+      getConfig(),
+      fleetSettings.overrides
+    ).percent,
   };
 }
 

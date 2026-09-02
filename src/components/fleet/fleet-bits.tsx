@@ -304,10 +304,12 @@ const DOT_COLOR: Record<LiveDotState, string> = {
  *
  * A deliberate operator hold is amber and says "held"; the boot master is amber
  * too but says "off", because it is not the switch and is not lifted like one;
- * a breached spend ceiling is red and says "paused" — the estate's severity
- * vocabulary, and three states that are not the same news. Both maps are keyed
- * by the reason union, so a fourth hold fails the build rather than rendering
- * as though nothing were wrong.
+ * a breached ceiling is red and says "paused" — the estate's severity
+ * vocabulary, and three states that are not the same news. The quota gate
+ * (issue #171) reads as a breached ceiling because that is what it is: a
+ * ceiling in a different currency, self-lifting like the cap, and not a thing
+ * a human presses. Both maps are keyed by the reason union, so a further hold
+ * fails the build rather than rendering as though nothing were wrong.
  */
 export const PAUSE_DOT: Record<PickupPause["reason"], LiveDotState> = {
   "autonomy-off-at-boot": "off",
@@ -319,6 +321,7 @@ export const PAUSE_DOT: Record<PickupPause["reason"], LiveDotState> = {
   // fleet is asking for, not one it is waiting out.
   "metered-cap": "paused",
   "metered-unconfirmed": "paused",
+  "quota-gate": "paused",
 };
 
 export const PAUSE_TONE: Record<PickupPause["reason"], keyof typeof TONES> = {
@@ -329,6 +332,7 @@ export const PAUSE_TONE: Record<PickupPause["reason"], keyof typeof TONES> = {
   // Amber, not red: nothing has gone wrong — the fleet is asking a question it
   // was built to ask, and one press answers it.
   "metered-unconfirmed": "amber",
+  "quota-gate": "red",
 };
 
 export function LiveDot({ state }: { state: LiveDotState }) {
