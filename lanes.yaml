@@ -35,6 +35,30 @@
 # third party. An operator's explicit choice (settings screen, or AGENT_LANE)
 # outranks this list and is honoured even when that lane is unavailable, so a
 # missing credential is reported rather than routed around.
+#
+# Since issue #176 this list is a *preference*, not the routing: with no
+# explicit choice made, each pass runs on the **cheapest lane that can serve
+# it**, and this order only breaks a tie on cost. Three things follow, and all
+# three are visible on the settings screen:
+#
+#   - While the subscription window is open nothing changes. A subscription
+#     lane costs nothing at the margin — its quota is already bought — so it
+#     wins every comparison, which is what made cost routing safe as a default.
+#   - A lane that bills per token and declares no `prices` below has an
+#     *unread* cost, and is ranked last accordingly: under-reading cost is how
+#     a fleet spends money nobody authorised. So an overflow off a walled
+#     window now prefers a lane whose price is written down over the
+#     Anthropic-direct one, even though the two charge the same.
+#   - `AGENT_MIN_LANE` (and the per-pass-kind rows on the settings screen) is a
+#     capability *floor*, expressed as a lane: routing may pick anything at or
+#     above the lane you name. Naming `anthropic-api` therefore means
+#     "first-party Claude only" for that pass kind, while leaving it unset lets
+#     triage and review run on the cheapest thing declared here.
+#
+# An explicit choice **pins** the fleet and turns cost routing off entirely.
+# A walled lane still fails over rather than waiting the window out: the pin is
+# honoured, but a lane that cannot serve the request at all is a different
+# thing from one you would rather not use.
 primary:
   - claude-subscription
   - anthropic-api

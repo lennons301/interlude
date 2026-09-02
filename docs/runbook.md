@@ -323,15 +323,30 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
     window resets. A *later* attempt at the same ticket is a fresh run and
     starts at the configured tier again.
   - An **account-wide** window (`five_hour`, `seven_day`, `overage`), or a wall
-    at the bottom of the ladder, pauses instead: the run goes `rate_limited`
-    with a `resumeAfter` taken from the limit event's own reset time, and its
-    container is torn down. The issue gets a comment saying so, and because a
-    `rate_limited` run still holds its ticket, the sweep will not claim a fresh
-    run over it.
-  Either way both counters stay where they were. An **account-wide** rejection
-  whose event carried *no* reset time is not paused at all: with no clock to wait
-  on, the pass takes its ordinary path and spends the attempt, as before. A
-  tier-scoped one still steps down — a degrade waits on no clock.
+    at the bottom of the ladder, gets one more chance before the clock: the run
+    **moves to another lane** if one is available and permitted (issue #176) —
+    a fresh pass under the same run, on the same branch, continuing the same
+    conversation where the transcript survived. The issue gets a comment naming
+    the lane it moved to. Only with nowhere to go does it pause: the run goes
+    `rate_limited` with a `resumeAfter` taken from the limit event's own reset
+    time, and its container is torn down. The issue gets a comment saying so,
+    and because a `rate_limited` run still holds its ticket, the sweep will not
+    claim a fresh run over it.
+
+    "Nowhere to go" is worth knowing precisely, because it is what you would be
+    looking at on a paused run: every other lane is missing a credential, is
+    below that pass kind's **minimum lane** (**Settings ▸ Execution lane**), is
+    walled itself, or bills per token on a day whose real money is unconfirmed
+    or capped. A lane move onto a paid lane is *allowed* for autonomous work but
+    never exempt from those guards, so the most common reason a run pauses
+    instead of moving is that nobody has confirmed the day's spend. A lane move
+    counts against the same **resume bound** as a resume, so a run walks its
+    lanes and then waits rather than thrashing.
+  Either way the attempt and interruption counters stay where they were. An
+  **account-wide** rejection whose event carried *no* reset time cannot pause —
+  there is no clock to wait on — so it either moves lanes or takes its ordinary
+  path and spends the attempt, as before. A tier-scoped one still steps down;
+  a degrade waits on no clock either.
   An **interactive** session on either kind of wall does not pause or step down
   — it crosses onto a paid lane instead, because you are sitting there waiting;
   see *When the subscription window walls* below.
@@ -465,12 +480,45 @@ things the dashboard does:
 Switching the primary lane between billing kinds takes effect at the next sweep,
 with no restart: the guards read the lane and the settings row fresh every tick.
 
+### Cost routing and the minimum lane (Settings → Execution lane)
+
+Which lane a pass runs on is not a fixed setting: with no lane explicitly
+chosen, each pass runs on the **cheapest lane that can serve it** (issue #176).
+Three practical consequences:
+
+- **While the subscription window is open, nothing changes.** Its quota is
+  already bought, so it is cheaper than everything and wins every comparison.
+  Cost routing only starts choosing when the window walls, when an overage
+  starts charging the card, or when the primary lane bills per token anyway.
+- **A minimum lane is a floor, not a choice.** Set one per pass kind on
+  **Settings → Execution lane** (or deployment-wide with `AGENT_MIN_LANE`), and
+  routing may pick anything *at or above* it. Naming a paid Anthropic-direct
+  lane therefore reads as "first-party Claude only" for that kind, while
+  leaving it unset lets triage and review run on the cheapest lane declared.
+  Each row also reports the lane it would be routed onto right now and what
+  that lane charges per million tokens, so a surprising choice is readable
+  rather than guessable.
+- **Pinning turns routing off.** Pick a primary lane on the settings screen (or
+  set `AGENT_LANE`) and every pass runs there. A walled lane still fails over
+  rather than waiting the window out — the pin is honoured, but a lane that
+  cannot serve the request at all is a different thing from one you would
+  rather not use.
+
+Routing never spends money the fleet is not permitted: a paid lane is only a
+candidate inside the day's real-money cap and its confirm-once press, judged
+per lane against that lane's own declared cap. And it never routes around a
+lane that is merely **unavailable** — a missing credential still fails the pass
+naming the variable, rather than being papered over by spending at another
+provider.
+
 ### When the subscription window walls (interactive overflow)
 
-A walled subscription window stops autonomous work — the run parks on the
-window's clock and resumes itself when it resets. An **interactive** session
-does the opposite, because you are sitting there waiting: it crosses onto an
-available metered lane and carries on, under the guards above.
+A walled subscription window used to stop autonomous work dead — the run parked
+on the window's clock and resumed itself when it reset. It now **moves lanes
+first** if one is available and permitted (above), and only pauses when none
+is. An **interactive** session has always crossed rather than waited, because
+you are sitting there waiting: it crosses onto the cheapest available metered
+lane and carries on, under the guards above.
 
 What you will see, on the session's own screen and in its transcript:
 
@@ -538,7 +586,8 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 | `DISCORD_FLEET_CHANNEL_ID` | Channel for fleet events + fallback for blocked questions when a project has no linked channel. |
 | `MAX_BUDGET_USD` | Per-attempt default budget ($20). |
 | `METERED_DAILY_CAP_USD` | Real money the fleet may spend in one local day through a metered lane ($20). Overridable in Settings → Real money up to a hard $100 ceiling, and bound down by the lane's own declared cap. Subscription work never counts against it. |
-| `AGENT_LANE` | The deployment's default execution lane (an id from `lanes.yaml`). Unset, the file's own preference order decides; a lane picked on the settings screen outranks both. |
+| `AGENT_LANE` | The deployment's default execution lane (an id from `lanes.yaml`). Unset, cost routing picks the cheapest lane that can serve each pass and the file's preference order only breaks ties; **set** (here or on the settings screen), it pins the fleet and turns cost routing off. |
+| `AGENT_MIN_LANE` | The weakest lane cost routing may send any pass onto (an id from `lanes.yaml`) — a capability floor, so routing may still pick anything at or above it. Unset means no floor. The fall-through for the four Settings → Execution lane rows left on `environment`. |
 | `AGENT_MODEL`, `AGENT_MODEL_REVIEW`, `AGENT_MODEL_TRIAGE` | Default model per pass kind, as a tier (`heavy`/`standard`/`light`, or the `opus`/`sonnet`/`haiku` aliases) or a raw model id. The fall-through for a Settings → Models row left on `environment`; unset means no `--model` and the CLI resolves the account default. |
 | `CAPACITY_SLOTS`, `AGENT_MEMORY_MB` | Override derived capacity — only when the derivation is wrong. |
 | `OWED_REVIEW_STALL_MINUTES`, `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES` | Fleet-health watchdog thresholds in minutes (issue #126). Defaults 30 / 3 / 2. |

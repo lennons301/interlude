@@ -327,13 +327,19 @@ export function resetConfig(): void {
   _config = null;
 }
 
-/** The pass kinds a Claude turn can run as (mirrors `tasks.kind`). */
-export type AgentPassKind =
-  | "interactive"
-  | "implement"
-  | "review"
-  | "triage"
-  | "repair";
+/** The pass kinds a Claude turn can run as (mirrors `tasks.kind`). Declared as
+ * a list so a caller that has to iterate them — the settings screen showing
+ * what each kind would be routed onto (issue #176) — cannot fall out of step
+ * with the union derived from it. */
+export const AGENT_PASS_KINDS = [
+  "interactive",
+  "implement",
+  "review",
+  "triage",
+  "repair",
+] as const;
+
+export type AgentPassKind = (typeof AGENT_PASS_KINDS)[number];
 
 /** Whether a pass carries the *ticket's own* work, and so answers to a ticket
  * directive. Review and triage do not: they read the work rather than doing

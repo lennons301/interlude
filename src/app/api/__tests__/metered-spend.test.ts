@@ -218,19 +218,22 @@ describe("the crossing an attended session would make", () => {
     expect(state.notice).toBeNull();
   });
 
-  it("overflows a walled window onto the available paid lane, once confirmed", async () => {
+  it("overflows a walled window onto the cheapest paid lane, once confirmed", async () => {
     observe({ status: "rejected", utilization: null });
 
     const held = await crossing();
     expect(held.walled).toBe(true);
-    expect(held.laneId).toBe("openrouter");
+    // The *cheapest* available paid lane, not the file's first preference:
+    // cost routing (issue #176) picks the target now, and the shipped file's
+    // open-weights lane is roughly two orders of magnitude under the rest.
+    expect(held.laneId).toBe("openrouter-glm");
     expect(held.overflowedFrom).toBe("claude-subscription");
     expect(held.refusal.reason).toBe("unconfirmed");
 
     const state = (await (await PATCH(patch({ confirmed: true }))).json()).crossing;
 
     expect(state.refusal).toBeNull();
-    expect(state.laneId).toBe("openrouter");
+    expect(state.laneId).toBe("openrouter-glm");
     expect(state.notice).toContain("OpenRouter");
   });
 
@@ -248,8 +251,7 @@ describe("the crossing an attended session would make", () => {
 
   it("classifies an active overage as a paid lane, and guards the whole fleet with it", async () => {
     // The wall is up and the overage window is still serving — the request
-    // succeeds and the card pays for it. No overflow: the lane in force is
-    // already the paid one.
+    // succeeds and the card pays for it.
     observe({
       status: "rejected",
       utilization: null,
@@ -259,10 +261,14 @@ describe("the crossing an attended session would make", () => {
 
     const state = await (await GET()).json();
 
-    expect(state.crossing.laneId).toBe("claude-subscription");
-    expect(state.crossing.overflowedFrom).toBeNull();
+    // Overage spend is cash at a rate nothing writes down, so cost routing
+    // (issue #176) prefers a lane whose price *is* declared and capped — but
+    // the news the human is given is still the cause they are looking at,
+    // which is that the plan's quota is gone and the card is being charged.
+    expect(state.crossing.laneId).toBe("openrouter-glm");
     expect(state.crossing.overage).toBe(true);
     expect(state.crossing.refusal.reason).toBe("unconfirmed");
+    expect(state.crossing.refusal.message).toContain("overage is covering it");
     // The same reclassification the sweep and the dashboard see: an account
     // with overage billing enabled would otherwise never show a `rejected`,
     // and the wall would silently become a bill.

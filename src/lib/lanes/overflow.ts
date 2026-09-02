@@ -49,11 +49,7 @@ import {
   type LaneBilling,
   type LaneCatalog,
 } from "./lane-config";
-import {
-  selectLane,
-  type LaneCandidate,
-  type LaneSelection,
-} from "./lane-selection";
+import { selectLane, type LaneSelection } from "./lane-selection";
 import {
   effectiveBilling,
   laneIsWalled,
@@ -382,6 +378,7 @@ export function decideLaneCrossing({
       observation,
       overflowedFrom,
       overage,
+      walled,
       target.money!
     ),
   };
@@ -460,7 +457,13 @@ function refusedCrossing(
   const lead = at.walled
     ? `${wallSentence(at.primary, at.observation)}, so this session would ` +
       `continue on ${held.label} — which bills per token`
-    : whyPaid(held, at.primary, at.observation, at.overage);
+    : whyPaid(
+        held,
+        at.primary,
+        at.observation,
+        at.overage,
+        held.id === at.primary.id
+      );
   return {
     ...crossed,
     refusal: {
@@ -474,19 +477,31 @@ function refusedCrossing(
   };
 }
 
-/** Why this pass costs money when it is not an overflow: an overage on the
- * lane in force, or a lane that simply bills per token. */
+/**
+ * Why this pass costs money when no wall sent it anywhere: an overage on the
+ * lane in force, or a lane that simply bills per token.
+ *
+ * The overage question is asked of the **lane in force**, not of the lane this
+ * pass would run on. They were the same thing before cost routing; now a pass
+ * can be routed off an overage-paying subscription onto a lane whose price is
+ * written down, and the news the human needs is still that their plan's quota
+ * is gone and the card is being charged (issue #176).
+ */
 function whyPaid(
   lane: Pick<CrossingLane, "label" | "billing">,
   primary: CrossingLane,
   observation: QuotaObservation | null,
-  overage: boolean
+  overage: boolean,
+  /** Whether `lane` *is* the lane in force. */
+  onPrimary: boolean
 ): string {
-  if (overageIsThePayer(lane.billing, overage)) {
-    return (
+  if (overageIsThePayer(primary.billing, overage)) {
+    const lead =
       `${wallSentence(primary, observation)} and the account's overage is ` +
-      `covering it, so this session is already spending real money`
-    );
+      `covering it, so this session is already spending real money`;
+    return onPrimary
+      ? lead
+      : `${lead}; it would continue on ${lane.label}, which bills per token`;
   }
   return `${lane.label} bills per token, so this session spends real money`;
 }
@@ -499,19 +514,32 @@ function noticeFor(
   observation: QuotaObservation | null,
   overflowedFrom: string | null,
   overage: boolean,
+  /** Whether the lane in force has actually refused work — the one thing that
+   * licenses the wall sentence. Cost routing can move a pass with no wall
+   * anywhere in sight (issue #176), and a notice that announced an exhausted
+   * window then would be telling the human something untrue. */
+  walled: boolean,
   money: MeteredSpendState
 ): string {
   const spend = `Real money: ${usd(money.spentUsd)} of ${usd(money.capUsd)} spent today.`;
-  if (overflowedFrom !== null) {
+  if (walled && overflowedFrom !== null) {
     return (
       `${wallSentence(primary, observation)} — continuing on ${lane.label}, ` +
       `which bills per token. ${spend}`
     );
   }
-  if (overageIsThePayer(lane.billing, overage)) {
-    return (
+  if (overageIsThePayer(primary.billing, overage)) {
+    const cause =
       `${wallSentence(primary, observation)} and the account's overage is ` +
-      `covering it — this session is spending real money. ${spend}`
+      `covering it — this session is spending real money`;
+    return overflowedFrom === null
+      ? `${cause}. ${spend}`
+      : `${cause}, so it continues on ${lane.label}, which bills per token. ${spend}`;
+  }
+  if (overflowedFrom !== null) {
+    return (
+      `Routed to ${lane.label}, the cheapest lane available — it bills per ` +
+      `token. ${spend}`
     );
   }
   return `${lane.label} bills per token. ${spend}`;
