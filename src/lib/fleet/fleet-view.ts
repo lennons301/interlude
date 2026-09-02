@@ -48,9 +48,10 @@ export interface FleetRows {
    * money hold — such a fleet spends nothing, since every pass refuses to
    * start. */
   primaryLaneBilling: LaneBilling | null;
-  /** Whether that kind is `metered` only because an active overage is paying
-   * for subscription work (issue #173). Carried so a card can name the
-   * overage rather than accusing a subscription lane of billing per token. */
+  /** Whether an **overage** is what is being billed rather than the lane
+   * itself (issue #173) — already the shared predicate, not the raw
+   * observation, so a card cannot accuse a subscription lane of billing per
+   * token or describe a metered lane as an overage. */
   primaryLaneOverage: boolean;
   /** When the fleet last confirmed it may spend real money; null = never. The
    * view judges it against `now`, exactly as the reducer does. */

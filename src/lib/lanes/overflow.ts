@@ -37,7 +37,10 @@
 
 import type { AgentPassKind, AppConfig } from "../config";
 import { quotaObservationIsSpent } from "../quota/quota-gate";
-import type { QuotaObservation } from "../quota/rate-limit-event";
+import {
+  quotaSeverity,
+  type QuotaObservation,
+} from "../quota/rate-limit-event";
 import type { SettingsOverrides } from "../settings-resolver";
 import {
   findLane,
@@ -164,18 +167,25 @@ export function overagePaysNow(
   if (observation === null) return false;
   if (quotaObservationIsSpent(observation, now)) return false;
   if (observation.isUsingOverage === true) return true;
-  return observation.status === "rejected" && overageIsAvailable(observation);
+  return observation.status === "rejected" && overageIsServing(observation);
 }
 
-/** Whether the event reports an overage window that could still serve a
- * request. A status this build has never seen counts as available: the only
- * consequence is treating the work as paid, which errs towards asking the
- * human before spending rather than spending without asking. */
-function overageIsAvailable(observation: QuotaObservation): boolean {
-  return (
-    observation.overageStatus !== null &&
-    observation.overageStatus !== "rejected"
-  );
+/**
+ * Whether the event reports an overage window that can still serve a request.
+ *
+ * Judged through the shared severity map rather than a second list of status
+ * words, so a member a later CLI adds reads as `unknown` and **decides
+ * nothing** — #171's rule, and this is the one place it would have been easy
+ * to break: an unknown status read as "overage is serving" would suppress the
+ * wall, and the attended session would stay on the walled lane instead of
+ * crossing off it. Deciding nothing leaves the wall standing, the session
+ * crosses onto a metered lane, and the money guards still hold the first cash
+ * of the day — the safe direction on both counts.
+ */
+function overageIsServing(observation: QuotaObservation): boolean {
+  if (observation.overageStatus === null) return false;
+  const severity = quotaSeverity(observation.overageStatus);
+  return severity === "ok" || severity === "warning";
 }
 
 /**
@@ -292,6 +302,22 @@ function wallSentence(
   );
 }
 
+/**
+ * Whether an **overage** — rather than the lane itself — is what is being
+ * billed. One predicate because three surfaces write a sentence about it (the
+ * feed note here, the dashboard's cards, the settings panel), and a *metered*
+ * lane observed while an overage happens to be active must not be described as
+ * an overage: it bills per token on its own account. Getting that condition
+ * wrong on one surface is how a fleet ends up accusing a subscription lane of
+ * billing per token, or the reverse.
+ */
+export function overageIsThePayer(
+  billing: LaneBilling | null,
+  overagePaying: boolean
+): boolean {
+  return overagePaying && billing === "subscription";
+}
+
 /** Neither the lane's kind nor an overage alone decides who paid — both do.
  * One function because the pass that spends the money and the guards that
  * measure it must agree, and #174 keys entirely off this value. */
@@ -300,6 +326,25 @@ export function effectiveBilling(
   overagePaying: boolean
 ): LaneBilling {
   return billing === "metered" || overagePaying ? "metered" : "subscription";
+}
+
+/**
+ * Whether a pass's payer differs from what its task last recorded — what makes
+ * a crossing *news* rather than a line repeated on every turn.
+ *
+ * The obvious test, "is this sentence already the last thing on the feed?", is
+ * not enough on its own: the sentence quotes the day's running spend and the
+ * window's reset, so a session driven through a walled afternoon would post a
+ * line each turn that differed by a few cents. The recorded pair is the honest
+ * comparison, and it lives in a column rather than in memory, so it survives a
+ * restart mid-session — and it is the same pair the money ledger reads, so the
+ * thing announced and the thing charged cannot part company.
+ */
+export function payerChanged(
+  recorded: { lane: string | null; laneBilling: LaneBilling | null },
+  pass: { laneId: string; billing: LaneBilling }
+): boolean {
+  return recorded.lane !== pass.laneId || recorded.laneBilling !== pass.billing;
 }
 
 /** Only work a human is waiting on overflows, and only it is refused before it
@@ -443,7 +488,7 @@ function whyPaid(
   observation: QuotaObservation | null,
   overage: boolean
 ): string {
-  if (overage && lane.billing === "subscription") {
+  if (overageIsThePayer(lane.billing, overage)) {
     return (
       `${wallSentence(primary, observation)} and the account's overage is ` +
       `covering it, so this session is already spending real money`
@@ -469,7 +514,7 @@ function noticeFor(
       `which bills per token. ${spend}`
     );
   }
-  if (overage && lane.billing === "subscription") {
+  if (overageIsThePayer(lane.billing, overage)) {
     return (
       `${wallSentence(primary, observation)} and the account's overage is ` +
       `covering it — this session is spending real money. ${spend}`

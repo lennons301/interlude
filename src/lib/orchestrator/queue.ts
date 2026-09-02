@@ -2,10 +2,10 @@ import { db } from "@/db";
 import { tasks, messages } from "@/db/schema";
 import { eq, and, isNull, asc, ne, sql } from "drizzle-orm";
 import { readLaneCrossing } from "../lanes/overflow-state";
-import { noteOnceOnFeed } from "../tasks/feed-note";
 import { startTask } from "./turn-manager";
 import {
   abandonSessionWithoutContainer,
+  crossingHoldsPass,
   getActiveTasks,
   isParked,
   processQueuedMessages,
@@ -230,30 +230,19 @@ function nextQueuedTask(skipInteractive: boolean) {
 
 /**
  * Whether the money guards refuse to let an attended session start (issue
- * #173), telling the human why on the task's own feed.
+ * #173).
  *
- * The refusal is the crossing's, evaluated through the one function the turn
+ * The refusal is the crossing's, read through the one function the turn
  * manager routes a pass with and the task screen offers the confirmation
- * from, so the queue can never decline a pass the screen says is fine. Only
- * the task at the head is told: it is the one that would have started, and
- * every other queued session gets its own line when it gets there — a note
- * per queued task per poll would be a message storm on a fleet that is walled
- * for five hours.
- *
- * The task is left `queued`, not failed: a confirmation is a press away and
- * the cap lifts itself at midnight, so there is work here to start rather
- * than work to abandon.
+ * from, so the queue can never decline a pass the screen says is fine — and
+ * answered by the turn manager's own hold, so the sentence on the feed and its
+ * dedup are the same wherever a refusal is met. Only the task at the head is
+ * told: it is the one that would have started, and every other queued session
+ * gets its line when it gets there — a note per queued task per poll would be
+ * a message storm on a fleet that is walled for five hours.
  */
 function attendedPickupIsHeld(taskId: string): boolean {
-  const { refusal } = readLaneCrossing("interactive");
-  if (refusal === null) return false;
-
-  if (noteOnceOnFeed(taskId, refusal.message)) {
-    console.log(
-      `[orchestrator] Task ${taskId} waits in queue — ${refusal.reason} (issue #173)`
-    );
-  }
-  return true;
+  return crossingHoldsPass(taskId, readLaneCrossing("interactive"));
 }
 
 export function startQueue(): void {

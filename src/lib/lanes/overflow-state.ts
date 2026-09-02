@@ -39,6 +39,12 @@ export function readLaneCrossing(
   observation: QuotaObservation | null = getQuotaObservation()
 ): LaneCrossing {
   const catalog = getLaneCatalog();
+  // Read for its facts — which lane is in force, and what the card has been
+  // charged today — rather than for its verdict: the guards judge the *primary*
+  // lane, and a crossing may be about a different one, whose own declared cap
+  // binds. `decideLaneCrossing` therefore re-evaluates #174's own functions for
+  // the lane it picks, which is the same pair of pure calls, not a second
+  // policy.
   const guards = readMoneyGuards(now, settings, observation);
 
   return decideLaneCrossing({

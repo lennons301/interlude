@@ -7,6 +7,8 @@ import {
   decideLaneCrossing,
   effectiveBilling,
   laneIsWalled,
+  overageIsThePayer,
+  payerChanged,
   meteredOverflowCandidates,
   overagePaysNow,
   type CrossingLane,
@@ -155,6 +157,32 @@ describe("an active overage means the account is already paying cash", () => {
       overageInUse: true,
     });
     expect(overagePaysNow(healthy, NOW)).toBe(false);
+  });
+
+  it("decides nothing from an overage status this build has never heard", () => {
+    // #171's rule, inherited: only a member this build understands may decide
+    // anything. Read as "serving" it would suppress the wall, and the session
+    // would stay on the walled lane instead of crossing off it.
+    const unheard = observation({
+      status: "rejected",
+      overageStatus: "throttled_pending_review",
+    });
+
+    expect(overagePaysNow(unheard, NOW)).toBe(false);
+    expect(laneIsWalled(SUBSCRIPTION, unheard, NOW)).toBe(true);
+    // ...so the attended session crosses, and the guards hold the cash rather
+    // than the telemetry holding the work.
+    const decision = crossing({ observation: unheard });
+    expect(decision.laneId).toBe("direct-api");
+  });
+
+  it("counts an overage window that is merely warning, not refusing", () => {
+    const warning = observation({
+      status: "rejected",
+      overageStatus: "allowed_warning",
+    });
+
+    expect(overagePaysNow(warning, NOW)).toBe(true);
   });
 
   it("does not count a wall whose overage is exhausted too", () => {
@@ -399,11 +427,46 @@ describe("the pieces the callers share", () => {
     expect(effectiveBilling("metered", false)).toBe("metered");
   });
 
+  it("calls an overage the payer only on a lane that bills nothing itself", () => {
+    // The condition three surfaces write a sentence from: a metered lane
+    // observed while an overage is active still bills per token on its own
+    // account, and describing it as an overage would be the same confusion in
+    // the other direction.
+    expect(overageIsThePayer("subscription", true)).toBe(true);
+    expect(overageIsThePayer("metered", true)).toBe(false);
+    expect(overageIsThePayer("subscription", false)).toBe(false);
+    expect(overageIsThePayer(null, true)).toBe(false);
+  });
+
   it("decides nothing at all when no lane resolves", () => {
     const decision = crossing({ primary: null });
 
     expect(decision.laneId).toBeNull();
     expect(decision.billing).toBeNull();
     expect(decision.refusal).toBeNull();
+  });
+
+  it("calls a crossing news when the payer changes, and only then", () => {
+    // A session driven through a walled afternoon must be told once, not once
+    // a turn: the sentence quotes the day's running spend, so an exact-text
+    // dedup alone would post again every turn with a few cents more on it.
+    const onto = { laneId: "direct-api", billing: "metered" as const };
+
+    expect(payerChanged({ lane: null, laneBilling: null }, onto)).toBe(true);
+    expect(
+      payerChanged({ lane: "subscription", laneBilling: "subscription" }, onto)
+    ).toBe(true);
+    expect(
+      payerChanged({ lane: "direct-api", laneBilling: "metered" }, onto)
+    ).toBe(false);
+    // The lane held still while an overage started paying for it — a change of
+    // payer without a change of lane, which is exactly the case a lane-only
+    // comparison would miss.
+    expect(
+      payerChanged(
+        { lane: "subscription", laneBilling: "subscription" },
+        { laneId: "subscription", billing: "metered" }
+      )
+    ).toBe(true);
   });
 });

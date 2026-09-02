@@ -48,16 +48,15 @@ import type { CrossingRefusal } from "@/lib/lanes/overflow";
  * and one small GET a third of a minute is the cheaper half of that trade.
  */
 
-/** What `/api/settings/metered-spend` says about an attended crossing. */
-interface CrossingState {
+/** The crossing, as `/api/settings/metered-spend` reports it — the fields this
+ * screen has something to say about. The endpoint reports the crossing whole;
+ * the rest of it is for an operator reading it headless. */
+export interface CrossingState {
+  /** The lane the session would run on: the primary, or the overflow target. */
   laneId: string | null;
-  billing: "subscription" | "metered" | null;
-  walled: boolean;
-  overage: boolean;
-  overflowedFrom: string | null;
   refusal: CrossingRefusal | null;
+  /** What to say when nothing is held but money is being spent anyway. */
   notice: string | null;
-  spentUsd: number;
   capUsd: number;
 }
 
@@ -67,30 +66,20 @@ interface MeteredState {
 
 const POLL_MS = 20_000;
 
-export function MeteredCrossing({ live }: { live: boolean }) {
+export function MeteredCrossing() {
   const { data, error, reload, setData } = useLoad<MeteredState>(
     "/api/settings/metered-spend"
   );
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [pressError, setPressError] = useState<string | null>(null);
-  const triggerRef = useReturnFocus<HTMLButtonElement>(confirming);
 
+  // Mounted only while the session is live (see `task-chat.tsx`), so the
+  // interval ends with the conversation rather than needing to be told.
   useEffect(() => {
-    // A finished session cannot cross onto anything, so it stops asking.
-    if (!live) return;
     const timer = setInterval(reload, POLL_MS);
     return () => clearInterval(timer);
-  }, [live, reload]);
-
-  // A failed load says nothing: this is an advisory panel beside a
-  // conversation, and "the fleet might be about to spend money" is worse than
-  // silence — the orchestrator refuses the turn either way, and its refusal
-  // reaches the feed.
-  if (data === null || error !== null) return null;
-
-  const { crossing } = data;
-  if (crossing.refusal === null && crossing.notice === null) return null;
+  }, [reload]);
 
   async function confirm() {
     setBusy(true);
@@ -121,24 +110,65 @@ export function MeteredCrossing({ live }: { live: boolean }) {
     setBusy(false);
   }
 
-  // Nothing is being held: the session is simply spending money, and saying so
-  // quietly is the whole job.
-  if (crossing.refusal === null) {
+  // A failed load says nothing: this is an advisory panel beside a
+  // conversation, and "the fleet might be about to spend money" is worse than
+  // silence — the orchestrator refuses the turn either way, and its refusal
+  // reaches the feed.
+  if (data === null || error !== null) return null;
+
+  return (
+    <CrossingPanel
+      crossing={data.crossing}
+      busy={busy}
+      confirming={confirming}
+      error={pressError}
+      onOpen={() => setConfirming(true)}
+      onConfirm={confirm}
+      onCancel={() => setConfirming(false)}
+    />
+  );
+}
+
+/** The crossing as words and controls, given the decision. Separate from the
+ * fetching above so what it says in each of the four states is testable
+ * without a fleet. */
+export function CrossingPanel({
+  crossing,
+  busy,
+  confirming,
+  error,
+  onOpen,
+  onConfirm,
+  onCancel,
+}: {
+  crossing: CrossingState;
+  busy: boolean;
+  confirming: boolean;
+  /** Why the last press didn't take, if it didn't. */
+  error: string | null;
+  onOpen: () => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const triggerRef = useReturnFocus<HTMLButtonElement>(confirming);
+  const held = crossing.refusal;
+
+  if (held === null) {
+    // Nothing is being held: the session is simply spending money, and saying
+    // so quietly is the whole job.
+    if (crossing.notice === null) return null;
     return (
-      <p
-        className="shrink-0 border-t border-fl-line px-4 py-2 text-[13px] text-fl-ink-2"
-        data-testid="crossing-notice"
-      >
+      <p className="shrink-0 border-t border-fl-line px-4 py-2 text-[13px] text-fl-ink-2">
         {crossing.notice}
       </p>
     );
   }
 
-  const held = crossing.refusal;
+  const capped = held.reason === "cap-reached";
   return (
     <div className="shrink-0 border-t border-fl-line px-4 py-3">
-      <div className={`${PANEL} ${TONES[held.reason === "cap-reached" ? "red" : "amber"]}`}>
-        <p className="text-[13px]" role={held.reason === "cap-reached" ? "alert" : undefined}>
+      <div className={`${PANEL} ${TONES[capped ? "red" : "amber"]}`}>
+        <p className="text-[13px]" role={capped ? "alert" : undefined}>
           {held.message}
         </p>
 
@@ -147,7 +177,7 @@ export function MeteredCrossing({ live }: { live: boolean }) {
             ref={triggerRef}
             tone="amber"
             disabled={busy}
-            onClick={() => setConfirming(true)}
+            onClick={onOpen}
           >
             {busy ? "…" : "confirm real-money spend…"}
           </ControlButton>
@@ -158,7 +188,7 @@ export function MeteredCrossing({ live }: { live: boolean }) {
             <ActionLink size="sm" href="/settings">
               settings
             </ActionLink>{" "}
-            — {held.reason === "cap-reached" ? "raise the cap" : "lanes and credentials"}
+            — {capped ? "raise the cap" : "lanes and credentials"}
           </p>
         )}
 
@@ -169,9 +199,9 @@ export function MeteredCrossing({ live }: { live: boolean }) {
             confirm="confirm spend"
             busyLabel="confirming…"
             busy={busy}
-            error={pressError}
-            onConfirm={confirm}
-            onCancel={() => setConfirming(false)}
+            error={error}
+            onConfirm={onConfirm}
+            onCancel={onCancel}
           >
             <p className="text-[13px]">
               Spend real money on{" "}
@@ -184,9 +214,9 @@ export function MeteredCrossing({ live }: { live: boolean }) {
           </ConfirmStrip>
         )}
 
-        {!confirming && pressError !== null && (
+        {!confirming && error !== null && (
           <p role="alert" className="text-[13px] text-fl-red">
-            {pressError}
+            {error}
           </p>
         )}
       </div>

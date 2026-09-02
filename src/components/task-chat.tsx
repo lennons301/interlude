@@ -2,6 +2,7 @@
 
 import { useCallback, useState } from "react";
 import type { SessionSkill } from "@/db/schema";
+import type { AgentPassKind } from "@/lib/config";
 import { SlimShell } from "@/components/app-shell";
 import { ActionLink, FOCUS_RING, Gauge, Money } from "@/components/fleet/fleet-bits";
 import { toChatView, type ChatMessageRow } from "@/lib/chat/chat-view";
@@ -30,7 +31,7 @@ interface TaskData {
   /** Which pass this is. Only an interactive session can cross onto a paid
    * lane (issue #173) — an autonomous pass pauses instead — so only one asks
    * the human to confirm. */
-  kind: string;
+  kind: AgentPassKind;
 }
 
 type TaskStatusUpdate = {
@@ -223,7 +224,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
               rather than on the settings screen. Autonomous passes never
               reach this — they pause. */}
           {!isTerminal && initialTask.kind === "interactive" && (
-            <MeteredCrossing live={!isTerminal} />
+            <MeteredCrossing />
           )}
           {!isTerminal && (
             <MessageInput

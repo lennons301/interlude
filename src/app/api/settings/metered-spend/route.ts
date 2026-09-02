@@ -64,6 +64,11 @@ function state() {
     overage: overagePaying,
     hold: guards.hold,
     remainingUsd: guards.remainingUsd,
+    // Reported whole rather than narrowed to what the panel renders: the
+    // session screen reads `refusal` and `notice`, and the rest is what makes
+    // the same GET answer "why is my session held?" headless — which lane it
+    // would run on, which one it came off, and whether the wall or an overage
+    // is behind it.
     crossing: {
       laneId: crossing.laneId,
       billing: crossing.billing,

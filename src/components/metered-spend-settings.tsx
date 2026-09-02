@@ -271,7 +271,7 @@ export function MeteredSpendPanel() {
  * lane that bills nothing. */
 function payer(state: MeteredState): string {
   const lane = state.lane?.label ?? "the primary lane";
-  return state.overage && state.lane?.billing === "subscription"
+  return state.overage
     ? `${lane}'s window is walled and the account's overage is covering it, so the work is real money`
     : `${lane} bills per token`;
 }

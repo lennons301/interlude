@@ -23,7 +23,11 @@ import type { QuotaObservation } from "../quota/rate-limit-event";
 import type { FleetSettings } from "../settings";
 import { getLaneCatalog } from "./catalog";
 import type { LaneBilling } from "./lane-config";
-import { effectiveBilling, overagePaysNow } from "./overflow";
+import {
+  effectiveBilling,
+  overageIsThePayer,
+  overagePaysNow,
+} from "./overflow";
 import {
   evaluateMeteredSpend,
   resolveMeteredCap,
@@ -43,8 +47,12 @@ export interface MoneyGuards {
    * `rejected` at all, and the wall would silently become a bill.
    */
   billing: LaneBilling | null;
-  /** Whether that reclassification is in force, so a surface can name the
-   * overage rather than accusing a subscription lane of billing per token. */
+  /**
+   * Whether an **overage** is what is being billed, rather than the lane
+   * itself — the predicate every surface that writes a sentence about it
+   * reads, so none of them can accuse a subscription lane of billing per
+   * token, or describe a metered lane as an overage.
+   */
   overagePaying: boolean;
   /** Why the lane file could not be read, when it could not be. */
   laneError: string | null;
@@ -80,9 +88,10 @@ export function readMoneyGuards(
     lane?.caps.dailyBudgetUsd ?? null
   );
   const spentTodayUsd = todayMeteredSpendUsd(now);
-  const overagePaying = overagePaysNow(observation, now);
+  const overage = overagePaysNow(observation, now);
   const billing =
-    lane === null ? null : effectiveBilling(lane.billing, overagePaying);
+    lane === null ? null : effectiveBilling(lane.billing, overage);
+  const overagePaying = overageIsThePayer(lane?.billing ?? null, overage);
 
   return {
     lane,
