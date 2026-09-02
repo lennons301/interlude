@@ -10,6 +10,8 @@
  */
 
 import type { FailedCheck } from "../../github/pull-requests";
+import type { LaneBilling } from "../../lanes/lane-config";
+import { evaluateMeteredSpend } from "../../lanes/money";
 import { evaluateQuotaGate } from "../../quota/quota-gate";
 import type { QuotaObservation } from "../../quota/rate-limit-event";
 import { detectBlockedQuestion } from "./blocked";
@@ -369,6 +371,33 @@ export interface AutonomySnapshot {
   dailyCapUsd: number;
   /** Whether today's cap pause was already announced */
   dailyCapAnnounced: boolean;
+  // The money guards (issue #174) — the six fields below. All of them key off
+  // the **billing kind** of the lane a pass would actually run on, not off
+  // whether anything overflowed: a metered lane is a metered lane whether it is
+  // primary, an overflow target or reached by failover, and metered-primary is
+  // the configuration that would otherwise slip every guard.
+  /** The lane in force, for the announcements that name it; null = none
+   * resolves (an unreadable lane file, or a primary naming no declared lane). */
+  primaryLaneId: string | null;
+  /** Who pays for that lane. `null` = it could not be resolved, which decides
+   * nothing either way: such a fleet spends nothing, because every pass fails
+   * as it starts with the reason named, and a money hold invented on top would
+   * only hide that. */
+  primaryLaneBilling: LaneBilling | null;
+  /** Real money spent through metered lanes since local midnight — every task,
+   * not only run-owned ones, because the cap measures money rather than
+   * autonomy (see `todayMeteredSpendUsd`). */
+  meteredSpendTodayUsd: number;
+  /** The real-money cap in force: the operator's dial, bound down by the
+   * lane's own declared cap. */
+  meteredCapUsd: number;
+  /** When the fleet last confirmed it may spend real money; null = never. The
+   * reducer judges it against `now`, so nothing has to clear it at midnight. */
+  meteredSpendConfirmedAt: Date | null;
+  /** Whether today's real-money cap pause was already announced */
+  meteredCapAnnounced: boolean;
+  /** Whether today's request for a spend confirmation was already announced */
+  meteredConfirmationAnnounced: boolean;
   /**
    * The fleet's last quota observation (issue #171), from the durable row the
    * stream parser writes (#167). Null when nothing has ever been observed —
@@ -467,7 +496,14 @@ export type PauseReason =
   | "autonomy-off-project"
   | "preflight-failing"
   | "no-slots"
+  /** The estate's daily autonomous cap, or — since issue #174 — the real-money
+   * cap on a metered lane. Deliberately one reason for both: they are two caps
+   * feeding one mechanism, and the `detail` says which. */
   | "daily-cap"
+  /** A metered lane has not been confirmed for this local day (issue #174).
+   * Its own reason rather than the cap's, because the remedy is opposite: the
+   * cap lifts itself at midnight and this one waits for a human press. */
+  | "metered-unconfirmed"
   /** Quota is spent or nearly spent (issue #171) — the fleet stops starting
    * work it could not finish. Lifted by the window resetting, not by a human */
   | "quota-gate";
@@ -510,6 +546,26 @@ export type Action =
       type: "notify";
       event: "daily-cap-reached";
       payload: { spentUsd: number; capUsd: number };
+    }
+  | {
+      // The real-money cap (issue #174). Its own event rather than a field on
+      // the one above, because the two say different things to a reader: that
+      // one is "the fleet has worked hard today", this one is "the card has
+      // been charged $X and stops here", and it names the lane doing the
+      // charging.
+      type: "notify";
+      event: "metered-cap-reached";
+      payload: { spentUsd: number; capUsd: number; laneId: string | null };
+    }
+  | {
+      // Nobody is at the keyboard when an autonomous pass crosses into
+      // billing, so the fleet asks: one ping per local day, the same
+      // once-per-transition discipline every other announcement here keeps.
+      // Without it a metered fleet would simply sit quiet, which is the
+      // silent-wedge failure this codebase has been bitten by twice.
+      type: "notify";
+      event: "metered-confirmation-required";
+      payload: { capUsd: number; laneId: string | null };
     }
   | {
       type: "notify";
@@ -827,6 +883,16 @@ export function passOutcomeSnapshot(now: Date, pass: PassOutcome): AutonomySnaps
     todayAutonomousSpendUsd: 0,
     dailyCapUsd: 0,
     dailyCapAnnounced: true,
+    // Inert like every other pickup input: the money guards hold new claims,
+    // never a turn that already ran. A subscription billing kind is the one
+    // value that decides nothing here.
+    primaryLaneId: null,
+    primaryLaneBilling: "subscription",
+    meteredSpendTodayUsd: 0,
+    meteredCapUsd: 0,
+    meteredSpendConfirmedAt: null,
+    meteredCapAnnounced: true,
+    meteredConfirmationAnnounced: true,
     // No pickup is decided here, so the quota gate has nothing to hold: an
     // absent observation is an open gate, and the announcement is marked spent
     // so nothing could be said even if one were reached.
@@ -1431,6 +1497,20 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // costs. Registered is the only project gate — triage writes no code and
   // pushes nothing, so pickup preflight does not apply — and the author
   // allow-list bounds whose issues can spend triage money.
+  //
+  // The money guards (issue #174) are evaluated once for the whole tick, from
+  // the billing kind of the lane a pass would run on, because both pickup
+  // gates below consult them. `hold` is null on a subscription lane, on an
+  // unresolvable one, and on a metered lane confirmed today and still inside
+  // its cash cap.
+  const metered = evaluateMeteredSpend({
+    billing: snapshot.primaryLaneBilling,
+    spentUsd: snapshot.meteredSpendTodayUsd,
+    capUsd: snapshot.meteredCapUsd,
+    confirmedAt: snapshot.meteredSpendConfirmedAt,
+    now: snapshot.now,
+  });
+
   // The quota admission gate (issue #171), evaluated once and consulted twice
   // — here for triage and below for claims — so the fleet cannot hold one kind
   // of pickup and start the other on the same tick. Everything above this line
@@ -1447,7 +1527,12 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   if (
     !snapshot.globalPaused &&
     !quotaGate.closed &&
-    snapshot.todayAutonomousSpendUsd < snapshot.dailyCapUsd
+    snapshot.todayAutonomousSpendUsd < snapshot.dailyCapUsd &&
+    // Held by the money guards for the same reason the daily cap holds it: a
+    // triage pass takes a container and spends money, and on a metered lane
+    // that money is cash. Autonomous work on a metered primary is explicitly
+    // allowed — it is bounded here, not exempted.
+    metered.hold === null
   ) {
     for (const candidate of snapshot.triageCandidates) {
       if (candidate.hasTriageTask) continue;
@@ -1565,6 +1650,36 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     return actions;
   }
 
+  // The real-money cap (issue #174): the second cap feeding the mechanism
+  // directly above, keyed off the resolved lane's billing kind rather than off
+  // an overflow that may never have happened. Same pause reason — this is one
+  // hold with two causes, and the detail names which — but its own
+  // announcement, because "the card has been charged $X" is different news
+  // from "the fleet worked hard today". Subscription work never reaches here:
+  // `metered.hold` is null unless the lane bills per token, which is what
+  // "the cap measures money, not quota" means in code.
+  if (metered.hold === "cap-reached") {
+    if (!snapshot.meteredCapAnnounced) {
+      actions.push({
+        type: "notify",
+        event: "metered-cap-reached",
+        payload: {
+          spentUsd: metered.spentUsd,
+          capUsd: metered.capUsd,
+          laneId: snapshot.primaryLaneId,
+        },
+      });
+    }
+    actions.push({
+      type: "pausePickup",
+      reason: "daily-cap",
+      detail:
+        `real-money cap: $${metered.spentUsd.toFixed(2)} of ` +
+        `$${metered.capUsd.toFixed(2)} spent on ${snapshot.primaryLaneId ?? "a metered lane"}`,
+    });
+    return actions;
+  }
+
   // The operator's global kill switch (issue #118), read from the settings row
   // each tick. It sits beside the env master far above — that one stops sweeps
   // from ever starting, this one stops what a running sweep would claim, at the
@@ -1578,6 +1693,32 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // the dashboard names the switch instead, being the hold a human can lift.
   if (snapshot.globalPaused) {
     actions.push({ type: "pausePickup", reason: "kill-switch" });
+    return actions;
+  }
+
+  // The confirm-once gate. A fleet-level press, not a per-session one: nobody
+  // is at the keyboard when an autonomous pass crosses into billing. Once
+  // given it stands for the local day, so the second claim of the day and
+  // every one after it proceeds automatically until the cap above.
+  //
+  // Below the kill switch, unlike its own cap directly above: this one *asks
+  // for a press*, and asking under a switch a human has engaged would point
+  // them at a control that would change nothing — the same reasoning the quota
+  // gate below is placed here for. The cap stays above because its
+  // announcement is news either way, exactly as the daily cap's is.
+  if (metered.hold === "unconfirmed") {
+    if (!snapshot.meteredConfirmationAnnounced) {
+      actions.push({
+        type: "notify",
+        event: "metered-confirmation-required",
+        payload: { capUsd: metered.capUsd, laneId: snapshot.primaryLaneId },
+      });
+    }
+    actions.push({
+      type: "pausePickup",
+      reason: "metered-unconfirmed",
+      detail: `${snapshot.primaryLaneId ?? "the primary lane"} bills real money — today's spend is unconfirmed`,
+    });
     return actions;
   }
 

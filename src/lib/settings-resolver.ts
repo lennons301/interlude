@@ -40,6 +40,7 @@ import {
   QUOTA_THRESHOLD_OPTIONS,
 } from "./quota/quota-gate";
 import { isLaneIdShaped } from "./lanes/lane-id";
+import { MAX_METERED_DAILY_CAP_USD } from "./orchestrator/autonomy/budgets";
 import {
   MODEL_TIERS,
   TIER_MODEL_IDS,
@@ -72,7 +73,8 @@ export type SettingKey =
   | ModelTierSettingKey
   | "primaryLane"
   | "quotaPickupThresholdPercent"
-  | "maxResumesPerAttempt";
+  | "maxResumesPerAttempt"
+  | "meteredDailyCapUsd";
 
 /** What is stored on the settings row: a sparse map, because absent means
  * "fall through to the environment", which is a different thing from any
@@ -196,6 +198,31 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
     "The tier a chat or generation session runs on — the work you are sitting in front of.",
     baseModelEnv
   ),
+  meteredDailyCapUsd: {
+    key: "meteredDailyCapUsd",
+    label: "Real-money daily cap",
+    help:
+      "How much cash the fleet may spend through a metered lane in one local day. Subscription work never counts against it — this number measures money, not quota.",
+    // No options: a dollar amount is a range, not a vocabulary. The panel
+    // renders it as a number field and the rejection message states the range.
+    normalize: (raw) => {
+      const value = Number(raw.trim());
+      if (!Number.isFinite(value) || value <= 0) return null;
+      // Refused, never clamped (issue #166's rule), and refused *by name* in
+      // FIXED_CEILINGS when someone reaches for the ceiling itself: a press on
+      // a web page may not widen a cash ceiling without bound.
+      if (value > MAX_METERED_DAILY_CAP_USD) return null;
+      // Canonical form: cents, with no trailing zeros, so the row holds one
+      // spelling of a given amount and the screen echoes what was typed.
+      return String(Math.round(value * 100) / 100);
+    },
+    vocabulary: () =>
+      `a positive dollar amount up to $${MAX_METERED_DAILY_CAP_USD}`,
+    envDefault: (config) => ({
+      envVar: METERED_CAP_ENV_VAR,
+      value: String(config.meteredDailyCapUsd),
+    }),
+  },
   primaryLane: {
     key: "primaryLane",
     label: "Primary lane",
@@ -294,6 +321,7 @@ export const SETTABLE_KEYS: readonly SettingKey[] = [
   "primaryLane",
   "quotaPickupThresholdPercent",
   "maxResumesPerAttempt",
+  "meteredDailyCapUsd",
 ];
 
 /**
@@ -311,6 +339,9 @@ export const FIXED_CEILINGS: Readonly<Record<string, string>> = {
   maxBudgetUsd: "the maximum per-attempt budget",
   dailyAutonomousCapUsd: "the estate daily spend cap",
   maxAttempts: "the per-ticket attempt count",
+  // The real-money cap itself IS settable (`meteredDailyCapUsd`); what is not
+  // is the ceiling that bounds it (issue #174).
+  maxMeteredDailyCapUsd: "the ceiling on the real-money daily cap",
 };
 
 function isSettingKey(key: string): key is SettingKey {
@@ -424,6 +455,48 @@ export function applySettingsPatch(
     else next[key] = value;
   }
   return next;
+}
+
+/** The variable supplying the deployment's own real-money daily cap. Declared
+ * here, beside the field that falls through to it, and re-exported by the
+ * money guards so both halves name one variable. */
+export const METERED_CAP_ENV_VAR = "METERED_DAILY_CAP_USD";
+
+/** The real-money daily cap the settings layer is asking for, before a lane's
+ * own declared cap is allowed to bind it down (issue #174 — see
+ * `resolveMeteredCap`, the only caller, which owns that half). The merge lives
+ * here with every other field's, so there is one place an override beats the
+ * environment. */
+export function resolveMeteredCapSetting(
+  config: AppConfig,
+  overrides: SettingsOverrides
+): {
+  usd: number;
+  source: SettingSource;
+  /** The stored override verbatim, or null when the field falls through. */
+  override: string | null;
+  envVar: string;
+  envUsd: number;
+} {
+  const spec = SETTINGS_FIELDS.meteredDailyCapUsd;
+  const { envVar } = spec.envDefault(config);
+  const envUsd = config.meteredDailyCapUsd;
+  // Normalised through the field's own spec rather than parsed again here: a
+  // stored value an older build wrote (or one a since-lowered ceiling no
+  // longer accepts) falls through to the environment exactly as every other
+  // override does, instead of reaching the cap as an unvalidated number.
+  const stored = overrides.meteredDailyCapUsd ?? null;
+  const normalized = stored === null ? null : spec.normalize(stored, {});
+  if (normalized === null) {
+    return { usd: envUsd, source: "environment", override: null, envVar, envUsd };
+  }
+  return {
+    usd: Number(normalized),
+    source: "override",
+    override: normalized,
+    envVar,
+    envUsd,
+  };
 }
 
 /**

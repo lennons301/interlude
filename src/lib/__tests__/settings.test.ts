@@ -16,6 +16,7 @@ import {
   getSettingsOverrides,
   isGlobalAutonomyPaused,
   setGlobalAutonomyPaused,
+  setMeteredSpendConfirmed,
   updateSettingsOverrides,
 } from "../settings";
 import { SETTINGS_ROW_ID, settings } from "@/db/schema";
@@ -30,6 +31,7 @@ describe("fleet settings — the global autonomy kill switch", () => {
   it("defaults to not paused on an install that has never written a setting", () => {
     expect(getFleetSettings()).toEqual({
       globalAutonomyPaused: false,
+      meteredSpendConfirmedAt: null,
       overrides: {},
       updatedAt: null,
     });
@@ -39,6 +41,7 @@ describe("fleet settings — the global autonomy kill switch", () => {
   it("engages the switch and reads it back", () => {
     expect(setGlobalAutonomyPaused(true, NOW)).toEqual({
       globalAutonomyPaused: true,
+      meteredSpendConfirmedAt: null,
       overrides: {},
       updatedAt: NOW,
     });
@@ -55,6 +58,7 @@ describe("fleet settings — the global autonomy kill switch", () => {
 
     expect(getFleetSettings()).toEqual({
       globalAutonomyPaused: false,
+      meteredSpendConfirmedAt: null,
       overrides: {},
       updatedAt: later,
     });
@@ -86,6 +90,7 @@ describe("fleet settings — UI overrides of env config", () => {
   it("stores an override and reads it straight back", () => {
     expect(updateSettingsOverrides({ modelTierReview: "light" }, NOW)).toEqual({
       globalAutonomyPaused: false,
+      meteredSpendConfirmedAt: null,
       overrides: { modelTierReview: "light" },
       updatedAt: NOW,
     });
@@ -108,6 +113,7 @@ describe("fleet settings — UI overrides of env config", () => {
     updateSettingsOverrides({ modelTierTriage: "light" }, NOW);
     expect(getFleetSettings()).toEqual({
       globalAutonomyPaused: true,
+      meteredSpendConfirmedAt: null,
       overrides: { modelTierTriage: "light" },
       updatedAt: NOW,
     });
@@ -137,5 +143,51 @@ describe("fleet settings — UI overrides of env config", () => {
       .run();
 
     expect(getSettingsOverrides()).toEqual({});
+  });
+});
+
+/**
+ * The confirm-once-per-day gate's durable half (issue #174). A restart must
+ * not re-ask — a fleet held for a confirmation it already has is a wedge —
+ * and must not silently forget that nobody ever confirmed.
+ */
+describe("fleet settings — the real-money spend confirmation", () => {
+  beforeEach(() => {
+    testDb = createTestDb().db;
+  });
+
+  it("is unconfirmed on an install that has never been asked", () => {
+    expect(getFleetSettings().meteredSpendConfirmedAt).toBeNull();
+  });
+
+  it("records when it was confirmed, and reads back across a fresh read", () => {
+    expect(setMeteredSpendConfirmed(true, NOW).meteredSpendConfirmedAt).toEqual(NOW);
+    expect(getFleetSettings().meteredSpendConfirmedAt).toEqual(NOW);
+  });
+
+  it("withdraws to null rather than to an older stamp", () => {
+    setMeteredSpendConfirmed(true, NOW);
+
+    setMeteredSpendConfirmed(false, new Date(NOW.getTime() + 60_000));
+
+    // "Confirmed, for a day that has passed" and "never confirmed" are the
+    // same state to every reader; keeping a stale stamp would invite one to
+    // treat it as evidence.
+    expect(getFleetSettings().meteredSpendConfirmedAt).toBeNull();
+  });
+
+  it("leaves the kill switch and the overrides alone", () => {
+    setGlobalAutonomyPaused(true, NOW);
+    updateSettingsOverrides({ modelTierTriage: "light" }, NOW);
+
+    setMeteredSpendConfirmed(true, NOW);
+
+    expect(getFleetSettings()).toEqual({
+      globalAutonomyPaused: true,
+      meteredSpendConfirmedAt: NOW,
+      overrides: { modelTierTriage: "light" },
+      updatedAt: NOW,
+    });
+    expect(testDb.select().from(settings).all()).toHaveLength(1);
   });
 });

@@ -1,1 +1,0 @@
-ALTER TABLE `runs` ADD `resume_count` integer DEFAULT 0 NOT NULL;

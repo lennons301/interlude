@@ -315,6 +315,12 @@ export const PAUSE_DOT: Record<PickupPause["reason"], LiveDotState> = {
   "autonomy-off-at-boot": "off",
   "kill-switch": "held",
   "daily-cap": "paused",
+  // Both money holds read `paused` rather than `held` (issue #174): `held` is
+  // reserved for the switch a human threw, and neither of these is that — the
+  // cash cap lifts itself at midnight, and the confirmation is a press the
+  // fleet is asking for, not one it is waiting out.
+  "metered-cap": "paused",
+  "metered-unconfirmed": "paused",
   "quota-gate": "paused",
 };
 
@@ -322,6 +328,10 @@ export const PAUSE_TONE: Record<PickupPause["reason"], keyof typeof TONES> = {
   "autonomy-off-at-boot": "amber",
   "kill-switch": "amber",
   "daily-cap": "red",
+  "metered-cap": "red",
+  // Amber, not red: nothing has gone wrong — the fleet is asking a question it
+  // was built to ask, and one press answers it.
+  "metered-unconfirmed": "amber",
   "quota-gate": "red",
 };
 

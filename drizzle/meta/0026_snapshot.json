@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "ee85e1a6-a238-4c2c-8ab0-4541b068a581",
+  "id": "82ec3323-cd27-4d51-b699-e2b8fb04f8c3",
   "prevId": "d04c4303-c2cc-4b4a-920d-aa39e072d980",
   "tables": {
     "messages": {
@@ -81,6 +81,38 @@
           "onUpdate": "no action"
         }
       },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "metered_spend": {
+      "name": "metered_spend",
+      "columns": {
+        "day": {
+          "name": "day",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "usd": {
+          "name": "usd",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -264,6 +296,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "lane_billing": {
+          "name": "lane_billing",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "model": {
           "name": "model",
           "type": "text",
@@ -383,14 +422,6 @@
           "notNull": false,
           "autoincrement": false
         },
-        "resume_count": {
-          "name": "resume_count",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
         "blocked_question": {
           "name": "blocked_question",
           "type": "text",
@@ -475,6 +506,13 @@
         "overrides": {
           "name": "overrides",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "metered_spend_confirmed_at": {
+          "name": "metered_spend_confirmed_at",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -564,6 +602,20 @@
         },
         "run_id": {
           "name": "run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "lane": {
+          "name": "lane",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "lane_billing": {
+          "name": "lane_billing",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

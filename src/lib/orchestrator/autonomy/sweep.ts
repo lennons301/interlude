@@ -42,6 +42,8 @@ import { parseRepoFromGitUrl } from "../../github/repo";
 import {
   notifyAttemptsExhausted,
   notifyDailyCapReached,
+  notifyMeteredCapReached,
+  notifyMeteredConfirmationRequired,
   notifyChecksEscalation,
   notifyGateConfigError,
   notifyIntegrationEscalation,
@@ -67,6 +69,7 @@ import {
   type QueuedTaskObservation,
 } from "../../fleet/health";
 import { recordFleetHealth } from "../../fleet/health-store";
+import { readMoneyGuards } from "../../lanes/money-state";
 import { getCapacity } from "../capacity";
 import { getQueueLastProgress, isQueueRunning, occupiedSlots } from "../queue";
 import { startOfLocalDay, todayAutonomousSpendUsd } from "../spend";
@@ -159,6 +162,13 @@ let fleetHealthState: FleetHealthState = EMPTY_FLEET_HEALTH_STATE;
 // The local day (startOfLocalDay ms) whose cap pause was announced — keyed by
 // day rather than a boolean so the announcement re-arms itself at midnight.
 let dailyCapAnnouncedDay: number | null = null;
+// Same, for the two money guards (issue #174): the local day whose real-money
+// cap pause was announced, and the day whose spend confirmation was asked for.
+// Separate from each other and from the cap above because they are separate
+// news — a fleet told about its cash cap has not been asked to confirm
+// anything, and vice versa.
+let meteredCapAnnouncedDay: number | null = null;
+let meteredConfirmationAnnouncedDay: number | null = null;
 // Whether the quota gate's current closed spell has been announced (issue
 // #171) — one Discord ping per transition, not one per 30s sweep, cleared the
 // moment the gate opens so the *next* wall is audible again.
@@ -478,12 +488,21 @@ async function reapOrphanedReviewPasses(): Promise<void> {
 
 async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
   const config = getConfig();
-  // One read of the settings row per tick, for both the runtime flags it
-  // carries: the kill switch (issue #118) and the quota threshold override
-  // (issue #171). Read here rather than cached anywhere, which is what makes a
-  // change on the settings screen take effect at the next sweep.
+  // One read of the settings row per tick, for every runtime flag it carries:
+  // the kill switch (issue #118), the quota threshold override (issue #171)
+  // and the money guards' cap and confirmation (issue #174). One read, because
+  // they must all describe the same instant — and read here rather than cached
+  // anywhere, which is what makes a change on the settings screen take effect
+  // at the next sweep.
   const settings = getFleetSettings();
   const capacity = await getCapacity();
+
+  // Which lane work would run on, who pays for it, and what it has cost today
+  // — read every tick from the checked-in catalog plus the *current*
+  // overrides, which is what makes switching the primary lane between billing
+  // kinds take effect at the next sweep with no restart. The same read the
+  // dashboard and the settings panel make, so all three describe one fleet.
+  const money = readMoneyGuards(now, settings);
 
   const registered = db
     .select()
@@ -694,6 +713,16 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     todayAutonomousSpendUsd: todayAutonomousSpendUsd(now),
     dailyCapUsd: DAILY_AUTONOMOUS_CAP_USD,
     dailyCapAnnounced: dailyCapAnnouncedDay === startOfLocalDay(now).getTime(),
+    primaryLaneId: money.lane?.id ?? null,
+    primaryLaneBilling: money.lane?.billing ?? null,
+    meteredSpendTodayUsd: money.spentTodayUsd,
+    meteredCapUsd: money.cap.capUsd,
+    meteredSpendConfirmedAt: settings.meteredSpendConfirmedAt,
+    // Both keyed by local day rather than by a boolean, exactly as the daily
+    // cap's is, so each announcement re-arms itself at midnight.
+    meteredCapAnnounced: meteredCapAnnouncedDay === startOfLocalDay(now).getTime(),
+    meteredConfirmationAnnounced:
+      meteredConfirmationAnnouncedDay === startOfLocalDay(now).getTime(),
     allowedAuthors: config.autonomyAllowedAuthors,
     slots: { total: capacity.slots, occupied: occupiedSlots(), occupants },
     queuedInteractiveCount: queuedTasks.filter((t) => t.kind === "interactive").length,
@@ -1434,6 +1463,27 @@ async function executeActions(actions: Action[]): Promise<void> {
           );
           dailyCapAnnouncedDay = startOfLocalDay(new Date()).getTime();
           await notifyDailyCapReached(getConfig().discordFleetChannelId, action.payload);
+        } else if (action.event === "metered-cap-reached") {
+          console.log(
+            `[autonomy] Real-money cap reached ($${action.payload.spentUsd.toFixed(2)} / ` +
+              `$${action.payload.capUsd.toFixed(2)} on ${action.payload.laneId ?? "a metered lane"}) ` +
+              `— pickup paused until local midnight`
+          );
+          meteredCapAnnouncedDay = startOfLocalDay(new Date()).getTime();
+          await notifyMeteredCapReached(
+            getConfig().discordFleetChannelId,
+            action.payload
+          );
+        } else if (action.event === "metered-confirmation-required") {
+          console.log(
+            `[autonomy] Pickup held: ${action.payload.laneId ?? "the primary lane"} bills real ` +
+              `money and today's spend is unconfirmed (cap $${action.payload.capUsd.toFixed(2)})`
+          );
+          meteredConfirmationAnnouncedDay = startOfLocalDay(new Date()).getTime();
+          await notifyMeteredConfirmationRequired(
+            getConfig().discordFleetChannelId,
+            action.payload
+          );
         } else if (action.event === "quota-gate-closed") {
           const { utilization, thresholdPercent, status, heldTickets } =
             action.payload;

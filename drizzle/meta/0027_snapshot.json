@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "23cdc8a3-060c-49ca-ab1a-c1375d18f173",
-  "prevId": "ee85e1a6-a238-4c2c-8ab0-4541b068a581",
+  "id": "0ecc37ff-cc8c-49c2-ad6a-04f3692b47c6",
+  "prevId": "82ec3323-cd27-4d51-b699-e2b8fb04f8c3",
   "tables": {
     "messages": {
       "name": "messages",
@@ -81,6 +81,38 @@
           "onUpdate": "no action"
         }
       },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "metered_spend": {
+      "name": "metered_spend",
+      "columns": {
+        "day": {
+          "name": "day",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "usd": {
+          "name": "usd",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -259,6 +291,13 @@
         },
         "lane": {
           "name": "lane",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "lane_billing": {
+          "name": "lane_billing",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -479,6 +518,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "metered_spend_confirmed_at": {
+          "name": "metered_spend_confirmed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "updated_at": {
           "name": "updated_at",
           "type": "integer",
@@ -564,6 +610,20 @@
         },
         "run_id": {
           "name": "run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "lane": {
+          "name": "lane",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "lane_billing": {
+          "name": "lane_billing",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

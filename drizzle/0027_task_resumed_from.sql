@@ -1,1 +1,0 @@
-ALTER TABLE `tasks` ADD `resumed_from_task_id` text;

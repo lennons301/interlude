@@ -9,6 +9,7 @@ import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, eq, gte, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { getConfig } from "../config";
 import { getFleetSettings } from "../settings";
+import { readMoneyGuards } from "../lanes/money-state";
 import { resolveQuotaThreshold } from "../settings-resolver";
 import { getCapacity } from "../orchestrator/capacity";
 import { getBacklogByProject } from "./backlog";
@@ -27,11 +28,15 @@ const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export async function loadFleetRows(now: Date): Promise<FleetRows> {
   const windowStart = new Date(now.getTime() - RECENT_WINDOW_MS);
-  // One read of the settings row per view build, for both runtime flags it
-  // carries — the kill switch and the quota threshold override — exactly as
-  // the sweep reads it each tick, so the dashboard reflects a change on its
-  // next SSE push with no restart.
+  // One read of the settings row per view build, for every runtime flag it
+  // carries — the kill switch, the quota threshold override, the money guards'
+  // cap and confirmation — exactly as the sweep reads it each tick, so the
+  // dashboard reflects a change on its next SSE push with no restart. The
+  // money guards are read through the same function the sweep and the settings
+  // panel use, and keyed on `now`, so the digest's view of a past day reports
+  // that day's cash rather than this morning's.
   const fleetSettings = getFleetSettings();
+  const money = readMoneyGuards(now, fleetSettings);
 
   // Slots come from the boot-time derivation; if the Docker daemon is
   // unreachable the dashboard should still render, so fall back to the
@@ -93,6 +98,11 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     now,
     slots,
     dailyCapUsd: DAILY_AUTONOMOUS_CAP_USD,
+    meteredCapUsd: money.cap.capUsd,
+    meteredSpendTodayUsd: money.spentTodayUsd,
+    primaryLaneId: money.lane?.id ?? null,
+    primaryLaneBilling: money.lane?.billing ?? null,
+    meteredSpendConfirmedAt: fleetSettings.meteredSpendConfirmedAt,
     // Read on every view build, exactly as the sweep reads it each tick — the
     // dashboard reflects a flip on its next SSE push, with no restart.
     globalAutonomyPaused: fleetSettings.globalAutonomyPaused,
