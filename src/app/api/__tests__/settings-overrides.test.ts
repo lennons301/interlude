@@ -271,12 +271,12 @@ describe("execution lanes on /api/settings/overrides", () => {
     resetConfig();
     resetLaneCatalog();
 
-    // A tier as well as a lane: with neither an override nor AGENT_MODEL, no
-    // tier resolves and the lane is asked for no identifier at all — which is
-    // a real state (the harness picks its own default) but not the one under
-    // test here.
+    // The lane and nothing else — no tier override and no AGENT_MODEL, which
+    // is the state a fresh deployment is in and therefore the one that has to
+    // work. A priced lane answers it from its own default tier rather than
+    // letting the harness pick a model from another provider's catalogue.
     const onGlm = await (
-      await PATCH(patch({ primaryLane: "openrouter-glm", modelTierImplement: "heavy" }))
+      await PATCH(patch({ primaryLane: "openrouter-glm" }))
     ).json();
     expect(onGlm.lanes).toMatchObject({
       primaryLaneId: "openrouter-glm",
@@ -299,14 +299,23 @@ describe("execution lanes on /api/settings/overrides", () => {
     const glm = resolveNow();
     expect(glm.ok).toBe(true);
     if (!glm.ok) return;
-    // The tier map resolves to concrete OpenRouter identifiers, and the lane
-    // carries its own prices — the harness's reported cost is not trusted here.
-    expect(glm.lane.model).toBe("z-ai/glm-5.3");
+    // The tier map resolves to a concrete OpenRouter identifier, and the lane
+    // carries its own prices — the harness's reported cost is not trusted
+    // here. Both hold with no tier configured, which is the whole point: this
+    // is the configuration one press leaves the fleet in.
+    expect(glm.lane.tier).toBe("standard");
+    expect(glm.lane.model).toBe("z-ai/glm-5.3-flash");
     expect(glm.lane.baseUrl).toBe("https://openrouter.ai/api");
     expect(glm.lane.prices?.inputPerMTok).toBeGreaterThan(0);
+    expect(glm.lane.declaresPrices).toBe(true);
     // Same credential as its Anthropic-slug neighbour: changing model on a
     // third-party provider is a tier-map edit, not a new secret.
     expect(glm.lane.auth).toEqual({ ANTHROPIC_AUTH_TOKEN: "sk-or-v1-test" });
+
+    // And a tier chosen on the screen still wins over the lane's default.
+    await PATCH(patch({ modelTierImplement: "heavy" }));
+    const heavy = resolveNow();
+    expect(heavy.ok && heavy.lane.model).toBe("z-ai/glm-5.3");
 
     await PATCH(patch({ primaryLane: null }));
 
@@ -316,6 +325,7 @@ describe("execution lanes on /api/settings/overrides", () => {
     expect(back.lane.id).toBe("claude-subscription");
     // And back on a lane whose reported cost *is* the charged one.
     expect(back.lane.prices).toBeNull();
+    expect(back.lane.declaresPrices).toBe(false);
   });
 
   it("refuses a lane that is not declared, storing nothing", async () => {

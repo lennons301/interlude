@@ -39,6 +39,14 @@ import {
   type TokenPrices,
 } from "./lane-config";
 
+/**
+ * The tier a priced lane falls back to when nothing else names one — see the
+ * note at its use in `resolveLane`. `standard` because it is the lane's own
+ * middle answer: a fleet that has configured nothing gets the model the lane
+ * considers ordinary, not its most expensive or its weakest.
+ */
+export const PRICED_LANE_DEFAULT_TIER: ModelTier = "standard";
+
 /** Just enough of `process.env` to be handed a plain object in a test. */
 export type LaneEnv = Readonly<Record<string, string | undefined>>;
 
@@ -195,6 +203,18 @@ export interface ResolvedLane {
    * guess about money.
    */
   prices: TokenPrices | null;
+  /**
+   * Whether the lane *definition* declares prices at all — a fact about the
+   * lane, where `prices` above is a fact about this pass's tier.
+   *
+   * They are not the same question, and one caller needs this one. Whether the
+   * harness may be handed `--max-budget-usd` turns on "does the CLI price this
+   * lane's provider?", which is knowable before any tier resolves; reading the
+   * per-tier field there would hand a ceiling in the fleet's currency back to
+   * a CLI that misapplies it, in exactly the pinned-model case where nobody is
+   * watching the tier.
+   */
+  declaresPrices: boolean;
   caps: LaneCaps;
 }
 
@@ -253,12 +273,22 @@ export function resolveLane({
     };
   }
 
-  const { tier, pinnedModel } = resolveAgentModelChoice(
-    kind,
-    config,
-    ticketModel,
-    overrides
-  );
+  const chosen = resolveAgentModelChoice(kind, config, ticketModel, overrides);
+  const { pinnedModel } = chosen;
+  // A priced lane runs a priced model. "No tier resolves" is not only the
+  // pinned-model escape hatch below — it is also the *unset* state, which is
+  // what a fresh deployment with no `AGENT_MODEL` and no stored tier is in.
+  // On an Anthropic-direct lane that state means what it has always meant:
+  // pass no `--model` and let the harness pick. On a lane that declares its
+  // own model map and its own prices it cannot mean that, because the model
+  // the harness would pick is an identifier from *another* provider's
+  // catalogue — the endpoint may not serve it at all, and if it does, the
+  // fleet is quietly paying Claude prices on the lane it chose to avoid them,
+  // at a price this lane's table does not contain. So the lane's own default
+  // tier answers instead, and the pass has a known model at a known price.
+  const tier =
+    chosen.tier ??
+    (pinnedModel === null && lane.prices !== null ? PRICED_LANE_DEFAULT_TIER : null);
 
   const auth: Record<string, string> = {};
   for (const ref of lane.auth) auth[ref.harnessVar] = env[ref.fromEnv]!;
@@ -276,6 +306,7 @@ export function resolveLane({
       tier,
       model: tier !== null ? lane.models[tier] : pinnedModel,
       prices: tier !== null ? (lane.prices?.[tier] ?? null) : null,
+      declaresPrices: lane.prices !== null,
       caps: lane.caps,
     },
   };

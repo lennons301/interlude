@@ -37,6 +37,7 @@ function lane(overrides: Partial<ResolvedLane> = {}): ResolvedLane {
     tier: "heavy",
     model: "opus",
     prices: null,
+    declaresPrices: false,
     caps: { dailyBudgetUsd: null },
     ...overrides,
   };
@@ -202,6 +203,7 @@ describe("buildClaudeTurnCommand", () => {
       lane: lane({
         id: "openrouter-glm",
         model: "z-ai/glm-5.3-flash",
+        declaresPrices: true,
         prices: {
           inputPerMTok: 0.075,
           outputPerMTok: 0.25,
@@ -215,6 +217,26 @@ describe("buildClaudeTurnCommand", () => {
     // What still bounds the turn: the turn ceiling here, and the fleet's own
     // accounting between turns, which charges the lane's real prices.
     expect(cmd).toContain("--max-turns 50");
+  });
+
+  it("gives no ceiling to a priced lane even when no tier resolved", () => {
+    // The pinned-model case: `AGENT_MODEL` names a raw identifier, so no tier
+    // resolves and there is no per-tier price to read — but the *provider* is
+    // still one the CLI does not price, so the ceiling is still one it would
+    // misapply. Keying this branch on the resolved `prices` rather than on the
+    // lane definition put the invisible mid-work truncation straight back.
+    const cmd = buildClaudeTurnCommand({
+      maxBudgetUsd: 20,
+      lane: lane({
+        id: "openrouter-glm",
+        tier: null,
+        model: "some/pinned-model",
+        declaresPrices: true,
+        prices: null,
+      }),
+    });
+
+    expect(cmd).not.toContain("--max-budget-usd");
   });
 
   it("keeps the ceiling on a lane whose reported cost is its own list price", () => {

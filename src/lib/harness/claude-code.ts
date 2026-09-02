@@ -111,7 +111,14 @@ export function buildClaudeTurnCommand(input: HarnessCommandInput): string {
   // lane's real prices (`attemptExhaustion` reads accumulated cost). A lane
   // with no prices — Anthropic-direct, where the CLI's figure is its own list
   // price and correct — keeps the flag and is unchanged by any of this.
-  if (input.lane.prices === null) {
+  //
+  // The question is asked of the lane *definition* (`declaresPrices`), never
+  // of this pass's resolved tier: "does the CLI price this provider?" is a
+  // fact about the endpoint, true before any tier resolves. Keying it on the
+  // per-tier `prices` would put the ceiling back the moment no tier resolved —
+  // the pinned-model case — which is precisely the invisible mid-work
+  // truncation this branch exists to remove.
+  if (!input.lane.declaresPrices) {
     cmdParts.push(
       "--max-budget-usd",
       String(input.maxBudgetUsd ?? config.maxBudgetUsd)

@@ -364,12 +364,53 @@ describe("what a resolved lane carries", () => {
     expect(result.ok && result.lane.model).toBe("claude-opus-4-8");
   });
 
-  it("passes no model at all when nothing names one", () => {
+  it("passes no model at all when nothing names one, on an unpriced lane", () => {
     // The pre-#74 behaviour: no `--model`, the harness resolves its own
     // default. An install that has configured nothing must keep working.
     const result = resolve();
     expect(result.ok && result.lane.model).toBeNull();
+    expect(result.ok && result.lane.tier).toBeNull();
     expect(result.ok && result.lane.id).toBe("subscription");
+  });
+
+  it("falls back to a priced lane's own default tier when nothing names one", () => {
+    // The default state — no `AGENT_MODEL`, no stored tier — and therefore the
+    // one a fresh deployment is in (issue #175 review). "Let the harness pick"
+    // cannot mean anything here: the identifier it would pick belongs to
+    // Anthropic's catalogue, so the endpoint either refuses it or quietly
+    // serves a Claude model at a price this lane's table does not hold, and
+    // the fleet would charge the CLI's fiction for it.
+    const result = resolve({ overrides: { primaryLane: "openrouter" } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.lane.tier).toBe("standard");
+    expect(result.lane.model).toBe("anthropic/claude-sonnet-4.5");
+    expect(result.lane.prices).toEqual({
+      inputPerMTok: 3,
+      outputPerMTok: 15,
+      cacheReadPerMTok: 0.3,
+      cacheWritePerMTok: 3.75,
+    });
+  });
+
+  it("reports a lane's declared prices apart from this pass's tier prices", () => {
+    // Two different questions (issue #175 review): "what does this tier cost?"
+    // and "does the CLI price this lane's provider at all?". The second is
+    // what decides whether the harness may be handed `--max-budget-usd`, and
+    // it still has an answer in the pinned-model case where the first does not.
+    const pinned = resolve({
+      config: cfg({ agentModel: "claude-opus-4-8" }),
+      overrides: { primaryLane: "openrouter" },
+    });
+    expect(pinned.ok).toBe(true);
+    if (!pinned.ok) return;
+    expect(pinned.lane.tier).toBeNull();
+    expect(pinned.lane.model).toBe("claude-opus-4-8");
+    expect(pinned.lane.prices).toBeNull();
+    expect(pinned.lane.declaresPrices).toBe(true);
+
+    const subscription = resolve();
+    expect(subscription.ok && subscription.lane.declaresPrices).toBe(false);
   });
 
   it("keeps the subscription lane's mapping identical to the pre-lane one", () => {

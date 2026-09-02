@@ -168,7 +168,6 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
   };
 }
 
-
 export async function currentFleetView(now: Date): Promise<FleetView> {
   return buildFleetView(await loadFleetRows(now));
 }
