@@ -36,7 +36,12 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
   // panel use, and keyed on `now`, so the digest's view of a past day reports
   // that day's cash rather than this morning's.
   const fleetSettings = getFleetSettings();
-  const money = readMoneyGuards(now, fleetSettings);
+  // The last rate-limit event any pass saw (issue #167), read once here: the
+  // money guards need it to tell subscription quota from an active overage
+  // (issue #173) and the admission gate below judges the same row, so the two
+  // must describe one instant rather than two reads of it.
+  const quota = getQuotaObservation();
+  const money = readMoneyGuards(now, fleetSettings, quota);
 
   // Slots come from the boot-time derivation; if the Docker daemon is
   // unreachable the dashboard should still render, so fall back to the
@@ -101,7 +106,11 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     meteredCapUsd: money.cap.capUsd,
     meteredSpendTodayUsd: money.spentTodayUsd,
     primaryLaneId: money.lane?.id ?? null,
-    primaryLaneBilling: money.lane?.billing ?? null,
+    // The *effective* kind, not the declared one (issue #173): an active
+    // overage means the subscription lane is already being billed, and the
+    // guards must see that.
+    primaryLaneBilling: money.billing,
+    primaryLaneOverage: money.overagePaying,
     meteredSpendConfirmedAt: fleetSettings.meteredSpendConfirmedAt,
     // Read on every view build, exactly as the sweep reads it each tick — the
     // dashboard reflects a flip on its next SSE push, with no restart.
@@ -155,7 +164,7 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     // row rather than an in-memory store: the writer is the stream parser in
     // the orchestrator's module graph and this read happens in the app
     // router's, which share nothing but the database (issue #159).
-    quota: getQuotaObservation(),
+    quota,
     // The threshold that observation is judged against (issue #171), resolved
     // from the same row and the same config the sweep reads — so the banner
     // cannot say "claiming" while the reducer is refusing, or the reverse.

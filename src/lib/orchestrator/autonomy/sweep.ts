@@ -502,7 +502,11 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
   // overrides, which is what makes switching the primary lane between billing
   // kinds take effect at the next sweep with no restart. The same read the
   // dashboard and the settings panel make, so all three describe one fleet.
-  const money = readMoneyGuards(now, settings);
+  // The quota observation is read once for the tick: the money guards need it
+  // to tell subscription quota from an active overage (issue #173), and the
+  // admission gate reads the same row, so both describe one instant.
+  const quota = getQuotaObservation();
+  const money = readMoneyGuards(now, settings, quota);
 
   const registered = db
     .select()
@@ -698,7 +702,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     // force. Both read fresh each tick, never captured at boot: that is what
     // lets a wall observed mid-sweep, or a threshold changed on the settings
     // screen, take effect at the next tick rather than at the next restart.
-    quota: getQuotaObservation(),
+    quota,
     quotaThresholdPercent: resolveQuotaThreshold(config, settings.overrides)
       .percent,
     quotaGateAnnounced: quotaGateAnnouncement.announced,
@@ -714,7 +718,10 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     dailyCapUsd: DAILY_AUTONOMOUS_CAP_USD,
     dailyCapAnnounced: dailyCapAnnouncedDay === startOfLocalDay(now).getTime(),
     primaryLaneId: money.lane?.id ?? null,
-    primaryLaneBilling: money.lane?.billing ?? null,
+    // The *effective* kind (issue #173): an active overage means the account
+    // is already paying cash for subscription-lane work, and the guards must
+    // see that or the wall silently becomes a bill.
+    primaryLaneBilling: money.billing,
     meteredSpendTodayUsd: money.spentTodayUsd,
     meteredCapUsd: money.cap.capUsd,
     meteredSpendConfirmedAt: settings.meteredSpendConfirmedAt,

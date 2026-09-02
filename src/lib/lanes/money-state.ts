@@ -19,8 +19,11 @@
 
 import { getConfig } from "../config";
 import { todayMeteredSpendUsd } from "../orchestrator/spend";
+import type { QuotaObservation } from "../quota/rate-limit-event";
 import type { FleetSettings } from "../settings";
 import { getLaneCatalog } from "./catalog";
+import type { LaneBilling } from "./lane-config";
+import { effectiveBilling, overagePaysNow } from "./overflow";
 import {
   evaluateMeteredSpend,
   resolveMeteredCap,
@@ -32,6 +35,17 @@ import { primaryLaneOf, type LaneView } from "./resolve";
 export interface MoneyGuards {
   /** The lane work would run on; null = none resolves. */
   lane: LaneView | null;
+  /**
+   * How that lane must be billed *now* (issue #173) — its declared kind, or
+   * `metered` when an active overage means the account is already paying cash
+   * for subscription work. This, not `lane.billing`, is what the guards key
+   * off: an account with overage billing enabled would otherwise never show a
+   * `rejected` at all, and the wall would silently become a bill.
+   */
+  billing: LaneBilling | null;
+  /** Whether that reclassification is in force, so a surface can name the
+   * overage rather than accusing a subscription lane of billing per token. */
+  overagePaying: boolean;
   /** Why the lane file could not be read, when it could not be. */
   laneError: string | null;
   cap: MeteredCap;
@@ -44,7 +58,11 @@ export interface MoneyGuards {
 
 export function readMoneyGuards(
   now: Date,
-  settings: FleetSettings
+  settings: FleetSettings,
+  /** The fleet's last quota observation (issue #167). Handed in rather than
+   * read here because both impure callers have just read it for the admission
+   * gate, and the two must describe the same instant. */
+  observation: QuotaObservation | null
 ): MoneyGuards {
   const config = getConfig();
   const catalog = getLaneCatalog();
@@ -62,9 +80,14 @@ export function readMoneyGuards(
     lane?.caps.dailyBudgetUsd ?? null
   );
   const spentTodayUsd = todayMeteredSpendUsd(now);
+  const overagePaying = overagePaysNow(observation, now);
+  const billing =
+    lane === null ? null : effectiveBilling(lane.billing, overagePaying);
 
   return {
     lane,
+    billing,
+    overagePaying,
     laneError: catalog.ok ? null : catalog.reason,
     cap,
     spentTodayUsd,
@@ -72,7 +95,7 @@ export function readMoneyGuards(
       // Null billing — an unreadable lane file, or a choice naming no declared
       // lane — decides nothing either way: such a fleet spends nothing, since
       // every pass refuses to start with the reason named.
-      billing: lane?.billing ?? null,
+      billing,
       spentUsd: spentTodayUsd,
       capUsd: cap.capUsd,
       confirmedAt: settings.meteredSpendConfirmedAt,

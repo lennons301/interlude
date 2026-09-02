@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { readMoneyGuards } from "@/lib/lanes/money-state";
+import { readLaneCrossing } from "@/lib/lanes/overflow-state";
+import { getQuotaObservation } from "@/lib/quota/quota-store";
 import {
   getFleetSettings,
   setMeteredSpendConfirmed,
@@ -20,18 +22,30 @@ import { parseSettingsPatch } from "@/lib/settings-resolver";
  * resolver's own allowlist — not a copy of it — so a bad value is refused with
  * a reason and the code ceiling is refused by name.
  *
+ * It also answers the *crossing* (issue #173) — what would happen to an
+ * attended session right now — because that is what puts the confirmation in
+ * front of the human who is actually sitting there. One endpoint for both:
+ * the crossing is judged from this panel's own numbers, and a task screen
+ * fetching the question from one route and the press from another would offer
+ * a confirmation for a state that had already moved.
+ *
  * Everything served here is a number, a lane id or a billing kind. No lane
  * secret is stored in the database or crosses this route, which is the rule a
  * project route once broke.
  */
 function state() {
   const settings = getFleetSettings();
+  const now = new Date();
+  // One read of the quota row for both answers below, so the guards and the
+  // crossing describe the same instant.
+  const observation = getQuotaObservation();
   // The same read the sweep and the dashboard make, so the panel cannot report
   // a fleet other than the one being gated.
-  const { lane, laneError, cap, spentTodayUsd, state: guards } = readMoneyGuards(
-    new Date(),
-    settings
-  );
+  const { lane, billing, overagePaying, laneError, cap, spentTodayUsd, state: guards } =
+    readMoneyGuards(now, settings, observation);
+  // The same pure decision the turn manager routes a pass with and the queue
+  // loop declines to start one with — never a second opinion about it.
+  const crossing = readLaneCrossing("interactive", now, settings, observation);
 
   return {
     lane:
@@ -44,8 +58,23 @@ function state() {
     confirmedAt: settings.meteredSpendConfirmedAt?.toISOString() ?? null,
     confirmedToday: guards.confirmed,
     metered: guards.metered,
+    /** The effective billing kind — `metered` on an active overage even where
+     * the lane declares itself a subscription (issue #173). */
+    billing,
+    overage: overagePaying,
     hold: guards.hold,
     remainingUsd: guards.remainingUsd,
+    crossing: {
+      laneId: crossing.laneId,
+      billing: crossing.billing,
+      walled: crossing.walled,
+      overage: crossing.overage,
+      overflowedFrom: crossing.overflowedFrom,
+      refusal: crossing.refusal,
+      notice: crossing.notice,
+      spentUsd: crossing.money?.spentUsd ?? spentTodayUsd,
+      capUsd: crossing.money?.capUsd ?? cap.capUsd,
+    },
     updatedAt: settings.updatedAt?.toISOString() ?? null,
   };
 }

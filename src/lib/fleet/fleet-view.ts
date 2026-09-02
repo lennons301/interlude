@@ -48,6 +48,10 @@ export interface FleetRows {
    * money hold — such a fleet spends nothing, since every pass refuses to
    * start. */
   primaryLaneBilling: LaneBilling | null;
+  /** Whether that kind is `metered` only because an active overage is paying
+   * for subscription work (issue #173). Carried so a card can name the
+   * overage rather than accusing a subscription lane of billing per token. */
+  primaryLaneOverage: boolean;
   /** When the fleet last confirmed it may spend real money; null = never. The
    * view judges it against `now`, exactly as the reducer does. */
   meteredSpendConfirmedAt: Date | null;
@@ -218,6 +222,9 @@ export interface MeteredSpendView {
   confirmed: boolean;
   /** What is holding autonomous pickup on money grounds, or null. */
   hold: MeteredHold | null;
+  /** True when this is an active overage rather than a metered lane (issue
+   * #173) — the same guard, a different sentence. */
+  overage: boolean;
 }
 
 /** Re-exported from the budgets leaf so the view and the loop can't drift */
@@ -637,7 +644,16 @@ export function buildFleetView(rows: FleetRows): FleetView {
     capPaused: meteredState.hold === "cap-reached",
     confirmed: meteredState.confirmed,
     hold: meteredState.hold,
+    overage: rows.primaryLaneOverage,
   };
+
+  // Who the money is actually going to, for the sentences below: an active
+  // overage bills the card while the lane in force still declares itself a
+  // subscription (issue #173), so naming the lane alone would read as an
+  // accusation against a lane that bills nothing.
+  const payer = metered.overage
+    ? `an active overage on ${metered.laneId ?? "the subscription"}`
+    : metered.laneId;
 
   // The same gate `decideNext` refuses pickup with (issue #171), from the same
   // pure function: the banner is not allowed to have its own opinion about
@@ -679,12 +695,12 @@ export function buildFleetView(rows: FleetRows): FleetView {
         : metered.hold === "cap-reached"
           ? {
               reason: "metered-cap",
-              body: `Real-money cap reached on ${metered.laneId ?? "a metered lane"} — autonomous pickup paused until midnight; interactive work unaffected`,
+              body: `Real-money cap reached on ${payer ?? "a metered lane"} — autonomous pickup paused until midnight; interactive work is capped too`,
             }
           : metered.hold === "unconfirmed"
             ? {
                 reason: "metered-unconfirmed",
-                body: `${metered.laneId ?? "The primary lane"} bills real money — pickup is held until today's spend is confirmed once in Settings`,
+                body: `${payer ?? "The primary lane"} is spending real money — pickup is held until today's spend is confirmed once`,
               }
             : quotaGate.closed
               ? {
@@ -816,15 +832,15 @@ export function buildFleetView(rows: FleetRows): FleetView {
       cause: "metered-cap",
       severity: "red",
       context: `$${metered.todayUsd.toFixed(2)} / $${metered.capUsd.toFixed(2)} real money today`,
-      body: `Real-money cap spent on ${metered.laneId ?? "a metered lane"} — autonomous pickup paused until midnight. Raise the cap to carry on today.`,
+      body: `Real-money cap spent on ${payer ?? "a metered lane"} — autonomous pickup paused until midnight, and an interactive session is told it is capped rather than spending past it. Raise the cap to carry on today.`,
       action: { label: "Settings", href: "/settings" },
     });
   } else if (metered.hold === "unconfirmed") {
     needsYou.push({
       cause: "metered-confirm",
       severity: "amber",
-      context: `${metered.laneId ?? "primary lane"} · cap $${metered.capUsd.toFixed(2)}`,
-      body: "This lane bills real money and today's spend isn't confirmed — autonomous pickup is held until you confirm it once.",
+      context: `${payer ?? "primary lane"} · cap $${metered.capUsd.toFixed(2)}`,
+      body: "Real money is being spent and today's spend isn't confirmed — autonomous pickup is held, and an interactive session asks for the same press, until you confirm it once.",
       action: { label: "Settings", href: "/settings" },
     });
   }

@@ -1,0 +1,409 @@
+import { describe, expect, it } from "vitest";
+import type { AppConfig } from "../../config";
+import type { QuotaObservation } from "../../quota/rate-limit-event";
+import type { SettingsOverrides } from "../../settings-resolver";
+import { parseLaneConfig, type LaneCatalog } from "../lane-config";
+import {
+  decideLaneCrossing,
+  effectiveBilling,
+  laneIsWalled,
+  meteredOverflowCandidates,
+  overagePaysNow,
+  type CrossingLane,
+  type LaneCrossingInput,
+} from "../overflow";
+
+/**
+ * The crossing (issue #173), tested as the pure policy it is: no lane file, no
+ * database, no clock and no provider. Every rule here is one that three
+ * surfaces depend on — the turn manager routing a pass, the queue loop
+ * declining to start one, and the UI asking the human to confirm — which is
+ * why they read it from this one function.
+ */
+
+const LANES = `
+primary:
+  - subscription
+  - direct-api
+lanes:
+  - id: subscription
+    label: Claude subscription
+    adapter: claude-code
+    billing: subscription
+    auth:
+      CLAUDE_CODE_OAUTH_TOKEN: CLAUDE_CODE_OAUTH_TOKEN
+    models:
+      heavy: opus
+      standard: sonnet
+      light: haiku
+  - id: direct-api
+    label: Anthropic API
+    adapter: claude-code
+    billing: metered
+    auth:
+      ANTHROPIC_API_KEY: ANTHROPIC_API_KEY
+    models:
+      heavy: opus
+      standard: sonnet
+      light: haiku
+    caps:
+      daily_budget_usd: 20
+  - id: openrouter
+    label: OpenRouter
+    adapter: claude-code
+    billing: metered
+    auth:
+      ANTHROPIC_AUTH_TOKEN: OPENROUTER_API_KEY
+    base_url: https://openrouter.ai/api
+    models:
+      heavy: anthropic/claude-opus-4.1
+      standard: anthropic/claude-sonnet-4.5
+      light: anthropic/claude-haiku-4.5
+`;
+
+const catalog: LaneCatalog = (() => {
+  const parsed = parseLaneConfig(LANES);
+  if (!parsed.ok) throw new Error(parsed.reason);
+  return parsed.catalog;
+})();
+
+const NOW = new Date("2026-09-02T10:00:00");
+const RESETS = new Date("2026-09-02T14:05:00");
+
+const SUBSCRIPTION: CrossingLane = {
+  id: "subscription",
+  label: "Claude subscription",
+  billing: "subscription",
+  caps: { dailyBudgetUsd: null },
+};
+
+const METERED_PRIMARY: CrossingLane = {
+  id: "direct-api",
+  label: "Anthropic API",
+  billing: "metered",
+  caps: { dailyBudgetUsd: 20 },
+};
+
+/** Both metered lanes' credentials present, so availability is never the thing
+ * under test unless a case takes one away. */
+const FULL_ENV = {
+  CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+  ANTHROPIC_API_KEY: "sk-ant",
+  OPENROUTER_API_KEY: "sk-or",
+};
+
+function observation(fields: Partial<QuotaObservation> = {}): QuotaObservation {
+  return {
+    status: "allowed",
+    rateLimitType: "five_hour",
+    utilization: 12,
+    resetsAt: RESETS,
+    overageStatus: null,
+    overageResetsAt: null,
+    isUsingOverage: null,
+    overageInUse: null,
+    observedAt: NOW,
+    ...fields,
+  };
+}
+
+/** A rejection with a stated reset — the wall #168 pauses an autonomous run
+ * on, and the one this ticket overflows an attended session off. */
+const WALL = observation({ status: "rejected", utilization: null });
+
+function crossing(over: Partial<LaneCrossingInput> = {}) {
+  return decideLaneCrossing({
+    kind: "interactive",
+    primary: SUBSCRIPTION,
+    catalog,
+    env: FULL_ENV,
+    observation: WALL,
+    config: { meteredDailyCapUsd: 20 } as AppConfig,
+    overrides: {} as SettingsOverrides,
+    spentTodayUsd: 0,
+    confirmedAt: NOW,
+    now: NOW,
+    ...over,
+  });
+}
+
+describe("an active overage means the account is already paying cash", () => {
+  it("counts a request that drew on overage", () => {
+    expect(overagePaysNow(observation({ isUsingOverage: true }), NOW)).toBe(true);
+  });
+
+  it("counts a refused window whose overage window is still serving", () => {
+    // `scripts/rate-limit-stub.mjs --scenario overage-active`: the wall is up,
+    // the request succeeded anyway, and the card paid for it.
+    const active = observation({
+      status: "rejected",
+      overageStatus: "allowed",
+      overageInUse: true,
+    });
+    expect(overagePaysNow(active, NOW)).toBe(true);
+  });
+
+  it("does not count overage merely being available on a healthy account", () => {
+    // The real captured event from a working account carries exactly this:
+    // billing is configured, nothing is drawing on it. Reading it as cash
+    // would hold the fleet for a confirmation nobody owed.
+    const healthy = observation({
+      status: "allowed",
+      rateLimitType: "overage",
+      overageStatus: "allowed",
+      isUsingOverage: false,
+      overageInUse: true,
+    });
+    expect(overagePaysNow(healthy, NOW)).toBe(false);
+  });
+
+  it("does not count a wall whose overage is exhausted too", () => {
+    const exhausted = observation({
+      status: "rejected",
+      overageStatus: "rejected",
+    });
+    expect(overagePaysNow(exhausted, NOW)).toBe(false);
+    // ...and that is a real wall, so an attended session overflows off it.
+    expect(laneIsWalled(SUBSCRIPTION, exhausted, NOW)).toBe(true);
+  });
+
+  it("decides nothing from telemetry that no longer describes the account", () => {
+    const past = new Date(RESETS.getTime() + 1000);
+    expect(overagePaysNow(observation({ isUsingOverage: true }), past)).toBe(false);
+    expect(laneIsWalled(SUBSCRIPTION, WALL, past)).toBe(false);
+  });
+
+  it("is not a wall — the pass runs on the same lane, the card just pays", () => {
+    const active = observation({ status: "rejected", overageStatus: "allowed" });
+    expect(laneIsWalled(SUBSCRIPTION, active, NOW)).toBe(false);
+  });
+});
+
+describe("what counts as walled", () => {
+  it("needs a rejection: a warning is not a wall", () => {
+    const warning = observation({ status: "allowed_warning", utilization: 97 });
+    expect(laneIsWalled(SUBSCRIPTION, warning, NOW)).toBe(false);
+  });
+
+  it("is never true of a metered lane, which reports no quota at all", () => {
+    expect(laneIsWalled(METERED_PRIMARY, WALL, NOW)).toBe(false);
+  });
+
+  it("needs an observation: silence is not a wall", () => {
+    expect(laneIsWalled(SUBSCRIPTION, null, NOW)).toBe(false);
+  });
+});
+
+describe("autonomous passes never overflow", () => {
+  it.each(["implement", "review", "triage", "repair"] as const)(
+    "leaves a %s pass on the walled lane, to be paused by #168",
+    (kind) => {
+      const decision = crossing({ kind });
+
+      expect(decision.laneId).toBe("subscription");
+      expect(decision.overflowedFrom).toBeNull();
+      expect(decision.billing).toBe("subscription");
+      expect(decision.refusal).toBeNull();
+      // The wall is still reported — it is a fact about the fleet, not a
+      // decision about this pass.
+      expect(decision.walled).toBe(true);
+    }
+  );
+
+  it("still books an autonomous pass's overage spend as the cash it is", () => {
+    const decision = crossing({
+      kind: "implement",
+      observation: observation({ isUsingOverage: true }),
+    });
+
+    expect(decision.billing).toBe("metered");
+    // Never refused: #174's guards hold pickup, not a pass already running.
+    expect(decision.refusal).toBeNull();
+  });
+});
+
+describe("interactive work overflows to a metered lane", () => {
+  it("routes to the first available metered lane in preference order", () => {
+    const decision = crossing();
+
+    expect(decision.laneId).toBe("direct-api");
+    expect(decision.overflowedFrom).toBe("subscription");
+    expect(decision.billing).toBe("metered");
+    expect(decision.refusal).toBeNull();
+    expect(decision.notice).toContain("Anthropic API");
+    // The cause is named before the consequence, with the window's own clock.
+    expect(decision.notice).toContain("resets 14:05");
+  });
+
+  it("falls past a metered lane whose credential is missing", () => {
+    const decision = crossing({
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "oauth", OPENROUTER_API_KEY: "sk-or" },
+    });
+
+    expect(decision.laneId).toBe("openrouter");
+    expect(decision.overflowedFrom).toBe("subscription");
+  });
+
+  it("stays on the subscription lane while the window is fine", () => {
+    const decision = crossing({ observation: observation() });
+
+    expect(decision.laneId).toBe("subscription");
+    expect(decision.billing).toBe("subscription");
+    expect(decision.money).toBeNull();
+    expect(decision.notice).toBeNull();
+  });
+
+  it("refuses, naming what is missing, when no metered lane is available", () => {
+    const decision = crossing({ env: { CLAUDE_CODE_OAUTH_TOKEN: "oauth" } });
+
+    expect(decision.refusal?.reason).toBe("no-metered-lane");
+    expect(decision.refusal?.message).toContain("ANTHROPIC_API_KEY");
+    expect(decision.refusal?.message).toContain("OPENROUTER_API_KEY");
+    expect(decision.laneId).toBe("subscription");
+  });
+
+  it("does not overflow off a lane that is merely unavailable", () => {
+    // A missing credential is #172's report, not a wall: routing around an
+    // operator's explicit choice is what that ticket exists to refuse.
+    const decision = crossing({
+      observation: null,
+      env: { ANTHROPIC_API_KEY: "sk-ant" },
+    });
+
+    expect(decision.overflowedFrom).toBeNull();
+    expect(decision.laneId).toBe("subscription");
+    expect(decision.refusal).toBeNull();
+  });
+});
+
+describe("the at-the-keyboard confirmation", () => {
+  it("asks for one before the first real money of the day", () => {
+    const decision = crossing({ confirmedAt: null });
+
+    expect(decision.refusal?.reason).toBe("unconfirmed");
+    expect(decision.refusal?.message).toContain("$0.00 of $20.00");
+    expect(decision.refusal?.message).toContain("Confirm real-money spend");
+    // The lane is still named, so the UI can say what it would spend on.
+    expect(decision.laneId).toBe("direct-api");
+  });
+
+  it("treats yesterday's confirmation as no confirmation", () => {
+    const decision = crossing({
+      confirmedAt: new Date("2026-09-01T23:59:00"),
+    });
+
+    expect(decision.refusal?.reason).toBe("unconfirmed");
+  });
+
+  it("lets the rest of the day's overflow through once confirmed", () => {
+    const decision = crossing({
+      confirmedAt: new Date("2026-09-02T09:00:00"),
+      spentTodayUsd: 4.5,
+    });
+
+    expect(decision.refusal).toBeNull();
+    expect(decision.laneId).toBe("direct-api");
+    expect(decision.notice).toContain("$4.50 of $20.00");
+  });
+
+  it("asks on a metered primary too — the confirmation is per day, not per overflow", () => {
+    // #174 deliberately left interactive dispatch ungated; the attended
+    // confirmation is this ticket's, and it keys off the billing kind rather
+    // than off having overflowed, exactly as that ticket's guards do.
+    const decision = crossing({
+      primary: METERED_PRIMARY,
+      observation: null,
+      confirmedAt: null,
+    });
+
+    expect(decision.refusal?.reason).toBe("unconfirmed");
+    expect(decision.overflowedFrom).toBeNull();
+    expect(decision.billing).toBe("metered");
+  });
+
+  it("asks before subscription work that an overage has started billing", () => {
+    const decision = crossing({
+      observation: observation({ isUsingOverage: true }),
+      confirmedAt: null,
+    });
+
+    expect(decision.refusal?.reason).toBe("unconfirmed");
+    expect(decision.refusal?.message).toContain("overage");
+    // No overflow: the lane in force is already the paid one.
+    expect(decision.laneId).toBe("subscription");
+    expect(decision.overflowedFrom).toBeNull();
+    expect(decision.billing).toBe("metered");
+  });
+});
+
+describe("the cap", () => {
+  it("tells an attended session it is capped rather than overflowing", () => {
+    const decision = crossing({ spentTodayUsd: 20 });
+
+    expect(decision.refusal?.reason).toBe("cap-reached");
+    expect(decision.refusal?.message).toContain("$20.00");
+    expect(decision.money?.remainingUsd).toBe(0);
+  });
+
+  it("outranks the confirmation, because confirming would start nothing", () => {
+    const decision = crossing({ spentTodayUsd: 25, confirmedAt: null });
+
+    expect(decision.refusal?.reason).toBe("cap-reached");
+  });
+
+  it("is bound down by the overflow lane's own declared cap", () => {
+    const decision = crossing({
+      config: { meteredDailyCapUsd: 50 } as AppConfig,
+      spentTodayUsd: 20,
+    });
+
+    // The dial says $50, lanes.yaml says $20 on this lane, the lower wins.
+    expect(decision.money?.capUsd).toBe(20);
+    expect(decision.refusal?.reason).toBe("cap-reached");
+  });
+
+  it("leaves subscription-lane interactive work exempt", () => {
+    const decision = crossing({
+      observation: observation(),
+      spentTodayUsd: 500,
+      confirmedAt: null,
+    });
+
+    expect(decision.refusal).toBeNull();
+    expect(decision.billing).toBe("subscription");
+  });
+});
+
+describe("the pieces the callers share", () => {
+  it("orders overflow candidates by the file's own preference", () => {
+    const ids = meteredOverflowCandidates(catalog, FULL_ENV, "subscription").map(
+      (lane) => lane.id
+    );
+    expect(ids).toEqual(["direct-api", "openrouter"]);
+  });
+
+  it("never offers the lane being overflowed off", () => {
+    const ids = meteredOverflowCandidates(catalog, FULL_ENV, "direct-api").map(
+      (lane) => lane.id
+    );
+    expect(ids).toEqual(["openrouter"]);
+  });
+
+  it("has no candidates without a catalog to read", () => {
+    expect(meteredOverflowCandidates(null, FULL_ENV, null)).toEqual([]);
+  });
+
+  it("makes cash of a metered lane or an overage, and nothing else", () => {
+    expect(effectiveBilling("subscription", false)).toBe("subscription");
+    expect(effectiveBilling("subscription", true)).toBe("metered");
+    expect(effectiveBilling("metered", false)).toBe("metered");
+  });
+
+  it("decides nothing at all when no lane resolves", () => {
+    const decision = crossing({ primary: null });
+
+    expect(decision.laneId).toBeNull();
+    expect(decision.billing).toBeNull();
+    expect(decision.refusal).toBeNull();
+  });
+});

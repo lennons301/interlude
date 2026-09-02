@@ -847,7 +847,8 @@ export async function notifyMeteredCapReached(
       .setDescription(
         `$${payload.spentUsd.toFixed(2)} of the $${payload.capUsd.toFixed(2)} real-money ` +
           `cap is spent on ${payload.laneId ?? "a metered lane"} — autonomous pickup is ` +
-          `paused until local midnight. Raise the cap in Settings if this was expected.`
+          `paused until local midnight, and an interactive session is told it is capped ` +
+          `rather than spending past it. Raise the cap in Settings if this was expected.`
       )
       .setColor(0xef4444);
 
@@ -877,10 +878,11 @@ export async function notifyMeteredConfirmationRequired(
     const embed = new EmbedBuilder()
       .setTitle("Real-money spend needs confirming")
       .setDescription(
-        `${payload.laneId ?? "The primary lane"} bills per token, and today's spend ` +
-          `hasn't been confirmed — autonomous pickup is held. Confirm it once in ` +
-          `Settings and the fleet runs unattended up to $${payload.capUsd.toFixed(2)} ` +
-          `for the rest of the day. In-flight runs and interactive work are unaffected.`
+        `Real money is being spent on ${payload.laneId ?? "the primary lane"}, and ` +
+          `today's spend hasn't been confirmed — autonomous pickup is held. Confirm ` +
+          `it once and the fleet runs unattended up to $${payload.capUsd.toFixed(2)} ` +
+          `for the rest of the day. In-flight runs are unaffected; an interactive ` +
+          `session asks for the same one press before it spends (issue #173).`
       )
       .setColor(0xf59e0b);
 
