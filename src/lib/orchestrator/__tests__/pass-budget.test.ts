@@ -160,6 +160,9 @@ describe("the allowance a pass runs on (issue #169)", () => {
     attemptBudgetUsd: number | null;
     carriedCostUsd: number;
     allowanceUsd: number | null;
+    /** What the pass is actually charged for its predecessors, when it differs
+     * from what the chain spent. */
+    carriedApplied?: number;
     remainingUsd: number | null;
   }[] = [
     {
@@ -187,12 +190,18 @@ describe("the allowance a pass runs on (issue #169)", () => {
       remainingUsd: 15,
     },
     {
-      name: "a resumed repair pass draws on the repair allowance, netted",
+      // Only the attempt's budget is netted. A repair pass is never an attempt:
+      // it has its own allowance, it is bounded per conflict episode, and it may
+      // not fail the run — so netting its $5 would hand a resumed repair small
+      // change to merge a branch with, and refusing it would fail an attempt a
+      // repair pass is not allowed to spend.
+      name: "a resumed repair pass keeps its own allowance, unnetted",
       kind: "repair",
       attemptBudgetUsd: 20,
       carriedCostUsd: 3,
       allowanceUsd: DEFAULT_REPAIR_BUDGET_USD,
-      remainingUsd: DEFAULT_REPAIR_BUDGET_USD - 3,
+      carriedApplied: 0,
+      remainingUsd: DEFAULT_REPAIR_BUDGET_USD,
     },
     {
       name: "a review pass keeps its own allowance",
@@ -230,19 +239,32 @@ describe("the allowance a pass runs on (issue #169)", () => {
 
       expect(budget.allowanceUsd).toBe(c.allowanceUsd);
       expect(budget.remainingUsd).toBe(c.remainingUsd);
-      expect(budget.carriedCostUsd).toBe(c.carriedCostUsd);
+      expect(budget.carriedCostUsd).toBe(c.carriedApplied ?? c.carriedCostUsd);
     });
   }
 
-  it("reports nothing left when the predecessors spent the allowance", () => {
+  it("reports nothing left when the predecessors spent the attempt budget", () => {
     // What the turn manager refuses to provision a container for: the pass has
-    // no money, so there is nothing for a ~2 GiB container to run.
+    // no money, so there is nothing for a ~2 GiB container to run. Defence in
+    // depth rather than a live path — exhaustion is judged ahead of the pause,
+    // so every link in a resume chain is strictly under the ceiling.
     const budget = resolvePassBudget({
-      kind: "repair",
+      kind: "implement",
       attemptBudgetUsd: 20,
-      carriedCostUsd: DEFAULT_REPAIR_BUDGET_USD,
+      carriedCostUsd: 20,
     });
 
     expect(budget.remainingUsd).toBe(0);
+  });
+
+  it("never nets a review or triage pass, which cannot be resumed at all", () => {
+    // Only an implement-shaped pass can pause on quota, so a carried figure
+    // here would mean lineage on a row that cannot have any — reported as the
+    // allowance it runs on, not as a reduced one.
+    for (const kind of ["review", "triage"]) {
+      const budget = resolvePassBudget({ kind, attemptBudgetUsd: 20, carriedCostUsd: 4 });
+      expect(budget.carriedCostUsd).toBe(0);
+      expect(budget.remainingUsd).toBe(budget.allowanceUsd);
+    }
   });
 });

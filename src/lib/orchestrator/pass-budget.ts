@@ -34,29 +34,48 @@ export type PassBudget = {
  * where that spend would accrue with no pickup gate in front of it, since a
  * resume is deliberately exempt from the daily cap.
  *
- * So the allowance follows the pass rather than the row. Which allowance is the
- * pass kind's, unchanged: an implement pass draws on the run's per-attempt
- * budget, a review pass on its own smaller one, a triage pass the smallest of
- * all, a repair pass its own — and an interactive task on none of them.
+ * So the **attempt's** budget follows the pass rather than the row. Which
+ * allowance a pass draws on is unchanged: an implement pass the run's
+ * per-attempt budget, a review pass its own smaller one, a triage pass the
+ * smallest of all, a repair pass its own — and an interactive task none of
+ * them, answering to the configured per-task default instead.
+ *
+ * Only the attempt's budget is netted, which is deliberate. A repair pass
+ * (issue #54) is *never an attempt*: it carries its own modest allowance, it is
+ * bounded per conflict episode rather than per attempt, and it may not fail the
+ * run — a repair that spends its allowance without clearing the conflict parks,
+ * and the sweep escalates the still-conflicting PR to a human. Netting its $5
+ * would hand a resumed repair pass small change to merge a branch with, and a
+ * refusal on the way in would have to fail an attempt a repair pass is not
+ * allowed to spend. What that leaves open is bounded and much smaller than what
+ * it closes: a resumed repair pass gets its $5 again, at most
+ * `MAX_RESUMES_CEILING` times. Closing it properly means giving repair one
+ * allowance per conflict episode across rows — including the fix-up turns that
+ * already charge against `run.budgetUsd` rather than the $5 — which is #54's
+ * accounting to settle, not this ticket's.
  */
 export function resolvePassBudget(pass: {
   kind: string;
   attemptBudgetUsd: number | null;
   carriedCostUsd: number;
 }): PassBudget {
-  const allowanceUsd =
+  // Null = "this kind has no allowance of its own": it draws on the attempt's,
+  // and so is the only kind whose budget is netted below.
+  const ownAllowanceUsd =
     pass.kind === "review"
       ? DEFAULT_REVIEW_BUDGET_USD
       : pass.kind === "triage"
         ? DEFAULT_TRIAGE_BUDGET_USD
         : pass.kind === "repair"
           ? DEFAULT_REPAIR_BUDGET_USD
-          : pass.attemptBudgetUsd;
+          : null;
+  const allowanceUsd = ownAllowanceUsd ?? pass.attemptBudgetUsd;
+  const carriedCostUsd = ownAllowanceUsd === null ? pass.carriedCostUsd : 0;
 
   return {
     allowanceUsd,
-    carriedCostUsd: pass.carriedCostUsd,
-    remainingUsd: allowanceUsd === null ? null : allowanceUsd - pass.carriedCostUsd,
+    carriedCostUsd,
+    remainingUsd: allowanceUsd === null ? null : allowanceUsd - carriedCostUsd,
   };
 }
 

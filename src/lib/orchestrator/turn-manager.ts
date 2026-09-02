@@ -356,17 +356,19 @@ export async function startTask(taskId: string): Promise<void> {
       carriedCostUsd,
     });
 
-    // A resumed pass whose predecessors spent the whole allowance has nothing
-    // left to run on. Judged here, before the container is provisioned, because
-    // the alternative is ~2 GiB built to run a turn with no money in it. An
-    // implement pass cannot reach this — exhaustion is judged ahead of the
-    // pause, so an attempt already at its ceiling fails rather than parks — but
-    // a repair pass is never an attempt, so its chain can.
-    if (run && isImplementShaped && passBudget.remainingUsd !== null && passBudget.remainingUsd <= 0) {
+    // Defence in depth, on the one kind for which "the attempt has no money
+    // left" and "the attempt fails" are the same sentence. An implement pass
+    // cannot actually reach this — exhaustion is judged ahead of the pause, so
+    // an attempt at its ceiling fails rather than parks, and every link in a
+    // resume chain is therefore strictly under it — but if it ever did, this is
+    // the answer, and it is given before a ~2 GiB container is built to run a
+    // turn with no money in it. Deliberately not repair: a repair pass is never
+    // an attempt and may not fail one, and its allowance is not netted anyway.
+    if (isImplementPass && run && passBudget.remainingUsd !== null && passBudget.remainingUsd <= 0) {
       await failImplementAttempt(
         taskId,
         run.id,
-        `budget exhausted ($${carriedCostUsd.toFixed(2)} of ` +
+        `budget exhausted ($${passBudget.carriedCostUsd.toFixed(2)} of ` +
           `$${(passBudget.allowanceUsd ?? 0).toFixed(2)} spent before this resume)`
       );
       return;
@@ -578,7 +580,11 @@ export async function startTask(taskId: string): Promise<void> {
       // rather than the repair burning a strike.
       if (isImplementPass) {
         const exhaustion = run
-          ? attemptExhaustion(run, carriedCostUsd + turnResult.costUsd, turnResult.subtype)
+          ? attemptExhaustion(
+              run,
+              passBudget.carriedCostUsd + turnResult.costUsd,
+              turnResult.subtype
+            )
           : null;
         if (exhaustion) {
           await failImplementAttempt(taskId, run!.id, exhaustion);
@@ -1036,7 +1042,10 @@ export async function processQueuedMessages(
     const budgetUsd = run?.budgetUsd ?? config.maxBudgetUsd;
     // The attempt's spend on this pass, not the row's: a pass resumed off a
     // quota pause carries what its predecessors spent (issue #169), so a
-    // fix-up turn cannot re-open a budget the attempt has already used up.
+    // fix-up turn cannot re-open a budget the attempt has already used up. The
+    // figure judged here is the *attempt's* budget for every run-owned task, a
+    // repair pass included, so what carries is netted by the same rule
+    // `resolvePassBudget` applies on the way in.
     const spentUsd = spendCarriedIntoPass(task) + (task.totalCostUsd ?? 0);
     if (spentUsd > 0 && spentUsd >= budgetUsd) {
       if (run) {
