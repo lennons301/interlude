@@ -534,6 +534,7 @@ describe("undelivered answer (issue #136)", () => {
     issueRef: "lennons301/moontide#62",
     taskUrl: "/tasks/task-1",
     queuedAtMs: T0,
+    sessionIdle: true,
     ...overrides,
   });
 
@@ -584,5 +585,33 @@ describe("undelivered answer (issue #136)", () => {
       delivered.state
     );
     expect(again.announce.undeliveredAnswers).toHaveLength(1);
+  });
+
+  it("never fires while a turn is in flight — a queued follow-up is not a stuck answer", () => {
+    const { signals, announce } = evaluate(
+      baseInput({
+        nowMs: T0 + min(120),
+        undeliveredAnswers: [answer({ sessionIdle: false })],
+      })
+    );
+    expect(signals.undeliveredAnswers).toEqual([]);
+    expect(announce.undeliveredAnswers).toEqual([]);
+  });
+
+  it("clears a standing card once the session picks the turn up", () => {
+    const stuck = evaluate(
+      baseInput({ nowMs: T0 + min(11), undeliveredAnswers: [answer()] })
+    );
+    expect(stuck.signals.undeliveredAnswers).toHaveLength(1);
+
+    const working = evaluate(
+      baseInput({
+        nowMs: T0 + min(12),
+        undeliveredAnswers: [answer({ sessionIdle: false })],
+      }),
+      stuck.state
+    );
+    expect(working.signals.undeliveredAnswers).toEqual([]);
+    expect(working.state.undeliveredAnswerAnnounced).toEqual([]);
   });
 });

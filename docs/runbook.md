@@ -264,14 +264,19 @@ the run continues on the same attempt, with its own conversation. If the project
 has no Discord channel and no fleet channel is configured, the question still
 appears on the task's chat page in the UI, where you can answer it.
 
-A blocked run **survives a restart** (issue #136): boot re-adopts its parked
-container, so an answer given before or after the restart is delivered on the
-next poll. If the container did not survive (a host OOM, a manual `docker rm`),
+A blocked run **survives a restart, and a deploy** (issues #136, #190): boot
+re-adopts its parked container, so an answer given before or after the restart is
+delivered on the next poll. The agent network is external to the compose stack,
+so a deploy's `down`/`up` no longer recreates it underneath a parked container —
+and a container whose network *was* recreated under it is reattached (aliases
+intact) on its next start rather than failing forever. If the container did not survive (a host OOM, a manual `docker rm`),
 the run is marked `interrupted` instead — the ticket is re-claimed without
 consuming an attempt, and the question plus anything you had already said is
 posted to the issue so the next attempt reads it. Either way, an answer left
-undelivered for 10 minutes raises an **answer stuck** card and one Discord ping,
-so a stuck answer is never silent.
+undelivered for 10 minutes **by an idle session** raises an **answer stuck** card
+and one Discord ping, so a stuck answer is never silent. A follow-up queued
+behind a turn that is actually running is ordinary queueing and says nothing —
+which is what you leave behind whenever you answer twice.
 
 ### 5. Find PRs waiting for sign-off
 
@@ -583,10 +588,17 @@ trigger) · `workflow:<skill>` (per-ticket workflow selector).
   collaborator" can mean `REVIEWER_GH_TOKEN` is unset or its account isn't on the repo.
 - **I answered a blocked agent and nothing happened.** The dashboard says so
   itself after 10 minutes — an **answer stuck** card, plus one Discord ping
-  (issue #136). Delivery needs the orchestrator to hold the parked container's
-  handle, which boot restores, so the usual cause left is memory: a parked
-  container is only resumed when the box has headroom. Check free memory, and
-  restart the app to force a fresh re-adopt. Repeating the answer does not help
-  — the *oldest* undelivered message is the one that gets delivered.
+  (issue #136) — but only when the session is *idle*; if a turn is running, your
+  answer is simply next in line. Boot restores the container handle (#136) and
+  the network survives a deploy (#190), so the cause left is memory: a parked
+  container is only resumed when the box has headroom. Check free memory.
+  Repeating the answer does not help — the *oldest* undelivered message is the
+  one delivered first.
+- **A deploy went green but prod is on old code.** Fixed in #189, and worth
+  knowing how to check: compare `git -C /opt/interlude rev-parse HEAD` with the
+  pushed SHA, and the `interlude-app` image's `CreatedAt` with the deploy time.
+  A cached rebuild of a stale checkout reproduces the *identical* image and
+  passes every health check, so the job's own green is not evidence. The deploy
+  now asserts the checked-out SHA against `github.sha` and fails instead.
 - **A gated PR never merges.** That's by design — `human-signoff` means it waits
   for you. Merge it yourself.

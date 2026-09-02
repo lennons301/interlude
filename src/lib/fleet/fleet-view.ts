@@ -966,8 +966,13 @@ export function buildFleetView(rows: FleetRows): FleetView {
   }
   // An answer the owner has already given that the agent never received
   // (issue #136). Red, and above the run-level cards: the owner has done their
-  // part, so this is the machinery failing to carry it — and until #136's boot
-  // adoption a restart was the only thing that could.
+  // part, so this is the machinery failing to carry it.
+  //
+  // The remedy names memory rather than a restart. Boot adoption (#136) and the
+  // external agent network (#190) between them removed the two reasons a
+  // restart used to be the answer, and the evaluator only raises this for an
+  // *idle* session — so what is left is a resume the memory-admission gate keeps
+  // deferring, which a restart would not help.
   for (const answer of health?.undeliveredAnswers ?? []) {
     needsYou.push({
       cause: "answer-undelivered",
@@ -976,8 +981,8 @@ export function buildFleetView(rows: FleetRows): FleetView {
       body:
         `Your answer has sat undelivered for ${formatDuration(
           answer.undeliveredForMs
-        )} — the agent never received it. ` +
-        "The parked session is not resuming; restart the app to re-adopt it.",
+        )} — the session is idle and has not taken it. ` +
+        "A parked container is only resumed when the box has memory headroom; check free memory.",
       action: { label: "Open session", href: answer.taskUrl },
     });
   }

@@ -443,6 +443,11 @@ async function gatherFleetHealthInput(
  * they repeat themselves — which is exactly what an owner does when nothing
  * happens (the #136 incident had the same answer sent twice, once in the UI and
  * once through Discord).
+ *
+ * That repetition is also why `sessionIdle` is carried rather than assumed: the
+ * *second* of two answers stays undelivered for the whole of the turn the first
+ * one started, so a card judged on age alone fires on a run that is working.
+ * Only `container_status` distinguishes them, and the evaluator decides.
  */
 function gatherUndeliveredAnswers(): UndeliveredAnswerObservation[] {
   const rows = db
@@ -452,6 +457,7 @@ function gatherUndeliveredAnswers(): UndeliveredAnswerObservation[] {
       title: tasks.title,
       kind: tasks.kind,
       githubIssue: tasks.githubIssue,
+      containerStatus: tasks.containerStatus,
     })
     .from(messages)
     .innerJoin(tasks, eq(tasks.id, messages.taskId))
@@ -474,6 +480,7 @@ function gatherUndeliveredAnswers(): UndeliveredAnswerObservation[] {
       issueRef: row.githubIssue,
       taskUrl: `/tasks/${row.taskId}`,
       queuedAtMs: row.createdAt.getTime(),
+      sessionIdle: row.containerStatus === "idle",
     });
   }
   return [...oldest.values()];
