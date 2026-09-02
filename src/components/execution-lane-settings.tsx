@@ -1,13 +1,8 @@
 "use client";
 
-import { useState } from "react";
-import {
-  Chip,
-  ChipRadio,
-  LoadFailure,
-  PANEL_PLAIN,
-} from "@/components/fleet/fleet-bits";
-import { useLoad } from "@/lib/use-load";
+import { Chip, ChipRadio, PANEL_PLAIN } from "@/components/fleet/fleet-bits";
+import { FALL_THROUGH } from "@/components/settings-overrides";
+import { MODEL_TIERS } from "@/lib/model-tiers";
 import type { LaneSettingsView, LaneView } from "@/lib/lanes/resolve";
 
 /**
@@ -29,84 +24,38 @@ import type { LaneSettingsView, LaneView } from "@/lib/lanes/resolve";
  * - variable **names** only ever cross the wire. No lane secret is stored in
  *   the database or served by the API, and this panel could not show one if it
  *   wanted to.
+ *
+ * Presentational: its state is shared with the model-tier panel, because a
+ * tier's model identifier is whatever the lane picked here says it is.
  */
-
-interface LaneState {
+export function ExecutionLanePanel({
+  lanes,
+  laneError,
+  busy,
+  disabled,
+  saveError,
+  onChoose,
+}: {
   lanes: LaneSettingsView | null;
-  /** Why the lane file could not be read, when it could not be. */
   laneError: string | null;
-}
-
-/** The option that means "no override" — fall through to the deployment's own
- * variable and then to the file's preference order. */
-const FALL_THROUGH = "environment";
-
-export function ExecutionLaneSettings() {
-  const {
-    data: state,
-    error: loadError,
-    reload,
-    setData,
-  } = useLoad<LaneState>("/api/settings/overrides");
-  const [busy, setBusy] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-
-  async function choose(choice: string) {
-    setBusy(true);
-    setSaveError(null);
-    try {
-      const res = await fetch("/api/settings/overrides", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          primaryLane: choice === FALL_THROUGH ? null : choice,
-        }),
-      });
-      const body = await res.json();
-      if (!res.ok) {
-        // The route answers a rejection with the reason it refused — show that
-        // rather than a status code, since the reason is the whole point of
-        // rejecting instead of quietly picking some other lane.
-        throw new Error(
-          typeof body?.error === "string"
-            ? body.error
-            : `the server answered ${res.status}`
-        );
-      }
-      setData(body as LaneState);
-    } catch (err) {
-      setSaveError(
-        `That didn't stick — ${err instanceof Error ? err.message : "the request failed"}`
-      );
-    }
-    setBusy(false);
-  }
-
-  if (state === null) {
-    return (
-      <div className={PANEL_PLAIN}>
-        {loadError === null ? (
-          <p className="font-plex-mono text-[11px] text-fl-ink-3">checking…</p>
-        ) : (
-          <LoadFailure what="the execution lanes" error={loadError} onRetry={reload} />
-        )}
-      </div>
-    );
-  }
-
-  if (state.lanes === null) {
+  busy: boolean;
+  disabled: boolean;
+  saveError: string | null;
+  onChoose: (choice: string) => void;
+}) {
+  if (lanes === null) {
     return (
       <div className={PANEL_PLAIN}>
         <p role="alert" className="text-[13px] text-fl-red">
-          No usable execution lanes — {state.laneError ?? "lanes.yaml could not be read"}.
+          No usable execution lanes — {laneError ?? "lanes.yaml could not be read"}.
           No pass can start until this is fixed.
         </p>
       </div>
     );
   }
 
-  const lanes = state.lanes;
   const selected = lanes.override ?? FALL_THROUGH;
+  const primary = lanes.lanes.find((lane) => lane.id === lanes.primaryLaneId);
 
   return (
     <div className={`${PANEL_PLAIN} space-y-4`}>
@@ -129,16 +78,16 @@ export function ExecutionLaneSettings() {
               name="primaryLane"
               value={lane.id}
               selected={selected === lane.id}
-              disabled={busy}
-              onSelect={() => choose(lane.id)}
+              disabled={disabled}
+              onSelect={() => onChoose(lane.id)}
             />
           ))}
           <ChipRadio
             name="primaryLane"
             value={FALL_THROUGH}
             selected={selected === FALL_THROUGH}
-            disabled={busy}
-            onSelect={() => choose(FALL_THROUGH)}
+            disabled={disabled}
+            onSelect={() => onChoose(FALL_THROUGH)}
           />
           {busy && (
             <span className="font-plex-mono text-[11px] text-fl-ink-3">…</span>
@@ -162,6 +111,17 @@ export function ExecutionLaneSettings() {
           </span>
         </p>
       </fieldset>
+
+      {primary !== undefined && !primary.available && (
+        <p role="alert" className="text-[13px] text-fl-red">
+          The lane in force cannot run: set{" "}
+          <span className="font-plex-mono">
+            {primary.missingEnvVars.join(", ")}
+          </span>{" "}
+          in the deployment, or pick a lane that is available. Until then every
+          pass fails as it starts.
+        </p>
+      )}
 
       {lanes.unknownChoice !== null && (
         <p role="alert" className="text-[13px] text-fl-amber">
@@ -220,9 +180,7 @@ function LaneRow({ lane }: { lane: LaneView }) {
 
       <p className="font-plex-mono text-[11px] text-fl-ink-3">
         {lane.adapter} · {lane.baseUrl ?? "default endpoint"} ·{" "}
-        {(["heavy", "standard", "light"] as const)
-          .map((tier) => `${tier}=${lane.models[tier]}`)
-          .join(" ")}
+        {MODEL_TIERS.map((tier) => `${tier}=${lane.models[tier]}`).join(" ")}
         {lane.caps.dailyBudgetUsd !== null &&
           ` · cap $${lane.caps.dailyBudgetUsd}/day`}
       </p>

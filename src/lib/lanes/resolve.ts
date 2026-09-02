@@ -104,7 +104,11 @@ export function choosePrimaryLane({
   for (const [value, source] of explicit) {
     if (value === null || value === "") continue;
     if (findLane(catalog, value) !== null) {
-      return { laneId: value, source, unknownChoice: null };
+      // The dangling choice is carried even when a later layer resolves: an
+      // override naming a removed lane is exactly the case where the fleet is
+      // not on the lane the operator picked, and that must not be hidden by
+      // AGENT_LANE happening to answer.
+      return { laneId: value, source, unknownChoice };
     }
     // Keep looking (an unknown override still lets AGENT_LANE decide), but
     // remember the first dangling choice so the screen can say so.
@@ -124,6 +128,35 @@ export function choosePrimaryLane({
     laneId: chosen?.id ?? null,
     source: "preference",
     unknownChoice,
+  };
+}
+
+/**
+ * Where the primary-lane choice is read from: the catalog it must name a lane
+ * in, the environment default, the stored override, and the environment the
+ * credentials live in. One type because both callers — resolving a lane for a
+ * pass and describing the lanes for the screen — must answer "which lane is
+ * primary?" from exactly the same four things, or the screen would report a
+ * lane other than the one a pass would run on.
+ */
+export interface LaneSettingsInput {
+  catalog: LaneCatalog;
+  config: AppConfig;
+  overrides: SettingsOverrides;
+  env: LaneEnv;
+}
+
+function primaryLaneInput({
+  catalog,
+  config,
+  overrides,
+  env,
+}: LaneSettingsInput): PrimaryLaneInput {
+  return {
+    catalog,
+    override: overrides.primaryLane ?? null,
+    envLane: config.agentLane,
+    env,
   };
 }
 
@@ -157,15 +190,11 @@ export type LaneResolution =
   | { ok: true; lane: ResolvedLane; choice: PrimaryLaneChoice }
   | { ok: false; reason: string; choice: PrimaryLaneChoice };
 
-export interface ResolveLaneInput {
-  catalog: LaneCatalog;
+export interface ResolveLaneInput extends LaneSettingsInput {
   kind: AgentPassKind;
-  config: AppConfig;
   /** A ticket's `model:` directive, already normalised to a tier by the
    * directive parser; null for a pass that carries none. */
   ticketModel: string | null;
-  overrides: SettingsOverrides;
-  env: LaneEnv;
 }
 
 /**
@@ -188,12 +217,7 @@ export function resolveLane({
   overrides,
   env,
 }: ResolveLaneInput): LaneResolution {
-  const choice = choosePrimaryLane({
-    catalog,
-    override: overrides.primaryLane ?? null,
-    envLane: config.agentLane,
-    env,
-  });
+  const choice = choosePrimaryLane(primaryLaneInput({ catalog, config, overrides, env }));
 
   const lane = findLane(catalog, choice.laneId);
   if (lane === null) {
@@ -281,18 +305,10 @@ export interface LaneSettingsView {
 /** The variable the deployment's own lane default comes from. */
 export const LANE_ENV_VAR = "AGENT_LANE";
 
-export function describeLanes(
-  catalog: LaneCatalog,
-  config: AppConfig,
-  overrides: SettingsOverrides,
-  env: LaneEnv
-): LaneSettingsView {
-  const choice = choosePrimaryLane({
-    catalog,
-    override: overrides.primaryLane ?? null,
-    envLane: config.agentLane,
-    env,
-  });
+export function describeLanes(input: LaneSettingsInput): LaneSettingsView {
+  const { catalog, config, env } = input;
+  const overrides = input.overrides;
+  const choice = choosePrimaryLane(primaryLaneInput(input));
 
   return {
     primaryLaneId: choice.laneId,

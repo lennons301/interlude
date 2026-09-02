@@ -127,6 +127,14 @@ export const runs = sqliteTable("runs", {
   // pins it from claim time; otherwise it is set when the implement pass
   // starts. Null means AGENT_MODEL was unset (no directive) and the CLI
   // resolved the account default.
+  //
+  // Holds a *tier* (`heavy`/`standard`/`light`) since lanes (issue #172), not
+  // the identifier it resolved to — the column is read back as the run's
+  // directive on every later pass of the same attempt, and a lane-specific
+  // identifier names no tier, so storing one would drop the directive. Read
+  // it beside `lane` to recover the identifier. The one exception is an
+  // environment that pins a raw model id naming no tier: that is stored
+  // verbatim, because there is no tier to store.
   model: text("model"),
   // Reasoning-effort level the implement pass ran at (issue #81) — the other
   // half of the cost/quality dial alongside model. A ticket's `effort:`

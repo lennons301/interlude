@@ -3,8 +3,7 @@ import { Eyebrow } from "@/components/fleet/fleet-bits";
 import { ProjectList } from "@/components/project-list";
 import { DockerStatus } from "@/components/docker-status";
 import { KillSwitch } from "@/components/kill-switch";
-import { ModelTierSettings } from "@/components/model-tier-settings";
-import { ExecutionLaneSettings } from "@/components/execution-lane-settings";
+import { SettingsOverrides } from "@/components/settings-overrides";
 import { getConfig } from "@/lib/config";
 
 /**
@@ -46,15 +45,10 @@ export default function SettingsPage() {
           <KillSwitch />
         </section>
 
-        <section aria-label="Models" className="space-y-3">
-          <Eyebrow>Models</Eyebrow>
-          <ModelTierSettings />
-        </section>
-
-        <section aria-label="Execution lane" className="space-y-3">
-          <Eyebrow>Execution lane</Eyebrow>
-          <ExecutionLaneSettings />
-        </section>
+        {/* Two headed sections, one client-side state: a tier's model
+            identifier is whatever the primary lane resolves it to, so the two
+            panels cannot be fetched independently (issue #172). */}
+        <SettingsOverrides />
 
         <section aria-label="Projects" className="space-y-3">
           <Eyebrow>Projects</Eyebrow>

@@ -7,11 +7,7 @@ import {
   DEFAULT_QUEUE_HEARTBEAT_STALE_MS,
 } from "./orchestrator/autonomy/budgets";
 import type { FleetHealthThresholds } from "./fleet/health";
-import {
-  normalizeModelTier,
-  tierModelId,
-  type ModelTier,
-} from "./model-tiers";
+import { normalizeModelTier, type ModelTier } from "./model-tiers";
 import {
   resolveModelTier,
   type SettingsOverrides,
@@ -246,8 +242,8 @@ function isWorkPassKind(kind: AgentPassKind): boolean {
 }
 
 /**
- * Which model a turn of the given kind runs on (issues #74, #80, #166), and
- * the one place the three layers of that answer are ordered:
+ * Which **tier** a turn of the given kind runs at (issues #74, #80, #166,
+ * #172), and the one place the three layers of that answer are ordered:
  *
  * 1. A ticket's `model:` directive — already normalised to a tier by the
  *    directive parser — wins, for the pass kinds that carry a run's tier
@@ -257,43 +253,20 @@ function isWorkPassKind(kind: AgentPassKind): boolean {
  * 2. Then the UI override for this pass kind, if one is set (issue #166).
  * 3. Then the environment default — `AGENT_MODEL` as the base, with
  *    `AGENT_MODEL_REVIEW` / `AGENT_MODEL_TRIAGE` for the read-heavy passes.
- *    Null means "pass no `--model`": the CLI resolves the account default,
- *    exactly as before any of this was configurable.
+ *
+ * It stops at the tier because what a tier *means* is a property of the
+ * execution lane the pass is about to run on (issue #172), not of this module
+ * — see `resolveLane`, the only caller. `pinnedModel` is the escape hatch that
+ * must keep working: an environment naming a raw model id rather than a tier
+ * (`AGENT_MODEL=claude-opus-4-8`) has no tier to map, so the id passes through
+ * verbatim. Both null means "pass no model flag": the harness resolves its own
+ * default, exactly as before any of this was configurable.
  *
  * `overrides` is explicit rather than fetched here, and has no default, so a
  * new call site has to decide where it reads them from — the answer is
  * `getSettingsOverrides()` at the point of use, never a cached copy, because
  * `getConfig()` memoises and a UI override cannot ride on something that never
  * re-reads.
- */
-export function resolveAgentModel(
-  kind: AgentPassKind,
-  config: AppConfig,
-  ticketModel: string | null,
-  overrides: SettingsOverrides
-): string | null {
-  const { tier, pinnedModel } = resolveAgentModelChoice(
-    kind,
-    config,
-    ticketModel,
-    overrides
-  );
-  return tier !== null ? tierModelId(tier) : pinnedModel;
-}
-
-/**
- * The same three-layer answer, stopped one step earlier: the **tier** the pass
- * runs at, before anything decides what that tier means as a model identifier.
- *
- * Execution lanes (issue #172) are why this seam exists. A tier is the durable
- * choice a human makes; which identifier stands behind it is a property of the
- * lane the pass runs on, so the mapping cannot live here any more — it belongs
- * to whichever endpoint is about to be called. `resolveAgentModel` above keeps
- * the pre-lane mapping (`TIER_MODEL_IDS`) for callers with no lane in hand.
- *
- * `pinnedModel` is the escape hatch that must keep working: an environment
- * that names a raw model id rather than a tier (`AGENT_MODEL=claude-opus-4-8`)
- * has no tier to map, so the id passes through verbatim.
  */
 export function resolveAgentModelChoice(
   kind: AgentPassKind,

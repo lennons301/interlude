@@ -24,6 +24,7 @@
 
 import { parse as parseYaml } from "yaml";
 import { MODEL_TIERS, type ModelTier } from "../model-tiers";
+import { isLaneIdShaped } from "./lane-id";
 
 /** The harness adapters that exist. Exactly one ships (issue #172) — the
  * interface is designed against what an OpenCode or Codex adapter would need,
@@ -99,10 +100,6 @@ export type LaneConfigResult =
   | { ok: true; catalog: LaneCatalog }
   | { ok: false; reason: string };
 
-/** Lane ids are slugs — they reach a settings row, a URL-ish API payload and a
- * log line, so they stay boring. */
-const LANE_ID = /^[a-z0-9][a-z0-9-]*$/;
-
 /**
  * An environment-variable *name*. This pattern is the mechanism behind
  * "secrets appear only as names": a pasted `sk-ant-...` does not match, so an
@@ -170,7 +167,7 @@ function parseLane(raw: unknown, index: number): LaneParse {
   if (!isMapping(raw)) return { reason: `${at} is not a mapping` };
 
   const id = raw.id;
-  if (typeof id !== "string" || !LANE_ID.test(id)) {
+  if (typeof id !== "string" || !isLaneIdShaped(id)) {
     return {
       reason: `${at} has no valid \`id\` (lowercase slug, e.g. "anthropic-api")`,
     };

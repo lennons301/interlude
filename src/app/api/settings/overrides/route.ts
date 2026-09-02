@@ -5,6 +5,7 @@ import {
   describeModelTierSettings,
   parseSettingsPatch,
   type SettingsOverrides,
+  type TierModelIds,
 } from "@/lib/settings-resolver";
 import { getLaneCatalog } from "@/lib/lanes/catalog";
 import { laneCatalogContext } from "@/lib/lanes/settings-context";
@@ -29,19 +30,32 @@ import { describeLanes, type LaneSettingsView } from "@/lib/lanes/resolve";
 function laneState(overrides: SettingsOverrides): {
   lanes: LaneSettingsView | null;
   laneError: string | null;
+  /** The primary lane's tier map — what the model-tier rows must be resolved
+   * against, so the screen names the model a pass would actually run. */
+  tierModels: TierModelIds | undefined;
 } {
   const catalog = getLaneCatalog();
-  if (!catalog.ok) return { lanes: null, laneError: catalog.reason };
-  return {
-    lanes: describeLanes(catalog.catalog, getConfig(), overrides, process.env),
-    laneError: null,
-  };
+  if (!catalog.ok) {
+    // No catalog means no pass can start at all, which the lane panel says in
+    // as many words; the tier rows fall back to the pre-lane map rather than
+    // rendering blank beside it.
+    return { lanes: null, laneError: catalog.reason, tierModels: undefined };
+  }
+  const lanes = describeLanes({
+    catalog: catalog.catalog,
+    config: getConfig(),
+    overrides,
+    env: process.env,
+  });
+  const primary = lanes.lanes.find((lane) => lane.primary);
+  return { lanes, laneError: null, tierModels: primary?.models };
 }
 
 function state(overrides: SettingsOverrides, updatedAt: Date | null) {
+  const { tierModels, ...lanes } = laneState(overrides);
   return {
-    fields: describeModelTierSettings(getConfig(), overrides),
-    ...laneState(overrides),
+    fields: describeModelTierSettings(getConfig(), overrides, tierModels),
+    ...lanes,
     updatedAt: updatedAt?.toISOString() ?? null,
   };
 }

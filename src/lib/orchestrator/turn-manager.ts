@@ -294,69 +294,6 @@ export async function startTask(taskId: string): Promise<void> {
     ? db.select().from(runs).where(eq(runs.id, task.runId)).get()
     : undefined;
 
-  // The execution lane this pass runs on (issue #172): the harness adapter,
-  // the endpoint, the credentials and the model identifier standing behind the
-  // tier that kind of pass runs at — pinned by kind (issue #74) and, for an
-  // implement-shaped or interactive pass, overridable by the run's `model:`
-  // directive (issue #80).
-  //
-  // Resolved *before* the container is provisioned, so a lane whose named
-  // variables are absent fails the pass here, naming them, rather than dying
-  // inside a live harness twenty seconds later with "Not logged in".
-  //
-  // Read fresh from the settings row, not from a cached config: a UI-set tier
-  // or lane (issues #166, #172) has to reach the next pass without a restart,
-  // and `getConfig()` memoises on first read.
-  const passLane = requireLane(task.kind, run?.model ?? null);
-  const passModel = passLane.model;
-
-  // The reasoning-effort level this pass runs at (issue #81), the other half
-  // of the cost/quality dial. Pinned by kind and, for an implement-shaped or
-  // interactive pass, overridable by the run's `effort:` directive. Passed to
-  // every turn as `--effort` and recorded on the run row below.
-  const passEffort = resolveAgentEffort(task.kind, getConfig(), run?.effort ?? null);
-
-  // Update task status
-  updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
-  insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
-
-  // Only an implement-shaped pass moves the run to `implementing` — a review
-  // pass starting must not drag a `reviewing`/`gated` run backwards. A repair
-  // pass keeps the run's original startedAt so the dashboard's elapsed time
-  // does not jump when a conflict is repaired mid-life.
-  if (run && isImplementShaped) {
-    // Record the implement-pass lane, model and effort on the run — they drive
-    // the bulk of a run's spend, so they are the substrate, tier and depth the
-    // run's cost should be read against, and the lane is what says whether
-    // that cost was subscription quota or real money (issue #172). A review
-    // pass writes its own (cheaper/lower) model and effort nowhere on the run,
-    // leaving these stable. Repair keeps the original implement values.
-    db.update(runs)
-      .set({
-        status: "implementing",
-        startedAt: run.startedAt ?? new Date(),
-        lane: passLane.id,
-        model: passModel,
-        effort: passEffort,
-      })
-      .where(eq(runs.id, run.id))
-      .run();
-  }
-
-  // Notify Discord channel that task is queued — but not for tasks created
-  // from Discord, which already got their queued embed posted in client.ts,
-  // and not for autonomous passes: their lifecycle lives on the issue thread
-  // and Discord stays push-only for exceptional events.
-  if (proj.discordChannelId && !task.discordMessageId && !isAutonomousPass) {
-    notifyTaskQueued(proj.discordChannelId, {
-      id: taskId,
-      title: task.title,
-      projectName: proj.name,
-    }).then((msgId) => {
-      if (msgId) updateTask(taskId, { discordMessageId: msgId });
-    }).catch(console.error);
-  }
-
   let running: RunningContainer | null = null;
   // Whether the initial turn reached a terminal agent result (a `result`
   // event). Stays false if the container dies mid-turn — the signal the catch
@@ -364,7 +301,87 @@ export async function startTask(taskId: string): Promise<void> {
   // (issue #97).
   let producedResult = false;
 
+  // Everything from here is inside the failure path. Lane resolution
+  // (issue #172) is why the boundary sits this early: an unavailable lane is a
+  // routinely reachable misconfiguration, and a throw *outside* the try would
+  // leave the task `queued` for the poll loop to pick up again every two
+  // seconds forever. Inside, it fails the task with the reason on the feed,
+  // and an implement pass routes to the bounded interruption path like any
+  // other infra death.
   try {
+    // The execution lane this pass runs on (issue #172): the harness adapter,
+    // the endpoint, the credentials and the model identifier standing behind the
+    // tier that kind of pass runs at — pinned by kind (issue #74) and, for an
+    // implement-shaped or interactive pass, overridable by the run's `model:`
+    // directive (issue #80).
+    //
+    // Resolved *before* the container is provisioned, so a lane whose named
+    // variables are absent fails the pass here, naming them, rather than dying
+    // inside a live harness twenty seconds later with "Not logged in".
+    //
+    // Read fresh from the settings row, not from a cached config: a UI-set tier
+    // or lane (issues #166, #172) has to reach the next pass without a restart,
+    // and `getConfig()` memoises on first read.
+    const passLane = requireLane(task.kind, run?.model ?? null);
+    const passModel = passLane.model;
+
+    // The reasoning-effort level this pass runs at (issue #81), the other half
+    // of the cost/quality dial. Pinned by kind and, for an implement-shaped or
+    // interactive pass, overridable by the run's `effort:` directive. Passed to
+    // every turn as `--effort` and recorded on the run row below.
+    const passEffort = resolveAgentEffort(task.kind, getConfig(), run?.effort ?? null);
+
+    // Update task status
+    updateTask(taskId, { status: "running", branch, containerStatus: "setup" });
+    insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
+
+    // Only an implement-shaped pass moves the run to `implementing` — a review
+    // pass starting must not drag a `reviewing`/`gated` run backwards. A repair
+    // pass keeps the run's original startedAt so the dashboard's elapsed time
+    // does not jump when a conflict is repaired mid-life.
+    if (run && isImplementShaped) {
+      // Record the implement-pass lane, tier and effort on the run — they drive
+      // the bulk of a run's spend, so they are the substrate, tier and depth
+      // the run's cost should be read against, and the lane is what says
+      // whether that cost was subscription quota or real money (issue #172). A
+      // review pass writes its own (cheaper/lower) model and effort nowhere on
+      // the run, leaving these stable. Repair keeps the original implement
+      // values.
+      //
+      // The *tier* is what goes in `model`, not the identifier it resolved to
+      // (issue #172): this column is read back as the run's `model:` directive
+      // on every later pass, and a lane-specific identifier
+      // ("anthropic/claude-sonnet-4.5") names no tier, so recording it would
+      // silently drop the directive the moment the fleet left an
+      // alias-mapped lane. With the lane recorded beside it, tier + lane still
+      // gives the identifier. A pinned raw id (no tier) is recorded verbatim,
+      // exactly as before.
+      db.update(runs)
+        .set({
+          status: "implementing",
+          startedAt: run.startedAt ?? new Date(),
+          lane: passLane.id,
+          model: passLane.tier ?? passModel,
+          effort: passEffort,
+        })
+        .where(eq(runs.id, run.id))
+        .run();
+    }
+
+    // Notify Discord channel that task is queued — but not for tasks created
+    // from Discord, which already got their queued embed posted in client.ts,
+    // and not for autonomous passes: their lifecycle lives on the issue thread
+    // and Discord stays push-only for exceptional events.
+    if (proj.discordChannelId && !task.discordMessageId && !isAutonomousPass) {
+      notifyTaskQueued(proj.discordChannelId, {
+        id: taskId,
+        title: task.title,
+        projectName: proj.name,
+      }).then((msgId) => {
+        if (msgId) updateTask(taskId, { discordMessageId: msgId });
+      }).catch(console.error);
+    }
+
     // Create container. Review and triage passes receive no credential beyond
     // the App token their setup uses for cloning — not even the project's
     // Doppler secrets: they read code, they don't run the app. A repair pass
@@ -790,6 +807,13 @@ export async function processQueuedMessages(
       break;
     }
 
+    // Resolve the lane before anything is consumed (issue #172). Fresh on
+    // every follow-up turn, so a tier or lane changed mid-session applies from
+    // the next one (issue #166) — and *before* the dequeue below, because a
+    // throw after a message is marked delivered would burn the owner's turn on
+    // a misconfiguration and strand the task non-terminal.
+    const passLane = requireLane(task.kind, run?.model ?? null);
+
     // Find oldest undelivered user message
     const queued = db
       .select()
@@ -865,9 +889,7 @@ export async function processQueuedMessages(
       {
         maxBudgetUsd: run ? run.budgetUsd - (task.totalCostUsd ?? 0) : undefined,
         maxTurns: run?.maxTurns ?? undefined,
-        // Fresh again on a follow-up turn, so a tier or lane changed
-        // mid-session applies from the next turn (issues #166, #172).
-        lane: requireLane(task.kind, run?.model ?? null),
+        lane: passLane,
         effort: resolveAgentEffort(task.kind, config, run?.effort ?? null),
         // A generation session's follow-up exec gets a `gh` token too (#62).
         isGenerationSession: isGenerationSession(task),

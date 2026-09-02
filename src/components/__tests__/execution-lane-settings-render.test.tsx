@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { LaneSettingsView, LaneView } from "@/lib/lanes/resolve";
+import { ExecutionLanePanel } from "../execution-lane-settings";
 
 /**
  * The execution-lane panel (issue #172). Its single control is which lane is
@@ -12,22 +13,9 @@ import type { LaneSettingsView, LaneView } from "@/lib/lanes/resolve";
  * The strongest assertion here is the negative one: no credential may reach
  * the markup, because a project API route has previously leaked a stored token
  * in cleartext.
+ *
+ * Presentational, so the view model is handed in directly.
  */
-let state: { lanes: LaneSettingsView | null; laneError: string | null } = {
-  lanes: null,
-  laneError: null,
-};
-
-vi.mock("@/lib/use-load", () => ({
-  useLoad: () => ({
-    data: state,
-    error: null,
-    reload: () => {},
-    setData: () => {},
-  }),
-}));
-
-import { ExecutionLaneSettings } from "../execution-lane-settings";
 
 function lane(over: Partial<LaneView> = {}): LaneView {
   return {
@@ -64,20 +52,25 @@ const OPENROUTER = lane({
 });
 
 function render(over: Partial<LaneSettingsView> = {}): string {
-  state = {
-    laneError: null,
-    lanes: {
-      lanes: [lane(), OPENROUTER],
-      primaryLaneId: "claude-subscription",
-      source: "preference",
-      override: null,
-      envVar: "AGENT_LANE",
-      envValue: null,
-      unknownChoice: null,
-      ...over,
-    },
-  };
-  return renderToStaticMarkup(<ExecutionLaneSettings />);
+  return renderToStaticMarkup(
+    <ExecutionLanePanel
+      lanes={{
+        lanes: [lane(), OPENROUTER],
+        primaryLaneId: "claude-subscription",
+        source: "preference",
+        override: null,
+        envVar: "AGENT_LANE",
+        envValue: null,
+        unknownChoice: null,
+        ...over,
+      }}
+      laneError={null}
+      busy={false}
+      disabled={false}
+      saveError={null}
+      onChoose={() => {}}
+    />
+  );
 }
 
 describe("the execution-lane settings panel", () => {
@@ -136,9 +129,16 @@ describe("the execution-lane settings panel", () => {
   });
 
   it("says plainly when the lane file itself is unusable", () => {
-    state = { lanes: null, laneError: "duplicate lane id \"openrouter\"" };
-
-    const html = renderToStaticMarkup(<ExecutionLaneSettings />);
+    const html = renderToStaticMarkup(
+      <ExecutionLanePanel
+        lanes={null}
+        laneError={'duplicate lane id "openrouter"'}
+        busy={false}
+        disabled={false}
+        saveError={null}
+        onChoose={() => {}}
+      />
+    );
 
     expect(html).toContain("No usable execution lanes");
     expect(html).toContain("duplicate lane id");

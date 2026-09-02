@@ -192,6 +192,23 @@ describe("which lane is primary", () => {
     ).toMatchObject({ laneId: "openrouter", source: "override" });
   });
 
+  it("still reports a dangling override when the environment resolves", () => {
+    // The case the screen most needs: the fleet is running, but not on the
+    // lane the operator picked.
+    expect(
+      choosePrimaryLane({
+        catalog,
+        override: "retired-lane",
+        envLane: "openrouter",
+        env: EVERYTHING,
+      })
+    ).toEqual({
+      laneId: "openrouter",
+      source: "environment",
+      unknownChoice: "retired-lane",
+    });
+  });
+
   it("reports a stored choice that names no declared lane, and carries on", () => {
     const choice = choosePrimaryLane({
       catalog,
@@ -274,6 +291,27 @@ describe("what a resolved lane carries", () => {
     expect(review.ok && review.lane.model).toBe("anthropic/claude-haiku-4.5");
   });
 
+  it("round-trips the tier the run ledger records, on any lane", () => {
+    // The ledger stores the *tier* (issue #172), and every later pass of the
+    // attempt reads it back as the run's `model:` directive. Storing the
+    // resolved identifier instead would drop the directive the moment the
+    // fleet left a lane whose ids happen to be tier aliases.
+    const first = resolve({
+      kind: "implement",
+      ticketModel: "heavy",
+      overrides: { primaryLane: "openrouter" },
+    });
+    expect(first.ok && first.lane.tier).toBe("heavy");
+
+    const recorded = first.ok ? first.lane.tier : null;
+    const later = resolve({
+      kind: "repair",
+      ticketModel: recorded,
+      overrides: { primaryLane: "openrouter" },
+    });
+    expect(later.ok && later.lane.model).toBe("anthropic/claude-opus-4.1");
+  });
+
   it("accepts a legacy vendor alias as a tier", () => {
     const result = resolve({
       kind: "implement",
@@ -311,12 +349,12 @@ describe("what a resolved lane carries", () => {
 });
 
 describe("describeLanes — what the settings screen is handed", () => {
-  const view = describeLanes(
+  const view = describeLanes({
     catalog,
-    cfg({ agentLane: "direct-api" }),
-    {},
-    SUBSCRIBED
-  );
+    config: cfg({ agentLane: "direct-api" }),
+    overrides: {},
+    env: SUBSCRIBED,
+  });
 
   it("reports the lane in force and where the choice came from", () => {
     expect(view).toMatchObject({

@@ -15,7 +15,7 @@ vi.mock("@/db", () => ({
 }));
 
 import { GET, PATCH } from "@/app/api/settings/overrides/route";
-import { getConfig, resetConfig, resolveAgentModel } from "@/lib/config";
+import { getConfig, resetConfig, resolveAgentModelChoice } from "@/lib/config";
 import { getSettingsOverrides } from "@/lib/settings";
 import { getLaneCatalog, resetLaneCatalog } from "@/lib/lanes/catalog";
 import { resolveLane } from "@/lib/lanes/resolve";
@@ -91,14 +91,16 @@ describe("GET/PATCH /api/settings/overrides", () => {
       envValue: "claude-opus-4-8",
     });
 
-    // What the orchestrator itself would read, fresh from the row.
+    // What the orchestrator itself would read, fresh from the row. Since
+    // issue #172 the resolver stops at the tier — what that tier *is* comes
+    // from the lane, which the lane suite covers.
     expect(
-      resolveAgentModel("review", getConfig(), null, getSettingsOverrides())
-    ).toBe("haiku");
-    // Untouched kinds still follow the environment.
+      resolveAgentModelChoice("review", getConfig(), null, getSettingsOverrides())
+    ).toEqual({ tier: "light", pinnedModel: null });
+    // Untouched kinds still follow the environment, raw model id and all.
     expect(
-      resolveAgentModel("implement", getConfig(), null, getSettingsOverrides())
-    ).toBe("claude-opus-4-8");
+      resolveAgentModelChoice("implement", getConfig(), null, getSettingsOverrides())
+    ).toEqual({ tier: null, pinnedModel: "claude-opus-4-8" });
   });
 
   it("accepts a legacy vendor alias and stores the tier", async () => {
@@ -235,6 +237,27 @@ describe("execution lanes on /api/settings/overrides", () => {
     expect(resolved.lane.id).toBe("openrouter");
     expect(resolved.lane.baseUrl).toBe("https://openrouter.ai/api");
     expect(resolved.lane.auth).toEqual({ ANTHROPIC_AUTH_TOKEN: "sk-or-v1-test" });
+  });
+
+  it("names each tier's model as the primary lane resolves it", async () => {
+    // The screen must not show one thing while the fleet runs another: on the
+    // OpenRouter lane, `light` is an OpenRouter slug, not the CLI alias.
+    process.env.OPENROUTER_API_KEY = "sk-or-v1-test";
+    delete process.env.AGENT_MODEL;
+    resetConfig();
+    resetLaneCatalog();
+
+    await PATCH(patch({ modelTierReview: "light" }));
+    const before = await (await GET()).json();
+    expect(
+      before.fields.find((f: { key: string }) => f.key === "modelTierReview")
+    ).toMatchObject({ tier: "light", model: "haiku" });
+
+    const after = await (await PATCH(patch({ primaryLane: "openrouter" }))).json();
+
+    expect(
+      after.fields.find((f: { key: string }) => f.key === "modelTierReview")
+    ).toMatchObject({ tier: "light", model: "anthropic/claude-haiku-4.5" });
   });
 
   it("refuses a lane that is not declared, storing nothing", async () => {

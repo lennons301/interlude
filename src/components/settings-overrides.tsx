@@ -1,0 +1,133 @@
+"use client";
+
+import { useState } from "react";
+import { Eyebrow, LoadFailure, PANEL_PLAIN } from "@/components/fleet/fleet-bits";
+import { ModelTierPanel } from "@/components/model-tier-settings";
+import { ExecutionLanePanel } from "@/components/execution-lane-settings";
+import { useLoad } from "@/lib/use-load";
+import type { SettingFieldView } from "@/lib/settings-resolver";
+import type { LaneSettingsView } from "@/lib/lanes/resolve";
+
+/**
+ * The UI-editable settings (issues #166, #172): which tier each kind of pass
+ * runs at, and which execution lane it runs on.
+ *
+ * Two panels, **one** piece of state, deliberately. They are not independent:
+ * a tier's model identifier is whatever the primary lane says it is, so
+ * changing the lane changes every row of the panel above it. Fetched twice
+ * they would drift the moment a lane was picked, and the screen would name
+ * models no pass would run — the exact failure the provenance work exists to
+ * prevent. The endpoint answers a PATCH with the whole resolved state, so one
+ * write refreshes both.
+ */
+
+interface OverridesState {
+  fields: SettingFieldView[];
+  lanes: LaneSettingsView | null;
+  /** Why the lane file could not be read, when it could not be. */
+  laneError: string | null;
+  /** ISO-8601; null = no setting has ever been written on this install. */
+  updatedAt: string | null;
+}
+
+/** The option that means "no override" — the fall-through every field starts
+ * in, offered beside the real choices so clearing is one press. */
+export const FALL_THROUGH = "environment";
+
+export function SettingsOverrides() {
+  const {
+    data: state,
+    error: loadError,
+    reload,
+    setData,
+  } = useLoad<OverridesState>("/api/settings/overrides");
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  async function choose(key: string, choice: string) {
+    setBusyKey(key);
+    setSaveError(null);
+    try {
+      const res = await fetch("/api/settings/overrides", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [key]: choice === FALL_THROUGH ? null : choice }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        // The route answers a rejection with the reason it refused — show that
+        // rather than a status code, since the reason is the whole point of
+        // rejecting instead of quietly clamping.
+        throw new Error(
+          typeof body?.error === "string"
+            ? body.error
+            : `the server answered ${res.status}`
+        );
+      }
+      // The endpoint answers with the whole resolved state, so the panels show
+      // what the fleet would actually run, not what was asked for.
+      setData(body as OverridesState);
+    } catch (err) {
+      setSaveError(
+        `That didn't stick — ${err instanceof Error ? err.message : "the request failed"}`
+      );
+    }
+    setBusyKey(null);
+  }
+
+  if (state === null) {
+    return (
+      <Sections>
+        <div className={PANEL_PLAIN}>
+          {loadError === null ? (
+            <p className="font-plex-mono text-[11px] text-fl-ink-3">checking…</p>
+          ) : (
+            <LoadFailure what="the settings" error={loadError} onRetry={reload} />
+          )}
+        </div>
+        <div className={PANEL_PLAIN}>
+          <p className="font-plex-mono text-[11px] text-fl-ink-3">—</p>
+        </div>
+      </Sections>
+    );
+  }
+
+  return (
+    <Sections>
+      <ModelTierPanel
+        fields={state.fields}
+        updatedAt={state.updatedAt}
+        busyKey={busyKey}
+        disabled={busyKey !== null}
+        saveError={saveError}
+        onChoose={choose}
+      />
+      <ExecutionLanePanel
+        lanes={state.lanes}
+        laneError={state.laneError}
+        busy={busyKey === "primaryLane"}
+        disabled={busyKey !== null}
+        saveError={saveError}
+        onChoose={(choice) => choose("primaryLane", choice)}
+      />
+    </Sections>
+  );
+}
+
+/** The two headed sections the control room reads as. Kept here rather than on
+ * the page so both panels can share one client-side state. */
+function Sections({ children }: { children: [React.ReactNode, React.ReactNode] }) {
+  const [models, lanes] = children;
+  return (
+    <>
+      <section aria-label="Models" className="space-y-3">
+        <Eyebrow>Models</Eyebrow>
+        {models}
+      </section>
+      <section aria-label="Execution lane" className="space-y-3">
+        <Eyebrow>Execution lane</Eyebrow>
+        {lanes}
+      </section>
+    </>
+  );
+}

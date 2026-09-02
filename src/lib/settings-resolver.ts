@@ -31,13 +31,22 @@
  */
 
 import type { AgentPassKind, AppConfig } from "./config";
+import { isLaneIdShaped } from "./lanes/lane-id";
 import {
   MODEL_TIERS,
+  TIER_MODEL_IDS,
   type ModelTier,
   describeModelTierVocabulary,
   normalizeModelTier,
-  tierModelId,
 } from "./model-tiers";
+
+/**
+ * What each tier means as a model identifier. A parameter since execution
+ * lanes (issue #172): the tier is the durable choice, and what it resolves to
+ * belongs to the lane the pass will run on. Defaulted to the pre-lane map only
+ * so a caller with no lane in hand still resolves something.
+ */
+export type TierModelIds = Readonly<Record<ModelTier, string>>;
 
 /** The model-tier fields, named as their own union because they share a
  * resolver: asking one of them "what tier is in force?" is meaningful, and
@@ -99,15 +108,6 @@ export interface SettingSpec {
   vocabulary(context: SettingsContext): string;
   envDefault(config: AppConfig): EnvDefault;
 }
-
-/**
- * A lane id, syntactically — the same slug shape `lanes.yaml` enforces, with a
- * length bound. Membership in the real catalog is the check that matters and it
- * needs `SettingsContext`; this is what can be asserted without one, and it is
- * bounded so a caller that has no catalog still cannot park something large in
- * the settings row.
- */
-const LANE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 function modelTierField(
   key: ModelTierSettingKey,
@@ -185,7 +185,10 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
     // at runtime, so the vocabulary arrives through `SettingsContext` instead.
     normalize: (raw, context) => {
       const value = raw.trim().toLowerCase();
-      if (!LANE_ID.test(value)) return null;
+      // Shape from the same leaf module the lane file validates with, so the
+      // two can't drift. Membership in the real catalog is the check that
+      // matters, and it needs a `SettingsContext` this caller may not have.
+      if (!isLaneIdShaped(value)) return null;
       // With the catalog in hand, a lane that does not exist is rejected by
       // name rather than stored and quietly ignored later; without it, the
       // shape check is all that can honestly be asserted.
@@ -394,9 +397,15 @@ export const MODEL_TIER_FIELD_BY_KIND: Readonly<
 export function resolveModelTier(
   kind: AgentPassKind,
   config: AppConfig,
-  overrides: SettingsOverrides
+  overrides: SettingsOverrides,
+  tierModels: TierModelIds = TIER_MODEL_IDS
 ): ResolvedModelTier {
-  return resolveModelTierField(MODEL_TIER_FIELD_BY_KIND[kind], config, overrides);
+  return resolveModelTierField(
+    MODEL_TIER_FIELD_BY_KIND[kind],
+    config,
+    overrides,
+    tierModels
+  );
 }
 
 /** The same resolution addressed by field rather than by pass kind — what the
@@ -404,7 +413,8 @@ export function resolveModelTier(
 export function resolveModelTierField(
   key: ModelTierSettingKey,
   config: AppConfig,
-  overrides: SettingsOverrides
+  overrides: SettingsOverrides,
+  tierModels: TierModelIds = TIER_MODEL_IDS
 ): ResolvedModelTier {
   const spec = SETTINGS_FIELDS[key];
   const { envVar, value: envValue } = spec.envDefault(config);
@@ -414,7 +424,7 @@ export function resolveModelTierField(
     return {
       key,
       tier: override,
-      model: tierModelId(override),
+      model: tierModels[override],
       source: "override",
       override,
       envVar,
@@ -430,7 +440,7 @@ export function resolveModelTierField(
   return {
     key,
     tier: envTier,
-    model: envTier !== null ? tierModelId(envTier) : envValue,
+    model: envTier !== null ? tierModels[envTier] : envValue,
     source: "environment",
     override: null,
     envVar,
@@ -459,15 +469,21 @@ export interface SettingFieldView {
   model: string | null;
 }
 
-/** Every field, resolved for display. The API and the screen both read this,
- * so the value the UI shows is the value the resolver would hand a pass. */
+/**
+ * Every field, resolved for display. The API and the screen both read this, so
+ * the value the UI shows is the value the resolver would hand a pass — which
+ * is why `tierModels` must be the *primary lane's* map (issue #172). Show the
+ * pre-lane map while the fleet runs on OpenRouter and the row would name a
+ * model no pass will ever run.
+ */
 export function describeModelTierSettings(
   config: AppConfig,
-  overrides: SettingsOverrides
+  overrides: SettingsOverrides,
+  tierModels: TierModelIds = TIER_MODEL_IDS
 ): SettingFieldView[] {
   return MODEL_TIER_FIELD_ORDER.map((key) => {
     const spec = SETTINGS_FIELDS[key];
-    const resolved = resolveModelTierField(key, config, overrides);
+    const resolved = resolveModelTierField(key, config, overrides, tierModels);
     return {
       key,
       label: spec.label,

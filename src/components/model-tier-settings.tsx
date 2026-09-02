@@ -1,14 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import {
-  Chip,
-  ChipRadio,
-  LoadFailure,
-  PANEL_PLAIN,
-  formatChanged,
-} from "@/components/fleet/fleet-bits";
-import { useLoad } from "@/lib/use-load";
+import { Chip, ChipRadio, PANEL_PLAIN, formatChanged } from "@/components/fleet/fleet-bits";
+import { FALL_THROUGH } from "@/components/settings-overrides";
 import type { SettingFieldView } from "@/lib/settings-resolver";
 
 /**
@@ -27,74 +20,30 @@ import type { SettingFieldView } from "@/lib/settings-resolver";
  * - clearing an override is a first-class option (`environment`), not a
  *   hidden reset, because falling back is the state a fresh deployment is in.
  *
+ * The model id a row names is the one the **primary lane** gives that tier
+ * (issue #172), which is why this panel is presentational and shares its state
+ * with the lane panel below — see `SettingsOverrides`.
+ *
  * A change lands on the settings row and is read fresh when the next pass
  * starts, so it takes effect at the next sweep with no restart. Runs already
  * in flight keep the tier they recorded.
  */
-
-interface OverridesState {
+export function ModelTierPanel({
+  fields,
+  updatedAt,
+  busyKey,
+  disabled,
+  saveError,
+  onChoose,
+}: {
   fields: SettingFieldView[];
   /** ISO-8601; null = no setting has ever been written on this install. */
   updatedAt: string | null;
-}
-
-/** The option that means "no override" — the fall-through every field starts
- * in, offered beside the tiers so clearing is one press. */
-const FALL_THROUGH = "environment";
-
-export function ModelTierSettings() {
-  const {
-    data: state,
-    error: loadError,
-    reload,
-    setData,
-  } = useLoad<OverridesState>("/api/settings/overrides");
-  const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
-
-  async function choose(key: string, choice: string) {
-    setBusyKey(key);
-    setSaveError(null);
-    try {
-      const res = await fetch("/api/settings/overrides", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [key]: choice === FALL_THROUGH ? null : choice }),
-      });
-      const body = await res.json();
-      if (!res.ok) {
-        // The route answers a rejection with the reason it refused — show that
-        // rather than a status code, since the reason is the whole point of
-        // rejecting instead of quietly clamping.
-        throw new Error(
-          typeof body?.error === "string"
-            ? body.error
-            : `the server answered ${res.status}`
-        );
-      }
-      // The endpoint answers with the whole resolved state, so the panel shows
-      // what the fleet would actually run, not what was asked for.
-      setData(body as OverridesState);
-    } catch (err) {
-      setSaveError(
-        `That didn't stick — ${err instanceof Error ? err.message : "the request failed"}`
-      );
-    }
-    setBusyKey(null);
-  }
-
-  if (state === null) {
-    return (
-      <div className={PANEL_PLAIN}>
-        {loadError === null ? (
-          <p className="font-plex-mono text-[11px] text-fl-ink-3">checking…</p>
-        ) : (
-          <LoadFailure what="the model tiers" error={loadError} onRetry={reload} />
-        )}
-      </div>
-    );
-  }
-
+  busyKey: string | null;
+  disabled: boolean;
+  saveError: string | null;
+  onChoose: (key: string, choice: string) => void;
+}) {
   return (
     <div className={`${PANEL_PLAIN} space-y-4`}>
       <p className="text-[13px] text-fl-ink-3">
@@ -102,20 +51,20 @@ export function ModelTierSettings() {
         <span className="font-plex-mono">heavy</span>,{" "}
         <span className="font-plex-mono">standard</span>,{" "}
         <span className="font-plex-mono">light</span> — so it survives a change
-        of provider. Left on{" "}
-        <span className="font-plex-mono">{FALL_THROUGH}</span>, a row follows
-        the deployment&apos;s own variable. A ticket&apos;s{" "}
+        of provider; the model it names is whatever the lane below resolves it
+        to. Left on <span className="font-plex-mono">{FALL_THROUGH}</span>, a
+        row follows the deployment&apos;s own variable. A ticket&apos;s{" "}
         <span className="font-plex-mono">model:</span> directive still outranks
         both.
       </p>
 
-      {state.fields.map((field) => (
+      {fields.map((field) => (
         <TierRow
           key={field.key}
           field={field}
           busy={busyKey === field.key}
-          disabled={busyKey !== null}
-          onChoose={(choice) => choose(field.key, choice)}
+          disabled={disabled}
+          onChoose={(choice) => onChoose(field.key, choice)}
         />
       ))}
 
@@ -125,9 +74,9 @@ export function ModelTierSettings() {
         </p>
       )}
 
-      {state.updatedAt !== null && (
+      {updatedAt !== null && (
         <p className="font-plex-mono text-[11px] text-fl-ink-3">
-          settings last changed {formatChanged(state.updatedAt)}
+          settings last changed {formatChanged(updatedAt)}
         </p>
       )}
     </div>
