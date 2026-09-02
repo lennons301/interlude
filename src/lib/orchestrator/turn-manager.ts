@@ -402,6 +402,11 @@ export async function startTask(taskId: string): Promise<void> {
       // an overage means these dollars are cash however the lane describes
       // itself, and the real-money ledger keys off exactly this column.
       laneBilling: pass.billing,
+      // The tier beside the lane, for the reason the run row records both
+      // (issue #172): the pair is what makes this task's cost interpretable
+      // after the fact, and interactive work — the only kind that crosses onto
+      // a paid lane — has no run row to record it on.
+      tier: passLane.tier ?? passModel,
     });
     insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
 
@@ -1154,7 +1159,11 @@ export async function processQueuedMessages(
     // attributing the lot to the lane it is on *now* is the direction that
     // fails safe, since over-reporting real money pauses pickup early while
     // under-reporting spends past the cap.
-    updateTask(taskId, { lane: passLane.id, laneBilling: pass.billing });
+    updateTask(taskId, {
+      lane: passLane.id,
+      laneBilling: pass.billing,
+      tier: passLane.tier ?? passLane.model,
+    });
 
     // Find oldest undelivered user message
     const queued = db
@@ -2212,6 +2221,7 @@ function updateTask(
     triageResult: (typeof tasks.$inferSelect)["triageResult"];
     lane: string | null;
     laneBilling: "subscription" | "metered" | null;
+    tier: string | null;
   }>
 ): void {
   // The one funnel every task-cost write goes through, which is why the
