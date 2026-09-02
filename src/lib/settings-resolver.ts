@@ -559,7 +559,8 @@ export function resolveModelTierField(
   key: ModelTierSettingKey,
   config: AppConfig,
   overrides: SettingsOverrides,
-  tierModels: TierModelIds = TIER_MODEL_IDS
+  tierModels: TierModelIds = TIER_MODEL_IDS,
+  fallbackTier: ModelTier | null = null
 ): ResolvedModelTier {
   const spec = SETTINGS_FIELDS[key];
   const { envVar, value: envValue } = spec.envDefault(config);
@@ -581,11 +582,19 @@ export function resolveModelTierField(
   // does — `AGENT_MODEL=heavy` must reach the CLI as a model it accepts, not
   // as the word "heavy". Anything that names no tier is a pinned model id and
   // is passed through verbatim.
+  //
+  // `fallbackTier` covers the state where the variable is unset too: on a lane
+  // that declares its own prices the pass runs that lane's default tier rather
+  // than no `--model` at all (issue #175, `laneFallbackTier`), and a row that
+  // said "the account default" over it would name a model no pass would run.
+  // It stays `source: "environment"` with `envValue` null, because the field
+  // genuinely is unset — what changed is only what unset resolves to.
   const envTier = normalizeModelTier(envValue);
+  const tier = envTier ?? (envValue === null ? fallbackTier : null);
   return {
     key,
-    tier: envTier,
-    model: envTier !== null ? tierModels[envTier] : envValue,
+    tier,
+    model: tier !== null ? tierModels[tier] : envValue,
     source: "environment",
     override: null,
     envVar,
@@ -732,18 +741,26 @@ export interface SettingFieldView {
 /**
  * Every field, resolved for display. The API and the screen both read this, so
  * the value the UI shows is the value the resolver would hand a pass — which
- * is why `tierModels` must be the *primary lane's* map (issue #172). Show the
- * pre-lane map while the fleet runs on OpenRouter and the row would name a
- * model no pass will ever run.
+ * is why `tierModels` must be the *primary lane's* map (issue #172) and
+ * `fallbackTier` its answer for an unset field (issue #175). Show the pre-lane
+ * map while the fleet runs on OpenRouter and the row would name a model no
+ * pass will ever run.
  */
 export function describeModelTierSettings(
   config: AppConfig,
   overrides: SettingsOverrides,
-  tierModels: TierModelIds = TIER_MODEL_IDS
+  tierModels: TierModelIds = TIER_MODEL_IDS,
+  fallbackTier: ModelTier | null = null
 ): SettingFieldView[] {
   return MODEL_TIER_FIELD_ORDER.map((key) => {
     const spec = SETTINGS_FIELDS[key];
-    const resolved = resolveModelTierField(key, config, overrides, tierModels);
+    const resolved = resolveModelTierField(
+      key,
+      config,
+      overrides,
+      tierModels,
+      fallbackTier
+    );
     return {
       key,
       label: spec.label,

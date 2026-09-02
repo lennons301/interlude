@@ -17,6 +17,7 @@ import { getNeedsHumanByProject } from "./needs-human";
 import { getFleetHealth } from "./health-store";
 import { getFailingChecks } from "./failing-checks";
 import { getQuotaObservation } from "../quota/quota-store";
+import type { FleetLaneRow } from "./fleet-view";
 import { DAILY_AUTONOMOUS_CAP_USD } from "../orchestrator/autonomy/budgets";
 import {
   buildFleetView,
@@ -29,14 +30,29 @@ const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 export async function loadFleetRows(now: Date): Promise<FleetRows> {
   const windowStart = new Date(now.getTime() - RECENT_WINDOW_MS);
   // One read of the settings row per view build, for every runtime flag it
-  // carries — the kill switch, the quota threshold override, the money guards'
-  // cap and confirmation — exactly as the sweep reads it each tick, so the
-  // dashboard reflects a change on its next SSE push with no restart. The
-  // money guards are read through the same function the sweep and the settings
-  // panel use, and keyed on `now`, so the digest's view of a past day reports
-  // that day's cash rather than this morning's.
+  // carries — the kill switch, the quota threshold override, the chosen
+  // execution lane, the money guards' cap and confirmation — exactly as the
+  // sweep reads it each tick, so the dashboard reflects a change on its next
+  // SSE push with no restart. The money guards are read through the same
+  // function the sweep and the settings panel use, and keyed on `now`, so the
+  // digest's view of a past day reports that day's cash rather than this
+  // morning's.
   const fleetSettings = getFleetSettings();
   const money = readMoneyGuards(now, fleetSettings);
+  // The lane a pass would run on right now (issue #175): the quota row is
+  // keyed by lane, so the dashboard must read the same lane's observation the
+  // sweep's admission gate does. Deliberately the lane the money guards
+  // already resolved rather than a second resolution of the same fact — the
+  // two surfaces naming different lanes is the failure per-lane keying exists
+  // to prevent.
+  const primaryLane: FleetLaneRow | null =
+    money.lane === null
+      ? null
+      : {
+          id: money.lane.id,
+          label: money.lane.label,
+          billing: money.lane.billing,
+        };
 
   // Slots come from the boot-time derivation; if the Docker daemon is
   // unreachable the dashboard should still render, so fall back to the
@@ -151,11 +167,13 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
     // Failing check names per parked run from the same sweep (issue #130); null
     // until the first sweep, which renders no failing-checks cards.
     failingChecksByRun: getFailingChecks(),
-    // The last rate-limit event any pass saw (issue #167), from the durable
-    // row rather than an in-memory store: the writer is the stream parser in
-    // the orchestrator's module graph and this read happens in the app
-    // router's, which share nothing but the database (issue #159).
-    quota: getQuotaObservation(),
+    // The last rate-limit event a pass on the *primary lane* saw (issue #167,
+    // per-lane since #175), from the durable row rather than an in-memory
+    // store: the writer is the stream parser in the orchestrator's module
+    // graph and this read happens in the app router's, which share nothing but
+    // the database (issue #159).
+    quota: getQuotaObservation(primaryLane?.id ?? null),
+    quotaLane: primaryLane,
     // The threshold that observation is judged against (issue #171), resolved
     // from the same row and the same config the sweep reads — so the banner
     // cannot say "claiming" while the reducer is refusing, or the reverse.

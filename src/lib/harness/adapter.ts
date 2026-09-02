@@ -79,6 +79,14 @@ export interface HarnessAdapter {
   buildExecEnv(input: HarnessExecEnvInput): string[];
   /** The shell command that runs one turn inside the container. */
   buildCommand(input: HarnessCommandInput): string;
-  /** A handler for this harness's output stream. */
-  createOutputHandler(taskId: string): HarnessOutputHandler;
+  /**
+   * A handler for this harness's output stream.
+   *
+   * Takes the lane for the same reason the other two members do (issue #175):
+   * a stream carries quota telemetry, and quota belongs to the lane's account,
+   * not to the fleet. Handing the lane over here rather than letting the
+   * handler reach for a fleet-wide default is what keeps a lane that reports no
+   * quota from inheriting one.
+   */
+  createOutputHandler(taskId: string, lane: ResolvedLane): HarnessOutputHandler;
 }

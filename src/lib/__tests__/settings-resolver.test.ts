@@ -207,6 +207,44 @@ describe("provenance — every field says where its value came from", () => {
     });
   });
 
+  it("names the lane's default over an unset field, rather than \"no --model\"", () => {
+    // Issue #175: a priced lane answers an unset tier with its own default, so
+    // the row must say what will run. Saying "the account default" there would
+    // name a model no pass on that lane would ever be given.
+    const glm = { heavy: "z-ai/glm-5.3", standard: "z-ai/glm-5.3-flash", light: "z-ai/glm-4.7-flash" };
+    const fields = describeModelTierSettings(cfg(), NONE, glm, "standard");
+    expect(fields.find((f) => f.key === "modelTierImplement")).toMatchObject({
+      source: "environment",
+      override: null,
+      envValue: null,
+      tier: "standard",
+      model: "z-ai/glm-5.3-flash",
+    });
+
+    // And an unpriced lane keeps the pre-#74 answer: no `--model` at all.
+    const plain = describeModelTierSettings(cfg(), NONE);
+    expect(plain.find((f) => f.key === "modelTierImplement")).toMatchObject({
+      tier: null,
+      model: null,
+    });
+  });
+
+  it("never lets the lane's default displace a pinned model id", () => {
+    // `AGENT_MODEL` naming no tier is passed through verbatim by the resolver,
+    // so the screen must not claim the lane's tier was chosen instead.
+    const glm = { heavy: "z-ai/glm-5.3", standard: "z-ai/glm-5.3-flash", light: "z-ai/glm-4.7-flash" };
+    const fields = describeModelTierSettings(
+      cfg({ agentModel: "claude-opus-4-8" }),
+      NONE,
+      glm,
+      "standard"
+    );
+    expect(fields.find((f) => f.key === "modelTierImplement")).toMatchObject({
+      tier: null,
+      model: "claude-opus-4-8",
+    });
+  });
+
   it("describes every model-tier field, in display order", () => {
     expect(describeModelTierSettings(cfg(), NONE).map((f) => f.key)).toEqual([
       ...MODEL_TIER_FIELD_ORDER,

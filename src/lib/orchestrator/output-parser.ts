@@ -8,6 +8,7 @@ import {
   type QuotaObservation,
 } from "../quota/rate-limit-event";
 import { recordQuotaObservation } from "../quota/quota-store";
+import type { TurnTokenUsage } from "../lanes/lane-cost";
 
 /**
  * Parse Claude Code stream-json output and insert messages into DB.
@@ -59,6 +60,20 @@ export interface TurnResult {
    * retried carries several and only the newest describes the account now.
    */
   rateLimit: QuotaObservation | null;
+  /**
+   * The tokens the turn consumed, or null when no `result` event arrived
+   * (issue #175) — what a lane's own prices are applied to when the harness's
+   * dollar figure cannot be trusted.
+   *
+   * Read from `modelUsage` and *only* from it — never the sibling `usage`
+   * object, which is the last API iteration rather than the turn. Pinned by
+   * observation on 2026-09-02: a subscription turn reported
+   * `usage.input_tokens: 10` beside `modelUsage.inputTokens: 909`, and only
+   * the latter reproduces the CLI's own `total_cost_usd` at list prices to the
+   * cent. See `readTurnUsage` for why that rules the fallback out rather than
+   * making it a second-best.
+   */
+  usage: TurnTokenUsage | null;
 }
 
 interface ContentBlock {
@@ -72,8 +87,103 @@ interface ContentBlock {
   content?: string | Array<{ type: string; text?: string }>;
 }
 
+/** A token count, or null when the field was not reported at all.
+ *
+ * Absent is kept apart from zero for the same reason `utilization` is over in
+ * the quota reader: a lane charges from these numbers, and a report whose
+ * fields are all missing must not price as a free turn. Negatives are treated
+ * as unreported — a count cannot be one. */
+function readCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+}
+
+/** One reader's four counts, before they are known to be worth anything. */
+type PartialCounts = Record<keyof TurnTokenUsage, number | null>;
+
+const EMPTY_COUNTS: PartialCounts = {
+  inputTokens: null,
+  outputTokens: null,
+  cacheReadTokens: null,
+  cacheWriteTokens: null,
+};
+
+const COUNT_KEYS = Object.keys(EMPTY_COUNTS) as (keyof TurnTokenUsage)[];
+
+/**
+ * The turn's token counts, summed over every model it used (issue #175).
+ *
+ * **`modelUsage` and nothing else.** The sibling `usage` object looks like a
+ * cheap fallback and is a trap: the captured turns show it carrying the *last
+ * API iteration* rather than the turn (`usage.input_tokens: 10` beside
+ * `modelUsage.inputTokens: 909`), and only `modelUsage` reproduces the CLI's
+ * own cost at list prices. Charging a lane's prices against `usage` would
+ * therefore undercharge by ~90x with every appearance of being right — the one
+ * direction `chargeForTurn` refuses to fail in. A harness that reports no
+ * `modelUsage` gets null here and is charged its own reported figure instead,
+ * which over-states on a third-party lane and is the safe half of that trade.
+ *
+ * Summed across entries rather than read from one, because a pass that spawns
+ * subagents bills several models under one turn and the lane charges for all of
+ * them. Null unless at least one count was actually a number: a shape carrying
+ * the field names and no values would otherwise total to a legitimate-looking
+ * zero. A genuine zero survives, since zero is reported as a number.
+ */
+export function readTurnUsage(
+  event: Record<string, unknown>
+): TurnTokenUsage | null {
+  const modelUsage = event.modelUsage;
+  if (modelUsage === null || typeof modelUsage !== "object") return null;
+
+  const totals = Object.values(modelUsage as Record<string, unknown>)
+    .filter(
+      (entry): entry is Record<string, unknown> =>
+        entry !== null && typeof entry === "object"
+    )
+    .reduce<PartialCounts>(
+      (total, entry) =>
+        addCounts(total, {
+          inputTokens: readCount(entry.inputTokens),
+          outputTokens: readCount(entry.outputTokens),
+          cacheReadTokens: readCount(entry.cacheReadInputTokens),
+          cacheWriteTokens: readCount(entry.cacheCreationInputTokens),
+        }),
+      EMPTY_COUNTS
+    );
+
+  if (COUNT_KEYS.every((key) => totals[key] === null)) return null;
+  return {
+    inputTokens: totals.inputTokens ?? 0,
+    outputTokens: totals.outputTokens ?? 0,
+    cacheReadTokens: totals.cacheReadTokens ?? 0,
+    cacheWriteTokens: totals.cacheWriteTokens ?? 0,
+  };
+}
+
+/** Add two partial reports, keeping "neither reported this" as unreported. */
+function addCounts(a: PartialCounts, b: PartialCounts): PartialCounts {
+  const sum = { ...EMPTY_COUNTS };
+  for (const key of COUNT_KEYS) {
+    sum[key] =
+      a[key] === null && b[key] === null ? null : (a[key] ?? 0) + (b[key] ?? 0);
+  }
+  return sum;
+}
+
 export function createOutputHandler(
   taskId: string,
+  /**
+   * The lane this turn runs on (issue #175) — which quota state an observed
+   * `rate_limit_event` belongs to.
+   *
+   * Required rather than defaulted, because the whole point is that there is
+   * no fleet-wide quota to fall back to: a rate limit is a fact about one
+   * account on one provider, and attributing a subscription observation to a
+   * metered lane (or the reverse) is how a lane that *cannot* report quota ends
+   * up gated by somebody else's wall.
+   */
+  laneId: string,
   /** Injectable so the recorder can be observed in tests without a filesystem;
    * production always takes the process-wide one. */
   recorder: StreamRecorder = getStreamRecorder(),
@@ -84,7 +194,8 @@ export function createOutputHandler(
    * it was when the turn *started* would be the fleet's freshest fact arriving
    * last. Injectable for the same reason the recorder is.
    */
-  onQuotaObservation: (observation: QuotaObservation) => void = recordQuotaObservation
+  onQuotaObservation: (observation: QuotaObservation) => void = (observation) =>
+    recordQuotaObservation(laneId, observation)
 ) {
   let buffer = "";
   let sessionId: string | null = null;
@@ -93,6 +204,7 @@ export function createOutputHandler(
   let subtype: string | null = null;
   let terminalResult: Record<string, unknown> | null = null;
   let rateLimit: QuotaObservation | null = null;
+  let usage: TurnTokenUsage | null = null;
   let lastToolUseMessageId: string | null = null;
   let _onDone: (() => void) | null = null;
 
@@ -117,7 +229,15 @@ export function createOutputHandler(
         this.parseLine(buffer.trim());
         buffer = "";
       }
-      return { sessionId, costUsd, finalMessage, subtype, terminalResult, rateLimit };
+      return {
+        sessionId,
+        costUsd,
+        finalMessage,
+        subtype,
+        terminalResult,
+        rateLimit,
+        usage,
+      };
     },
 
     parseLine(line: string): void {
@@ -247,6 +367,7 @@ export function createOutputHandler(
           (event.total_cost_usd as number) ??
           (event.cost_usd as number) ??
           0;
+        usage = readTurnUsage(event);
 
         db.insert(messages)
           .values({
@@ -255,6 +376,10 @@ export function createOutputHandler(
             role: "system",
             type: "system",
             content: JSON.stringify({
+              // The harness's own figure, which on a lane that declares prices
+              // is not what the turn is charged (issue #175) — `runTurn` adds
+              // the lane's number beside this line when the two differ, rather
+              // than this one quietly reporting a price nobody paid.
               text: `Turn complete (cost: $${costUsd.toFixed(4)})`,
             }),
             createdAt: new Date(),

@@ -345,13 +345,10 @@ export const messages = sqliteTable("messages", {
   updatedAt: int("updated_at", { mode: "timestamp_ms" }),
 });
 
-/** The one row id in `quota_state` — one account backs the whole fleet, so its
- * quota is one durable row, latest observation wins. */
-export const QUOTA_STATE_ROW_ID = "fleet";
-
 /**
- * The fleet's last observed quota state (issue #167): what the Claude Code
- * CLI's `rate_limit_event` said, the last time any pass saw one.
+ * The last observed quota state **per execution lane** (issue #167, made
+ * per-lane by #175): what the Claude Code CLI's `rate_limit_event` said, the
+ * last time a pass on that lane saw one.
  *
  * A table rather than a column on `settings` because the two have opposite
  * lifecycles — `settings` is state a human flips and stamps `updatedAt` when
@@ -371,6 +368,16 @@ export const QUOTA_STATE_ROW_ID = "fleet";
  * already carries two fields the CLI's own schema does not document, so a later
  * ticket reading one more of them should be a code change and not a migration.
  * Written by `lib/quota/quota-store.ts`, which never trusts it verbatim on read.
+ *
+ * Keyed by lane rather than by the fleet (issue #175) because a rate limit is a
+ * fact about one account at one provider, and the lanes do not share one. The
+ * unified-window machinery is subscription-only (#165's finding 6, re-confirmed
+ * against OpenRouter on 2026-09-02: no `anthropic-ratelimit-*` response header,
+ * no `rate_limit_event` anywhere on the stream), so a metered lane has *no*
+ * observation, permanently. Under one fleet-wide row, the fleet's last
+ * subscription reading would stand as the current state of a lane that cannot
+ * produce one — which is exactly how a lane bounded by spend would come to be
+ * gated by somebody else's wall.
  */
 /**
  * Real money spent per local day (issue #174), one row per day the fleet has
@@ -401,7 +408,10 @@ export const meteredSpend = sqliteTable("metered_spend", {
 });
 
 export const quotaState = sqliteTable("quota_state", {
-  id: text("id").primaryKey(),
+  /** The execution-lane id the observation was made on — `lanes.yaml`'s own
+   * vocabulary, so a renamed lane simply reads as never-observed rather than as
+   * somebody else's quota. */
+  lane: text("lane").primaryKey(),
   observation: text("observation", { mode: "json" }).notNull(),
   observedAt: int("observed_at", { mode: "timestamp_ms" }).notNull(),
 });

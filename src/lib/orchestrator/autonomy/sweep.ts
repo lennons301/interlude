@@ -694,11 +694,23 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     // what makes the kill switch (issue #118) take effect at the next sweep
     // rather than at the next restart.
     globalPaused: settings.globalAutonomyPaused,
-    // The last observation any pass wrote (issue #167), and the threshold in
-    // force. Both read fresh each tick, never captured at boot: that is what
-    // lets a wall observed mid-sweep, or a threshold changed on the settings
+    // The last observation a pass on the lane *this* tick would claim onto
+    // wrote (issue #167, per-lane since #175), and the threshold in force.
+    // Both read fresh each tick, never captured at boot: that is what lets a
+    // wall observed mid-sweep, or a threshold or lane changed on the settings
     // screen, take effect at the next tick rather than at the next restart.
-    quota: getQuotaObservation(),
+    //
+    // Per-lane is what keeps the gate honest, not a refinement of it: the
+    // unified-window machinery is subscription-only, so a metered lane never
+    // produces an observation at all. Read fleet-wide, the subscription's last
+    // rejection would close the gate over a lane that cannot be rate-limited —
+    // holding every pickup on a fleet that was, on that lane, entirely free to
+    // work. The gate already treats no observation as open (see its rule 1),
+    // so asking the right lane is the whole fix. The lane comes from the one
+    // resolution this tick already made for the money guards (issue #174), so
+    // the lane whose quota is judged and the lane whose spend is capped can
+    // never be different lanes.
+    quota: getQuotaObservation(money.lane?.id ?? null),
     quotaThresholdPercent: resolveQuotaThreshold(config, settings.overrides)
       .percent,
     quotaGateAnnounced: quotaGateAnnouncement.announced,
