@@ -20,14 +20,48 @@ jobs:
     steps:
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           command_timeout: 15m
+          # The SHA this run is deploying, so the box can prove it actually got
+          # it (issue #189).
+          envs: DEPLOY_SHA
           script: |
+            # `set -euo pipefail` is load-bearing (issue #189). Without `-e`, a
+            # failed `git pull` was not fatal: every later step ran against the
+            # old checkout, `compose build app` was a 100% cache hit that
+            # reproduced the *identical* image, `up -d` recreated the containers
+            # and the health check passed against the old app — so two commits
+            # "deployed successfully" while prod sat 4.5h behind.
+            set -euo pipefail
+
             cd /opt/interlude
-            git pull origin main
+
+            # The pull is anonymous (public repo, HTTPS remote, no credential on
+            # the box) and GitHub rate-limits unauthenticated requests from an IP
+            # that also serves every agent container's plugin clone. That is a
+            # transient, recurring failure, so retry it before giving up —
+            # and then fail, loudly, rather than deploying nothing.
+            for attempt in 1 2 3; do
+              if git pull origin main; then break; fi
+              echo "git pull failed (attempt $attempt/3) — retrying in $((attempt * 10))s"
+              sleep $((attempt * 10))
+              [ "$attempt" -lt 3 ] || { echo "ERROR: could not pull origin/main after 3 attempts"; exit 1; }
+            done
+
+            # The assertion that makes this whole class of failure loud: a stale
+            # checkout, a partial pull and a cached rebuild of old source all
+            # fail here, and a green run means prod is running the pushed commit.
+            HEAD_SHA=$(git rev-parse HEAD)
+            if [ "$HEAD_SHA" != "$DEPLOY_SHA" ]; then
+              echo "ERROR: checkout is at $HEAD_SHA but this run deploys $DEPLOY_SHA — refusing to report success for code that is not there"
+              exit 1
+            fi
+            echo "Deploying $DEPLOY_SHA"
 
             # Stop app before rebuild to free RAM for the Next.js build (4GB VPS)
             docker compose down
@@ -35,6 +69,13 @@ jobs:
             # Force rebuild agent image so Dockerfile.agent changes take effect
             docker rmi interlude-agent:latest 2>/dev/null || true
             docker compose build app
+
+            # The agent network is `external` in compose (issue #190), so `down`
+            # no longer destroys it and `up` will not create it. Idempotent, so a
+            # fresh box works and an existing network keeps its ID — which is the
+            # whole point: a parked agent container references it by ID and could
+            # never start again after a recreate.
+            docker network create interlude 2>/dev/null || true
 
             # Render the proxy's env from Doppler (interlude/prd) — the same config
             # the app boots with, making it the single source of truth for DOMAIN.

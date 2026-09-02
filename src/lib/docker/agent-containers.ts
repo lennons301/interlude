@@ -20,6 +20,19 @@ import type { AgentContainerCensus } from "../fleet/health";
 export const AGENT_CONTAINER_NAME_PREFIX = "interlude-task-";
 
 /**
+ * The Docker network every agent container attaches to, and the one the app and
+ * proxy share so the orchestrator can reach a container by its preview alias.
+ *
+ * Named here, beside the container-name prefix, because it is the same kind of
+ * fact and had the same failure mode waiting in it: as a literal at the create
+ * site, nothing else could name it — and the reattach that recovers a container
+ * whose network was recreated under it (issue #190) must name exactly the
+ * network the create used. Compose declares it `external`, so its lifecycle is
+ * the box's rather than the stack's.
+ */
+export const AGENT_NETWORK_NAME = "interlude";
+
+/**
  * How long either Docker probe may wait on the daemon before giving up — the
  * census here, and the memory-admission check that gates a container start
  * (which re-exports this as `ADMISSION_PROBE_TIMEOUT_MS`, the name its own call

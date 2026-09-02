@@ -42,5 +42,19 @@ volumes:
   app_data:
 
 networks:
+  # `external` is load-bearing, not tidiness (issue #190). This is the compose
+  # *default* network, renamed — so `docker compose down` used to remove it and
+  # `up -d` recreate it with a **new ID**, while every parked agent container
+  # (stopped but preserved since #93, re-adopted at boot since #136) still
+  # referenced the old one. Their `docker start` then failed
+  # `404 … network <old-id> not found` forever, so a blocked run could survive a
+  # restart and never a deploy — and deploys land on every push to main.
+  #
+  # The network genuinely outlives the stack: agent containers attach to it and
+  # are not compose services, so compose is the wrong thing to own its
+  # lifecycle. Declaring it external means `up` requires it to exist, which the
+  # deploy guarantees with an idempotent `docker network create` (and local dev
+  # has always created it by hand — see CLAUDE.md).
   default:
     name: interlude
+    external: true

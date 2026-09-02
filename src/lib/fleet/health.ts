@@ -117,6 +117,18 @@ export interface UndeliveredAnswerObservation {
   taskUrl: string;
   /** When the answer was queued (ms) — the message row's own stamp. */
   queuedAtMs: number;
+  /**
+   * Whether the session is idle — no turn running inside its container.
+   *
+   * An undelivered message is only *stuck* when nothing is happening. While a
+   * turn is in flight the queue takes the next message the moment it ends, so a
+   * follow-up waiting behind it is ordinary queueing — and an owner who answers
+   * a blocked run twice (which is what an owner does when nothing seems to
+   * happen: once in the UI, once through Discord) leaves exactly that shape
+   * behind for the whole of the resumed turn. Firing on it would put a red card
+   * advising a restart over a run that is working perfectly.
+   */
+  sessionIdle: boolean;
 }
 
 export interface FleetHealthInput {
@@ -386,6 +398,7 @@ export function evaluateFleetHealth(
   const announcedAnswers: UndeliveredAnswer[] = [];
   const undeliveredAnswerAnnounced: string[] = [];
   for (const obs of input.undeliveredAnswers) {
+    if (!obs.sessionIdle) continue;
     const undeliveredForMs = now - obs.queuedAtMs;
     if (undeliveredForMs < thresholds.undeliveredAnswerMs) continue;
 

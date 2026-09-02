@@ -7,7 +7,9 @@ import { getCapacity } from "../orchestrator/capacity";
 import {
   AGENT_CONTAINER_NAME_PREFIX,
   DOCKER_PROBE_TIMEOUT_MS,
+  AGENT_NETWORK_NAME,
 } from "./agent-containers";
+import { isRecreatedNetworkFailure, planNetworkReattach } from "./stale-network";
 import { raceWithTimeout, runBoundedProbe, TIMED_OUT } from "../timeout";
 
 /**
@@ -254,7 +256,7 @@ export async function createWorkspaceContainer(
     Cmd: ["sleep", "infinity"],
     WorkingDir: "/workspace",
     HostConfig: {
-      NetworkMode: "interlude",
+      NetworkMode: AGENT_NETWORK_NAME,
       // Hard caps: a runaway agent fails its own task, never the platform.
       // MemorySwap = Memory disables swap, so the cap bites immediately.
       Memory: capacity.perAgentMemory,
@@ -263,7 +265,7 @@ export async function createWorkspaceContainer(
     },
     NetworkingConfig: {
       EndpointsConfig: {
-        interlude: {
+        [AGENT_NETWORK_NAME]: {
           Aliases: [previewSubdomain],
         },
       },
@@ -678,6 +680,12 @@ export async function stopContainer(
  * propagates so the caller's turn fails loudly rather than execing into a dead
  * container. Used to resume a container `stopContainer` parked to free memory
  * (issue #93).
+ *
+ * One failure is *recovered* rather than propagated: a start that failed because
+ * the network was recreated under the container (issue #190). It is retried
+ * exactly once, after reattaching, and a second failure propagates like any
+ * other — so this can turn a permanently-wedged resume into a working one, and
+ * can never turn a real failure into a loop.
  */
 export async function startContainer(
   running: RunningContainer
@@ -686,8 +694,54 @@ export async function startContainer(
     await running.container.start();
   } catch (err) {
     if ((err as { statusCode?: number })?.statusCode === 304) return; // Already running
-    throw err;
+    if (!isRecreatedNetworkFailure(err)) throw err;
+    await reattachToNetwork(running);
+    await running.container.start();
   }
+}
+
+/**
+ * Put a container back on the agent network after the network was recreated
+ * under it (issue #190).
+ *
+ * The stale endpoint has to go first: it still names a network ID that no
+ * longer exists, and the daemon reads it on every start. `Force` is what makes
+ * that possible — a disconnect of an endpoint whose network is gone is not a
+ * graceful operation — and the disconnect is tolerated rather than required,
+ * because the only thing that actually matters is the connect that follows.
+ *
+ * The aliases come from the container's own inspect output, so its preview
+ * subdomain keeps resolving afterwards (see {@link planNetworkReattach}).
+ */
+async function reattachToNetwork(running: RunningContainer): Promise<void> {
+  const info = await running.container.inspect();
+  const plan = planNetworkReattach(
+    info.NetworkSettings?.Networks as
+      | Record<string, { Aliases?: string[] | null }>
+      | undefined,
+    AGENT_NETWORK_NAME
+  );
+  if (!plan) {
+    throw new Error(
+      `container ${running.name} failed to start on a recreated network but is ` +
+        `not attached to '${AGENT_NETWORK_NAME}' — nothing to reattach`
+    );
+  }
+
+  const network = getDocker().getNetwork(plan.network);
+  try {
+    await network.disconnect({ Container: running.id, Force: true });
+  } catch {
+    // The stale endpoint may already be gone — the connect below is the point.
+  }
+  await network.connect({
+    Container: running.id,
+    EndpointConfig: { Aliases: plan.aliases },
+  });
+  console.log(
+    `[docker] Reattached ${running.name} to '${plan.network}' after the network was ` +
+      `recreated under it (aliases: ${plan.aliases.join(", ") || "none"}) — issue #190`
+  );
 }
 
 /** Force-remove a container, idempotently — an already-gone container is not

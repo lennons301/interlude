@@ -1238,6 +1238,7 @@ describe("buildFleetView — needs you", () => {
               issueRef: "o/r#3",
               taskUrl: "/tasks/t-3",
               queuedAtMs: 0,
+              sessionIdle: true,
               undeliveredForMs: 20 * 60_000,
             },
           ],
@@ -2490,6 +2491,7 @@ describe("the quota's lane (issue #175)", () => {
               issueRef: "lennons301/moontide#62",
               taskUrl: "/tasks/t-62",
               queuedAtMs: 0,
+              sessionIdle: true,
               undeliveredForMs: 95 * 60_000,
             },
           ],
@@ -2503,8 +2505,8 @@ describe("the quota's lane (issue #175)", () => {
         severity: "red",
         context: "moontide #62",
         body:
-          "Your answer has sat undelivered for 1h 35m — the agent never received it. " +
-          "The parked session is not resuming; restart the app to re-adopt it.",
+          "Your answer has sat undelivered for 1h 35m — the session is idle and has not taken it. " +
+          "A parked container is only resumed when the box has memory headroom; check free memory.",
         action: { label: "Open session", href: "/tasks/t-62" },
       },
     ]);
