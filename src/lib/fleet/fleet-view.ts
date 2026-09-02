@@ -278,7 +278,9 @@ export type NeedsYouCause =
    * wedged pickup, a queue poll loop gone quiet. */
   | "review-stalled"
   | "pickup-wedged"
-  | "queue-stale";
+  | "queue-stale"
+  /** An answer the owner gave that never reached the agent (issue #136) */
+  | "answer-undelivered";
 
 export interface NeedsYouItem {
   cause: NeedsYouCause;
@@ -962,6 +964,24 @@ export function buildFleetView(rows: FleetRows): FleetView {
       action: null,
     });
   }
+  // An answer the owner has already given that the agent never received
+  // (issue #136). Red, and above the run-level cards: the owner has done their
+  // part, so this is the machinery failing to carry it — and until #136's boot
+  // adoption a restart was the only thing that could.
+  for (const answer of health?.undeliveredAnswers ?? []) {
+    needsYou.push({
+      cause: "answer-undelivered",
+      severity: "red",
+      context: answer.label,
+      body:
+        `Your answer has sat undelivered for ${formatDuration(
+          answer.undeliveredForMs
+        )} — the agent never received it. ` +
+        "The parked session is not resuming; restart the app to re-adopt it.",
+      action: { label: "Open session", href: answer.taskUrl },
+    });
+  }
+
   for (const stall of health?.owedReviewStalls ?? []) {
     const prTag = `PR #${stall.prNumber}`;
     needsYou.push({

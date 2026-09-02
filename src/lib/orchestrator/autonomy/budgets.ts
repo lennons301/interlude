@@ -164,8 +164,8 @@ export const DAILY_AUTONOMOUS_CAP_USD = 500;
  * couple of minutes are each surfaced as a needs-you card + one Discord ping.
  * Env-overridable in minutes via config.ts (`OWED_REVIEW_STALL_MINUTES`,
  * `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES`,
- * `OCCUPANCY_DIVERGED_MINUTES`); kept here as ms so the leaf that holds every
- * tunable also holds these.
+ * `OCCUPANCY_DIVERGED_MINUTES`, `UNDELIVERED_ANSWER_MINUTES`); kept here as ms
+ * so the leaf that holds every tunable also holds these.
  */
 export const DEFAULT_OWED_REVIEW_STALL_MS = 30 * 60_000;
 export const DEFAULT_PICKUP_WEDGED_MS = 3 * 60_000;
@@ -185,6 +185,18 @@ export const DEFAULT_QUEUE_HEARTBEAT_STALE_MS = 2 * 60_000;
  * ping with over an hour left. Warming the image at boot would let this drop.
  */
 export const DEFAULT_OCCUPANCY_DIVERGED_MS = 20 * 60_000;
+
+/**
+ * How long an answer the owner has given may sit undelivered before the fleet
+ * says so (issue #136, `UNDELIVERED_ANSWER_MINUTES`).
+ *
+ * Delivery is one 2s queue poll away, so ten minutes is three orders of
+ * magnitude of slack — it cannot fire on a healthy resume, and it fires long
+ * before an owner would think to go and check. The two things it catches both
+ * look identical from the outside: a blocked run whose delivery path died with
+ * its process, and a parked resume that memory admission keeps deferring.
+ */
+export const DEFAULT_UNDELIVERED_ANSWER_MS = 10 * 60_000;
 
 /**
  * Default real-money daily cap in USD (issue #174) — the ceiling on cash spent

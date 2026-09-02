@@ -50,6 +50,12 @@ export interface FleetHealthThresholds {
    * which includes a cold agent-image build — and this card's remedy is a
    * restart, which would kill that task. See DEFAULT_OCCUPANCY_DIVERGED_MS. */
   occupancyDivergedMs: number;
+  /** A user's answer left undelivered longer than this is surfaced (issue
+   * #136, default 10 min). Delivery is normally one 2s poll away, so this is
+   * generous by two orders of magnitude — it fires only on a *stuck* answer:
+   * a blocked run stranded by a restart (nothing holds its container handle
+   * any more), or a parked resume that memory admission keeps deferring. */
+  undeliveredAnswerMs: number;
 }
 
 /** A run owed a review whose pass has not started — no review container is
@@ -94,6 +100,25 @@ export interface AgentContainerCensus {
   stopped: number;
 }
 
+/**
+ * An answer the owner has given that the orchestrator has not delivered
+ * (issue #136). Timed from the message's own row rather than a since-timer,
+ * deliberately: the failure this detects is a *restart* severing the delivery
+ * path, and a since-timer would restart with the process and so be blindest
+ * exactly when the fleet needs it most.
+ */
+export interface UndeliveredAnswerObservation {
+  taskId: string;
+  /** Human context, e.g. "moontide #62". */
+  label: string;
+  /** "owner/repo#n" when the task has one. */
+  issueRef: string | null;
+  /** Where the owner can go and look. */
+  taskUrl: string;
+  /** When the answer was queued (ms) — the message row's own stamp. */
+  queuedAtMs: number;
+}
+
 export interface FleetHealthInput {
   /** Evaluation time in ms. */
   nowMs: number;
@@ -118,6 +143,8 @@ export interface FleetHealthInput {
   queueRunning: boolean;
   /** The queue loop's last-progress stamp (ms); null before its first tick. */
   queueLastProgressMs: number | null;
+  /** Answers queued against a live task and not yet delivered (issue #136). */
+  undeliveredAnswers: UndeliveredAnswerObservation[];
 }
 
 export interface OwedReviewStall extends OwedReviewObservation {
@@ -144,6 +171,10 @@ export interface PickupWedge {
   remedy: string;
 }
 
+export interface UndeliveredAnswer extends UndeliveredAnswerObservation {
+  undeliveredForMs: number;
+}
+
 export interface QueueStale {
   staleForMs: number;
 }
@@ -153,6 +184,7 @@ export interface FleetHealthSignals {
   owedReviewStalls: OwedReviewStall[];
   pickupWedged: PickupWedge | null;
   queueStale: QueueStale | null;
+  undeliveredAnswers: UndeliveredAnswer[];
 }
 
 /** The subset that just became active this evaluation — one Discord ping each. */
@@ -160,6 +192,7 @@ export interface FleetHealthAnnounce {
   owedReviewStalls: OwedReviewStall[];
   pickupWedged: PickupWedge | null;
   queueStale: QueueStale | null;
+  undeliveredAnswers: UndeliveredAnswer[];
 }
 
 /** Cross-sweep memory: when each condition first became true, and which have
@@ -186,6 +219,9 @@ export interface FleetHealthState {
    * wedge that changes character — and so changes its remedy — pings again. */
   pickupWedgedAnnounced: PickupWedgeCause | null;
   queueStaleAnnounced: boolean;
+  /** Task ids whose undelivered answer was already pinged; pruned when the
+   * answer is delivered (issue #136). */
+  undeliveredAnswerAnnounced: string[];
 }
 
 export const EMPTY_FLEET_HEALTH_STATE: FleetHealthState = {
@@ -195,6 +231,7 @@ export const EMPTY_FLEET_HEALTH_STATE: FleetHealthState = {
   occupancyDivergedSinceMs: null,
   pickupWedgedAnnounced: null,
   queueStaleAnnounced: false,
+  undeliveredAnswerAnnounced: [],
 };
 
 export const DEFAULT_FLEET_HEALTH_THRESHOLDS: FleetHealthThresholds = {
@@ -202,6 +239,7 @@ export const DEFAULT_FLEET_HEALTH_THRESHOLDS: FleetHealthThresholds = {
   pickupWedgedMs: 3 * 60_000,
   heartbeatStaleMs: 2 * 60_000,
   occupancyDivergedMs: 20 * 60_000,
+  undeliveredAnswerMs: 10 * 60_000,
 };
 
 export interface FleetHealthEvaluation {
@@ -340,12 +378,32 @@ export function evaluateFleetHealth(
   // A healthy idle loop still completes a cycle every 2s, keeping the stamp
   // fresh — only a hung or dead loop goes stale, so an idle fleet never alarms.
 
+  // --- (e) An answer the owner gave that never reached the agent -----------
+  // No since-timer: the message row's own stamp is the clock, so a restart —
+  // the very thing that strands a blocked run's answer (issue #136) — cannot
+  // reset it.
+  const undeliveredAnswers: UndeliveredAnswer[] = [];
+  const announcedAnswers: UndeliveredAnswer[] = [];
+  const undeliveredAnswerAnnounced: string[] = [];
+  for (const obs of input.undeliveredAnswers) {
+    const undeliveredForMs = now - obs.queuedAtMs;
+    if (undeliveredForMs < thresholds.undeliveredAnswerMs) continue;
+
+    const answer: UndeliveredAnswer = { ...obs, undeliveredForMs };
+    undeliveredAnswers.push(answer);
+    undeliveredAnswerAnnounced.push(obs.taskId);
+    if (!prev.undeliveredAnswerAnnounced.includes(obs.taskId)) {
+      announcedAnswers.push(answer);
+    }
+  }
+
   return {
-    signals: { owedReviewStalls, pickupWedged, queueStale },
+    signals: { owedReviewStalls, pickupWedged, queueStale, undeliveredAnswers },
     announce: {
       owedReviewStalls: announcedStalls,
       pickupWedged: announcePickupWedged,
       queueStale: announceQueueStale,
+      undeliveredAnswers: announcedAnswers,
     },
     state: {
       owedReviewSinceMs,
@@ -354,6 +412,7 @@ export function evaluateFleetHealth(
       occupancyDivergedSinceMs,
       pickupWedgedAnnounced,
       queueStaleAnnounced,
+      undeliveredAnswerAnnounced,
     },
   };
 }
