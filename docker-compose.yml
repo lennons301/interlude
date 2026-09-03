@@ -2,6 +2,14 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    # Memory caps: the host has no headroom to spare (4GB, and one agent
+    # container is entitled to 2GB of it). Uncapped, a leak here competes with
+    # the kernel itself — on 2026-09-03 dockerd's leak plus a stuck run tipped
+    # the box into a global OOM and a 3-hour reclaim livelock (kernel answering
+    # SYN, no userspace process able to emit a byte). A per-service cap turns
+    # that into a single contained restart. dockerd/containerd are capped
+    # separately via systemd drop-ins; the agent cap is AGENT_MEMORY_MB.
+    mem_limit: 192m
     ports:
       - "80:80"
       - "443:443"
@@ -28,6 +36,7 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    mem_limit: 768m
     env_file: .env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
