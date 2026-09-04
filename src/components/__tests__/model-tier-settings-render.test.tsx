@@ -154,7 +154,9 @@ describe("the model-tier settings panel", () => {
     );
   });
 
-  it("reads the implement row as its own tier and the ceiling on the repair's step", () => {
+  it("reads the implement row as the tier the implement pass and its repair run at — a ceiling on nothing", () => {
+    // A repair runs at the run's own tier (issue #211), so the row is a
+    // chosen tier for both kinds and derives nothing.
     const html = render({
       key: "modelTierImplement",
       label: "Implement",
@@ -162,11 +164,19 @@ describe("the model-tier settings panel", () => {
       envValue: "standard",
       tier: "standard",
       model: "sonnet",
-      chooses: ["implement"],
-      derived: [{ kind: "repair", rule: "capped", ceiling: "standard" }],
+      chooses: ["implement", "repair"],
+      derived: [],
     });
 
-    expect(html).toContain("runs standard (sonnet) · ceiling standard on repair (sonnet)");
+    expect(html).toContain("runs standard (sonnet)");
+    expect(html).not.toContain("on repair");
+  });
+
+  it("describes one ceiling row — review — in its opening copy", () => {
+    const html = render();
+
+    expect(html).toContain("Review alone is not chosen here but derived");
+    expect(html).not.toContain("Review and repair");
   });
 
   it("checks the option in force, so the control shows the state", () => {

@@ -215,6 +215,16 @@ describe("the shipped lanes.yaml", () => {
     expect(preferred.map((lane) => lane.baseUrl)).toEqual([null, null]);
   });
 
+  it("names the plan the subscription lane is on, under the id the ledger records", () => {
+    // The label is what the screen shows and moves with the plan (issue
+    // #211); the id is on every ledger row and in the stored primary-lane
+    // override, so it may not.
+    const subscription = catalog.lanes.find(
+      (lane) => lane.id === "claude-subscription"
+    )!;
+    expect(subscription.label).toBe("Claude subscription (Pro)");
+  });
+
   it("runs every lane on the one adapter that ships", () => {
     expect(catalog.lanes.map((lane) => lane.adapter)).toEqual(
       catalog.lanes.map(() => "claude-code")

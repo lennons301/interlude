@@ -501,12 +501,13 @@ export async function startTask(taskId: string): Promise<void> {
       // gives the identifier. A pinned raw id (no tier) is recorded verbatim,
       // exactly as before.
       //
-      // A repair pass leaves `model` alone (issue #201). It runs one rung
-      // above the implement tier, *derived from* this column — which is also
-      // the rung the quota ladder steps off (#170, and it only ever moves
-      // down) and the tier outcome-by-tier groups the run under (#198). A
-      // repair writing its own tier here would ratchet the run up a rung per
-      // repair and misfile it; the tier it actually ran at is on its task row.
+      // A repair pass leaves `model` alone (issues #201, #211). This column
+      // is the tier the *implement* pass ran at: what a repair runs at (#211)
+      // and the review derives from (#201), the rung the quota ladder steps
+      // off (#170, and it only ever moves down) and the tier outcome-by-tier
+      // groups the run under (#198). A repair writing here would file a run
+      // that recorded no tier under the fleet default its repair happened to
+      // resolve; the tier it actually ran at is on its task row.
       db.update(runs)
         .set({
           status: "implementing",

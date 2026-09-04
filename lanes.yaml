@@ -78,8 +78,11 @@ primary:
   - anthropic-api
 
 lanes:
+  # The id is unchanged by the plan the account is on: it is on every ledger
+  # row this lane has ever run (`runs.lane` / `tasks.lane`) and in the stored
+  # primary-lane override, so only the label names the plan (issue #211).
   - id: claude-subscription
-    label: Claude subscription
+    label: Claude subscription (Pro)
     adapter: claude-code
     billing: subscription
     # A long-lived token from `claude setup-token`, exec-scoped into the
@@ -92,6 +95,17 @@ lanes:
       # The CLI's own short aliases, which is what every pass has run on since
       # issue #74 — so "all existing passes run through this lane unchanged"
       # is a fact about these three lines.
+      #
+      # Plan fact (issue #211): the account is on Claude Pro, and Pro includes
+      # Opus, so `heavy` is Opus. Fable 5.1 on Pro is NOT included in the
+      # plan's limits — it bills to usage credits at API rates — so it is not
+      # named here. The upgrade path, on a Max plan: set `heavy: fable`; add
+      # `fable` to MODEL_TIER_ALIASES (src/lib/model-tiers.ts) as an alias of
+      # `heavy`, so a Fable-scoped rate-limit window (`seven_day_fable`) steps
+      # the tier ladder down (#170) instead of reading as account-wide; and
+      # keep usage credits DISABLED on the account, so the 50%-of-weekly Fable
+      # allowance surfaces as a wall the fleet can see rather than as silent
+      # real-money spend through a lane declared `billing: subscription`.
       heavy: opus
       standard: sonnet
       light: haiku
