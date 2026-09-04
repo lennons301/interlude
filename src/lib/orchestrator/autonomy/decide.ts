@@ -28,7 +28,7 @@ import {
 import type { ModelTier } from "../../model-tiers";
 import type { QuotaRejection } from "../../quota/rate-limit-rejection";
 import { planTierDegrade } from "../../quota/tier-ladder";
-import type { TriageExitKind, TriageResult } from "./triage";
+import { chooseRunTier, type RunTierChoice, type TriageExitKind, type TriageResult } from "./triage";
 import {
   buildFeedbackTurn,
   undeliverableFeedbackBody,
@@ -67,6 +67,11 @@ export interface CandidateIssue {
    * charged to the ticket, but the re-claim is bounded */
   interruptionsMade: number;
   hasActiveRun: boolean;
+  /** The tier the issue's most recent triage pass suggested for its work
+   * (issue #200), read off `tasks.triageTier`; null when no pass suggested
+   * one. Advice the claim applies only where the body states no `model:`
+   * directive — a tier in the Workflow section always outranks it. */
+  triageTier: ModelTier | null;
 }
 
 /**
@@ -269,6 +274,10 @@ export interface PendingTriage {
   /** "owner/repo#n" */
   issueRef: string;
   issueTitle: string;
+  /** The issue body as it stands, so the recommendation can state the tier
+   * the run will use (issue #200) under the same precedence the claim
+   * applies: a `model:` directive in the body outranks the pass's suggestion */
+  issueBody: string;
   projectId: string;
   result: TriageResult;
 }
@@ -576,9 +585,15 @@ export type Action =
       /** Per-exec turn limit from a max-turns directive; null = the default */
       maxTurns: number | null;
       /** Model tier from a `model:` directive (issues #80, #166), normalised
-       * to the tier vocabulary; null = the configured default tier. Recorded
-       * on runs.model. */
+       * to the tier vocabulary — or, where the body states none, the tier the
+       * issue's triage pass suggested (issue #200); null = the configured
+       * default tier. Recorded on runs.model. */
       model: string | null;
+      /** Where `model` came from: the ticket's own directive, or triage's
+       * stored suggestion filling the gap; null when neither stated one. The
+       * claim comment names it so a tier that reached the run without
+       * appearing in the body is still visible on the issue. */
+      modelSource: "ticket" | "triage" | null;
       /** Reasoning-effort level from an `effort:` directive (issue #81),
        * clamped to the allowlist; null = the configured default. Recorded on
        * runs.effort. */
@@ -945,6 +960,12 @@ export type Action =
         issueTitle: string;
         projectId: string;
         assessment: string;
+        /** The tier the run will use if armed as the issue stands (issue
+         * #200) — the body's directive, else triage's suggestion; null means
+         * the configured default. Stated on the embed because the suggestion
+         * reaches the run without appearing in the body, and the Discord
+         * reply is the moment the operator authorizes the work. */
+        tier: RunTierChoice;
       };
     }
   | {
@@ -1065,6 +1086,22 @@ function isAuthorAllowed(repo: string, author: string, allowedAuthors: string[])
   const login = author.toLowerCase();
   const repoOwner = repo.split("/")[0].toLowerCase();
   return login === repoOwner || allowedAuthors.some((a) => a.toLowerCase() === login);
+}
+
+/**
+ * One sentence naming the tier a run will use and where it came from (issue
+ * #200), for the issue comment and the Discord embed. Null names the
+ * configured default without guessing which tier that resolves to: the
+ * reducer is pure and the default is the executor's to read.
+ */
+export function describeRunTier(tier: RunTierChoice): string {
+  if (tier === null) {
+    return "Tier: the configured default — neither the ticket nor triage stated one.";
+  }
+  return tier.source === "ticket"
+    ? `Tier: \`${tier.tier}\` (ticket directive).`
+    : `Tier: \`${tier.tier}\` (triage's suggestion — the ticket states none; a ` +
+        "`model:` line in a Workflow section would outrank it).";
 }
 
 export function decideNext(snapshot: AutonomySnapshot): Action[] {
@@ -1390,6 +1427,13 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     }
 
     if (result.kind === "recommend") {
+      // The tier the run will use if armed as the issue stands (issue #200),
+      // under the same precedence the claim applies below — the body's own
+      // directive outranks the pass's suggestion. Named on both surfaces the
+      // operator authorizes from (the issue comment for a label click, the
+      // embed for a Discord "yes") because the suggestion reaches the run
+      // without ever appearing in the body.
+      const tier = chooseRunTier(parseTicketDirectives(pending.issueBody).model, result.tier);
       actions.push({
         type: "applyTriage",
         taskId: pending.taskId,
@@ -1398,6 +1442,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
         addLabels: [],
         comment:
           `Triage assessment — recommended for arming:\n\n${result.body}\n\n` +
+          `${describeRunTier(tier)}\n\n` +
           `Arming stays with a human: apply \`ready-for-agent\` to launch, ` +
           `or confirm the Discord recommendation with a reply of "yes".`,
       });
@@ -1410,6 +1455,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
           issueTitle: pending.issueTitle,
           projectId: pending.projectId,
           assessment: result.body,
+          tier,
         },
       });
     } else if (result.kind === "needs-info") {
@@ -1980,6 +2026,12 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     // Directives are the ticket adjusting its own bounded numbers — parsed
     // from the Workflow section only, already clamped to the ceilings.
     const directives = parseTicketDirectives(candidate.body);
+    // The run's tier (issue #200): the body's directive, else the tier the
+    // issue's triage pass suggested. Triage fills the gap and never overrides
+    // it — a pass that read the ticket cold may not overrule what the
+    // operator wrote — and with neither the run keeps its configured default
+    // exactly as an untiered ticket always has.
+    const tier = chooseRunTier(directives.model, candidate.triageTier);
     actions.push({
       type: "claimIssue",
       issueRef: candidate.issueRef,
@@ -1992,7 +2044,8 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       budgetUsd: directives.budget ?? snapshot.attemptBudgetUsd,
       checkpoint: directives.checkpoint,
       maxTurns: directives.maxTurns,
-      model: directives.model,
+      model: tier?.tier ?? null,
+      modelSource: tier?.source ?? null,
       effort: directives.effort,
       workflow: selectWorkflow(candidate.body, candidate.labels),
     });

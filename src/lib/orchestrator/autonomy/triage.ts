@@ -32,6 +32,22 @@ export type TriageResult =
     }
   | { kind: "unparseable"; reason: string };
 
+/**
+ * The exit as stored on `tasks.triageResult`: rows written before issue #200
+ * carry no `tier` key. `readStoredTriageResult` is the one reader that turns
+ * a row back into a `TriageResult`, re-clamping the stored word to the tier
+ * vocabulary on the way — a row is data, and the reducer only ever sees a
+ * tier or null.
+ */
+export type StoredTriageResult =
+  | { kind: TriageExitKind; body: string; tier?: ModelTier | null }
+  | { kind: "unparseable"; reason: string };
+
+export function readStoredTriageResult(stored: StoredTriageResult): TriageResult {
+  if (stored.kind === "unparseable") return stored;
+  return { kind: stored.kind, body: stored.body, tier: normalizeModelTier(stored.tier) };
+}
+
 const TRIAGE_LINE = /^TRIAGE:[ \t]*(recommend|needs-info|ready-for-human)[ \t]*$/i;
 const TIER_LINE = /^TIER:[ \t]*(.*?)[ \t]*$/i;
 

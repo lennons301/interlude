@@ -230,6 +230,10 @@ export function buildTriagePrompt(ticket: TriageTicket): string {
     `- The first line is exactly one of \`TRIAGE: recommend\`, ` +
       `\`TRIAGE: needs-info\` or \`TRIAGE: ready-for-human\` — nothing else ` +
       `on that line, and TRIAGE: appears nowhere else in the message.`,
+    `- The second line is exactly one of \`TIER: light\`, \`TIER: standard\` ` +
+      `or \`TIER: heavy\` — the tier the issue's work runs at, chosen against ` +
+      `the rubric in *The tier* above. State it on every exit; a fourth word ` +
+      `is dropped, and a missing line leaves the tier to the fleet's default.`,
     `- Then a blank line, then the exit's body in markdown: the assessment, ` +
       `the specific questions, or the suggested grilling agenda. Every exit ` +
       `requires a non-empty body; most of it is posted to the issue verbatim.`,

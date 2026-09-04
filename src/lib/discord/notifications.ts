@@ -684,7 +684,9 @@ export async function notifyTaskIdle(
  * and arming is one explicit yes away. Returns the Discord message ID so it
  * becomes the triage task's interactive message — a reply of "yes" is the
  * confirmation the orchestrator arms on. Anything else, including silence,
- * leaves the issue un-armed.
+ * leaves the issue un-armed. The embed states the tier the run will use
+ * (issue #200): triage's suggestion reaches the run without appearing in the
+ * body, and this reply is the moment the operator authorizes the work.
  */
 export async function notifyTriageRecommendation(
   channelId: string,
@@ -693,6 +695,8 @@ export async function notifyTriageRecommendation(
     issueRef: string;
     issueTitle: string;
     assessment: string;
+    /** One line naming the tier the run will use and where it came from */
+    tierLine: string;
     projectName: string | null;
   }
 ): Promise<string | null> {
@@ -706,6 +710,7 @@ export async function notifyTriageRecommendation(
     const lines = [rec.assessment.trim().slice(0, 800), ""];
     if (rec.projectName) lines.push(`Project: ${rec.projectName}`);
     lines.push(`Ticket: ${rec.issueRef}`);
+    lines.push(rec.tierLine);
     lines.push(
       "",
       "Reply **yes** to arm it (applies `ready-for-agent`), or apply the " +

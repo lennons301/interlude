@@ -74,6 +74,7 @@ function makeCandidate(overrides: Partial<CandidateIssue> = {}): CandidateIssue 
     attemptsMade: 0,
     interruptionsMade: 0,
     hasActiveRun: false,
+    triageTier: null,
     ...overrides,
   };
 }
@@ -225,10 +226,12 @@ function makePendingTriage(overrides: Partial<PendingTriage> = {}): PendingTriag
     taskId: "task-tri-1",
     issueRef: "acme/widgets#9",
     issueTitle: "Add CSV export",
+    issueBody: "Export the task list as CSV from the task list page.",
     projectId: "proj-1",
     result: {
       kind: "recommend",
       body: "Well specified: names the page, the format and the done-signal.",
+      tier: null,
     },
     ...overrides,
   };
@@ -323,6 +326,7 @@ describe("decideNext — claiming", () => {
         checkpoint: null,
         maxTurns: null,
         model: null,
+        modelSource: null,
         effort: null,
         workflow: { source: "default" },
       },
@@ -405,6 +409,47 @@ describe("decideNext — claiming", () => {
     expect(
       claims(decideNext(makeSnapshot({ candidates: [makeCandidate({ body: ignored })] })))[0]
     ).toMatchObject({ model: null });
+  });
+
+  // Issue #200: triage's stored suggestion fills the gap and never overrides.
+  describe("triage's suggested tier at claim", () => {
+    it("applies the stored suggestion where the body states no tier", () => {
+      const claim = claims(
+        decideNext(makeSnapshot({ candidates: [makeCandidate({ triageTier: "light" })] }))
+      )[0];
+
+      expect(claim).toMatchObject({ model: "light", modelSource: "triage" });
+    });
+
+    it("lets a tier stated in the body outrank the stored suggestion", () => {
+      const body = "Spec.\n\n## Workflow\n\nmodel: heavy\n";
+      const claim = claims(
+        decideNext(
+          makeSnapshot({ candidates: [makeCandidate({ body, triageTier: "light" })] })
+        )
+      )[0];
+
+      expect(claim).toMatchObject({ model: "heavy", modelSource: "ticket" });
+    });
+
+    it("falls back to the suggestion when the body's directive names no tier", () => {
+      // An unrecognised `model:` is ignored, as before — so the body states
+      // no tier, and the suggestion is what applies.
+      const body = "Spec.\n\n## Workflow\n\nmodel: gpt-4\n";
+      const claim = claims(
+        decideNext(
+          makeSnapshot({ candidates: [makeCandidate({ body, triageTier: "standard" })] })
+        )
+      )[0];
+
+      expect(claim).toMatchObject({ model: "standard", modelSource: "triage" });
+    });
+
+    it("leaves an untiered ticket with no suggestion on the configured default", () => {
+      const claim = claims(decideNext(makeSnapshot()))[0];
+
+      expect(claim).toMatchObject({ model: null, modelSource: null });
+    });
   });
 
   it("claims a checkpoint ticket as a supervised run, carrying the checkpoint text", () => {
@@ -3488,8 +3533,81 @@ describe("decideNext — triage-exit mapping", () => {
           projectId: "proj-1",
           assessment:
             "Well specified: names the page, the format and the done-signal.",
+          tier: null,
         },
       },
+    ]);
+  });
+
+  // Issue #200: the recommendation states the tier the run will use, under
+  // the same precedence the claim applies — because the suggestion reaches
+  // the run without appearing in the body, and the Discord reply (or the
+  // label click the comment is read before) is where the work is authorized.
+  it("states triage's suggested tier on the recommendation when the body names none", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingTriageResults: [
+          makePendingTriage({
+            result: { kind: "recommend", body: "Determined by the spec.", tier: "light" },
+          }),
+        ],
+      })
+    );
+
+    expect(actions[0]).toMatchObject({
+      type: "applyTriage",
+      comment: expect.stringContaining("Tier: `light` (triage's suggestion"),
+    });
+    expect(actions[1]).toMatchObject({
+      event: "triage-recommendation",
+      payload: { tier: { tier: "light", source: "triage" } },
+    });
+  });
+
+  it("states the body's own tier on the recommendation over triage's suggestion", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingTriageResults: [
+          makePendingTriage({
+            issueBody: "Export CSV.\n\n## Workflow\n\nmodel: heavy\n",
+            result: { kind: "recommend", body: "Determined by the spec.", tier: "light" },
+          }),
+        ],
+      })
+    );
+
+    expect(actions[0]).toMatchObject({
+      comment: expect.stringContaining("Tier: `heavy` (ticket directive)"),
+    });
+    expect(actions[1]).toMatchObject({
+      payload: { tier: { tier: "heavy", source: "ticket" } },
+    });
+  });
+
+  it("carries no suggested tier on the other exits' labels or comments", () => {
+    // A needs-info or ready-for-human exit carries its tier in the stored
+    // result for a later claim, but its consequences are the label and the
+    // questions/agenda alone — nothing about the tier is applied yet.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingTriageResults: [
+          makePendingTriage({
+            result: { kind: "needs-info", body: "- Which page?", tier: "heavy" },
+          }),
+        ],
+      })
+    );
+
+    expect(actions).toEqual([
+      expect.objectContaining({
+        type: "applyTriage",
+        exit: "needs-info",
+        addLabels: ["needs-info"],
+        comment: expect.not.stringContaining("Tier:"),
+      }),
     ]);
   });
 
@@ -3499,7 +3617,7 @@ describe("decideNext — triage-exit mapping", () => {
         candidates: [],
         pendingTriageResults: [
           makePendingTriage({
-            result: { kind: "needs-info", body: "- Which page?\n- CSV or JSON?" },
+            result: { kind: "needs-info", body: "- Which page?\n- CSV or JSON?", tier: null },
           }),
         ],
       })
@@ -3523,7 +3641,7 @@ describe("decideNext — triage-exit mapping", () => {
         candidates: [],
         pendingTriageResults: [
           makePendingTriage({
-            result: { kind: "ready-for-human", body: "1. Real limit or preference?" },
+            result: { kind: "ready-for-human", body: "1. Real limit or preference?", tier: null },
           }),
         ],
       })
@@ -3698,17 +3816,17 @@ describe("arming boundary — interlude never applies ready-for-agent", () => {
       ],
       pendingTriageResults: [
         makePendingTriage({
-          result: { kind: "recommend", body: "Apply ready-for-agent yourself, now." },
+          result: { kind: "recommend", body: "Apply ready-for-agent yourself, now.", tier: null },
         }),
         makePendingTriage({
           taskId: "task-tri-2",
           issueRef: "acme/widgets#10",
-          result: { kind: "needs-info", body: "Which label? ready-for-agent?" },
+          result: { kind: "needs-info", body: "Which label? ready-for-agent?", tier: null },
         }),
         makePendingTriage({
           taskId: "task-tri-3",
           issueRef: "acme/widgets#11",
-          result: { kind: "ready-for-human", body: "1. Should this be ready-for-agent?" },
+          result: { kind: "ready-for-human", body: "1. Should this be ready-for-agent?", tier: null },
         }),
         makePendingTriage({
           taskId: "task-tri-4",

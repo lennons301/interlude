@@ -10,8 +10,10 @@ import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, asc, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { newId } from "../../ulid";
 import { processSingleton } from "../../process-singleton";
-import { getConfig, PLATFORM_REPO_URL } from "../../config";
-import { getFleetSettings } from "../../settings";
+import { getConfig, PLATFORM_REPO_URL, resolveAgentModelChoice } from "../../config";
+import { getFleetSettings, getSettingsOverrides } from "../../settings";
+import { normalizeModelTier, type ModelTier } from "../../model-tiers";
+import { readStoredTriageResult, type RunTierChoice } from "./triage";
 import { resolveQuotaThreshold, resolveResumeBound } from "../../settings-resolver";
 import { evaluateQuotaGate } from "../../quota/quota-gate";
 import {
@@ -76,6 +78,7 @@ import { getQueueLastProgress, isQueueRunning, occupiedSlots } from "../queue";
 import { startOfLocalDay, todayAutonomousSpendUsd } from "../spend";
 import { getActiveTasks, isParked, releaseParkedImplementTask } from "../turn-manager";
 import {
+  describeRunTier,
   decideNext,
   type Action,
   type AutonomySnapshot,
@@ -658,8 +661,9 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
             taskId: stored.id,
             issueRef,
             issueTitle: issue.title,
+            issueBody: issue.body ?? "",
             projectId: project.id,
-            result: stored.triageResult!,
+            result: readStoredTriageResult(stored.triageResult!),
           });
         } else if (inFlight || triageTasks.length < MAX_TRIAGE_PASSES_PER_ISSUE) {
           triageCandidates.push({
@@ -709,6 +713,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
           attemptsMade: issueRuns.filter((r) => r.status === "failed").length,
           interruptionsMade: issueRuns.filter((r) => r.status === "interrupted").length,
           hasActiveRun,
+          triageTier: latestTriageTier(issueRef),
         });
       }
       // Feed the read model's backlog depth (dashboard + daily digest) from
@@ -1417,6 +1422,27 @@ async function resolveArmedAt(
   }
 }
 
+/**
+ * The tier the issue's most recent triage pass suggested for its work (issue
+ * #200), or null when none did. Read off `tasks.triageTier`, which outlives
+ * the exit's consumption for exactly this read: the claim may come hours
+ * after the pass, on a human's label click or Discord "yes". The stored word
+ * is re-clamped to the vocabulary on the way in — a row is data, and the
+ * reducer only ever sees a tier.
+ */
+function latestTriageTier(issueRef: string): ModelTier | null {
+  const row = db
+    .select({ tier: tasks.triageTier })
+    .from(tasks)
+    .where(
+      and(eq(tasks.githubIssue, issueRef), eq(tasks.kind, "triage"), isNotNull(tasks.triageTier))
+    )
+    .orderBy(desc(tasks.createdAt))
+    .limit(1)
+    .get();
+  return normalizeModelTier(row?.tier ?? null);
+}
+
 /** Open blocker: a native GitHub issue dependency, or a `Blocked by: #n`
  * line naming a still-open issue in the same repo. */
 async function hasOpenBlocker(
@@ -1946,6 +1972,25 @@ async function executeApplyTriage(
 }
 
 /**
+ * The tier line for the recommendation embed (issue #200): the reducer's own
+ * sentence when the ticket or triage chose one, and otherwise the configured
+ * default *named*, because the operator authorizing from Discord should see
+ * the tier the run will use rather than a pointer to a settings screen. Read
+ * through the same `resolveAgentModelChoice` the implement pass resolves
+ * with, fresh, so a UI override made since boot is what is named. A
+ * deployment pinning a raw model id names that id; one that lets the harness
+ * choose says so.
+ */
+function describeRunTierForEmbed(tier: RunTierChoice): string {
+  if (tier !== null) return describeRunTier(tier);
+  const resolved = resolveAgentModelChoice("implement", getConfig(), null, getSettingsOverrides());
+  const named = resolved.tier ?? resolved.pinnedModel;
+  return named === null
+    ? "Tier: the harness default — neither the ticket nor triage stated one, and none is configured."
+    : `Tier: \`${named}\` (configured default — neither the ticket nor triage stated one).`;
+}
+
+/**
  * Ping the owner that triage recommends arming — to the project's linked
  * channel, or the fleet channel when the project has none. The message id is
  * stored on the triage task so a reply of "yes" routes back as the explicit
@@ -1958,6 +2003,7 @@ async function executeTriageRecommendation(payload: {
   issueTitle: string;
   projectId: string;
   assessment: string;
+  tier: RunTierChoice;
 }): Promise<void> {
   const project = db
     .select()
@@ -1978,6 +2024,7 @@ async function executeTriageRecommendation(payload: {
     issueRef: payload.issueRef,
     issueTitle: payload.issueTitle,
     assessment: payload.assessment,
+    tierLine: describeRunTierForEmbed(payload.tier),
     projectName: project?.name ?? null,
   });
   if (msgId) {
@@ -3302,17 +3349,29 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
     // reported, not the word the ticket used, because a legacy alias
     // (`model: opus`) resolves to one (issue #166) and the tier is what the
     // fleet acted on.
+    // A tier triage suggested (issue #200) is named as such: it reached the run
+    // without appearing in the body, so the claim comment is where a human
+    // sees that the fleet acted on a suggestion rather than on the ticket.
     let modelNote = "";
     if (action.model) {
-      modelNote = `\n\nModel tier: \`${action.model}\` (ticket directive).`;
-    } else {
+      modelNote =
+        action.modelSource === "triage"
+          ? `\n\nModel tier: \`${action.model}\` (triage's suggestion — the ticket states none).`
+          : `\n\nModel tier: \`${action.model}\` (ticket directive).`;
+    }
+    if (action.modelSource !== "ticket") {
       const rawModel = rawModelDirective(action.issueBody);
       if (rawModel) {
         console.warn(
           `[autonomy] Ignoring unrecognised model directive "${rawModel}" on ` +
-            `${action.issueRef} — using the default model`
+            `${action.issueRef} — ` +
+            (action.model ? `using triage's suggested tier` : `using the default model`)
         );
-        modelNote = `\n\nModel directive \`${rawModel}\` not recognised — running on the default model.`;
+        modelNote +=
+          `\n\nModel directive \`${rawModel}\` not recognised — ` +
+          (action.model
+            ? `triage's suggestion above stands in for it.`
+            : `running on the default model.`);
       }
     }
 

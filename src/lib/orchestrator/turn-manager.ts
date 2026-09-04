@@ -1882,7 +1882,13 @@ async function finishTriagePass(
 ): Promise<void> {
   const exit = parseTriageExit(rawStream);
 
-  updateTask(taskId, { triageResult: exit });
+  // The suggested tier (issue #200) is written to its own column beside the
+  // exit: the exit is consumed when the sweep applies it, and the tier has
+  // to survive that to be read at claim.
+  updateTask(taskId, {
+    triageResult: exit,
+    triageTier: exit.kind === "unparseable" ? null : exit.tier,
+  });
 
   insertSystemMessage(
     taskId,
@@ -2766,6 +2772,7 @@ function updateTask(
     pullRequestUrl: string | null;
     discordMessageId: string | null;
     triageResult: (typeof tasks.$inferSelect)["triageResult"];
+    triageTier: string | null;
     lane: string | null;
     laneBilling: "subscription" | "metered" | null;
     tier: string | null;
