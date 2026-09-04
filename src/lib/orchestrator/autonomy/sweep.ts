@@ -3257,6 +3257,11 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
         // claim time (issue #80); the implement pass resolves through the same
         // value and records it here. Null keeps the configured default.
         model: action.model,
+        // The same directive, kept apart from `model` (issue #198): the
+        // implement pass rewrites `model` with the tier it resolved, after which
+        // a default and a declaration read the same. Written once, here, and
+        // never again — tier coverage is read from this column alone.
+        declaredTier: action.model,
         // An `effort:` directive (already allowlist-clamped) pins the level
         // from claim time (issue #81); the implement pass resolves through the
         // same value and records it here. Null keeps the configured default.

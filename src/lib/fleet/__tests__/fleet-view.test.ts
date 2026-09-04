@@ -77,6 +77,7 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     resumeAfter: null,
     model: null,
     degradedFrom: null,
+    declaredTier: null,
     claimedAt: TODAY_9AM,
     startedAt: TODAY_9AM,
     finishedAt: null,
@@ -2510,5 +2511,287 @@ describe("the quota's lane (issue #175)", () => {
         action: { label: "Open session", href: "/tasks/t-62" },
       },
     ]);
+  });
+});
+
+describe("buildFleetView — tier coverage and outcome by tier (issue #198)", () => {
+  const daysAgo = (days: number) =>
+    new Date(NOW.getTime() - days * 24 * 60 * 60 * 1000);
+
+  it("reports nothing claimed as nothing — not as 0% coverage", () => {
+    const view = buildFleetView(baseRows());
+
+    expect(view.tiers).toEqual({
+      windowDays: 7,
+      coverage: { claimed: 0, declared: 0, undeclared: 0, percent: null },
+      byTier: [],
+    });
+  });
+
+  it("counts coverage over claims in the window, and says how many declared none", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          makeRun({ id: "r1", githubIssue: "o/r#1", model: "light", declaredTier: "light" }),
+          makeRun({ id: "r2", githubIssue: "o/r#2", model: "standard", declaredTier: null }),
+          makeRun({ id: "r3", githubIssue: "o/r#3", model: "standard", declaredTier: null }),
+          // Claimed 8 days ago: outside the window, however recently it finished.
+          makeRun({
+            id: "r4",
+            githubIssue: "o/r#4",
+            model: "heavy",
+            declaredTier: "heavy",
+            status: "merged",
+            claimedAt: daysAgo(8),
+            finishedAt: daysAgo(1),
+          }),
+          // Claimed after `now`: the digest evaluates the view at the end of a
+          // past day over live rows, and must know nothing after it.
+          makeRun({
+            id: "r5",
+            githubIssue: "o/r#5",
+            model: "heavy",
+            declaredTier: "heavy",
+            claimedAt: new Date(NOW.getTime() + 60_000),
+          }),
+        ],
+      })
+    );
+
+    expect(view.tiers.coverage).toEqual({
+      claimed: 3,
+      declared: 1,
+      undeclared: 2,
+      percent: 33,
+    });
+    // One denominator: the outcome rows account for every claim covered.
+    const attempts = view.tiers.byTier.reduce((sum, row) => sum + row.attempts, 0);
+    expect(attempts).toBe(view.tiers.coverage.claimed);
+  });
+
+  it("reads a declaration off declaredTier, never off model", () => {
+    // Once the implement pass has started, `model` holds the resolved tier for
+    // a declared and an undeclared run alike — which is why the column exists.
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          makeRun({ id: "r1", githubIssue: "o/r#1", model: "standard", declaredTier: "standard" }),
+          makeRun({ id: "r2", githubIssue: "o/r#2", model: "standard", declaredTier: null }),
+        ],
+      })
+    );
+
+    expect(view.tiers.coverage).toMatchObject({ declared: 1, undeclared: 1, percent: 50 });
+    expect(view.tiers.byTier).toEqual([
+      expect.objectContaining({ tier: "standard", attempts: 2, declared: 1 }),
+    ]);
+  });
+
+  it("groups attempts, tickets, burned attempts, verdicts and spend by the tier the work ran at", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          makeRun({
+            id: "h1",
+            githubIssue: "o/r#1",
+            model: "heavy",
+            declaredTier: "heavy",
+            status: "merged",
+            reviewVerdict: "approve",
+            totalCostUsd: 12.5,
+            finishedAt: TODAY_9AM,
+          }),
+          makeRun({
+            id: "l1",
+            githubIssue: "o/r#2",
+            attempt: 1,
+            model: "light",
+            declaredTier: "light",
+            status: "failed",
+            reviewVerdict: "request-changes",
+            totalCostUsd: 4,
+            finishedAt: TODAY_9AM,
+          }),
+          // The last failed attempt, relabelled when the ticket went to a human:
+          // a burned attempt under another name.
+          makeRun({
+            id: "l2",
+            githubIssue: "o/r#2",
+            attempt: 2,
+            model: "light",
+            declaredTier: "light",
+            status: "exhausted",
+            reviewVerdict: "escalate",
+            totalCostUsd: 6,
+            finishedAt: TODAY_9AM,
+          }),
+          // In flight, no verdict yet, and landed on light by default.
+          makeRun({
+            id: "l3",
+            githubIssue: "o/r#3",
+            model: "light",
+            declaredTier: null,
+            status: "implementing",
+            totalCostUsd: 1.25,
+          }),
+        ],
+      })
+    );
+
+    expect(view.tiers.byTier).toEqual([
+      {
+        tier: "heavy",
+        attempts: 1,
+        tickets: 1,
+        failed: 0,
+        declared: 1,
+        degraded: 0,
+        verdicts: { approve: 1, requestChanges: 0, escalate: 0 },
+        spendUsd: 12.5,
+      },
+      {
+        tier: "light",
+        attempts: 3,
+        tickets: 2,
+        failed: 2,
+        declared: 2,
+        degraded: 0,
+        verdicts: { approve: 0, requestChanges: 1, escalate: 1 },
+        spendUsd: 11.25,
+      },
+    ]);
+  });
+
+  it("counts a run that stepped down the ladder once, under the tier it ended on (issue #170)", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          makeRun({
+            id: "r1",
+            githubIssue: "o/r#1",
+            model: "light",
+            degradedFrom: "heavy",
+            declaredTier: "heavy",
+            totalCostUsd: 3,
+          }),
+        ],
+        tasks: [
+          // The refused pass and its retry a rung down: two task rows, one attempt.
+          makeTask({ id: "t1", runId: "r1", kind: "implement", status: "failed", containerStatus: null, totalCostUsd: 0.01 }),
+          makeTask({ id: "t2", runId: "r1", kind: "implement", status: "running", containerStatus: "running", totalCostUsd: 2.99 }),
+        ],
+      })
+    );
+
+    // Declared overall — the ticket named a tier — but routed work on neither
+    // row: it declared heavy and fell to light.
+    expect(view.tiers.coverage).toMatchObject({ claimed: 1, declared: 1 });
+    expect(view.tiers.byTier).toEqual([
+      expect.objectContaining({ tier: "light", attempts: 1, degraded: 1, declared: 0, spendUsd: 3 }),
+    ]);
+    expect(view.tiers.byTier.some((row) => row.tier === "heavy")).toBe(false);
+  });
+
+  it("counts a run resumed or moved across lanes once — tasks are never the unit (issues #169, #176)", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          makeRun({ id: "r1", githubIssue: "o/r#1", model: "standard", declaredTier: "standard", totalCostUsd: 9 }),
+        ],
+        tasks: [
+          makeTask({ id: "t1", runId: "r1", kind: "implement", status: "failed", containerStatus: null, totalCostUsd: 2 }),
+          makeTask({ id: "t2", runId: "r1", kind: "implement", status: "completed", containerStatus: null, totalCostUsd: 5 }),
+          makeTask({ id: "t3", runId: "r1", kind: "review", status: "running", containerStatus: "running", totalCostUsd: 2 }),
+        ],
+      })
+    );
+
+    expect(view.tiers.coverage.claimed).toBe(1);
+    expect(view.tiers.byTier).toEqual([
+      expect.objectContaining({ tier: "standard", attempts: 1, tickets: 1, spendUsd: 9 }),
+    ]);
+  });
+
+  it("folds a restart's re-claim into the attempt it continues — a restart consumes no attempt (issue #24)", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          // Attempt 1, interrupted by a restart yesterday…
+          makeRun({
+            id: "r1",
+            githubIssue: "o/r#1",
+            attempt: 1,
+            model: "light",
+            declaredTier: "light",
+            status: "interrupted",
+            totalCostUsd: 2,
+            claimedAt: daysAgo(1),
+            finishedAt: daysAgo(1),
+          }),
+          // …re-claimed today under the same attempt number, and failed.
+          makeRun({
+            id: "r2",
+            githubIssue: "o/r#1",
+            attempt: 1,
+            model: "light",
+            declaredTier: "light",
+            status: "failed",
+            reviewVerdict: "request-changes",
+            totalCostUsd: 3,
+            finishedAt: TODAY_9AM,
+          }),
+          // Attempt 2, in flight.
+          makeRun({
+            id: "r3",
+            githubIssue: "o/r#1",
+            attempt: 2,
+            model: "light",
+            declaredTier: "light",
+            status: "implementing",
+            totalCostUsd: 1,
+          }),
+        ],
+      })
+    );
+
+    // Two attempts, not three rows — and the interrupted row's spend still
+    // belongs to the attempt it was part of.
+    expect(view.tiers.coverage).toMatchObject({ claimed: 2, declared: 2, percent: 100 });
+    expect(view.tiers.byTier).toEqual([
+      {
+        tier: "light",
+        attempts: 2,
+        tickets: 1,
+        failed: 1,
+        declared: 2,
+        degraded: 0,
+        verdicts: { approve: 0, requestChanges: 1, escalate: 0 },
+        spendUsd: 6,
+      },
+    ]);
+  });
+
+  it("shows runs that recorded no tier as their own row, last, and groups a legacy alias under its tier", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          // Failed before start, or predates the ledger: no tier at all.
+          makeRun({ id: "r1", githubIssue: "o/r#1", model: null }),
+          // An environment pinning a raw model id names no tier — kept verbatim.
+          makeRun({ id: "r2", githubIssue: "o/r#2", model: "claude-opus-4-8" }),
+          // Pre-#166 rows carry the vendor alias.
+          makeRun({ id: "r3", githubIssue: "o/r#3", model: "opus" }),
+          makeRun({ id: "r4", githubIssue: "o/r#4", model: "light" }),
+        ],
+      })
+    );
+
+    expect(view.tiers.byTier.map((row) => row.tier)).toEqual([
+      "heavy",
+      "light",
+      "claude-opus-4-8",
+      null,
+    ]);
+    expect(view.tiers.coverage).toMatchObject({ claimed: 4, declared: 0, undeclared: 4, percent: 0 });
   });
 });

@@ -13,7 +13,10 @@ import {
   type ProjectPickupHold,
   type RecentItem,
   type RunningCard,
+  type TierOutcome,
+  type TierView,
 } from "./fleet-view";
+import { counted, describeVerdicts, tierLabel } from "./tier-prose";
 
 /** Half-open interval [start, end) — one local calendar day */
 export interface DigestWindow {
@@ -276,6 +279,43 @@ function completedLine(item: RecentItem): string {
   return parts.join(" · ");
 }
 
+/** One tier's outcome row as a line (issue #198): what the work at that tier
+ * cost in attempts, verdicts and dollars, and how much of the row is routed
+ * work rather than the default landing there. */
+function tierLine(row: TierOutcome): string {
+  return [
+    tierLabel(row.tier),
+    `${counted(row.attempts, "attempt")} on ${counted(row.tickets, "ticket")}`,
+    `${row.failed} failed`,
+    describeVerdicts(row.verdicts) ?? "no verdicts",
+    usd(row.spendUsd),
+    `${row.declared} declared` +
+      (row.degraded > 0 ? `, ${row.degraded} stepped down` : ""),
+  ].join(" · ");
+}
+
+/**
+ * Tier coverage, then outcome by tier (issue #198) — the figures the
+ * dashboard's Tiers panel shows, off the same read model, so the morning digest
+ * and the screen cannot describe the fleet's routing differently. The coverage
+ * line leads and names the claims that declared nothing, because a savings
+ * claim read off the routed tickets alone is drawn from a biased sample.
+ * Nothing claimed is said as such rather than as 0% coverage.
+ */
+function tierLines(tiers: TierView): string[] {
+  const { coverage } = tiers;
+  if (coverage.claimed === 0) {
+    return [`No tickets claimed in the last ${tiers.windowDays} days.`];
+  }
+  const lead =
+    `Coverage: ${coverage.declared} of ${counted(coverage.claimed, "attempt")} ` +
+    `carried a declared tier (${coverage.percent}%)` +
+    (coverage.undeclared > 0
+      ? ` — ${coverage.undeclared} ran on the default.`
+      : ".");
+  return [lead, ...tiers.byTier.map(tierLine)];
+}
+
 /**
  * Render the digest over a FleetView built at the last instant of `window`
  * (`buildFleetView({...rows, now: window.end - 1ms})`), so the view's own
@@ -352,6 +392,13 @@ export function renderDailyDigest(
               ]
             : []),
         ],
+      },
+      {
+        // A weekly reading rather than yesterday's (issue #198): whether
+        // per-ticket tier routing is running, and what each tier has been
+        // costing, over the same window the dashboard's Tiers panel shows.
+        heading: `Tiers (last ${view.tiers.windowDays} days)`,
+        lines: tierLines(view.tiers),
       },
     ],
   };
