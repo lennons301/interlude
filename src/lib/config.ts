@@ -11,7 +11,6 @@ import {
 import type { FleetHealthThresholds } from "./fleet/health";
 import {
   normalizeModelTier,
-  strongerTier,
   tierAbove,
   weakerTier,
   type ModelTier,
@@ -376,52 +375,50 @@ function choiceFromSetting(
 
 /**
  * Which **tier** a turn of the given kind runs at (issues #74, #80, #166,
- * #172, #201), and the one place the layers of that answer are ordered:
+ * #172, #201, #211), and the one place the layers of that answer are ordered:
  *
- * 1. A **derived** kind — review and repair (`DERIVED_TIER_KINDS`) — runs one
- *    rung above the tier the run's implement pass ran at, capped at the top
- *    of the vocabulary (issue #201). A single fleet review tier cannot be
- *    right for both a one-line guard and a new state machine, and a repair
- *    pass retrying at the tier that just failed repeats the failure. Deriving
+ * 1. The **derived** kind — review, the only member of `DERIVED_TIER_KINDS` —
+ *    runs one rung above the tier the run's implement pass ran at, capped at
+ *    the top of the vocabulary (issue #201). A single fleet review tier cannot
+ *    be right for both a one-line guard and a new state machine. Deriving
  *    review as *equal* to the implement tier was rejected: a ticket declaring
  *    `light` would buy itself a light gate, so a misclassified ticket would
  *    get both a weak implement and a weak review; one rung of margin makes a
- *    misclassification the thing most likely to be caught. The kind's own
+ *    misclassification the thing most likely to be caught. The reviewer's own
  *    fleet setting, when an operator has explicitly set it, is a **ceiling**
  *    on the derivation rather than the answer — an operator's stated choice
  *    is honoured even when it is suboptimal, exactly as an explicit lane
  *    choice is, and the accepted consequence is that a review tier set low as
  *    a cost measure caps a heavy ticket's review there. Unset, the derivation
- *    runs free — and "set" means the kind's *own* field: a stored override or
- *    its own variable, never the base `AGENT_MODEL` standing in for an unset
- *    `AGENT_MODEL_REVIEW`, which is the implement kind's setting and would
- *    otherwise cap every review at the implement tier (`tierCeiling`). A run
- *    with no resolved implement tier (a pinned raw model id, or the harness
- *    default) derives nothing, and the pass resolves exactly as it did
- *    before. A field that pins a raw model id names no tier to bound with: on
- *    the reviewer's own field the pin is honoured as the answer, as it always
- *    was, and on the implement field a repair derives past it
+ *    runs free — and "set" means the review's *own* field: a stored override
+ *    or its own variable, never the base `AGENT_MODEL` standing in for an
+ *    unset `AGENT_MODEL_REVIEW`, which is the implement kind's setting and
+ *    would otherwise cap every review at the implement tier (`tierCeiling`).
+ *    A run with no resolved implement tier (a pinned raw model id, or the
+ *    harness default) derives nothing, and the review resolves exactly as it
+ *    did before. A review field that pins a raw model id names no tier to
+ *    bound with, so the pin is honoured as the answer, as it always was
  *    (`tierDerivation`, shared with the settings screen so it cannot restate
- *    the rule). That is one asymmetry between the two derived kinds, and it
- *    is #80's line (`isWorkPassKind`), which decides the other too: the
- *    review field is the reviewer's own and a ticket may not touch it, so it
- *    is a hard cap — a review tier set low caps a heavy ticket's review below
- *    its implement pass, the accepted consequence. Repair answers to the
- *    *implement* field, which for the implement pass is a default the
- *    ticket's directive outranks; applied to the repair as a hard cap it
- *    would run the continuation of heavy work at light because the fleet
- *    default was light, undoing the directive for the second half of the
- *    same work. So for a work-carrying derived kind the ceiling bounds the
- *    *step*, never the work: the run's own tier is a floor under it.
- * 2. A ticket's `model:` directive — already normalised to a tier by the
- *    directive parser — wins for the pass kinds that carry a run's tier and
- *    are not derived (implement and interactive). Review and triage never
- *    read it directly: the ticket chooses the model its *work* runs on, not
- *    the reviewer's, and the derivation above is the only way a ticket's tier
- *    reaches its review — one rung up, never level.
- * 3. Then the UI override for this pass kind, if one is set (issue #166).
+ *    the rule). Repair is deliberately *not* derived (issue #211): a repair
+ *    pass is the same attempt continuing after the default branch moved under
+ *    its PR — a conflict to merge (#54), a red rollup to make green (#130) —
+ *    not work that was judged wrong, so stepping it up would spend the tier
+ *    the fleet is most constrained on to fix a merge conflict. It takes the
+ *    next layer exactly as the implement pass does.
+ * 2. The run's tier — a ticket's `model:` directive, already normalised to a
+ *    tier by the directive parser, on the implement pass; `runs.model`, the
+ *    tier that pass actually ran at, on a repair — wins for the pass kinds
+ *    that carry a run's work (`isWorkPassKind`: implement, repair and
+ *    interactive). Review and triage never read it directly: the ticket
+ *    chooses the model its *work* runs on, not the reviewer's, and the
+ *    derivation above is the only way a ticket's tier reaches its review —
+ *    one rung up, never level.
+ * 3. Then the UI override for this pass kind, if one is set (issue #166) —
+ *    the implement field for a repair, which has no knob of its own.
  * 4. Then the environment default — `AGENT_MODEL` as the base, with
  *    `AGENT_MODEL_REVIEW` / `AGENT_MODEL_TRIAGE` for the read-heavy passes.
+ *    A raw model id pinned there passes through verbatim, for a repair as for
+ *    the implement pass.
  *
  * Triage and interactive derive nothing and keep their chosen settings: triage
  * is standalone and gated by a human authorising arming, and interactive has
@@ -429,9 +426,10 @@ function choiceFromSetting(
  *
  * `ticketModel` is the run's `model:` directive on an implement pass and, on
  * every later pass of the run, `runs.model` — the tier the implement pass
- * actually ran at, which is what the derivation reads. It is passed for every
- * kind and was, before #201, discarded for the non-work kinds; the derivation
- * is therefore a change to this one function, with no new plumbing.
+ * actually ran at, which is what the derivation reads and what a repair runs
+ * at. It is passed for every kind and was, before #201, discarded for the
+ * non-work kinds; the derivation is therefore a change to this one function,
+ * with no new plumbing.
  *
  * It stops at the tier because what a tier *means* is a property of the
  * execution lane the pass is about to run on (issue #172), not of this module
@@ -462,15 +460,11 @@ export function resolveAgentModelChoice(
   if (isDerivedTierKind(kind)) {
     // Nothing to derive from: the field alone decides, as before.
     if (runTier === null) return choiceFromSetting(resolved);
-    const { rule, ceiling } = tierDerivation(kind, resolved);
+    const { rule, ceiling } = tierDerivation(resolved);
     if (rule === "pinned") return choiceFromSetting(resolved);
     const derived = tierAbove(runTier);
-    const capped = ceiling === null ? derived : weakerTier(derived, ceiling);
-    // A work-carrying derived kind — repair — is floored at the run's own
-    // tier: the ceiling bounds its step, never the work (the doc above).
-    const floorsAtRunTier = isWorkPassKind(kind);
     return {
-      tier: floorsAtRunTier ? strongerTier(capped, runTier) : capped,
+      tier: ceiling === null ? derived : weakerTier(derived, ceiling),
       pinnedModel: null,
     };
   }

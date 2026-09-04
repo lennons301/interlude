@@ -5,18 +5,20 @@ import * as schema from "@/db/schema";
 import { newId } from "@/lib/ulid";
 
 /**
- * A repair pass runs one rung above the run's implement tier (issue #201) and
- * leaves that tier where it found it. Driven through the real `startTask` over
- * a real (in-memory, migrated) database and the real `lanes.yaml`, up to the
- * container — which is stubbed to fail, because everything this ticket promises
- * about the ledger is written *before* the container is provisioned.
+ * A repair pass runs at the run's own implement tier (issue #211) — no step,
+ * no derivation — and leaves that tier where it found it (issue #201). Driven
+ * through the real `startTask` over a real (in-memory, migrated) database and
+ * the real `lanes.yaml`, up to the container — which is stubbed to fail,
+ * because everything these tickets promise about the ledger is written
+ * *before* the container is provisioned.
  *
  * Two facts, both only observable here: the task row records the tier the
  * repair actually ran at, and `runs.model` — the tier the implement pass ran
- * at, what the next repair derives from, what the quota ladder steps off and
- * what outcome-by-tier groups the run under — is not rewritten by it. Before
- * this, a repair copied the implement tier and wrote it back, a no-op; once it
- * derives, writing back would ratchet the run up a rung per repair.
+ * at, what the review derives from, what the quota ladder steps off and what
+ * outcome-by-tier groups the run under — is not rewritten by it. Writing it
+ * back would be a no-op on a run that recorded a tier and a backfill on one
+ * that did not, filing the run under a fleet default its repair happened to
+ * resolve.
  */
 
 let testDb: ReturnType<typeof createTestDb>["db"];
@@ -121,7 +123,7 @@ function task() {
   return testDb.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)).get()!;
 }
 
-describe("a repair pass and the run's implement tier (issue #201)", () => {
+describe("a repair pass and the run's implement tier (issues #201, #211)", () => {
   let turns: TurnManager;
   const env = { ...process.env };
 
@@ -152,12 +154,15 @@ describe("a repair pass and the run's implement tier (issue #201)", () => {
     vi.restoreAllMocks();
   });
 
-  it("runs one rung above the implement tier and records that on its own row", async () => {
+  it("runs at the run's implement tier, with no step, and records that on its own row", async () => {
+    // A repair is the same attempt continuing after the default branch moved
+    // under its PR, not work judged wrong (issue #211) — so a standard run's
+    // conflict is fixed by the tier that wrote the code, not the heavy one.
     await boot("standard");
 
     await turns.startTask(taskId);
 
-    expect(task().tier).toBe("heavy");
+    expect(task().tier).toBe("standard");
   });
 
   it("leaves the run's implement tier where it found it", async () => {
@@ -171,16 +176,30 @@ describe("a repair pass and the run's implement tier (issue #201)", () => {
     expect(run().model).toBe("standard");
   });
 
-  it("holds the step under the fleet's implement tier when one is set", async () => {
+  it("lets the run's tier outrank the fleet's implement tier, as it did for the implement pass", async () => {
     // The ticket declared light and the fleet's default is standard: the
-    // repair steps up to standard and no further, and the run still reads as
-    // the light run it was.
+    // repair runs light — the run's tier is the directive the implement pass
+    // honoured, and the fleet default is what it outranked — and the run
+    // still reads as the light run it was.
     await boot("light", "repair", { AGENT_MODEL: "standard" });
 
     await turns.startTask(taskId);
 
-    expect(task().tier).toBe("standard");
+    expect(task().tier).toBe("light");
     expect(run().model).toBe("light");
+  });
+
+  it("reads the fleet's implement tier when the run recorded none, without writing it back", async () => {
+    // Exactly what an implement pass with no ticket tier does — except that
+    // the implement pass writes what it resolved to `runs.model` and a repair
+    // never does, so a run that recorded no tier is not filed under the
+    // default its repair happened to resolve.
+    await boot(null, "repair", { AGENT_MODEL: "standard" });
+
+    await turns.startTask(taskId);
+
+    expect(task().tier).toBe("standard");
+    expect(run().model).toBeNull();
   });
 
   it("still lets the implement pass write the tier it resolved", async () => {

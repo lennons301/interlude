@@ -365,13 +365,14 @@ describe("the model tier with UI overrides (issue #166)", () => {
 });
 
 /**
- * Review and repair derive their tier from the run's implement tier (issue
- * #201): one rung above it, capped at the top of the vocabulary, held under
- * the kind's own fleet setting only when an operator has explicitly set one.
+ * Review derives its tier from the run's implement tier (issue #201): one rung
+ * above it, capped at the top of the vocabulary, held under the review's own
+ * fleet setting only when an operator has explicitly set one. It is the only
+ * kind that derives — repair runs at the run's own tier (issue #211, below).
  * `ticketModel` here is what the turn manager passes on every later pass of a
  * run — `runs.model`, the tier the implement pass actually ran at.
  */
-describe("derived tiers for review and repair (issue #201)", () => {
+describe("the derived review tier (issue #201)", () => {
   /** Nothing set anywhere for review, so the derivation runs free; the base
    * is set so an implement pass with no directive still resolves. */
   const free = cfg({ agentModel: null });
@@ -381,16 +382,9 @@ describe("derived tiers for review and repair (issue #201)", () => {
     expect(modelOn("review", free, "standard", NO_OVERRIDES)).toBe("opus");
   });
 
-  it("resolves a repair pass one rung above the run's implement tier", () => {
-    // Before this, a repair copied the implement tier — a second attempt at
-    // work that had just failed, at the tier that had just failed.
-    expect(modelOn("repair", free, "light", NO_OVERRIDES)).toBe("sonnet");
-    expect(modelOn("repair", free, "standard", NO_OVERRIDES)).toBe("opus");
-  });
-
   it("caps the derivation at the top of the vocabulary rather than overflowing", () => {
     expect(modelOn("review", free, "heavy", NO_OVERRIDES)).toBe("opus");
-    expect(modelOn("repair", free, "opus", NO_OVERRIDES)).toBe("opus");
+    expect(modelOn("review", free, "opus", NO_OVERRIDES)).toBe("opus");
   });
 
   it("holds the derivation under an explicitly set per-kind tier — a UI override", () => {
@@ -403,23 +397,17 @@ describe("derived tiers for review and repair (issue #201)", () => {
     expect(
       modelOn("review", free, "standard", { modelTierReview: "standard" })
     ).toBe("sonnet");
-    // Repair answers to the implement field, as it always has.
-    expect(
-      modelOn("repair", free, "standard", { modelTierImplement: "standard" })
-    ).toBe("sonnet");
   });
 
   it("holds the derivation under an explicitly set per-kind tier — the kind's own variable", () => {
     const c = cfg({ agentModel: null, agentModelReview: "standard" });
     expect(modelOn("review", c, "standard", NO_OVERRIDES)).toBe("sonnet");
-    // `AGENT_MODEL` is the implement kind's own variable, so it caps the
-    // repair's step...
-    const base = cfg({ agentModel: "standard" });
-    expect(modelOn("repair", base, "standard", NO_OVERRIDES)).toBe("sonnet");
+    expect(modelOn("review", c, "heavy", NO_OVERRIDES)).toBe("sonnet");
   });
 
   it("does not read the base AGENT_MODEL as the review's ceiling", () => {
-    // ...but it is not the *review* kind's setting: it is what a review with
+    // `AGENT_MODEL` is the implement kind's own variable, not the *review*
+    // kind's setting: it is what a review with
     // nothing to derive from falls back to. Read as the review's ceiling it
     // would cap every review at the implement tier in the commonest
     // configuration — the "equal" design the ticket rejected — and a heavy
@@ -436,9 +424,7 @@ describe("derived tiers for review and repair (issue #201)", () => {
       modelOn("review", free, "light", { modelTierReview: "heavy" })
     ).toBe("sonnet");
     const c = cfg({ agentModel: null, agentModelReview: "heavy" });
-    expect(modelOn("repair", c, "light", { modelTierImplement: "heavy" })).toBe(
-      "sonnet"
-    );
+    expect(modelOn("review", c, "light", NO_OVERRIDES)).toBe("sonnet");
   });
 
   it("lets an unset per-kind tier run the derivation free", () => {
@@ -456,7 +442,6 @@ describe("derived tiers for review and repair (issue #201)", () => {
     const c = cfg({ agentModel: "claude-opus-4-8", agentModelReview: "light" });
     // No run tier at all — the fleet setting decides, as it did before.
     expect(modelOn("review", c, null, NO_OVERRIDES)).toBe("haiku");
-    expect(modelOn("repair", c, null, NO_OVERRIDES)).toBe("claude-opus-4-8");
     // A pinned raw model id recorded on the run row names no tier to step
     // from, so it is treated exactly as none.
     expect(modelOn("review", c, "claude-opus-4-8", NO_OVERRIDES)).toBe("haiku");
@@ -476,42 +461,14 @@ describe("derived tiers for review and repair (issue #201)", () => {
     expect(modelOn("review", c, "heavy", NO_OVERRIDES)).toBe("claude-opus-4-8");
   });
 
-  it("derives a repair past a pin on the implement field, as the implement pass ran past it", () => {
-    // `AGENT_MODEL=claude-opus-4-8` is the implement pass's default, which a
-    // ticket's directive outranks (issue #80); the run's tier is that
-    // directive, so the repair steps up from it rather than falling back to
-    // the pin the implement pass never ran.
+  it("derives a review past a pin arriving through the base, which is not the reviewer's own", () => {
+    // `AGENT_MODEL=claude-opus-4-8` is the implement kind's, standing in for
+    // an unset AGENT_MODEL_REVIEW, not the reviewer's own answer — so a review
+    // with a tier to derive from steps up from it, and one without runs the
+    // pin as the fall-back it always was.
     const c = cfg({ agentModel: "claude-opus-4-8" });
-    expect(modelOn("repair", c, "light", NO_OVERRIDES)).toBe("sonnet");
-    expect(modelOn("repair", c, "heavy", NO_OVERRIDES)).toBe("opus");
-    // With no run tier, the pin is what a repair runs — exactly as before.
-    expect(modelOn("repair", c, null, NO_OVERRIDES)).toBe("claude-opus-4-8");
-    // And a review derives past that same base pin too: it is the implement
-    // kind's, standing in for an unset AGENT_MODEL_REVIEW, not the reviewer's
-    // own answer.
     expect(modelOn("review", c, "light", NO_OVERRIDES)).toBe("sonnet");
     expect(modelOn("review", c, null, NO_OVERRIDES)).toBe("claude-opus-4-8");
-  });
-
-  it("never runs a repair below the tier the work ran at — the ceiling bounds the step, not the work", () => {
-    // The implement field is a default the ticket's directive outranks for
-    // the implement pass (issue #80). As a hard cap on the repair it would run
-    // the continuation of heavy work at light because the fleet default was
-    // light — undoing the directive for the second half of the same work.
-    expect(
-      modelOn("repair", free, "heavy", { modelTierImplement: "light" })
-    ).toBe("opus");
-    expect(
-      modelOn("repair", free, "standard", { modelTierImplement: "light" })
-    ).toBe("sonnet");
-    const c = cfg({ agentModel: "light" });
-    expect(modelOn("repair", c, "standard", NO_OVERRIDES)).toBe("sonnet");
-    // Review has no such floor: the review field is the reviewer's own, a
-    // ticket may not touch it, and a review tier set low caps a heavy
-    // ticket's review below its implement pass — the accepted consequence.
-    expect(
-      modelOn("review", free, "heavy", { modelTierReview: "light" })
-    ).toBe("haiku");
   });
 
   it("derives nothing for triage and interactive, which keep their chosen settings", () => {
@@ -549,5 +506,95 @@ describe("derived tiers for review and repair (issue #201)", () => {
     expect(
       modelOn("implement", c, null, { modelTierImplement: "heavy" })
     ).toBe("opus");
+  });
+});
+
+/**
+ * A repair pass runs at the tier the run's implement pass ran at (issue #211)
+ * — no step, no derivation. Both passes queued under the kind (integration
+ * repair, #54; CI repair, #130) are triggered by the default branch moving
+ * under a parked PR, not by the work being judged wrong, so the one-rung
+ * step-up #201 gave it was for a failure that is not what a repair is. It
+ * resolves exactly as an implement pass does: the run's tier wins; with none,
+ * the implement setting answers.
+ */
+describe("a repair pass runs at the run's own tier (issue #211)", () => {
+  const free = cfg({ agentModel: null });
+
+  it("resolves a repair pass to the tier the run's implement pass ran at, with no step", () => {
+    expect(modelOn("repair", free, "light", NO_OVERRIDES)).toBe("haiku");
+    expect(modelOn("repair", free, "standard", NO_OVERRIDES)).toBe("sonnet");
+    expect(modelOn("repair", free, "heavy", NO_OVERRIDES)).toBe("opus");
+    // A legacy alias recorded on the run row names the same tier.
+    expect(modelOn("repair", free, "opus", NO_OVERRIDES)).toBe("opus");
+  });
+
+  it("lets the run's tier outrank the implement setting for a repair, as it does for the implement pass", () => {
+    // The implement field is a default the ticket's directive outranked for
+    // the implement pass (issue #80); the run's tier *is* that directive, so
+    // the repair continues the work at it whichever way the setting points.
+    expect(
+      modelOn("repair", free, "heavy", { modelTierImplement: "light" })
+    ).toBe("opus");
+    expect(
+      modelOn("repair", free, "light", { modelTierImplement: "heavy" })
+    ).toBe("haiku");
+    expect(modelOn("repair", cfg({ agentModel: "heavy" }), "light", NO_OVERRIDES)).toBe(
+      "haiku"
+    );
+    // A raw model id pinned in AGENT_MODEL is what the implement pass would
+    // have run had the ticket declared nothing; the run's tier outranks it
+    // for the repair exactly as it did for the work.
+    expect(
+      modelOn("repair", cfg({ agentModel: "claude-opus-4-8" }), "light", NO_OVERRIDES)
+    ).toBe("haiku");
+  });
+
+  it("resolves a repair on a run with no recorded tier through the implement setting, exactly as an implement pass with no ticket tier", () => {
+    expect(modelOn("repair", cfg({ agentModel: "standard" }), null, NO_OVERRIDES)).toBe(
+      "sonnet"
+    );
+    expect(
+      modelOn("repair", cfg({ agentModel: "standard" }), null, { modelTierImplement: "light" })
+    ).toBe("haiku");
+    // A raw model id pinned in AGENT_MODEL passes through verbatim.
+    expect(
+      modelOn("repair", cfg({ agentModel: "claude-opus-4-8" }), null, NO_OVERRIDES)
+    ).toBe("claude-opus-4-8");
+    // And a raw id recorded on the run row names no tier, so it is treated
+    // exactly as none.
+    expect(
+      modelOn("repair", cfg({ agentModel: "standard" }), "claude-opus-4-8", NO_OVERRIDES)
+    ).toBe("sonnet");
+    // Nothing set anywhere: no --model, the harness decides.
+    expect(modelOn("repair", free, null, NO_OVERRIDES)).toBeNull();
+  });
+
+  it("resolves a repair exactly as an implement pass across every tier and setting", () => {
+    // The two flavours of repair share the kind, and the kind shares the
+    // implement pass's rule wholesale — so the two can never part company on
+    // any (run tier, setting) pair, not only the ones spelled out above.
+    const configs = [
+      free,
+      cfg({ agentModel: "light" }),
+      cfg({ agentModel: "standard" }),
+      cfg({ agentModel: "heavy" }),
+      cfg({ agentModel: "claude-opus-4-8" }),
+    ];
+    const overrideSets: SettingsOverrides[] = [
+      NO_OVERRIDES,
+      { modelTierImplement: "light" },
+      { modelTierImplement: "heavy" },
+    ];
+    const runTiers = [null, "light", "standard", "heavy", "opus", "claude-opus-4-8"];
+    for (const c of configs) {
+      for (const overrides of overrideSets) {
+        for (const runTier of runTiers) {
+          expect(modelOn("repair", c, runTier, overrides)).toBe(
+            modelOn("implement", c, runTier, overrides)
+          );
+        }
+      }
+    }
   });
 });

@@ -30,11 +30,12 @@ import type { SettingFieldView } from "@/lib/settings-resolver";
  * (issue #172), which is why this panel is presentational and shares its state
  * with the lane panel below — see `SettingsOverrides`.
  *
- * Two of the rows are **ceilings** rather than fixed tiers (issue #201): a
- * review pass runs one rung above the tier the run's implement pass ran at,
- * and a repair pass does too, so the Review row bounds the review and the
- * Implement row bounds the repair's step. Which rows those are, and whether a
- * row caps, frees or pins its derived pass, is the resolver's to say
+ * One row is a **ceiling** rather than a fixed tier (issue #201): a review
+ * pass runs one rung above the tier the run's implement pass ran at, so the
+ * Review row bounds the review. Repair is deliberately not derived (issue
+ * #211) — it runs at the run's own tier, so the Implement row is a chosen tier
+ * for both the implement pass and its repair. Which row is the ceiling, and
+ * whether it caps, frees or pins its derived pass, is the resolver's to say
  * (`derived`), not this component's — the pass and the screen read one
  * description of the same rule, and this only puts it into words.
  *
@@ -69,11 +70,12 @@ export function ModelTierPanel({
         to. Left on <span className="font-plex-mono">{FALL_THROUGH}</span>, a
         row follows the deployment&apos;s own variable. A ticket&apos;s{" "}
         <span className="font-plex-mono">model:</span> directive still outranks
-        both for the work it declares. Review and repair are not chosen here
+        both for the work it declares — its implement pass, and the repair
+        that continues it at the same tier. Review alone is not chosen here
         but derived — one rung above the tier the implement pass ran at — so
-        their rows are <em>ceilings</em>: set, a row caps the derivation there;
-        left on <span className="font-plex-mono">{FALL_THROUGH}</span> with
-        the variable unset, the derivation runs free.
+        its row is a <em>ceiling</em>: set, it caps the derivation there; left
+        on <span className="font-plex-mono">{FALL_THROUGH}</span> with the
+        variable unset, the derivation runs free.
       </p>
 
       {fields.map((field) => (
@@ -161,8 +163,8 @@ function TierRow({
  * tier, what the pass runs on — naming the model id beside the tier is the bit
  * that makes an override checkable against the harness's own logs. For a field
  * that is a **ceiling** on a derived kind (issue #201), the ceiling in force
- * or its absence, and — where the field also decides an underived pass, or
- * stands in when a run has no tier to derive from — what that runs.
+ * or its absence, and — since the field also stands in when a run has no tier
+ * to derive from — what that runs.
  */
 function effective(field: SettingFieldView): string {
   if (field.derived.length === 0) return runsLine(field);
@@ -178,12 +180,12 @@ function effective(field: SettingFieldView): string {
     }
   });
 
-  // A row that chooses a tier for a pass of its own (Implement) says that
-  // first, with the ceiling on the repair's step beside it. A row that is
-  // nothing but a ceiling (Review) leads with the rule; what a review runs
+  // A row that is a ceiling (Review, the only derived kind — issue #211)
+  // chooses no tier of its own and leads with the rule; what a review runs
   // when the run has no implement tier to step from is the fall-back, and a
-  // pinned row has already said what it runs.
-  if (field.chooses.length > 0) return [runsLine(field), ...clauses].join(" · ");
+  // pinned row has already said what it runs. The type still permits a row
+  // that both chooses and derives; none exists, so `chooses` is deliberately
+  // not read here — a kind added to both lists would need its own line.
   const pinned = field.derived.every((entry) => entry.rule === "pinned");
   return pinned
     ? clauses.join(" · ")

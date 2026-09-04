@@ -244,7 +244,7 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
   modelTierImplement: modelTierField(
     "modelTierImplement",
     "Implement",
-    "The tier an implement pass runs on when its ticket declares none — a ticket's own model: directive outranks it. It is also the ceiling on the step a repair pass takes: a repair runs one rung above the tier the implement pass ran at, so a second attempt at failed work is not a rerun of the first, but no higher than this — and never below the tier the work itself ran at.",
+    "The tier an implement pass runs on when its ticket declares none — a ticket's own model: directive outranks it. A repair pass, which fixes up the PR after the default branch moves under it, runs at the tier the implement pass ran at, and reads this row the same way when the run recorded none.",
     baseModelEnv
   ),
   modelTierReview: modelTierField(
@@ -726,19 +726,22 @@ export const MODEL_TIER_FIELD_BY_KIND: Readonly<
  * The pass kinds whose tier is **derived** from the run's implement tier rather
  * than chosen (issue #201): one rung above it, capped at the top of the
  * vocabulary, and held under the kind's own field above when that field is
- * explicitly set. A single fleet review tier cannot be right for both a
- * one-line guard and a new state machine, and a repair pass is by definition a
- * second attempt at work that already failed, so retrying at the tier that
- * just failed repeats the failure. Triage and interactive are deliberately
- * absent: triage is standalone and gated by a human authorising arming, and
- * interactive has a human present who can ask for something else.
+ * explicitly set. Review is the only one: a single fleet review tier cannot be
+ * right for both a one-line guard and a new state machine. Repair is
+ * deliberately absent (issue #211): it is the same attempt continuing after
+ * the default branch moved under its PR — a conflict to merge, a red rollup
+ * to make green — not work that was judged wrong, so it runs at the run's own
+ * tier and reads the implement field exactly as the implement pass does.
+ * Triage and interactive are absent too: triage is standalone and gated by a
+ * human authorising arming, and interactive has a human present who can ask
+ * for something else.
  *
  * The derivation itself is `resolveAgentModelChoice`'s (`config.ts`) — the one
  * pure model-choice function every pass resolves through — so this list only
  * names *which* kinds it applies to, where the settings screen can read it
  * beside the field each kind answers to.
  */
-export const DERIVED_TIER_KINDS: readonly AgentPassKind[] = ["review", "repair"];
+export const DERIVED_TIER_KINDS: readonly AgentPassKind[] = ["review"];
 
 export function isDerivedTierKind(kind: AgentPassKind): boolean {
   return DERIVED_TIER_KINDS.includes(kind);
@@ -748,10 +751,10 @@ export function isDerivedTierKind(kind: AgentPassKind): boolean {
  * Whether a pass carries the *ticket's own* work, and so answers to a ticket
  * directive (issue #80). Review and triage do not: they read the work rather
  * than doing it, and the ticket chooses the model its work runs on, not the
- * reviewer's. It is one line drawn once because two readers need the same
- * one: `resolveAgentModelChoice` (`config.ts`), which lets a directive reach
- * the work kinds, and the derivation rule below, where it decides which of
- * the two derived kinds treats its field as the reviewer's own.
+ * reviewer's. Its one reader is `resolveAgentModelChoice` (`config.ts`),
+ * which lets a directive — and, on a later pass, the run's recorded tier —
+ * reach the work kinds; it lives beside the kind→field map above because
+ * that is where the pass kinds are described.
  */
 export function isWorkPassKind(kind: AgentPassKind): boolean {
   return kind !== "review" && kind !== "triage";
@@ -798,16 +801,12 @@ export interface TierDerivation {
 /**
  * The one reading of a derived kind's field that both the pass
  * (`resolveAgentModelChoice`) and the settings screen resolve through, so
- * neither can restate it: a pin is honoured only on the reviewer's own field —
- * the implement field a repair reads is a default the run's tier already
- * outranked for the implement pass, so the repair derives past a pin there
- * exactly as the implement pass ran past it — and, as with the ceiling, only
- * the field's own value counts, never the base standing in for it.
+ * neither can restate it. It reads the field alone: with review the sole
+ * derived kind (issue #211) the field *is* the reviewer's own, so a pin on it
+ * is the operator's whole answer, and — as with the ceiling — only the field's
+ * own value counts, never the base standing in for it.
  */
-export function tierDerivation(
-  kind: AgentPassKind,
-  resolved: ResolvedModelTier
-): TierDerivation {
+export function tierDerivation(resolved: ResolvedModelTier): TierDerivation {
   const ceiling = tierCeiling(resolved);
   if (ceiling !== null) return { rule: "capped", ceiling };
   const pinsOwn =
@@ -815,7 +814,7 @@ export function tierDerivation(
     !resolved.envInherited &&
     resolved.envValue !== null &&
     normalizeModelTier(resolved.envValue) === null;
-  if (pinsOwn && !isWorkPassKind(kind)) return { rule: "pinned", ceiling: null };
+  if (pinsOwn) return { rule: "pinned", ceiling: null };
   return { rule: "free", ceiling: null };
 }
 
@@ -1083,7 +1082,7 @@ export function describeModelTierSettings(
       chooses: kinds.filter((kind) => !isDerivedTierKind(kind)),
       derived: kinds
         .filter(isDerivedTierKind)
-        .map((kind) => ({ kind, ...tierDerivation(kind, resolved) })),
+        .map((kind) => ({ kind, ...tierDerivation(resolved) })),
     };
   });
 }

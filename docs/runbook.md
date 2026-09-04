@@ -495,29 +495,35 @@ follows the environment exactly as before the screen existed
 (`AGENT_MODEL`, with `AGENT_MODEL_REVIEW` / `AGENT_MODEL_TRIAGE` for the
 read-heavy passes). A run already in flight keeps the tier it recorded.
 
-**Review and repair are derived, not chosen** (issue #201). Both run **one rung
-above the tier the run's implement pass ran at** — `light` work gets a
-`standard` review and repair, `standard` work gets `heavy`, and `heavy` stays
-`heavy` — so a misclassified ticket is caught by its gate rather than waved
-through by an equally weak reviewer, and a repair is not a rerun of the attempt
-that just failed at the tier that just failed. The Review row and the Implement
-row are therefore **ceilings** on that derivation rather than fixed tiers: set
-(from the screen, or by a tier named in the row's *own* variable —
-`AGENT_MODEL_REVIEW` for the review, `AGENT_MODEL` for the repair's step), a row
-caps the derivation there — set the review tier low as a cost measure and a
-heavy ticket's review is capped at it, which is the accepted trade; left unset,
-the derivation runs free. The base `AGENT_MODEL` standing in for an unset
-`AGENT_MODEL_REVIEW` is what a review with nothing to derive from falls back to,
-**not** a ceiling on the review — read as one it would cap every review at the
-implement tier. Two edges: a repair is never run *below* the tier its own work
-ran at (the Implement row is a default a ticket's directive outranks, so as a
-ceiling it bounds the repair's step, not the work), and a row pinning a raw
-model id rather than a tier cannot bound one — on the Review row the pin is run
-as pinned and nothing derives. A run whose implement pass resolved no tier
-(a pinned id, or the harness default) derives nothing, and its review and
-repair resolve exactly as before. Triage and interactive are never derived:
-triage is standalone and armed by a human, and an interactive session has a
-human present who can ask for something else.
+**Review is derived, not chosen** (issue #201) — and it is the only pass that
+is (issue #211). A review runs **one rung above the tier the run's implement
+pass ran at** — `light` work gets a `standard` review, `standard` work gets
+`heavy`, and `heavy` stays `heavy` — so a misclassified ticket is caught by its
+gate rather than waved through by an equally weak reviewer. The Review row is
+therefore a **ceiling** on that derivation rather than a fixed tier: set (from
+the screen, or by a tier named in `AGENT_MODEL_REVIEW`, the row's *own*
+variable), it caps the derivation there — set the review tier low as a cost
+measure and a heavy ticket's review is capped at it, which is the accepted
+trade; left unset, the derivation runs free. The base `AGENT_MODEL` standing in
+for an unset `AGENT_MODEL_REVIEW` is what a review with nothing to derive from
+falls back to, **not** a ceiling on the review — read as one it would cap every
+review at the implement tier. A Review row pinning a raw model id rather than a
+tier cannot bound one: the pin is run as pinned and nothing derives. A run
+whose implement pass resolved no tier (a pinned id, or the harness default)
+derives nothing, and its review resolves exactly as before. Triage and
+interactive are never derived: triage is standalone and armed by a human, and
+an interactive session has a human present who can ask for something else.
+
+**Repair runs at the run's own tier** (issue #211). A repair pass — merging the
+default branch into a conflicting PR, or making a red rollup green after `main`
+moved under it — is the same attempt continuing, not work that was judged
+wrong, so it is not stepped up: it runs at the tier the implement pass ran at,
+and on a run that recorded none it reads the Implement row exactly as an
+implement pass with no ticket tier does (a raw model id pinned in `AGENT_MODEL`
+passes through). The Implement row is a chosen tier for both, and a ceiling on
+nothing. The fix-up a review's request-changes verdict triggers is a follow-up
+turn in the same implement container, never a repair pass, and its tier is
+unchanged.
 
 The screen only takes a tier: a raw model id is rejected with a message rather
 than clamped, and a safety ceiling (the per-attempt budget maximum, the estate
@@ -525,8 +531,9 @@ daily cap, the attempt count) is refused by name — those stay in code and
 environment.
 
 **Per ticket**, a `model: <tier>` directive in a ticket's Workflow section
-outranks the configured default for the implement pass — and, through the
-derivation above, sets the rung its review and repair step up from. Use it to
+outranks the configured default for the implement pass — its repair runs at the
+same tier, and, through the derivation above, it sets the rung the review
+steps up from. Use it to
 match spend to the work: a mechanical rename doesn't need the heavy tier; a
 gnarly refactor can ask for it explicitly. The set is a fixed allowlist (issue
 text is semi-trusted, so it may only select a tier, never name an arbitrary
@@ -705,7 +712,7 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 | `METERED_DAILY_CAP_USD` | Real money the fleet may spend in one local day through a metered lane ($20). Overridable in Settings → Real money up to a hard $100 ceiling, and bound down by the lane's own declared cap. Subscription work never counts against it. |
 | `AGENT_LANE` | The deployment's default execution lane (an id from `lanes.yaml`). Unset, cost routing picks the cheapest lane that can serve each pass and the file's preference order only breaks ties; **set** (here or on the settings screen), it pins the fleet and turns cost routing off. |
 | `AGENT_MIN_LANE` | The weakest lane cost routing may send any pass onto (an id from `lanes.yaml`) — a capability floor, so routing may still pick anything at or above it. Unset means no floor. The fall-through for the four Settings → Execution lane rows left on `environment`. |
-| `AGENT_MODEL`, `AGENT_MODEL_REVIEW`, `AGENT_MODEL_TRIAGE` | Default model per pass kind, as a tier (`heavy`/`standard`/`light`, or the `opus`/`sonnet`/`haiku` aliases) or a raw model id. The fall-through for a Settings → Models row left on `environment`; unset means no `--model` and the CLI resolves the account default. For review and repair (issue #201) a tier here is a **ceiling** on the derived tier — one rung above the run's implement tier — not the tier itself; unset, the derivation runs free. |
+| `AGENT_MODEL`, `AGENT_MODEL_REVIEW`, `AGENT_MODEL_TRIAGE` | Default model per pass kind, as a tier (`heavy`/`standard`/`light`, or the `opus`/`sonnet`/`haiku` aliases) or a raw model id. The fall-through for a Settings → Models row left on `environment`; unset means no `--model` and the CLI resolves the account default. `AGENT_MODEL` is the tier itself for implement, interactive and repair (a repair runs at the run's own tier, issue #211). For review (issue #201) a tier in `AGENT_MODEL_REVIEW` is a **ceiling** on the derived tier — one rung above the run's implement tier — not the tier itself; unset, the derivation runs free. |
 | `CAPACITY_SLOTS`, `AGENT_MEMORY_MB` | Override derived capacity — only when the derivation is wrong. |
 | `OWED_REVIEW_STALL_MINUTES`, `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES` | Fleet-health watchdog thresholds in minutes (issue #126). Defaults 30 / 3 / 2. |
 | `QUOTA_PICKUP_THRESHOLD_PERCENT` | Quota utilization at or above which no new ticket is claimed (issue #171). One of 50/70/80/85/90/95/100; default 90. The fall-through for Settings → Quota when that row is left on `environment`. |
