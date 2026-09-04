@@ -45,8 +45,8 @@ export const TIER_MODEL_IDS: Readonly<Record<ModelTier, string>> = {
 
 /**
  * One rung more capable than `tier`, capped at the top of the vocabulary
- * (issue #201): the derivation a review or repair pass makes from the tier the
- * run's implement pass ran at. `heavy` stays `heavy` rather than overflowing —
+ * (issue #201): the derivation a review pass makes from the tier the run's
+ * implement pass ran at. `heavy` stays `heavy` rather than overflowing —
  * there is no rung above the top, and a derived pass must still resolve.
  */
 export function tierAbove(tier: ModelTier): ModelTier {
@@ -63,12 +63,6 @@ export function tierAbove(tier: ModelTier): ModelTier {
  */
 export function weakerTier(a: ModelTier, b: ModelTier): ModelTier {
   return MODEL_TIERS.indexOf(a) >= MODEL_TIERS.indexOf(b) ? a : b;
-}
-
-/** The more capable of two tiers — how a **floor** is applied: a repair pass is
- * never run below the tier the work it continues ran at (issue #201). */
-export function strongerTier(a: ModelTier, b: ModelTier): ModelTier {
-  return MODEL_TIERS.indexOf(a) <= MODEL_TIERS.indexOf(b) ? a : b;
 }
 
 /**
