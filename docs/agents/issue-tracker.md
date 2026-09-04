@@ -47,7 +47,7 @@ This section extends the generation skill's issue template. The skill (`/to-tick
 model: light
 ```
 
-The tier says how hard the ticket's *work* is, so the fleet can run a one-line guard and a new state machine at different tiers instead of running both at whatever the lane's default resolves to. Put the section after `## Acceptance criteria` and before `## Blocked by`. One `model:` line per ticket, on its own line, not inside a code fence; the executor reads whole lines inside the Workflow section and nothing else, so a tier mentioned in prose is data, not a decision.
+The tier says how hard the ticket's *work* is, so the fleet can run a one-line guard and a new state machine at different tiers instead of running both at whatever the fleet's configured default resolves to. Put the section after `## Acceptance criteria` and before `## Blocked by`. One `model:` line per ticket, on its own line, not inside a code fence; the executor reads whole lines inside the Workflow section and nothing else, so a tier mentioned in prose is data, not a decision.
 
 The key is `model:`, not `tier:`, because `model:` is the directive the executor already reads. The vendor names `opus`, `sonnet` and `haiku` still resolve as aliases for `heavy`, `standard` and `light`, but write the tier: the tier is what the fleet acts on, records on the run and reports.
 
@@ -61,22 +61,20 @@ Three tiers, and each one is **chosen positively**. There is no default and no "
 
 `standard` is not the middle to settle on when the choice feels hard; it is chosen when the route is genuinely the implementer's to find within conventions the repo already has. `light` is not reserved for the trivially obvious; it is chosen whenever the spec has already made every decision the implementer would otherwise make, however many lines that takes. `heavy` is chosen for the decision the ticket asks the implementer to make, not for the size of the diff. When none of the three fits, the ambiguity is usually in the ticket rather than the rubric — sharpen *what to build* until one criterion describes it.
 
-Three tickets from this repo, as calibration: "add a `## Workflow` section to a document, with these three bullets" is `light` — the words are in the spec. "A repair pass derives one rung above the implement tier, capped by the per-kind setting when one is set" is `standard` — several files, an existing pure function to extend, the acceptance criteria say what but not how. "A parked run re-checks lanes on every sweep and resumes early where one can now serve it" is `heavy` — reducer state, ordering against three existing wall behaviours, and a bound that must stay true across them.
-
 ### What a ticket may and may not say
 
 - **A tier, never a lane.** Which lane runs a pass — the subscription, the Anthropic API, OpenRouter — is fleet policy and cost routing. A ticket body is semi-trusted text and may not send the fleet somewhere that spends money. There is no lane directive, and the executor ignores unknown keys rather than interpreting them.
-- **A tier, never a raw model identifier.** `model: claude-opus-4-8` names no tier. The executor drops it, runs the pass at the fleet default and notes on the issue that the directive was not recognised — so a mistyped tier is visible, never fatal, and never obeyed.
+- **A tier, never a raw model identifier.** `model: claude-opus-4-8` names no tier. The executor drops it, runs the pass at the configured default and notes on the issue that the directive was not recognised — so a mistyped tier is visible, never fatal, and never obeyed.
 - **The tier applies to the ticket's work passes only** — the implement pass and any repair pass of the run. Review and triage run at the fleet's own settings. A ticket cannot cheapen the gate that judges it or the pass that assesses it, and the Workflow section has no key that would let it.
 - `budget:`, `max-turns:`, `checkpoint:` and `effort:` stay hand-written escape hatches in the same section (see `docs/runbook.md`). They are not part of the tier decision: a budget is a ceiling, not a lever, and declaring a low one on a cheap ticket saves nothing.
 
 ### A ticket that arrives without a tier
 
-It is not refused. It runs exactly as it did before this contract, at the lane's default tier: a forgotten section costs the fleet nothing it was not already paying — it only forfeits the choice. Refusing to claim such a ticket would wedge the frontier over a missing doc section, so the contract is enforced by the producer writing the section, not by the executor.
+It is not refused. It runs exactly as it did before this contract, at the configured default tier for the pass: a forgotten section costs the fleet nothing it was not already paying — it only forfeits the choice. Refusing to claim such a ticket would wedge the frontier over a missing doc section, so the contract is enforced by the producer writing the section, not by the executor.
 
 ### The section and `workflow:<skill>` labels
 
-The executor reads a body Workflow section as the ticket's *own* workflow: when one is present, the implement pass is told to follow the section and a `workflow:<skill>` label (`workflow:tdd`, `workflow:diagnosing-bugs`) is not applied. This contract puts a section on every ticket, so a label alone no longer selects a method. A ticket that needs one writes the method into the section itself — the steps, the seams under test, the done-signal — alongside its tier, which is the per-ticket override the estate contract already provides for. Teaching the executor to combine a directives-only section with a label is a reader change and out of this contract's scope.
+Know one consequence before you publish. The executor reads a body Workflow section as the ticket's *own* workflow: when one is present, the implement pass is told to follow the section, and a `workflow:<skill>` label (`workflow:tdd`) is **not** applied. This contract puts a section on every ticket, so a label alone no longer selects a method. The right fix is in the reader — a section carrying only directives should not count as a bespoke workflow — and is deliberately outside this contract, which changes no parser. Until it lands, a ticket that needs a named method writes the method into its Workflow section alongside the tier (the steps, the seams under test, the done-signal: the per-ticket override the estate contract already provides for) rather than relying on the label.
 
 ### The extended shape
 

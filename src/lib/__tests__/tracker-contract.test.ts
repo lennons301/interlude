@@ -15,35 +15,61 @@ import { parseTicketDirectives } from "@/lib/orchestrator/autonomy/ticket";
 import { MODEL_TIERS } from "@/lib/model-tiers";
 
 const CONTRACT_HEADING = "## Ticket contract";
+const RUBRIC_HEADING = "### Choosing the tier";
 
-/** The contract section: from its H2 to the next H2 *outside* a code fence —
- * the examples inside it are ticket shapes and carry `## Workflow` headings
- * of their own, which must not end the section early. */
-function contractSection(): string {
+interface Contract {
+  /** The section's prose, fenced code removed, keyed by `###` subsection. */
+  prose: Map<string, string[]>;
+  /** Each fenced example in the section, verbatim. */
+  examples: string[];
+}
+
+/**
+ * One walk over the document, from the contract's H2 to the next H2 outside
+ * a code fence. Deliberately its own reader rather than the parser's
+ * `workflowSectionLines`: the examples inside the section are whole ticket
+ * shapes carrying `## Workflow` headings of their own, which must not end
+ * the section early, and this walk *keeps* fenced lines (as examples) where
+ * the parser drops them.
+ */
+function readContract(): Contract {
   const doc = readFileSync(path.join(process.cwd(), "docs/agents/issue-tracker.md"), "utf8");
-  const lines: string[] = [];
+  const prose = new Map<string, string[]>();
+  const examples: string[] = [];
+  let subsection = "";
   let inSection = false;
-  let inFence = false;
+  let fence: string[] | null = null;
+
   for (const line of doc.split("\n")) {
-    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
-    if (!inFence && line.startsWith("## ")) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      if (fence) {
+        if (inSection) examples.push(fence.join("\n"));
+        fence = null;
+      } else {
+        fence = [];
+      }
+      continue;
+    }
+    if (fence) {
+      fence.push(line);
+      continue;
+    }
+    if (line.startsWith("## ")) {
       if (inSection) break;
       inSection = line.startsWith(CONTRACT_HEADING);
       continue;
     }
-    if (inSection) lines.push(line);
+    if (!inSection) continue;
+    if (line.startsWith("### ")) subsection = line;
+    if (!prose.has(subsection)) prose.set(subsection, []);
+    prose.get(subsection)!.push(line);
   }
-  expect(lines.length, `the tracker doc has a "${CONTRACT_HEADING}" section`).toBeGreaterThan(0);
-  return lines.join("\n");
-}
-
-function fencedExamples(section: string): string[] {
-  return [...section.matchAll(/```[a-z]*\n([\s\S]*?)```/g)].map((m) => m[1]);
+  return { prose, examples };
 }
 
 describe("tracker ticket contract (issue #197)", () => {
   it("shows examples the directive parser reads as a tier", () => {
-    const examples = fencedExamples(contractSection());
+    const { examples } = readContract();
     expect(examples.length).toBeGreaterThan(0);
     for (const example of examples) {
       const { model } = parseTicketDirectives(example);
@@ -53,8 +79,11 @@ describe("tracker ticket contract (issue #197)", () => {
   });
 
   it("gives a rubric criterion for exactly the parser's tier vocabulary", () => {
-    const section = contractSection();
-    const criteria = [...section.matchAll(/^- `([a-z]+)` — /gm)].map((m) => m[1]);
+    const rubric = readContract().prose.get(RUBRIC_HEADING);
+    expect(rubric, `the contract has a "${RUBRIC_HEADING}" subsection`).toBeDefined();
+    const criteria = rubric!
+      .map((line) => line.match(/^- `([a-z]+)` — /))
+      .flatMap((m) => (m ? [m[1]] : []));
     expect([...criteria].sort()).toEqual([...MODEL_TIERS].sort());
   });
 });
