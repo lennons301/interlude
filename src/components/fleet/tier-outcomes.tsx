@@ -1,4 +1,5 @@
 import type { FleetView, TierOutcome } from "@/lib/fleet/fleet-view";
+import { counted, describeVerdicts, tierLabel } from "@/lib/fleet/tier-prose";
 import { Eyebrow, Money } from "./fleet-bits";
 
 /**
@@ -46,8 +47,8 @@ export function TierOutcomes({ view }: { view: FleetView }) {
         <>
           {coverage.undeclared > 0 && (
             <p className="font-plex-mono text-[11px] text-fl-ink-3">
-              {plural(coverage.undeclared, "claim")} ran on the default tier — the
-              ticket named none
+              {counted(coverage.undeclared, "attempt")} ran on the default tier —
+              the ticket named none
             </p>
           )}
           <table className="w-full table-fixed border-collapse text-sm">
@@ -63,22 +64,7 @@ export function TierOutcomes({ view }: { view: FleetView }) {
   );
 }
 
-function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
-}
-
-/** The posted verdicts a row has, by kind, or null when it has none yet. */
-function verdictSummary(row: TierOutcome): string | null {
-  const parts = [
-    row.verdicts.approve > 0 ? `${row.verdicts.approve} approve` : null,
-    row.verdicts.requestChanges > 0 ? `${row.verdicts.requestChanges} changes` : null,
-    row.verdicts.escalate > 0 ? `${row.verdicts.escalate} escalate` : null,
-  ].filter((part) => part !== null);
-  return parts.length > 0 ? parts.join(" / ") : null;
-}
-
 function TierRow({ row }: { row: TierOutcome }) {
-  const verdicts = verdictSummary(row);
   return (
     <tr className="border-t border-fl-line first:border-t-0">
       <td className="w-[4.5rem] py-2 pr-2 align-top">
@@ -89,19 +75,19 @@ function TierRow({ row }: { row: TierOutcome }) {
             row.tier === null ? "text-fl-ink-3" : "text-fl-ink"
           }`}
         >
-          {row.tier ?? "no tier"}
+          {tierLabel(row.tier)}
         </span>
       </td>
       <td className="py-2 pr-2 align-top">
         <span className="block truncate font-plex-mono text-[12px] tabular-nums leading-snug text-fl-ink-2">
-          {plural(row.attempts, "attempt")} · {plural(row.tickets, "ticket")}
+          {counted(row.attempts, "attempt")} · {counted(row.tickets, "ticket")}
         </span>
         <span className="block truncate font-plex-mono text-[11px] tabular-nums text-fl-ink-3">
           <span className={row.failed > 0 ? "text-fl-red" : undefined}>
             {row.failed} failed
           </span>
           {" · "}
-          {verdicts ?? "no verdicts"}
+          {describeVerdicts(row.verdicts) ?? "no verdicts"}
           {" · "}
           {row.declared} declared
           {row.degraded > 0 && `, ${row.degraded} stepped down`}

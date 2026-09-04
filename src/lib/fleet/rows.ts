@@ -65,6 +65,11 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
 
   const projectRows = db.select().from(projects).all();
 
+  // Unfinished, or finished inside the window. The tier figures (issue #198)
+  // window by `claimedAt` instead, and lean on this filter being no tighter:
+  // a run claimed inside the window is either unfinished or finished inside
+  // it, so every row they need is here — narrow this and coverage under-counts
+  // silently.
   const runRows = db
     .select()
     .from(runs)

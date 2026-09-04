@@ -421,11 +421,13 @@ export interface RecentItem {
  * its denominator with the outcome rows beside it.
  */
 export interface TierCoverage {
-  /** Runs claimed in the window — one per attempt at a ticket. */
+  /** Attempts claimed in the window — the ledger's `(ticket, attempt)` pair,
+   * so a restart's re-claim (issue #24) is the attempt it continues, not a
+   * second claim. */
   claimed: number;
-  /** Of those, claims whose ticket declared a tier in its Workflow section. */
+  /** Of those, attempts whose ticket declared a tier in its Workflow section. */
   declared: number;
-  /** The rest — claims that ran on the fleet's default. Said outright rather
+  /** The rest — attempts that ran on the fleet's default. Said outright rather
    * than left as a remainder, because the point of the figure is that any
    * savings claim drawn from the declared tickets alone is drawn from a
    * biased sample. */
@@ -446,17 +448,19 @@ export interface TierCoverage {
  */
 export interface TierOutcome {
   /** `heavy` / `standard` / `light`; a pinned raw model id verbatim when the
-   * environment names one; null for runs that recorded no tier at all. */
+   * environment names one; null for attempts that recorded no tier — a claim
+   * whose implement pass has not started and carried no directive, a run that
+   * failed before start, or one predating the ledger. */
   tier: string | null;
-  /** Runs at this tier claimed in the window — each an attempt at a ticket. */
+  /** Attempts at this tier claimed in the window. */
   attempts: number;
   /** Distinct tickets those attempts were at, so attempts per ticket — the
    * burn rate — can be read off the row. */
   tickets: number;
   /** Attempts that ended `failed` or `exhausted`: the attempts burned. */
   failed: number;
-  /** Attempts whose ticket declared a tier, whichever it declared — how much
-   * of this row is routed work rather than the default landing here. */
+  /** Attempts whose ticket declared *this* tier — how much of the row is
+   * routed work, as against the default or the ladder landing here. */
   declared: number;
   /** Attempts that arrived at this tier by stepping down the ladder (issue
    * #170) rather than by being routed here. */
@@ -739,85 +743,128 @@ const TERMINAL_TASK_STATUSES = new Set<FleetTaskRow["status"]>([
 const isLiveTask = (t: FleetTaskRow): boolean =>
   t.containerStatus !== null && !TERMINAL_TASK_STATUSES.has(t.status);
 
+/** One attempt at one ticket, folded across the run rows a restart split it
+ * into: read through the row that carried it on, charged every row's spend. */
+interface TierAttempt {
+  latest: FleetRunRow;
+  spendUsd: number;
+}
+
 /**
- * Tier coverage and outcome by tier (issue #198), over the runs *claimed* in
- * the recent window.
+ * Tier coverage and outcome by tier (issue #198), over the attempts *claimed*
+ * in the recent window.
  *
- * The unit is the **run** — one row per attempt at one ticket, in the ledger's
- * own words — never the task. A run whose tier changed mid-attempt owns several
- * task rows (a resume off a pause, a rung down the ladder, a lane move), and
- * counting those would count one attempt twice; the run is grouped once, under
- * `runs.model`, which is the tier the work actually ran at and the tier its
- * spend is read against. A degraded run therefore sits under the tier it
- * stepped *to*, and `degraded` says how many of a row's attempts arrived that
- * way rather than by being routed there.
+ * The unit is the **attempt** — the ledger's `(ticket, attempt)` pair — never
+ * the task, and not quite the run either. A run whose tier changed mid-attempt
+ * owns several task rows (a resume off a pause, a rung down the ladder, a lane
+ * move), and counting those would count one attempt twice. A restart adds a
+ * *run* row instead: an interrupted run is re-claimed as a new row carrying the
+ * same attempt number and consuming no attempt (issue #24), so counting rows
+ * would read a ticket restarted twice as three attempts burned — the very
+ * figure this exists to show, inflated by the platform's own downtime. The
+ * rows of one attempt are therefore folded: read through the latest, which is
+ * the row that carried the attempt on, with every row's spend, because what
+ * the interrupted row spent is still the attempt's cost.
+ *
+ * Grouped once, under `runs.model` — the tier the work actually ran at, and
+ * the tier its spend is read against. A degraded run therefore sits under the
+ * tier it stepped *to*; `degraded` says how many of a row's attempts arrived
+ * that way rather than by being routed there, and `declared` counts only the
+ * attempts whose ticket named *this* tier, so the same run is never read as
+ * "declared standard" on the row it fell to. Known limit, by design: a run that
+ * did real work at one tier before a wall stepped it down books all of its
+ * spend to the lower tier — `degraded` is the flag to read such a row by.
  *
  * Coverage reads `declaredTier`, never `model`: the implement pass writes the
  * resolved tier to `model` so later passes resolve through it, and from that
- * moment a default is indistinguishable from a declaration. A claim that
+ * moment a default is indistinguishable from a declaration. An attempt that
  * declared none is counted, and said, rather than left out.
  *
  * Windowed by `claimedAt` — a claim is dated by when it was made — so coverage
  * and the outcome rows share one denominator: the rows' attempts sum to
- * `coverage.claimed`. Bounded above by `now` for the digest's sake, which
- * evaluates the view at the end of a past day and must know nothing after it.
+ * `coverage.claimed`. Deliberately not the ledger's finish-dated window: the
+ * two panels answer different questions, and an attempt claimed eight days ago
+ * belongs to last week's routing however recently it finished. Bounded above
+ * by `now` for the digest's sake, which evaluates the view at the end of a
+ * past day and must know nothing after it.
  */
 function tierView(runs: FleetRunRow[], windowStart: number, now: number): TierView {
-  const claimed = runs.filter(
+  const claimedRows = runs.filter(
     (r) => r.claimedAt.getTime() >= windowStart && r.claimedAt.getTime() <= now
   );
-  const isDeclared = (r: FleetRunRow) => r.declaredTier !== null;
-  const declared = claimed.filter(isDeclared).length;
+
+  // Fold a restart's re-claim into the attempt it continues (issue #24).
+  const rowsByAttempt = new Map<string, FleetRunRow[]>();
+  for (const run of claimedRows) {
+    const key = `${run.githubIssue}#${run.attempt}`;
+    const rows = rowsByAttempt.get(key);
+    if (rows) rows.push(run);
+    else rowsByAttempt.set(key, [run]);
+  }
+  const attempts: TierAttempt[] = [...rowsByAttempt.values()].map((rows) => ({
+    latest: rows.reduce((a, b) =>
+      b.claimedAt.getTime() > a.claimedAt.getTime() ? b : a
+    ),
+    spendUsd: rows.reduce((sum, r) => sum + r.totalCostUsd, 0),
+  }));
+  const declared = attempts.filter((a) => a.latest.declaredTier !== null).length;
 
   // A legacy alias (`opus`) names a tier and groups under it; a pinned raw
   // model id names none and is kept verbatim, because "which model" is still
-  // the question when the answer is not a tier; a run that recorded nothing
-  // groups under null and is shown as such rather than dropped.
+  // the question when the answer is not a tier; an attempt that recorded
+  // nothing groups under null and is shown as such rather than dropped.
   const tierOf = (r: FleetRunRow): string | null =>
     r.model === null ? null : (normalizeModelTier(r.model) ?? r.model);
 
-  const groups = new Map<string | null, FleetRunRow[]>();
-  for (const run of claimed) {
-    const tier = tierOf(run);
-    groups.set(tier, [...(groups.get(tier) ?? []), run]);
+  const groups = new Map<string | null, TierAttempt[]>();
+  for (const attempt of attempts) {
+    const tier = tierOf(attempt.latest);
+    const group = groups.get(tier);
+    if (group) group.push(attempt);
+    else groups.set(tier, [attempt]);
   }
 
   // The vocabulary's own order (most to least capable), then any pinned ids
-  // by name, then the runs that recorded no tier.
+  // by name, then the attempts that recorded no tier.
   const rank = (tier: string | null): number => {
     if (tier === null) return MODEL_TIERS.length + 1;
     const i = (MODEL_TIERS as readonly string[]).indexOf(tier);
     return i === -1 ? MODEL_TIERS.length : i;
   };
-  const count = (group: FleetRunRow[], test: (r: FleetRunRow) => boolean) =>
-    group.filter(test).length;
+  const count = (group: TierAttempt[], test: (r: FleetRunRow) => boolean) =>
+    group.filter((a) => test(a.latest)).length;
   const byTier: TierOutcome[] = [...groups.entries()]
     .sort(([a], [b]) => rank(a) - rank(b) || (a ?? "").localeCompare(b ?? ""))
     .map(([tier, group]) => ({
       tier,
       attempts: group.length,
-      tickets: new Set(group.map((r) => r.githubIssue)).size,
+      tickets: new Set(group.map((a) => a.latest.githubIssue)).size,
       // `exhausted` is the last failed attempt, relabelled when the ticket
       // went to a human — a burned attempt under another name.
       failed: count(group, (r) => r.status === "failed" || r.status === "exhausted"),
-      declared: count(group, isDeclared),
+      // Only a ticket that named *this* tier: a run that declared heavy and
+      // fell to standard is routed work on neither row.
+      declared: count(
+        group,
+        (r) => r.declaredTier !== null && normalizeModelTier(r.declaredTier) === tier
+      ),
       degraded: count(group, (r) => r.degradedFrom !== null),
       verdicts: {
         approve: count(group, (r) => r.reviewVerdict === "approve"),
         requestChanges: count(group, (r) => r.reviewVerdict === "request-changes"),
         escalate: count(group, (r) => r.reviewVerdict === "escalate"),
       },
-      spendUsd: group.reduce((sum, r) => sum + r.totalCostUsd, 0),
+      spendUsd: group.reduce((sum, a) => sum + a.spendUsd, 0),
     }));
 
   return {
     windowDays: RECENT_WINDOW_DAYS,
     coverage: {
-      claimed: claimed.length,
+      claimed: attempts.length,
       declared,
-      undeclared: claimed.length - declared,
+      undeclared: attempts.length - declared,
       percent:
-        claimed.length === 0 ? null : Math.round((declared / claimed.length) * 100),
+        attempts.length === 0 ? null : Math.round((declared / attempts.length) * 100),
     },
     byTier,
   };

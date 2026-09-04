@@ -2683,9 +2683,11 @@ describe("buildFleetView — tier coverage and outcome by tier (issue #198)", ()
       })
     );
 
-    expect(view.tiers.coverage.claimed).toBe(1);
+    // Declared overall — the ticket named a tier — but routed work on neither
+    // row: it declared heavy and fell to light.
+    expect(view.tiers.coverage).toMatchObject({ claimed: 1, declared: 1 });
     expect(view.tiers.byTier).toEqual([
-      expect.objectContaining({ tier: "light", attempts: 1, degraded: 1, declared: 1, spendUsd: 3 }),
+      expect.objectContaining({ tier: "light", attempts: 1, degraded: 1, declared: 0, spendUsd: 3 }),
     ]);
     expect(view.tiers.byTier.some((row) => row.tier === "heavy")).toBe(false);
   });
@@ -2707,6 +2709,65 @@ describe("buildFleetView — tier coverage and outcome by tier (issue #198)", ()
     expect(view.tiers.coverage.claimed).toBe(1);
     expect(view.tiers.byTier).toEqual([
       expect.objectContaining({ tier: "standard", attempts: 1, tickets: 1, spendUsd: 9 }),
+    ]);
+  });
+
+  it("folds a restart's re-claim into the attempt it continues — a restart consumes no attempt (issue #24)", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          // Attempt 1, interrupted by a restart yesterday…
+          makeRun({
+            id: "r1",
+            githubIssue: "o/r#1",
+            attempt: 1,
+            model: "light",
+            declaredTier: "light",
+            status: "interrupted",
+            totalCostUsd: 2,
+            claimedAt: daysAgo(1),
+            finishedAt: daysAgo(1),
+          }),
+          // …re-claimed today under the same attempt number, and failed.
+          makeRun({
+            id: "r2",
+            githubIssue: "o/r#1",
+            attempt: 1,
+            model: "light",
+            declaredTier: "light",
+            status: "failed",
+            reviewVerdict: "request-changes",
+            totalCostUsd: 3,
+            finishedAt: TODAY_9AM,
+          }),
+          // Attempt 2, in flight.
+          makeRun({
+            id: "r3",
+            githubIssue: "o/r#1",
+            attempt: 2,
+            model: "light",
+            declaredTier: "light",
+            status: "implementing",
+            totalCostUsd: 1,
+          }),
+        ],
+      })
+    );
+
+    // Two attempts, not three rows — and the interrupted row's spend still
+    // belongs to the attempt it was part of.
+    expect(view.tiers.coverage).toMatchObject({ claimed: 2, declared: 2, percent: 100 });
+    expect(view.tiers.byTier).toEqual([
+      {
+        tier: "light",
+        attempts: 2,
+        tickets: 1,
+        failed: 1,
+        declared: 2,
+        degraded: 0,
+        verdicts: { approve: 0, requestChanges: 1, escalate: 0 },
+        spendUsd: 6,
+      },
     ]);
   });
 

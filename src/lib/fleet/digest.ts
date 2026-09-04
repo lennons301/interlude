@@ -16,6 +16,7 @@ import {
   type TierOutcome,
   type TierView,
 } from "./fleet-view";
+import { counted, describeVerdicts, tierLabel } from "./tier-prose";
 
 /** Half-open interval [start, end) — one local calendar day */
 export interface DigestWindow {
@@ -278,25 +279,15 @@ function completedLine(item: RecentItem): string {
   return parts.join(" · ");
 }
 
-/** "1 attempt" / "3 attempts" — the digest counts things in prose. */
-function counted(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
-}
-
 /** One tier's outcome row as a line (issue #198): what the work at that tier
  * cost in attempts, verdicts and dollars, and how much of the row is routed
  * work rather than the default landing there. */
 function tierLine(row: TierOutcome): string {
-  const verdicts = [
-    row.verdicts.approve > 0 ? `${row.verdicts.approve} approve` : null,
-    row.verdicts.requestChanges > 0 ? `${row.verdicts.requestChanges} changes` : null,
-    row.verdicts.escalate > 0 ? `${row.verdicts.escalate} escalate` : null,
-  ].filter((part) => part !== null);
   return [
-    row.tier ?? "no tier recorded",
+    tierLabel(row.tier),
     `${counted(row.attempts, "attempt")} on ${counted(row.tickets, "ticket")}`,
     `${row.failed} failed`,
-    verdicts.length > 0 ? verdicts.join(" / ") : "no verdicts",
+    describeVerdicts(row.verdicts) ?? "no verdicts",
     usd(row.spendUsd),
     `${row.declared} declared` +
       (row.degraded > 0 ? `, ${row.degraded} stepped down` : ""),
@@ -317,8 +308,8 @@ function tierLines(tiers: TierView): string[] {
     return [`No tickets claimed in the last ${tiers.windowDays} days.`];
   }
   const lead =
-    `Coverage: ${coverage.declared} of ${counted(coverage.claimed, "claim")} ` +
-    `declared a tier (${coverage.percent}%)` +
+    `Coverage: ${coverage.declared} of ${counted(coverage.claimed, "attempt")} ` +
+    `carried a declared tier (${coverage.percent}%)` +
     (coverage.undeclared > 0
       ? ` — ${coverage.undeclared} ran on the default.`
       : ".");

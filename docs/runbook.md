@@ -149,9 +149,10 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
   worth knowing when you read it.
 - **recent** — the last 7 days of completions.
 - **tiers** — the last 7 days' tier routing (issue #198): coverage (how many
-  claims carried a declared tier, and how many ran on the default), then one
+  attempts carried a declared tier, and how many ran on the default), then one
   row per tier the work ran at — attempts on how many tickets, attempts burned,
-  review verdicts and spend. Routing work down that costs more than it saves
+  review verdicts and spend. A restart's re-claim is the same attempt, not a
+  second one. Routing work down that costs more than it saves
   shows here as attempts per ticket and failures beside the dollar figure. A run
   the ladder stepped down counts once, under the tier it ended on, and is noted
   as *stepped down*. The daily digest prints the same figures.

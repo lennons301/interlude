@@ -74,7 +74,7 @@ describe("tier outcomes panel", () => {
     const html = render(WEEK);
 
     expect(html).toContain("2/4 declared · 50%");
-    expect(html).toContain("2 claims ran on the default tier");
+    expect(html).toContain("2 attempts ran on the default tier");
   });
 
   it("renders one row per tier with attempts, tickets, burned attempts, verdicts and spend", () => {

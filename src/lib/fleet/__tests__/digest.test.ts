@@ -825,7 +825,8 @@ describe("renderDailyDigest — tiers (issue #198)", () => {
           finishedAt: aug(1, 10),
         }),
         // Asked for standard, stepped down to light (#170): one attempt, under
-        // the tier it ended on, and said to have stepped down.
+        // the tier it ended on, said to have stepped down — and not "declared"
+        // on a row its ticket never named.
         makeRun({
           id: "l2",
           githubIssue: "o/r#2",
@@ -839,9 +840,9 @@ describe("renderDailyDigest — tiers (issue #198)", () => {
     });
 
     expect(tiers(content)).toEqual([
-      "Coverage: 2 of 3 claims declared a tier (67%) — 1 ran on the default.",
+      "Coverage: 2 of 3 attempts carried a declared tier (67%) — 1 ran on the default.",
       "heavy · 1 attempt on 1 ticket · 0 failed · 1 approve · $12.50 · 1 declared",
-      "light · 2 attempts on 1 ticket · 1 failed · 1 changes · $10.00 · 1 declared, 1 stepped down",
+      "light · 2 attempts on 1 ticket · 1 failed · 1 changes · $10.00 · 0 declared, 1 stepped down",
     ]);
   });
 
@@ -857,8 +858,8 @@ describe("renderDailyDigest — tiers (issue #198)", () => {
     });
 
     expect(tiers(content)).toEqual([
-      "Coverage: 0 of 1 claim declared a tier (0%) — 1 ran on the default.",
-      "no tier recorded · 1 attempt on 1 ticket · 0 failed · no verdicts · $0.00 · 0 declared",
+      "Coverage: 0 of 1 attempt carried a declared tier (0%) — 1 ran on the default.",
+      "no tier · 1 attempt on 1 ticket · 0 failed · no verdicts · $0.00 · 0 declared",
     ]);
   });
 });
