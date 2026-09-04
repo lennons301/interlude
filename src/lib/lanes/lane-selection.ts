@@ -490,15 +490,23 @@ export function selectLane(input: LaneSelectionInput): LaneSelection {
 }
 
 /**
- * Where a pass refused by its lane's quota window may move to (issue #176), or
- * null when there is nowhere both available and permitted — in which case the
- * run pauses on the window's clock exactly as it did before this ticket.
+ * The ranking as it stands for a pass its lane's quota window has refused
+ * (issues #176, #199, #202): every declared lane judged for the pass, with the
+ * refused lane excluded and a pin naming it released.
  *
- * Deliberately a thin read of {@link selectLane} with the refused lane
- * excluded, rather than a second search: "which lane should this pass run on?"
- * is the same question whether it is being asked for the first time or after a
- * wall, and asking it twice in two ways is how the routing and the failover
- * would come to disagree about which lane is cheapest.
+ * Deliberately a thin read of {@link selectLane} rather than a second search:
+ * "which lane should this pass run on?" is the same question whether it is
+ * being asked for the first time or after a wall, and asking it twice in two
+ * ways is how the routing and the failover would come to disagree about which
+ * lane is cheapest.
+ *
+ * Handed back *whole* because two readers want different halves of it. The
+ * reducer wants only the winner ({@link planLaneFailover}), since its job is
+ * whether and when to move. The operator's manual move (issue #202) wants the
+ * losers too: refused, it has to say *why* nowhere can serve the run — a lane
+ * a press would free is a different sentence from a lane missing a credential
+ * — and `heldForMoney` and each candidate's `ineligible` are where that
+ * answer already lives.
  *
  * Note what it does *not* consult: a lane's quota telemetry is read per lane,
  * so the walled lane's rejection can never be held against a lane that reports
@@ -506,11 +514,11 @@ export function selectLane(input: LaneSelectionInput): LaneSelection {
  * what makes an autonomous move onto a paid lane answer to #174's cap and
  * confirm-once press rather than to somebody else's utilization.
  */
-export function planLaneFailover(
+export function selectLaneFailover(
   input: LaneSelectionInput & { fromLaneId: string | null }
-): LaneFailoverOption | null {
+): LaneSelection {
   const { fromLaneId } = input;
-  const selection = selectLane({
+  return selectLane({
     ...input,
     // Being called at all *is* the wall, for this lane: the caller is holding
     // the turn's own rejection, which is a fresher and more authoritative
@@ -529,6 +537,14 @@ export function planLaneFailover(
       ...(fromLaneId === null ? [] : [fromLaneId]),
     ],
   });
+}
+
+/** The winner of a failover ranking as the reducer receives it, or null when
+ * nothing was chosen — the reduction {@link planLaneFailover} makes, exported
+ * so a caller holding the whole selection can make the same one. */
+export function failoverOption(
+  selection: LaneSelection
+): LaneFailoverOption | null {
   if (selection.chosen === null) return null;
   return {
     toLaneId: selection.chosen.id,
@@ -536,4 +552,20 @@ export function planLaneFailover(
     billing: selection.chosen.effectiveBilling,
     rateUsdPerMTok: selection.chosen.rateUsdPerMTok,
   };
+}
+
+/**
+ * Where a pass refused by its lane's quota window may move to (issue #176), or
+ * null when there is nowhere both available and permitted — in which case the
+ * run pauses on the window's clock exactly as it did before this ticket.
+ *
+ * {@link selectLaneFailover} reduced to its winner: the shape the reducer
+ * receives, small on purpose, because it decides *whether* to move (the
+ * ordering against the tier ladder and the pause, and the bound) and this
+ * says *where*.
+ */
+export function planLaneFailover(
+  input: LaneSelectionInput & { fromLaneId: string | null }
+): LaneFailoverOption | null {
+  return failoverOption(selectLaneFailover(input));
 }
