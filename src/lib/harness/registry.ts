@@ -3,6 +3,13 @@
  * the one adapter that ships: registering a second harness should be an edit
  * here, not an edit to `claude-code.ts`, which has no business knowing what
  * else the fleet can run.
+ *
+ * Before registering one, read the stated limit at the foot of `adapter.ts`'s
+ * module note (issue #199): a lane move — a failover or an early resume of a
+ * paused run — carries the pass's session transcript across lanes, and it can
+ * only do so between lanes on the *same* adapter. A second adapter makes
+ * cross-adapter moves possible, and those must fall back to restarting on the
+ * branch; `restoreSessionTranscript` is where that fallback belongs.
  */
 
 import type { HarnessAdapter } from "./adapter";

@@ -183,6 +183,15 @@ export const runs = sqliteTable("runs", {
   // every later pass of the same attempt resolves through — so the requested
   // tier needs somewhere of its own to live rather than overwriting it.
   degradedFrom: text("degraded_from"),
+  // The tier the ticket's own Workflow section declared, as parsed at claim
+  // (issue #198) — null when it declared none. Written once, at claim, and
+  // never rewritten. `model` cannot answer this: the implement pass writes the
+  // *resolved* tier there (so the ladder has a rung to step off and every later
+  // pass resolves through it), and from that moment a fleet default is
+  // indistinguishable from a declaration. Tier coverage — the fraction of
+  // claims that carried a declared tier — is read from this column alone;
+  // which tier actually ran stays `model`'s to say.
+  declaredTier: text("declared_tier"),
   // Resolved version of the mattpocock-skills plugin the container installed at
   // start (issue #60) — the forensic trail for "what skill version ran?".
   // Recorded when the run's first pass sets up; null for a run whose container

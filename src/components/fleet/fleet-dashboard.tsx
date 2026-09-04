@@ -14,6 +14,7 @@ import { PulseStrip } from "./pulse-strip";
 import { NeedsYou } from "./needs-you";
 import { RunningList } from "./running-list";
 import { RecentLedger } from "./recent-ledger";
+import { TierOutcomes } from "./tier-outcomes";
 
 function useFleetStream() {
   const [view, setView] = useState<FleetView | null>(null);
@@ -82,7 +83,12 @@ export function FleetDashboard() {
               <NeedsYou view={view} />
               <RunningList view={view} now={now} />
             </div>
-            <RecentLedger view={view} now={new Date(now)} />
+            <div className="space-y-8">
+              <RecentLedger view={view} now={new Date(now)} />
+              {/* The week's tier routing under the week's completions (issue
+                  #198): the same window, read one column over. */}
+              <TierOutcomes view={view} />
+            </div>
           </div>
         </div>
       )}

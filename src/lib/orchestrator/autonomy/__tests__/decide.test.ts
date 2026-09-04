@@ -155,6 +155,10 @@ function makePausedRun(overrides: Partial<PausedRun> = {}): PausedRun {
     resumeAfter: new Date(NOW.getTime() - 60 * 60_000),
     resumesMade: 0,
     hasLiveTask: false,
+    laneId: "claude-subscription",
+    // Nowhere else to go by default: the early lane resume (issue #199) has
+    // its own tests, which say so.
+    laneFailover: null,
     ...overrides,
   };
 }
@@ -4272,6 +4276,257 @@ describe("decideNext — resuming a paused run (issue #169)", () => {
   });
 });
 
+describe("decideNext — resuming a paused run early on another lane (issue #199)", () => {
+  // Four hours out: the wall stands, and before this ticket that was the whole
+  // story — the run sat out the window whatever else the fleet could run it on.
+  const WALL_RESETS = new Date(NOW.getTime() + 4 * 60 * 60_000);
+  const ELSEWHERE = {
+    toLaneId: "openrouter-glm",
+    toLaneLabel: "OpenRouter (GLM open weights)",
+    billing: "metered" as const,
+    rateUsdPerMTok: 0.03875,
+  };
+
+  function early(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "resumeRunOnLane");
+  }
+  function resumes(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "resumeRun");
+  }
+  function exhausted(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "exhaustPausedRun");
+  }
+
+  /** A run parked with its wall still standing, offered `laneFailover`. */
+  function parked(overrides: Partial<PausedRun> = {}): PausedRun {
+    return makePausedRun({ resumeAfter: WALL_RESETS, laneFailover: ELSEWHERE, ...overrides });
+  }
+
+  it("stays parked while its wall stands and no other lane can serve it", () => {
+    // The gatherer found nowhere both available and permitted — every other
+    // lane missing a credential, below the floor, walled itself, or held by
+    // #174's cap or confirmation — so the run waits on its clock, as before.
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], pausedRuns: [parked({ laneFailover: null })] })
+    );
+
+    expect(early(actions)).toEqual([]);
+    expect(resumes(actions)).toEqual([]);
+    expect(exhausted(actions)).toEqual([]);
+  });
+
+  it("resumes on the other lane rather than waiting out its clock", () => {
+    const actions = decideNext(makeSnapshot({ candidates: [], pausedRuns: [parked()] }));
+
+    expect(early(actions)).toEqual([
+      {
+        type: "resumeRunOnLane",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        fromLaneId: "claude-subscription",
+        toLaneId: "openrouter-glm",
+        toLaneLabel: "OpenRouter (GLM open weights)",
+        toLaneBilling: "metered",
+        toLaneRateUsdPerMTok: 0.03875,
+        resumeAfter: WALL_RESETS,
+        resume: 1,
+        maxResumes: 3,
+      },
+    ]);
+    expect(resumes(actions)).toEqual([]);
+  });
+
+  it("counts against the same bound a clock-driven resume does", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxResumesPerAttempt: 3,
+        pausedRuns: [parked({ resumesMade: 2 })],
+      })
+    );
+
+    expect(early(actions)).toHaveLength(1);
+    expect(early(actions)[0]).toMatchObject({ resume: 3, maxResumes: 3 });
+  });
+
+  it("exhausts to a human at the bound rather than moving again", () => {
+    // The bound is judged before the lane, as it is before the clock: a run
+    // with no continuations left is never going to resume anywhere, so moving
+    // it would only defer telling the human — and a run cannot walk its lanes
+    // forever.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxResumesPerAttempt: 2,
+        pausedRuns: [parked({ resumesMade: 2 })],
+      })
+    );
+
+    expect(early(actions)).toEqual([]);
+    expect(exhausted(actions)).toEqual([
+      {
+        type: "exhaustPausedRun",
+        runId: "run-1",
+        issueRef: "acme/widgets#7",
+        resumesMade: 2,
+      },
+    ]);
+  });
+
+  it("never moves when continuations are switched off entirely", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], maxResumesPerAttempt: 0, pausedRuns: [parked()] })
+    );
+
+    expect(early(actions)).toEqual([]);
+    expect(exhausted(actions)).toHaveLength(1);
+  });
+
+  it("takes the ordinary resume once the window has reset, even with a lane on offer", () => {
+    // The wall is down, so the run's own lane can serve it again for nothing;
+    // paying to move it now would be spending cash to save no time at all.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pausedRuns: [parked({ resumeAfter: new Date(NOW.getTime() - 60 * 60_000) })],
+      })
+    );
+
+    expect(early(actions)).toEqual([]);
+    expect(resumes(actions)).toHaveLength(1);
+  });
+
+  it("waits out its jitter after the reset rather than moving lanes to skip it", () => {
+    // The stampede guard spreads the moment every paused run's wall lifts; a
+    // move here would buy at most that window, for money.
+    const resetAt = new Date(NOW.getTime() - 60_000);
+    const snapshot = makeSnapshot({
+      candidates: [],
+      resumeJitterMs: 10 * 60_000,
+      pausedRuns: [parked({ resumeAfter: resetAt })],
+    });
+
+    expect(early(decideNext(snapshot))).toEqual([]);
+    expect(resumes(decideNext(snapshot))).toEqual([]);
+    expect(
+      resumes(decideNext({ ...snapshot, now: new Date(resetAt.getTime() + 10 * 60_000) }))
+    ).toHaveLength(1);
+  });
+
+  it("does not pay to skip a wall that lifts within the jitter window", () => {
+    // Three minutes from reset under a five-minute spread: the ordinary resume
+    // is at most eight minutes away, and a lane move would cost cash and a
+    // fresh orientation to save it. Six minutes out, it moves.
+    const snapshot = makeSnapshot({
+      candidates: [],
+      resumeJitterMs: 5 * 60_000,
+      pausedRuns: [parked({ resumeAfter: new Date(NOW.getTime() + 3 * 60_000) })],
+    });
+
+    expect(early(decideNext(snapshot))).toEqual([]);
+    expect(resumes(decideNext(snapshot))).toEqual([]);
+    expect(
+      early(
+        decideNext({
+          ...snapshot,
+          pausedRuns: [parked({ resumeAfter: new Date(NOW.getTime() + 6 * 60_000) })],
+        })
+      )
+    ).toHaveLength(1);
+  });
+
+  it("resumes a clockless row on its own lane, never onto another", () => {
+    // #168 never writes one; a row with no clock is eligible now, and "now" is
+    // the ordinary resume — there is no wall standing to move away from.
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], pausedRuns: [parked({ resumeAfter: null })] })
+    );
+
+    expect(early(actions)).toEqual([]);
+    expect(resumes(actions)).toHaveLength(1);
+  });
+
+  it("leaves a run already resuming alone", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], pausedRuns: [parked({ hasLiveTask: true })] })
+    );
+
+    expect(early(actions)).toEqual([]);
+    expect(resumes(actions)).toEqual([]);
+    expect(exhausted(actions)).toEqual([]);
+  });
+
+  it("names no lane it left when the paused pass recorded none", () => {
+    const actions = decideNext(
+      makeSnapshot({ candidates: [], pausedRuns: [parked({ laneId: null })] })
+    );
+
+    expect(early(actions)[0]).toMatchObject({ fromLaneId: null });
+  });
+
+  it("reserves a slot against new claims exactly as a clock-driven resume does", () => {
+    // One slot, one paused run that can move, one armed ticket: the resume
+    // takes the slot — resuming existing work outranks claiming new work.
+    const actions = decideNext(
+      makeSnapshot({
+        slots: { total: 1, occupied: 0, occupants: [] },
+        pausedRuns: [parked({ issueRef: "acme/widgets#3" })],
+      })
+    );
+
+    expect(early(actions)).toHaveLength(1);
+    expect(claims(actions)).toEqual([]);
+    expect(actions.some((a) => a.type === "pausePickup" && a.reason === "no-slots")).toBe(
+      true
+    );
+  });
+
+  it("is not held by the kill switch or the daily cap, which gate pickup", () => {
+    // A paused run is the middle of an attempt the fleet already started; the
+    // money guards that bound a move onto a paid lane were evaluated inside
+    // the ranking that produced the option, not here.
+    const held = decideNext(makeSnapshot({ globalPaused: true, pausedRuns: [parked()] }));
+    const capped = decideNext(
+      makeSnapshot({
+        todayAutonomousSpendUsd: 500,
+        dailyCapUsd: 500,
+        pausedRuns: [parked()],
+      })
+    );
+
+    expect(early(held)).toHaveLength(1);
+    expect(claims(held)).toEqual([]);
+    expect(early(capped)).toHaveLength(1);
+    expect(claims(capped)).toEqual([]);
+  });
+
+  it("leaves the wall ordering of a finishing pass untouched", () => {
+    // A pass refused this instant is decided by the pass-completion path —
+    // tier degrade, then lane failover, then pause — and a paused-run entry for
+    // the same run is not driven a second time here.
+    const RESUME_AFTER = new Date(NOW.getTime() + 60 * 60_000);
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        maxResumesPerAttempt: 2,
+        completedPasses: [
+          makePass({
+            tier: "light",
+            laneId: "claude-subscription",
+            laneFailover: ELSEWHERE,
+            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "five_hour" },
+          }),
+        ],
+        pausedRuns: [parked({ runId: "run-1", resumeAfter: RESUME_AFTER })],
+      })
+    );
+
+    expect(actions.filter((a) => a.type === "failOverRunLane")).toHaveLength(1);
+    expect(early(actions)).toEqual([]);
+    expect(resumes(actions)).toEqual([]);
+  });
+});
+
 describe("decideNext — cross-lane failover (issue #176)", () => {
   const RESUME_AFTER = new Date(2026, 7, 1, 17, 0, 0);
   const CHEAPER = {
@@ -4323,6 +4578,7 @@ describe("decideNext — cross-lane failover (issue #176)", () => {
         toLaneId: "openrouter-glm",
         toLaneLabel: "OpenRouter (GLM open weights)",
         toLaneBilling: "metered",
+        toLaneRateUsdPerMTok: 0.03875,
         limitType: "five_hour",
         resumeAfter: RESUME_AFTER,
         move: 1,
