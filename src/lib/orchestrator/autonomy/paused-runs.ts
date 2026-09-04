@@ -40,19 +40,38 @@
  * gathers the facts it decides from and carries out what it decided.
  * Exhaustion stays in the sweep beside the other terminal executors, whose
  * labelling and finalisation helpers it shares.
+ *
+ * A third way a paused run resumes lives here too, because it shares the same
+ * body: the **operator's manual move** (issue #202), from the fleet card, for
+ * the run the ranking would *not* move — most often because nobody has
+ * confirmed the day's real-money spend — that is gating everything behind it.
+ * `readManualLaneMove` says what the press would do, `moveParkedRunToLane`
+ * does it; both decide through the pure `decideManualLaneMove` over the same
+ * failover ranking the sweep re-reads every tick, so the card can never offer
+ * a move the sweep would have refused on other grounds.
  */
 
 import { db } from "@/db";
 import { runs, tasks } from "@/db/schema";
 import { eq, inArray } from "drizzle-orm";
 import { newId } from "../../ulid";
+import { getConfig } from "../../config";
 import { commentOnIssue } from "../../github/issues";
 import { describeLaneCost } from "../../lanes/lane-rate";
-import type { MoneyGuards } from "../../lanes/money-state";
-import { readLaneFailover } from "../../lanes/overflow-state";
+import { readMoneyGuards, type MoneyGuards } from "../../lanes/money-state";
+import {
+  readLaneFailover,
+  readLaneFailoverSelection,
+} from "../../lanes/overflow-state";
 import { hasTranscript } from "../../quota/session-transcript";
-import type { FleetSettings } from "../../settings";
+import { getFleetSettings, type FleetSettings } from "../../settings";
+import { resolveResumeBound } from "../../settings-resolver";
 import type { Action, PausedRun } from "./decide";
+import {
+  decideManualLaneMove,
+  type LaneMoveDecision,
+  type LaneMoveOffer,
+} from "./lane-move";
 import { buildLaneMovePrompt, buildResumePrompt } from "./workflow";
 
 type RunRow = typeof runs.$inferSelect;
@@ -192,19 +211,19 @@ async function queueResumedPass(
   runId: string,
   issueRef: string,
   wording: ResumeWording
-): Promise<void> {
+): Promise<string | null> {
   const run = db.select().from(runs).where(eq(runs.id, runId)).get();
-  if (!run || run.status !== "rate_limited") return;
+  if (!run || run.status !== "rate_limited") return null;
 
   const owned = db.select().from(tasks).where(eq(tasks.runId, run.id)).all();
-  if (hasLivePass(owned)) return;
+  if (hasLivePass(owned)) return null;
 
   const paused = latestWorkPass(owned);
   if (!paused) {
     console.error(
       `[autonomy] Run ${runId} is paused but owns no implement pass to resume`
     );
-    return;
+    return null;
   }
 
   const sessionId =
@@ -242,6 +261,7 @@ async function queueResumedPass(
 
   console.log(wording.log({ run, taskId, sessionId }));
   await commentOnIssue(issueRef, wording.comment({ run, paused, sessionId }));
+  return taskId;
 }
 
 /** How the resumed pass stands with respect to its conversation, for the
@@ -332,4 +352,175 @@ export async function executeResumeRunOnLane(
       `interruption; it counts against the same resume bound as any other. ` +
       describeSession(paused, sessionId),
   });
+}
+
+/** What a press on the fleet card is told (issue #202): the decision, and —
+ * so the route can answer without a second read — what it was decided about. */
+export interface ManualLaneMoveReading {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  decision: LaneMoveDecision;
+}
+
+/** The outcome of pressing it: the move as made, or the refusal. */
+export type ManualLaneMoveResult =
+  | { ok: true; offer: LaneMoveOffer; taskId: string }
+  | { ok: false; refusal: Extract<LaneMoveDecision, { ok: false }>["refusal"] };
+
+/**
+ * What moving this run onto another lane *now* would do (issue #202), or why
+ * it may not: the fleet card asks this before it offers the press, so the
+ * confirmation names the lane and quotes its cost before any money is spent.
+ * Null when no such run exists.
+ *
+ * The facts are read exactly as `gatherPausedRuns` reads them for the sweep —
+ * the same pass, the same lane excluded, the same ranking at the tier the run
+ * actually runs at, over one read of the settings row and one of the money
+ * guards — so what the operator is offered here and what the sweep would have
+ * done by itself cannot part company. The difference is only that the whole
+ * ranking is kept (`readLaneFailoverSelection`), because a refusal has to say
+ * which lane a press would free, or why nowhere can serve the run at all, and
+ * that answer is in the losers rather than in the winner.
+ */
+export function readManualLaneMove(
+  runId: string,
+  now: Date = new Date()
+): ManualLaneMoveReading | null {
+  const run = db.select().from(runs).where(eq(runs.id, runId)).get();
+  if (!run) return null;
+
+  const owned = db.select().from(tasks).where(eq(tasks.runId, run.id)).all();
+  const pass = latestWorkPass(owned);
+  const hasLiveTask = hasLivePass(owned);
+
+  // Read fresh, never the memoised config (issue #166's freshness rule): a
+  // confirmation pressed on the settings screen a moment ago is the whole
+  // reason an operator presses this.
+  const settings = getFleetSettings();
+  const bound = resolveResumeBound(getConfig(), settings.overrides).resumes;
+
+  // The ranking is only read for a run that is up for the decision at all —
+  // a run already resuming, or with no pass to resume, is refused before it,
+  // exactly as the gatherer ranks nothing for one.
+  const selection =
+    run.status === "rate_limited" && !hasLiveTask && pass !== null
+      ? readLaneFailoverSelection(
+          pass.kind,
+          // `run.model` is the tier the run actually runs at — degraded, if
+          // #170 stepped it — which is the row of each lane's price table the
+          // resumed pass would be charged from.
+          run.model,
+          pass.lane,
+          now,
+          settings,
+          readMoneyGuards(now, settings)
+        )
+      : null;
+
+  return {
+    runId: run.id,
+    issueRef: run.githubIssue,
+    decision: decideManualLaneMove({
+      runStatus: run.status,
+      hasLiveTask,
+      passKind: pass?.kind ?? null,
+      resumesMade: run.resumeCount,
+      maxResumes: bound,
+      fromLaneId: pass?.lane ?? null,
+      resumeAfter: run.resumeAfter,
+      selection,
+      now,
+    }),
+  };
+}
+
+/**
+ * Move a parked run onto another lane now, at the operator's press (issue
+ * #202) — or refuse, with the reason. Null when no such run exists.
+ *
+ * Decided freshly here rather than trusting what the card was shown: the
+ * fleet moves between the GET and the press (a sweep may have resumed the run
+ * itself, another session may have spent the day's last dollar), and a press
+ * has to be judged against the fleet as it is when the money is spent.
+ *
+ * The move is the early resume's body (`queueResumedPass`): the paused pass
+ * queued again on the same branch, its lineage recorded so the attempt's
+ * budget follows it, the session carried where the transcript survived,
+ * `resumeCount` bumped when the move is queued, and the run left visibly
+ * `rate_limited` until the pass actually starts. It counts against the same
+ * resume bound a clock-driven resume does, and it is announced on the issue
+ * with the lane and what it costs — in the same sentence the sweep's own move
+ * uses, so a human reading the thread cannot tell the two apart on the money.
+ * What differs is who decided: the comment says the operator moved it, and
+ * that the wall was still standing when they did.
+ *
+ * The target is advisory, exactly as a failover's is: `startTask` re-asks the
+ * ranking as the pass starts, so a wall that lifted in between sends it back
+ * to the cheaper lane, and `tasks.lane` — not this comment — records where it
+ * actually ran.
+ */
+export async function moveParkedRunToLane(
+  runId: string,
+  now: Date = new Date()
+): Promise<ManualLaneMoveResult | null> {
+  const reading = readManualLaneMove(runId, now);
+  if (reading === null) return null;
+  if (!reading.decision.ok) return reading.decision;
+
+  const { offer } = reading.decision;
+  const from = offer.fromLaneId ?? "its lane";
+  const resets = offer.resumeAfter === null ? null : new Date(offer.resumeAfter).toUTCString();
+  const wall =
+    resets === null
+      ? `the run carried no reset time for the window on \`${from}\``
+      : offer.wallStands
+        ? `the window on \`${from}\` does not reset until ${resets}`
+        : `the window on \`${from}\` reset at ${resets} and the run had not yet resumed`;
+
+  const taskId = await queueResumedPass(reading.runId, reading.issueRef, {
+    prompt: (paused) =>
+      buildLaneMovePrompt({
+        originalPrompt: paused.description,
+        branch: paused.branch ?? "the attempt's branch",
+        toLaneLabel: offer.toLaneLabel,
+        move: offer.resume,
+        maxMoves: offer.maxResumes,
+      }),
+    log: ({ run, taskId, sessionId }) =>
+      `[autonomy] Operator moved ${reading.issueRef} onto ${offer.toLaneId} ` +
+      `(attempt ${run.attempt}, resume ${offer.resume}/${offer.maxResumes}; ` +
+      `${wall}) -> task ${taskId}` +
+      `${sessionId ? ` continuing session ${sessionId}` : " without its prior context"}`,
+    comment: ({ run, paused, sessionId }) =>
+      `Moved onto another lane by the operator (attempt ${run.attempt}): ` +
+      `${wall}, and **${offer.toLaneLabel}** can serve this run now, so it is ` +
+      `resuming there rather than waiting (resume ${offer.resume}/${offer.maxResumes}). ` +
+      `${offer.cost} ` +
+      `The lane is re-chosen as the pass starts, so a wall that lifts first ` +
+      `sends it back to the cheaper one; the task records where it actually ` +
+      `ran. A lane move consumes neither an attempt nor an interruption; it ` +
+      `counts against the same resume bound as any other. ` +
+      describeSession(paused, sessionId),
+  });
+
+  // Nothing was queued: the run moved on between the decision and the write
+  // (a sweep resumed it, or a human cancelled it). Judged again rather than
+  // reported as a success the ledger does not show.
+  if (taskId === null) {
+    const again = readManualLaneMove(runId, now);
+    if (again !== null && !again.decision.ok) return again.decision;
+    return {
+      ok: false,
+      refusal: {
+        reason: "already-resuming",
+        message:
+          "This run moved on between the decision and the move — a pass for it " +
+          "is already queued or running, so nothing was queued.",
+        heldLane: null,
+      },
+    };
+  }
+
+  return { ok: true, offer, taskId };
 }

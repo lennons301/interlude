@@ -21,6 +21,10 @@ import { describeLaneCost } from "@/lib/lanes/lane-rate";
  * against the same bound", "carries the session" and "announced with the lane
  * and its cost" are observable.
  *
+ * The operator's manual move (issue #202) is driven here too: it reads the
+ * same facts the gatherer does and shares the early resume's body, so what it
+ * is offered and what it writes are checked beside them.
+ *
  * Only outbound I/O is stubbed (GitHub, the transcript store). The DB reads
  * and writes, the ranking and the real lane file are the real thing.
  */
@@ -477,6 +481,189 @@ describe("a run parked on the quota clock (issues #169, #199)", () => {
 
       expect(queuedTasks()).toEqual([]);
       expect(github.comments).toEqual([]);
+    });
+  });
+
+  describe("what the operator's manual move is offered (issue #202)", () => {
+    it("offers the same lane the sweep would have, with its cost and the continuation it would be", () => {
+      const reading = pausedRuns.readManualLaneMove(runId, NOW);
+
+      expect(reading?.issueRef).toBe(ISSUE_REF);
+      expect(reading?.decision.ok).toBe(true);
+      if (!reading?.decision.ok) return;
+      expect(reading.decision.offer).toMatchObject({
+        toLaneId: "openrouter-glm",
+        toLaneLabel: "OpenRouter (GLM open weights)",
+        billing: "metered",
+        fromLaneId: "claude-subscription",
+        resume: 1,
+        maxResumes: 3,
+        wallStands: true,
+        resumeAfter: RESUME_AFTER.toISOString(),
+      });
+      expect(reading.decision.offer.cost).toContain("bills real money");
+      expect(reading.decision.offer.cost).toContain("per million tokens");
+      expect(reading.decision.offer.rateUsdPerMTok).toBe(
+        gather()[0].laneFailover?.rateUsdPerMTok
+      );
+      // The sweep's own gather agrees, because both read one ranking.
+      expect(gather()[0].laneFailover?.toLaneId).toBe(reading.decision.offer.toLaneId);
+    });
+
+    it("is refused while the day's real money is unconfirmed, naming the press", () => {
+      // The ticket's central promise: the press does not waive #174's gate.
+      writeSettings({ meteredSpendConfirmedAt: null });
+
+      const reading = pausedRuns.readManualLaneMove(runId, NOW);
+
+      expect(reading?.decision.ok).toBe(false);
+      if (reading?.decision.ok !== false) return;
+      expect(reading.decision.refusal.reason).toBe("unconfirmed");
+      expect(reading.decision.refusal.message).toContain("OpenRouter (GLM open weights)");
+      expect(reading.decision.refusal.message).toContain("Confirm real-money spend first");
+    });
+
+    it("is refused at the cap", async () => {
+      const { recordMeteredSpend } = await import("../../spend");
+      recordMeteredSpend(0, 20, NOW);
+
+      const reading = pausedRuns.readManualLaneMove(runId, NOW);
+
+      expect(reading?.decision.ok).toBe(false);
+      if (reading?.decision.ok !== false) return;
+      expect(reading.decision.refusal.reason).toBe("cap-reached");
+    });
+
+    it("is refused with the missing credential when no other lane has one", () => {
+      delete process.env.OPENROUTER_API_KEY;
+      resetConfig();
+
+      const reading = pausedRuns.readManualLaneMove(runId, NOW);
+
+      expect(reading?.decision.ok).toBe(false);
+      if (reading?.decision.ok !== false) return;
+      expect(reading.decision.refusal.reason).toBe("no-lane");
+      expect(reading.decision.refusal.message).toContain("OPENROUTER_API_KEY");
+      expect(reading.decision.refusal.message).toContain("ANTHROPIC_API_KEY");
+    });
+
+    it("reads the resume bound fresh from the settings row", () => {
+      writeSettings({ overrides: { maxResumesPerAttempt: "0" } });
+
+      const reading = pausedRuns.readManualLaneMove(runId, NOW);
+
+      expect(reading?.decision.ok).toBe(false);
+      if (reading?.decision.ok !== false) return;
+      expect(reading.decision.refusal.reason).toBe("resume-bound");
+    });
+
+    it("is refused for a run that is not parked", () => {
+      testDb
+        .update(schema.runs)
+        .set({ status: "implementing", resumeAfter: null })
+        .where(eq(schema.runs.id, runId))
+        .run();
+
+      const reading = pausedRuns.readManualLaneMove(runId, NOW);
+
+      expect(reading?.decision.ok).toBe(false);
+      if (reading?.decision.ok !== false) return;
+      expect(reading.decision.refusal.reason).toBe("not-parked");
+      expect(reading.decision.refusal.message).toContain("implementing");
+    });
+
+    it("answers nothing for a run that does not exist", () => {
+      expect(pausedRuns.readManualLaneMove(newId(), NOW)).toBeNull();
+    });
+  });
+
+  describe("the operator's manual move (issue #202)", () => {
+    it("queues the paused pass on the offered lane, with the lineage the budget follows", async () => {
+      const result = await pausedRuns.moveParkedRunToLane(runId, NOW);
+
+      expect(result?.ok).toBe(true);
+      if (result?.ok !== true) return;
+      expect(result.offer.toLaneId).toBe("openrouter-glm");
+
+      const queued = queuedTasks();
+      expect(queued).toHaveLength(1);
+      const [resumed] = queued;
+      expect(resumed.id).toBe(result.taskId);
+      expect(resumed.runId).toBe(runId);
+      expect(resumed.kind).toBe("implement");
+      expect(resumed.branch).toBe("agent/issue-34");
+      expect(resumed.resumedFromTaskId).toBe(taskId);
+      expect(resumed.sessionId).toBe(SESSION);
+      expect(resumed.description).toContain(PROMPT);
+      expect(resumed.description).toContain("continuing on OpenRouter (GLM open weights)");
+    });
+
+    it("counts against the same resume bound a clock-driven resume does, and nothing else", async () => {
+      await pausedRuns.moveParkedRunToLane(runId, NOW);
+
+      expect(run().resumeCount).toBe(1);
+      expect(run().attempt).toBe(2);
+      expect(run().interruptionCount).toBe(1);
+      // Visibly paused until the pass actually starts, as every resume is.
+      expect(run().status).toBe("rate_limited");
+    });
+
+    it("announces the lane and what it costs on the issue, and who moved it", async () => {
+      await pausedRuns.moveParkedRunToLane(runId, NOW);
+
+      const comment = github.comments.join("\n");
+      expect(comment).toContain("Moved onto another lane by the operator");
+      expect(comment).toContain("OpenRouter (GLM open weights)");
+      expect(comment).toContain("claude-subscription");
+      expect(comment).toContain("does not reset until");
+      expect(comment).toContain("bills real money at about $0.0");
+      expect(comment).toContain("per million tokens");
+      expect(comment).toContain("resume 1/3");
+      expect(comment).toContain("neither an attempt nor an interruption");
+      expect(comment).toContain("continues the same conversation");
+    });
+
+    it("says the window had already reset when it moves a run past its clock", async () => {
+      testDb
+        .update(schema.runs)
+        .set({ resumeAfter: new Date(NOW.getTime() - 60_000) })
+        .where(eq(schema.runs.id, runId))
+        .run();
+
+      const result = await pausedRuns.moveParkedRunToLane(runId, NOW);
+
+      expect(result?.ok).toBe(true);
+      if (result?.ok !== true) return;
+      expect(result.offer.wallStands).toBe(false);
+      expect(github.comments.join("\n")).toContain("reset at");
+    });
+
+    it("refuses without writing anything when the day's money is unconfirmed", async () => {
+      writeSettings({ meteredSpendConfirmedAt: null });
+
+      const result = await pausedRuns.moveParkedRunToLane(runId, NOW);
+
+      expect(result?.ok).toBe(false);
+      if (result?.ok !== false) return;
+      expect(result.refusal.reason).toBe("unconfirmed");
+      expect(queuedTasks()).toEqual([]);
+      expect(run().resumeCount).toBe(0);
+      expect(github.comments).toEqual([]);
+    });
+
+    it("refuses a second press as already resuming", async () => {
+      await pausedRuns.moveParkedRunToLane(runId, NOW);
+      const second = await pausedRuns.moveParkedRunToLane(runId, NOW);
+
+      expect(second?.ok).toBe(false);
+      if (second?.ok !== false) return;
+      expect(second.refusal.reason).toBe("already-resuming");
+      expect(queuedTasks()).toHaveLength(1);
+      expect(run().resumeCount).toBe(1);
+    });
+
+    it("moves nothing for a run that does not exist", async () => {
+      expect(await pausedRuns.moveParkedRunToLane(newId(), NOW)).toBeNull();
     });
   });
 
