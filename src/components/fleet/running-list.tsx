@@ -9,6 +9,7 @@ import {
   formatCountdown,
   formatElapsed,
 } from "./fleet-bits";
+import { LaneMoveControl } from "./lane-move-control";
 
 // afk work is the green "the fleet is driving" state; supervised and
 // interactive are cool (a human is in the loop); a triage pass is the lightest
@@ -60,8 +61,8 @@ function PausedLine({ resumeAfter, now }: { resumeAfter: string; now: number }) 
 }
 
 function RunCard({ card, now }: { card: RunningCard; now: number }) {
-  const inner = (
-    <div className="space-y-2 rounded-[4px] border border-fl-line bg-fl-card px-3 py-2.5">
+  const body = (
+    <>
       <div className="flex items-center justify-between gap-2">
         <span className="truncate font-plex-mono text-[12px] text-fl-ink-2">
           {card.projectName}
@@ -141,14 +142,32 @@ function RunCard({ card, now }: { card: RunningCard; now: number }) {
       {card.spend.budgetUsd !== null && (
         <Gauge value={card.spend.usd} max={card.spend.budgetUsd} tone="green" />
       )}
-    </div>
+    </>
   );
 
-  return card.taskId ? (
-    <Link href={`/tasks/${card.taskId}`} className="block">
-      {inner}
-    </Link>
-  ) : (
-    inner
+  // The card's frame is its own element and the link sits *inside* it, so the
+  // paused run's control (issue #202) can share the frame without sitting
+  // inside the anchor — a button in a link is not a thing, and a press on it
+  // must not also open the task.
+  return (
+    <div className="rounded-[4px] border border-fl-line bg-fl-card">
+      {card.taskId ? (
+        <Link href={`/tasks/${card.taskId}`} className="block space-y-2 px-3 py-2.5">
+          {body}
+        </Link>
+      ) : (
+        <div className="space-y-2 px-3 py-2.5">{body}</div>
+      )}
+
+      {/* Only a parked run can be moved, and only a run has a lane to move: the
+          control is absent from every other card rather than present and
+          inert, because the route would refuse it with "not parked" and a
+          control that can only be refused is noise (issue #202). */}
+      {card.paused && card.runId && (
+        <div className="border-t border-fl-line px-3 py-2">
+          <LaneMoveControl runId={card.runId} ticket={card.ticket} />
+        </div>
+      )}
+    </div>
   );
 }

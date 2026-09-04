@@ -109,3 +109,27 @@ describe("running list", () => {
     expect(html).not.toContain("paused");
   });
 });
+
+describe("the paused card's lane-move control (issue #202)", () => {
+  it("offers a paused run the move, outside the card's link", () => {
+    const html = render([PAUSED]);
+
+    expect(html).toContain("move to paid lane");
+    // The card still opens the task, and the control is not inside the anchor:
+    // a button in a link is not a thing, and a press must not also navigate.
+    expect(html).toContain('href="/tasks/t1"');
+    const anchor = html.slice(html.indexOf("<a "), html.indexOf("</a>"));
+    expect(anchor).not.toContain("<button");
+  });
+
+  it("offers nothing to a working run — only a parked run can be moved", () => {
+    expect(render([WORKING])).not.toContain("move to paid lane");
+    expect(render([DEGRADED])).not.toContain("move to paid lane");
+  });
+
+  it("offers nothing to a paused card with no run to move", () => {
+    // Defensive: `paused` is a run-ledger state, so a card carrying it without
+    // a run id has nothing the route could act on.
+    expect(render([{ ...PAUSED, runId: null }])).not.toContain("move to paid lane");
+  });
+});

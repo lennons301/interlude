@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/workspace/repo","session_id":"tri-recommend-bad-tier-001","tools":["Bash","Read","Grep","Glob"]}
+{"type":"assistant","message":{"content":[{"type":"text","text":"TRIAGE: recommend\nTIER: claude-opus-4-8\n\nWell specified: names the page, the format and the done-signal."}]},"session_id":"tri-recommend-bad-tier-001"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":35000,"num_turns":4,"result":"TRIAGE: recommend\nTIER: claude-opus-4-8\n\nWell specified: names the page, the format and the done-signal.","stop_reason":"end_turn","session_id":"tri-recommend-bad-tier-001","total_cost_usd":0.27}
