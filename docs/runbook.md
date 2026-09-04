@@ -462,7 +462,8 @@ Since issue #197 every published ticket is expected to name its tier, chosen
 against the three-way rubric in the ticket contract in
 `docs/agents/issue-tracker.md` — the contract binds the producer (`/to-tickets`,
 a human, a generation session), not the executor: a ticket that arrives
-without one still runs at the configured default exactly as above.
+without one still runs at triage's suggestion where there is one (next
+paragraph), and otherwise at the configured default exactly as above.
 
 **Raw issues get their tier from triage** (issue #200). The triage pass judges
 every opened issue against that same rubric and returns the tier on a `TIER:`

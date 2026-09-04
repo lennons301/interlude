@@ -64,13 +64,13 @@ Three tiers, and each one is **chosen positively**. There is no default and no "
 ### What a ticket may and may not say
 
 - **A tier, never a lane.** Which lane runs a pass — the subscription, the Anthropic API, OpenRouter — is fleet policy and cost routing. A ticket body is semi-trusted text and may not send the fleet somewhere that spends money. There is no lane directive, and the executor ignores unknown keys rather than interpreting them.
-- **A tier, never a raw model identifier.** `model: claude-opus-4-8` names no tier. The executor drops it, runs the pass at the configured default and notes on the issue that the directive was not recognised — so a mistyped tier is visible, never fatal, and never obeyed.
+- **A tier, never a raw model identifier.** `model: claude-opus-4-8` names no tier. The executor drops it, runs the pass as it would a ticket stating no tier (below — triage's suggestion where there is one, else the configured default) and notes on the issue that the directive was not recognised — so a mistyped tier is visible, never fatal, and never obeyed.
 - **The tier applies to the ticket's work passes only** — the implement pass and any repair pass of the run. Review and triage run at the fleet's own settings. A ticket cannot cheapen the gate that judges it or the pass that assesses it, and the Workflow section has no key that would let it.
 - `budget:`, `max-turns:`, `checkpoint:` and `effort:` stay hand-written escape hatches in the same section (see `docs/runbook.md`). They are not part of the tier decision: a budget is a ceiling, not a lever, and declaring a low one on a cheap ticket saves nothing.
 
 ### A ticket that arrives without a tier
 
-It is not refused. It runs exactly as it did before this contract, at the configured default tier for the pass: a forgotten section costs the fleet nothing it was not already paying — it only forfeits the choice. Refusing to claim such a ticket would wedge the frontier over a missing doc section, so the contract is enforced by the producer writing the section, not by the executor.
+It is not refused. Where the issue was triaged and the pass named a tier — every issue opened on a registered project is, and triage judges by this same rubric (issue #200, `docs/agents/triage-pass.md`) — it runs at that suggestion, which applies only because the body states none. Otherwise it runs exactly as it did before this contract, at the configured default tier for the pass: a forgotten section costs the fleet nothing it was not already paying — it only forfeits the choice. Refusing to claim such a ticket would wedge the frontier over a missing doc section, so the contract is enforced by the producer writing the section, not by the executor.
 
 ### The section and `workflow:<skill>` labels
 
