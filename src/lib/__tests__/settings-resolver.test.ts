@@ -30,6 +30,8 @@ import {
   DERIVED_TIER_KINDS,
   tierCeiling,
   resolveModelTierField,
+  tierDerivation,
+  isWorkPassKind,
 } from "../settings-resolver";
 import {
   DEFAULT_MAX_RESUMES_PER_ATTEMPT,
@@ -777,22 +779,36 @@ describe("derived tiers — the rungs and the ceiling (issue #201)", () => {
     expect(tierCeiling(resolved)).toBe("light");
   });
 
-  it("reads a tier named in the environment as the ceiling — the other explicit way", () => {
+  it("reads a tier named in the field's own variable as the ceiling — the other explicit way", () => {
     const own = resolveModelTierField(
       "modelTierReview",
       cfg({ agentModelReview: "standard" }),
       NONE
     );
+    expect(own.envInherited).toBe(false);
     expect(tierCeiling(own)).toBe("standard");
-    // The base supplies the review field when its own variable is unset and
-    // is what the row names — so it is the ceiling too, not a bound the
-    // derivation could quietly step over.
+    // The implement field's own variable is the base itself.
+    const implement = resolveModelTierField(
+      "modelTierImplement",
+      cfg({ agentModel: "sonnet" }),
+      NONE
+    );
+    expect(tierCeiling(implement)).toBe("standard");
+  });
+
+  it("does not read the base standing in for an unset own variable as a ceiling", () => {
+    // The base supplies the review field when its own variable is unset, and
+    // the row names it as the fall-back — but it is the implement kind's
+    // setting, not the review's, so it bounds nothing.
     const base = resolveModelTierField(
       "modelTierReview",
       cfg({ agentModel: "sonnet", agentModelReview: null }),
       NONE
     );
-    expect(tierCeiling(base)).toBe("standard");
+    expect(base.envVar).toBe("AGENT_MODEL");
+    expect(base.tier).toBe("standard");
+    expect(base.envInherited).toBe(true);
+    expect(tierCeiling(base)).toBeNull();
   });
 
   it("reads an unset field as no ceiling, so the derivation runs free", () => {
@@ -828,6 +844,31 @@ describe("derived tiers — the rungs and the ceiling (issue #201)", () => {
     expect(tierCeiling(resolved)).toBeNull();
   });
 
+  it("classifies a derived kind's field as capped, pinned or free — the reading the pass makes", () => {
+    const review = (models: Parameters<typeof cfg>[0], overrides = NONE) =>
+      tierDerivation("review", resolveModelTierField("modelTierReview", cfg(models), overrides));
+    const repair = (models: Parameters<typeof cfg>[0], overrides = NONE) =>
+      tierDerivation("repair", resolveModelTierField("modelTierImplement", cfg(models), overrides));
+
+    expect(review({}, { modelTierReview: "light" })).toEqual({ rule: "capped", ceiling: "light" });
+    expect(review({ agentModelReview: "heavy" })).toEqual({ rule: "capped", ceiling: "heavy" });
+    expect(review({})).toEqual({ rule: "free", ceiling: null });
+    // The base is the fall-back, not the review's setting: free.
+    expect(review({ agentModel: "standard" })).toEqual({ rule: "free", ceiling: null });
+    // A pin on the reviewer's own field is the answer; a pin arriving through
+    // the base is not the reviewer's.
+    expect(review({ agentModelReview: "claude-opus-4-8" })).toEqual({ rule: "pinned", ceiling: null });
+    expect(review({ agentModel: "claude-opus-4-8" })).toEqual({ rule: "free", ceiling: null });
+    // Repair reads the implement field, whose own variable is the base — and
+    // a pin there is a default the run's tier outranks, so never "pinned".
+    expect(repair({ agentModel: "standard" })).toEqual({ rule: "capped", ceiling: "standard" });
+    expect(repair({ agentModel: "claude-opus-4-8" })).toEqual({ rule: "free", ceiling: null });
+    expect(repair({})).toEqual({ rule: "free", ceiling: null });
+    // The work line the asymmetry rests on is #80's, drawn once.
+    expect(isWorkPassKind("repair")).toBe(true);
+    expect(isWorkPassKind("review")).toBe(false);
+  });
+
   it("tells the screen which rows are ceilings, for which kinds, and at what", () => {
     const fields = describeModelTierSettings(
       cfg({ agentModel: "standard", agentModelReview: null, agentModelTriage: null }),
@@ -836,26 +877,26 @@ describe("derived tiers — the rungs and the ceiling (issue #201)", () => {
     const byKey = Object.fromEntries(fields.map((f) => [f.key, f]));
 
     expect(byKey.modelTierReview).toMatchObject({
-      kinds: ["review"],
-      caps: ["review"],
-      ceiling: "light",
+      chooses: [],
+      derived: [{ kind: "review", rule: "capped", ceiling: "light" }],
     });
     // The implement row is the implement pass's own tier and the ceiling on
     // the repair's step.
     expect(byKey.modelTierImplement).toMatchObject({
-      kinds: ["implement", "repair"],
-      caps: ["repair"],
-      ceiling: "standard",
+      chooses: ["implement"],
+      derived: [{ kind: "repair", rule: "capped", ceiling: "standard" }],
     });
-    expect(byKey.modelTierTriage).toMatchObject({
-      kinds: ["triage"],
-      caps: [],
-      ceiling: null,
-    });
+    expect(byKey.modelTierTriage).toMatchObject({ chooses: ["triage"], derived: [] });
     expect(byKey.modelTierInteractive).toMatchObject({
-      kinds: ["interactive"],
-      caps: [],
+      chooses: ["interactive"],
+      derived: [],
     });
+    // With the override cleared the review row falls back to the base and
+    // reports the derivation free, not capped at the implement tier.
+    const [, freeReview] = describeModelTierSettings(cfg({ agentModel: "standard" }), NONE);
+    expect(freeReview.envVar).toBe("AGENT_MODEL");
+    expect(freeReview.tier).toBe("standard");
+    expect(freeReview.derived).toEqual([{ kind: "review", rule: "free", ceiling: null }]);
   });
 
   it("describes the review and implement rows as ceilings", () => {

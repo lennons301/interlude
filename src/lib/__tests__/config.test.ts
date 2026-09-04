@@ -409,15 +409,26 @@ describe("derived tiers for review and repair (issue #201)", () => {
     ).toBe("sonnet");
   });
 
-  it("holds the derivation under an explicitly set per-kind tier — the environment", () => {
+  it("holds the derivation under an explicitly set per-kind tier — the kind's own variable", () => {
     const c = cfg({ agentModel: null, agentModelReview: "standard" });
     expect(modelOn("review", c, "standard", NO_OVERRIDES)).toBe("sonnet");
-    // A tier named in the *base* variable supplies the review field too, and
-    // is the field's own environment default — so it is the ceiling the
-    // screen shows, not a bound the derivation may quietly step over.
+    // `AGENT_MODEL` is the implement kind's own variable, so it caps the
+    // repair's step...
     const base = cfg({ agentModel: "standard" });
-    expect(modelOn("review", base, "standard", NO_OVERRIDES)).toBe("sonnet");
     expect(modelOn("repair", base, "standard", NO_OVERRIDES)).toBe("sonnet");
+  });
+
+  it("does not read the base AGENT_MODEL as the review's ceiling", () => {
+    // ...but it is not the *review* kind's setting: it is what a review with
+    // nothing to derive from falls back to. Read as the review's ceiling it
+    // would cap every review at the implement tier in the commonest
+    // configuration — the "equal" design the ticket rejected — and a heavy
+    // ticket's review below its implement pass with nobody having chosen so.
+    const base = cfg({ agentModel: "standard" });
+    expect(modelOn("review", base, "standard", NO_OVERRIDES)).toBe("opus");
+    expect(modelOn("review", base, "light", NO_OVERRIDES)).toBe("sonnet");
+    // With no run tier the base is still what the review runs, as before.
+    expect(modelOn("review", base, null, NO_OVERRIDES)).toBe("sonnet");
   });
 
   it("never lets a ceiling raise the derivation — it is a cap, not a floor", () => {
@@ -431,9 +442,10 @@ describe("derived tiers for review and repair (issue #201)", () => {
   });
 
   it("lets an unset per-kind tier run the derivation free", () => {
-    // Only triage is set: the review field is untouched, so a light ticket's
-    // review runs one rung up rather than at anything the operator chose.
-    const c = cfg({ agentModel: null, agentModelTriage: "light" });
+    // Only triage and the base are set: the review field is untouched, so a
+    // light ticket's review runs one rung up rather than at anything the
+    // operator chose.
+    const c = cfg({ agentModel: "light", agentModelTriage: "light" });
     expect(
       modelOn("review", c, "light", { modelTierTriage: "light" })
     ).toBe("sonnet");
@@ -474,6 +486,11 @@ describe("derived tiers for review and repair (issue #201)", () => {
     expect(modelOn("repair", c, "heavy", NO_OVERRIDES)).toBe("opus");
     // With no run tier, the pin is what a repair runs — exactly as before.
     expect(modelOn("repair", c, null, NO_OVERRIDES)).toBe("claude-opus-4-8");
+    // And a review derives past that same base pin too: it is the implement
+    // kind's, standing in for an unset AGENT_MODEL_REVIEW, not the reviewer's
+    // own answer.
+    expect(modelOn("review", c, "light", NO_OVERRIDES)).toBe("sonnet");
+    expect(modelOn("review", c, null, NO_OVERRIDES)).toBe("claude-opus-4-8");
   });
 
   it("never runs a repair below the tier the work ran at — the ceiling bounds the step, not the work", () => {

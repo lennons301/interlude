@@ -19,8 +19,9 @@ import {
 import {
   SETTINGS_FIELDS,
   isDerivedTierKind,
+  isWorkPassKind,
   resolveModelTier,
-  tierCeiling,
+  tierDerivation,
   type ResolvedModelTier,
   type SettingKey,
   type SettingsOverrides,
@@ -362,17 +363,6 @@ function normalizeLaneId(raw: string | undefined): string | null {
   return value ? value : null;
 }
 
-/** Whether a pass carries the *ticket's own* work, and so answers to a ticket
- * directive. Review and triage do not: they read the work rather than doing
- * it, and the ticket chooses the model its work runs on, not the reviewer's.
- * Repair is work too, but since issue #201 its tier is *derived* from the
- * implement pass's rather than copied from it, so for repair this line
- * decides only that the run's tier is a **floor** under the derivation — the
- * ticket's directive still reaches the work it chose the tier for. */
-function isWorkPassKind(kind: AgentPassKind): boolean {
-  return kind !== "review" && kind !== "triage";
-}
-
 /** The choice a resolved field alone makes — the pre-#201 answer for every
  * kind, and still the answer wherever nothing derives. */
 function choiceFromSetting(
@@ -402,13 +392,18 @@ function choiceFromSetting(
  *    is honoured even when it is suboptimal, exactly as an explicit lane
  *    choice is, and the accepted consequence is that a review tier set low as
  *    a cost measure caps a heavy ticket's review there. Unset, the derivation
- *    runs free. A run with no resolved implement tier (a pinned raw model id,
- *    or the harness default) derives nothing, and the pass resolves exactly
- *    as it did before. A field that pins a raw model id names no tier to bound
- *    with: on the reviewer's own field the pin is honoured as the answer, as
- *    it always was, and on the implement field a repair derives past it.
- *    That is one asymmetry between the two derived kinds, and it is #80's
- *    line, which decides the other too: the
+ *    runs free — and "set" means the kind's *own* field: a stored override or
+ *    its own variable, never the base `AGENT_MODEL` standing in for an unset
+ *    `AGENT_MODEL_REVIEW`, which is the implement kind's setting and would
+ *    otherwise cap every review at the implement tier (`tierCeiling`). A run
+ *    with no resolved implement tier (a pinned raw model id, or the harness
+ *    default) derives nothing, and the pass resolves exactly as it did
+ *    before. A field that pins a raw model id names no tier to bound with: on
+ *    the reviewer's own field the pin is honoured as the answer, as it always
+ *    was, and on the implement field a repair derives past it
+ *    (`tierDerivation`, shared with the settings screen so it cannot restate
+ *    the rule). That is one asymmetry between the two derived kinds, and it
+ *    is #80's line (`isWorkPassKind`), which decides the other too: the
  *    review field is the reviewer's own and a ticket may not touch it, so it
  *    is a hard cap — a review tier set low caps a heavy ticket's review below
  *    its implement pass, the accepted consequence. Repair answers to the
@@ -467,19 +462,15 @@ export function resolveAgentModelChoice(
   if (isDerivedTierKind(kind)) {
     // Nothing to derive from: the field alone decides, as before.
     if (runTier === null) return choiceFromSetting(resolved);
-    // A field pinning a raw model id names no tier to bound with. On the
-    // reviewer's own field the pin is the operator's whole answer and is run
-    // as pinned — a ticket may not touch that field, and #201 does not open
-    // it. The implement field a repair reads is a default the run's tier
-    // already outranked for the implement pass, so the repair derives past
-    // the pin exactly as the implement pass ran past it.
-    const pinned = resolved.tier === null && resolved.model !== null;
-    if (pinned && !isWorkPassKind(kind)) return choiceFromSetting(resolved);
+    const { rule, ceiling } = tierDerivation(kind, resolved);
+    if (rule === "pinned") return choiceFromSetting(resolved);
     const derived = tierAbove(runTier);
-    const ceiling = tierCeiling(resolved);
     const capped = ceiling === null ? derived : weakerTier(derived, ceiling);
+    // A work-carrying derived kind — repair — is floored at the run's own
+    // tier: the ceiling bounds its step, never the work (the doc above).
+    const floorsAtRunTier = isWorkPassKind(kind);
     return {
-      tier: isWorkPassKind(kind) ? strongerTier(capped, runTier) : capped,
+      tier: floorsAtRunTier ? strongerTier(capped, runTier) : capped,
       pinnedModel: null,
     };
   }

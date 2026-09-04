@@ -27,9 +27,8 @@ function field(over: Partial<SettingFieldView> = {}): SettingFieldView {
     envValue: "claude-opus-4-8",
     tier: null,
     model: "claude-opus-4-8",
-    kinds: ["review"],
-    caps: [],
-    ceiling: null,
+    chooses: ["review"],
+    derived: [],
     ...over,
   };
 }
@@ -103,8 +102,8 @@ describe("the model-tier settings panel", () => {
       override: "light",
       tier: "light",
       model: "haiku",
-      caps: ["review"],
-      ceiling: "light",
+      chooses: [],
+      derived: [{ kind: "review", rule: "capped", ceiling: "light" }],
     });
 
     expect(html).toContain("ceiling light on review (haiku)");
@@ -118,8 +117,8 @@ describe("the model-tier settings panel", () => {
       envValue: null,
       model: null,
       tier: null,
-      caps: ["review"],
-      ceiling: null,
+      chooses: [],
+      derived: [{ kind: "review", rule: "free", ceiling: null }],
     });
 
     expect(html).toContain(
@@ -129,7 +128,10 @@ describe("the model-tier settings panel", () => {
   });
 
   it("reads a pinned raw model id on a ceiling row as the answer — a pin names no tier to bound", () => {
-    const html = render({ caps: ["review"], ceiling: null });
+    const html = render({
+      chooses: [],
+      derived: [{ kind: "review", rule: "pinned", ceiling: null }],
+    });
 
     expect(html).toContain("pinned — review runs claude-opus-4-8 and derives nothing");
     expect(html).not.toContain("no ceiling");
@@ -142,8 +144,8 @@ describe("the model-tier settings panel", () => {
       envValue: null,
       tier: "standard",
       model: "anthropic/claude-sonnet-4.5",
-      caps: ["review"],
-      ceiling: null,
+      chooses: [],
+      derived: [{ kind: "review", rule: "free", ceiling: null }],
     });
 
     expect(html).toContain("no ceiling — review runs one rung above the implement pass");
@@ -160,9 +162,8 @@ describe("the model-tier settings panel", () => {
       envValue: "standard",
       tier: "standard",
       model: "sonnet",
-      kinds: ["implement", "repair"],
-      caps: ["repair"],
-      ceiling: "standard",
+      chooses: ["implement"],
+      derived: [{ kind: "repair", rule: "capped", ceiling: "standard" }],
     });
 
     expect(html).toContain("runs standard (sonnet) · ceiling standard on repair (sonnet)");
