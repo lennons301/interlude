@@ -27,6 +27,8 @@ function field(over: Partial<SettingFieldView> = {}): SettingFieldView {
     envValue: "claude-opus-4-8",
     tier: null,
     model: "claude-opus-4-8",
+    chooses: ["review"],
+    derived: [],
     ...over,
   };
 }
@@ -88,6 +90,83 @@ describe("the model-tier settings panel", () => {
 
     expect(html).toContain("no --model — the account default");
     expect(html).toContain("AGENT_MODEL_REVIEW unset");
+  });
+
+  it("reads a set ceiling row as a ceiling on the derived pass, not as what it runs", () => {
+    // The Review row is a ceiling (issue #201): a review runs one rung above
+    // the implement pass, no higher than this. "runs light" would be a lie
+    // about a heavy ticket's review, which this row would hold at light but a
+    // light ticket's would not reach.
+    const html = render({
+      source: "override",
+      override: "light",
+      tier: "light",
+      model: "haiku",
+      chooses: [],
+      derived: [{ kind: "review", rule: "capped", ceiling: "light" }],
+    });
+
+    expect(html).toContain("ceiling light on review (haiku)");
+    expect(html).not.toContain("runs light (haiku) ·");
+    // And what an underived review runs is still named, as the fall-back.
+    expect(html).toContain("with no implement tier to derive from, runs light (haiku)");
+  });
+
+  it("says the derivation runs free when a ceiling row is unset", () => {
+    const html = render({
+      envValue: null,
+      model: null,
+      tier: null,
+      chooses: [],
+      derived: [{ kind: "review", rule: "free", ceiling: null }],
+    });
+
+    expect(html).toContain(
+      "no ceiling — review runs one rung above the implement pass"
+    );
+    expect(html).toContain("no --model — the account default");
+  });
+
+  it("reads a pinned raw model id on a ceiling row as the answer — a pin names no tier to bound", () => {
+    const html = render({
+      chooses: [],
+      derived: [{ kind: "review", rule: "pinned", ceiling: null }],
+    });
+
+    expect(html).toContain("pinned — review runs claude-opus-4-8 and derives nothing");
+    expect(html).not.toContain("no ceiling");
+  });
+
+  it("reads a lane's default over an unset ceiling row as the fall-back, not the ceiling", () => {
+    // On a priced lane an unset field resolves to the lane's default tier
+    // (issue #175); that is what an underived review runs, not a bound.
+    const html = render({
+      envValue: null,
+      tier: "standard",
+      model: "anthropic/claude-sonnet-4.5",
+      chooses: [],
+      derived: [{ kind: "review", rule: "free", ceiling: null }],
+    });
+
+    expect(html).toContain("no ceiling — review runs one rung above the implement pass");
+    expect(html).toContain(
+      "with no implement tier to derive from, runs standard (anthropic/claude-sonnet-4.5)"
+    );
+  });
+
+  it("reads the implement row as its own tier and the ceiling on the repair's step", () => {
+    const html = render({
+      key: "modelTierImplement",
+      label: "Implement",
+      envVar: "AGENT_MODEL",
+      envValue: "standard",
+      tier: "standard",
+      model: "sonnet",
+      chooses: ["implement"],
+      derived: [{ kind: "repair", rule: "capped", ceiling: "standard" }],
+    });
+
+    expect(html).toContain("runs standard (sonnet) · ceiling standard on repair (sonnet)");
   });
 
   it("checks the option in force, so the control shows the state", () => {

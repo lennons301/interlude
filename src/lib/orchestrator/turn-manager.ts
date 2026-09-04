@@ -490,8 +490,7 @@ export async function startTask(taskId: string): Promise<void> {
       // the run's cost should be read against, and the lane is what says
       // whether that cost was subscription quota or real money (issue #172). A
       // review pass writes its own (cheaper/lower) model and effort nowhere on
-      // the run, leaving these stable. Repair keeps the original implement
-      // values.
+      // the run, leaving these stable.
       //
       // The *tier* is what goes in `model`, not the identifier it resolved to
       // (issue #172): this column is read back as the run's `model:` directive
@@ -501,13 +500,20 @@ export async function startTask(taskId: string): Promise<void> {
       // alias-mapped lane. With the lane recorded beside it, tier + lane still
       // gives the identifier. A pinned raw id (no tier) is recorded verbatim,
       // exactly as before.
+      //
+      // A repair pass leaves `model` alone (issue #201). It runs one rung
+      // above the implement tier, *derived from* this column — which is also
+      // the rung the quota ladder steps off (#170, and it only ever moves
+      // down) and the tier outcome-by-tier groups the run under (#198). A
+      // repair writing its own tier here would ratchet the run up a rung per
+      // repair and misfile it; the tier it actually ran at is on its task row.
       db.update(runs)
         .set({
           status: "implementing",
           startedAt: run.startedAt ?? new Date(),
           lane: passLane.id,
           laneBilling: pass.billing,
-          model: passLane.tier ?? passModel,
+          ...(isRepairPass ? {} : { model: passLane.tier ?? passModel }),
           effort: passEffort,
           // A resumed run stops waiting on a clock the moment its pass starts
           // (issue #169). Cleared here rather than when the resume was decided,

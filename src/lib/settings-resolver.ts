@@ -112,6 +112,12 @@ export interface EnvDefault {
   /** Verbatim (null = the variable is unset and the harness resolves its own
    * default). */
   value: string | null;
+  /** True when the value came from the *base* variable because the field's
+   * own was unset (`cheaperTierEnv`). The row still names the variable that
+   * supplied it; what this decides is whether that value is the field's own
+   * setting — a ceiling on a derived pass (issue #201) — or merely what the
+   * kind falls back to. */
+  inherited?: boolean;
 }
 
 /**
@@ -218,7 +224,7 @@ function cheaperTierEnv(
 ): EnvDefault {
   if (own !== null) return { envVar, value: own };
   const base = baseModelEnv(config);
-  return base.value !== null ? base : { envVar, value: null };
+  return base.value !== null ? { ...base, inherited: true } : { envVar, value: null };
 }
 
 /** The counts the screen offers, derived from the ceiling so the chips and the
@@ -238,13 +244,13 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
   modelTierImplement: modelTierField(
     "modelTierImplement",
     "Implement",
-    "The tier an implement pass — and the repair pass that fixes up its PR — runs on. A ticket's own model: directive still outranks it.",
+    "The tier an implement pass runs on when its ticket declares none — a ticket's own model: directive outranks it. It is also the ceiling on the step a repair pass takes: a repair runs one rung above the tier the implement pass ran at, so a second attempt at failed work is not a rerun of the first, but no higher than this — and never below the tier the work itself ran at.",
     baseModelEnv
   ),
   modelTierReview: modelTierField(
     "modelTierReview",
     "Review",
-    "The tier a review pass runs on. Reviewing is read-heavy, so it is the first thing worth running cheaper than the work it reads.",
+    "A ceiling, not a fixed tier: a review pass runs one rung above the tier the implement pass ran at, so a misclassified ticket is caught by its gate rather than waved through by an equally weak reviewer — but never above this when it is set, here or in AGENT_MODEL_REVIEW. Unset, the derivation runs free; the base AGENT_MODEL is what a review with nothing to derive from runs, not a ceiling on one that has.",
     (config) =>
       cheaperTierEnv("AGENT_MODEL_REVIEW", config.agentModelReview, config)
   ),
@@ -610,6 +616,9 @@ export interface ResolvedModelTier {
   envVar: string;
   /** The environment default this field falls through to, verbatim. */
   envValue: string | null;
+  /** Whether `envValue` is the base variable's, standing in for the field's
+   * own unset one (see `EnvDefault.inherited`). */
+  envInherited: boolean;
 }
 
 /**
@@ -714,6 +723,103 @@ export const MODEL_TIER_FIELD_BY_KIND: Readonly<
 };
 
 /**
+ * The pass kinds whose tier is **derived** from the run's implement tier rather
+ * than chosen (issue #201): one rung above it, capped at the top of the
+ * vocabulary, and held under the kind's own field above when that field is
+ * explicitly set. A single fleet review tier cannot be right for both a
+ * one-line guard and a new state machine, and a repair pass is by definition a
+ * second attempt at work that already failed, so retrying at the tier that
+ * just failed repeats the failure. Triage and interactive are deliberately
+ * absent: triage is standalone and gated by a human authorising arming, and
+ * interactive has a human present who can ask for something else.
+ *
+ * The derivation itself is `resolveAgentModelChoice`'s (`config.ts`) — the one
+ * pure model-choice function every pass resolves through — so this list only
+ * names *which* kinds it applies to, where the settings screen can read it
+ * beside the field each kind answers to.
+ */
+export const DERIVED_TIER_KINDS: readonly AgentPassKind[] = ["review", "repair"];
+
+export function isDerivedTierKind(kind: AgentPassKind): boolean {
+  return DERIVED_TIER_KINDS.includes(kind);
+}
+
+/**
+ * Whether a pass carries the *ticket's own* work, and so answers to a ticket
+ * directive (issue #80). Review and triage do not: they read the work rather
+ * than doing it, and the ticket chooses the model its work runs on, not the
+ * reviewer's. It is one line drawn once because two readers need the same
+ * one: `resolveAgentModelChoice` (`config.ts`), which lets a directive reach
+ * the work kinds, and the derivation rule below, where it decides which of
+ * the two derived kinds treats its field as the reviewer's own.
+ */
+export function isWorkPassKind(kind: AgentPassKind): boolean {
+  return kind !== "review" && kind !== "triage";
+}
+
+/**
+ * The tier an explicitly set field holds a derived pass under (issue #201), or
+ * null when the field is unset and the derivation runs free.
+ *
+ * "Explicitly set" is a stored override or a tier named in the field's **own**
+ * variable — the same two ways a lane choice is explicit — read off the
+ * resolved field rather than re-deriving them, so the pass and the settings
+ * screen judge the ceiling from one reading. Three things are deliberately
+ * *not* a ceiling: the base `AGENT_MODEL` standing in for an unset
+ * `AGENT_MODEL_REVIEW` is the *implement* kind's setting and what an underived
+ * review falls back to, not the review kind's (read as the review's ceiling it
+ * would cap every review at the implement tier in the commonest configuration
+ * — the "equal" design #201 rejected); a lane's default tier over an unset
+ * field (issue #175) is what an underived pass runs, not a bound anyone chose;
+ * and a pinned raw model id names no tier to bound with (`tierDerivation`
+ * says what happens to it).
+ */
+export function tierCeiling(resolved: ResolvedModelTier): ModelTier | null {
+  if (resolved.override !== null) return resolved.override;
+  return resolved.envInherited ? null : normalizeModelTier(resolved.envValue);
+}
+
+/** How a derived kind's own field bears on its derivation (issue #201). */
+export type TierDerivationRule =
+  /** The field is unset: one rung above the implement tier, unbounded. */
+  | "free"
+  /** The field names a tier: one rung above, but never above `ceiling`. */
+  | "capped"
+  /** The reviewer's own field pins a raw model id: the pin is the operator's
+   * whole answer, the pass runs it and nothing derives. */
+  | "pinned";
+
+export interface TierDerivation {
+  rule: TierDerivationRule;
+  /** Set exactly when `rule` is `capped`. */
+  ceiling: ModelTier | null;
+}
+
+/**
+ * The one reading of a derived kind's field that both the pass
+ * (`resolveAgentModelChoice`) and the settings screen resolve through, so
+ * neither can restate it: a pin is honoured only on the reviewer's own field —
+ * the implement field a repair reads is a default the run's tier already
+ * outranked for the implement pass, so the repair derives past a pin there
+ * exactly as the implement pass ran past it — and, as with the ceiling, only
+ * the field's own value counts, never the base standing in for it.
+ */
+export function tierDerivation(
+  kind: AgentPassKind,
+  resolved: ResolvedModelTier
+): TierDerivation {
+  const ceiling = tierCeiling(resolved);
+  if (ceiling !== null) return { rule: "capped", ceiling };
+  const pinsOwn =
+    resolved.override === null &&
+    !resolved.envInherited &&
+    resolved.envValue !== null &&
+    normalizeModelTier(resolved.envValue) === null;
+  if (pinsOwn && !isWorkPassKind(kind)) return { rule: "pinned", ceiling: null };
+  return { rule: "free", ceiling: null };
+}
+
+/**
  * The model-tier setting in force for one pass kind. Each field falls through
  * to *its own* environment default, never to another field's override: an
  * override says "this pass kind runs here", and quietly spreading it to the
@@ -744,7 +850,7 @@ export function resolveModelTierField(
   fallbackTier: ModelTier | null = null
 ): ResolvedModelTier {
   const spec = SETTINGS_FIELDS[key];
-  const { envVar, value: envValue } = spec.envDefault(config);
+  const { envVar, value: envValue, inherited = false } = spec.envDefault(config);
   const override = normalizeModelTier(overrides[key] ?? null);
 
   if (override !== null) {
@@ -756,6 +862,7 @@ export function resolveModelTierField(
       override,
       envVar,
       envValue,
+      envInherited: inherited,
     };
   }
 
@@ -780,6 +887,7 @@ export function resolveModelTierField(
     override: null,
     envVar,
     envValue,
+    envInherited: inherited,
   };
 }
 
@@ -917,6 +1025,24 @@ export interface SettingFieldView {
   /** What actually reaches the harness (null = no `--model`; the CLI resolves
    * the account default, which is the pre-#74 behaviour). */
   model: string | null;
+  /** The pass kinds that run this row's tier as their own — empty for a row
+   * that is nothing but a ceiling (Review). */
+  chooses: readonly AgentPassKind[];
+  /** The derived pass kinds this field bears on (issue #201), each with the
+   * rule in force for it — computed here by the same reading the pass makes
+   * (`tierDerivation`), so the screen never restates it. Empty for a row no
+   * derived kind reads. */
+  derived: readonly (TierDerivation & { kind: AgentPassKind })[];
+}
+
+/** The pass kinds a field decides, read off the kind→field map rather than
+ * the pass-kind list in `config.ts`, which this module may import only as a
+ * type: `config.ts` imports this one's values, and a value import back would
+ * be a cycle. */
+function kindsReadingField(key: ModelTierSettingKey): AgentPassKind[] {
+  return (Object.keys(MODEL_TIER_FIELD_BY_KIND) as AgentPassKind[]).filter(
+    (kind) => MODEL_TIER_FIELD_BY_KIND[kind] === key
+  );
 }
 
 /**
@@ -942,6 +1068,7 @@ export function describeModelTierSettings(
       tierModels,
       fallbackTier
     );
+    const kinds = kindsReadingField(key);
     return {
       key,
       label: spec.label,
@@ -953,6 +1080,10 @@ export function describeModelTierSettings(
       envValue: resolved.envValue,
       tier: resolved.tier,
       model: resolved.model,
+      chooses: kinds.filter((kind) => !isDerivedTierKind(kind)),
+      derived: kinds
+        .filter(isDerivedTierKind)
+        .map((kind) => ({ kind, ...tierDerivation(kind, resolved) })),
     };
   });
 }
