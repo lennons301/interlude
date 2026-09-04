@@ -145,7 +145,8 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
   the sweep resumes it by itself once the clock runs out (issue #169), or earlier
   on another lane the moment one can serve it (issue #199) — confirming the day's
   real-money spend is how you make that happen for a run that is blocking the
-  frontier.
+  frontier. The paused card also carries **move to paid lane…** (issue #202),
+  which does that move now, at your press, and tells you why not when it cannot.
   A run the tier ladder stepped down (issue #170) also sits here, working
   normally, with a line saying which tier it is running at and which it was
   asked for — the result came from a cheaper model than you chose, and that is
@@ -396,6 +397,29 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   transcript was copied out before its container went, the resumed pass continues
   the *same conversation*; where it could not be, the pass starts again on the same
   branch with the work already pushed, and the issue comment says which happened.
+- **Move a parked run yourself** (issue #202). When the sweep would *not* move a
+  parked run — the day's spend unconfirmed, most often — and that run is gating
+  everything behind it, press **move to paid lane…** on its card under
+  **running**. The card first asks the fleet what the move would be and puts it
+  in front of you before anything is spent: the lane, what it costs per million
+  tokens, which continuation (n/bound) of the attempt it is, and whether the
+  wall it skips is still standing — past the reset the run resumes on its own
+  free lane within a few minutes anyway, so a move then pays to skip a short
+  wait, and the strip says so. **Move now** makes it; the issue gets a comment
+  saying the operator moved it, naming the lane and its cost exactly as the
+  sweep's own move would. It answers to the same guards as any crossing: with
+  the day's real money unconfirmed it is refused naming the press (make it under
+  **Settings ▸ Real money**, then press again — or let the sweep move the run
+  itself at its next tick, which it now will), at the cap it is refused naming
+  the cap, and with nowhere to go it names why — each other lane's missing
+  credential, the pass kind's minimum lane, a pin. It counts against the same
+  resume bound, and a run with none left is refused rather than moved, because
+  the sweep is about to hand its ticket to a human. Headless:
+
+  ```bash
+  curl -s https://interludes.co.uk/api/runs/<run-id>/lane-move            # what a press would do
+  curl -s -X POST https://interludes.co.uk/api/runs/<run-id>/lane-move    # do it (409 + reason when refused)
+  ```
   Nothing to do either way — but two things worth knowing:
     - the resume is **not** held by the kill switch, the daily cap or the quota
       admission gate. All three gate *pickup*, and a paused run is the middle of
