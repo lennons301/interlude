@@ -183,7 +183,9 @@ function effective(field: SettingFieldView): string {
   // A row that is a ceiling (Review, the only derived kind — issue #211)
   // chooses no tier of its own and leads with the rule; what a review runs
   // when the run has no implement tier to step from is the fall-back, and a
-  // pinned row has already said what it runs.
+  // pinned row has already said what it runs. The type still permits a row
+  // that both chooses and derives; none exists, so `chooses` is deliberately
+  // not read here — a kind added to both lists would need its own line.
   const pinned = field.derived.every((entry) => entry.rule === "pinned");
   return pinned
     ? clauses.join(" · ")

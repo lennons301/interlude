@@ -862,9 +862,17 @@ describe("the derived review tier — the rungs and the ceiling (issue #201)", (
     // the base is not the reviewer's.
     expect(review({ agentModelReview: "claude-opus-4-8" })).toEqual({ rule: "pinned", ceiling: null });
     expect(review({ agentModel: "claude-opus-4-8" })).toEqual({ rule: "free", ceiling: null });
-    // #80's work line still decides which kinds a ticket directive reaches.
+  });
+
+  it("keeps #80's work line for the kinds a run's tier reaches — repair included", () => {
+    // The line no longer bears on the derivation (issue #211); it is what
+    // lets the run's tier reach a repair exactly as it reaches the implement
+    // pass, and keeps it off the reviewer's and triage's.
+    expect(isWorkPassKind("implement")).toBe(true);
     expect(isWorkPassKind("repair")).toBe(true);
+    expect(isWorkPassKind("interactive")).toBe(true);
     expect(isWorkPassKind("review")).toBe(false);
+    expect(isWorkPassKind("triage")).toBe(false);
   });
 
   it("tells the screen which row is a ceiling, for which kind, and at what", () => {
