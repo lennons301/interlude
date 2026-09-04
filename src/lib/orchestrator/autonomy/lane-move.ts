@@ -16,7 +16,9 @@
  *   press evaluated *inside* that ranking per lane. A press does not waive
  *   them: an unconfirmed lane is refused naming the press, a capped one
  *   naming the cap. What the press changes is only that a human is here to
- *   be told — a sweep has nobody to tell, so it stays parked in silence.
+ *   be told — a sweep has nobody to tell, so it stays parked in silence — and
+ *   the card puts the day's confirmation in front of them where they stand,
+ *   as #173 does for an attended session, saying what it commits the fleet to.
  * - **Refused with a stated reason, never silently.** A control that does
  *   nothing tells the operator nothing; this one says which lane a press would
  *   free, or why nowhere at all can serve the run — a missing credential, the
@@ -34,17 +36,26 @@
  * same resume bound a clock-driven resume does — judged here, first, because a
  * run with no continuations left is never going to resume anywhere and the
  * sweep is about to hand its ticket to a human — carries the session where the
- * transcript survived, and is announced with the lane and what it costs.
+ * transcript survived, and is announced with the lane and what it costs. And
+ * like #199's early resume it is only for a wall that **still stands**: once
+ * the window has reset the run's own lane is free again and the ordinary
+ * resume is minutes away, so a move then would spend a continuation and be
+ * re-ranked straight back onto the free lane as the pass started — paying, in
+ * effect, for nothing. The reducer takes the ordinary resume there; this
+ * refuses and says so.
  */
 
+import type { runs } from "@/db/schema";
 import type { AgentPassKind } from "../../config";
 import type { LaneBilling } from "../../lanes/lane-config";
 import { describeLaneCost } from "../../lanes/lane-rate";
 import type { LaneCandidate, LaneSelection } from "../../lanes/lane-selection";
 
+type RunStatus = (typeof runs.$inferSelect)["status"];
+
 /** Why the move is refused. Ordered as they are judged: a run that is not
  * parked, or already resuming, is not up for a decision at all; the bound is
- * judged before the lanes, as the reducer judges it before the clock. */
+ * judged before the clock and the lanes, as the reducer judges it. */
 export type LaneMoveRefusalReason =
   /** The run is not `rate_limited` — nothing is parked. */
   | "not-parked"
@@ -54,6 +65,9 @@ export type LaneMoveRefusalReason =
   | "no-pass"
   /** The attempt has spent every continuation the bound allows. */
   | "resume-bound"
+  /** The window has already reset (or the row carries no clock), so the run
+   * resumes on its own lane by itself — a move would pay for nothing. */
+  | "window-reset"
   /** A lane could serve it, but today's real-money spend is not confirmed
    * (#174's press). */
   | "unconfirmed"
@@ -69,7 +83,7 @@ export interface LaneMoveRefusal {
   message: string;
   /** The lane a press or a raised cap would free, when the refusal is one of
    * #174's holds; null otherwise. Carried so a screen can name it beside the
-   * control that frees it. */
+   * control that frees it, and quote the cap that press authorises. */
   heldLane: { id: string; label: string; spentUsd: number; capUsd: number } | null;
 }
 
@@ -94,23 +108,33 @@ export interface LaneMoveOffer {
   maxResumes: number;
   /** The lane that walled the paused pass; null when its row recorded none. */
   fromLaneId: string | null;
-  /** When that window resets, ISO-8601; null when the row carries no clock. */
-  resumeAfter: string | null;
-  /** Whether that clock still stands at the moment of the decision. Past it
-   * the run's own lane is free again and the ordinary resume is minutes away,
-   * so a move then pays for what waiting would do for nothing — worth saying
-   * to someone about to pay. */
-  wallStands: boolean;
+  /** When that window resets, ISO-8601 — still in the future, since a move is
+   * only offered while the wall stands. */
+  resumeAfter: string;
 }
 
 export type LaneMoveDecision =
   | { ok: true; offer: LaneMoveOffer }
   | { ok: false; refusal: LaneMoveRefusal };
 
+/** What a press on the fleet card is told: the decision, and — so the route
+ * can answer without a second read — what it was decided about. */
+export interface ManualLaneMoveReading {
+  runId: string;
+  /** "owner/repo#n" */
+  issueRef: string;
+  decision: LaneMoveDecision;
+}
+
+/** The outcome of pressing it: the move as made, or the refusal. */
+export type ManualLaneMoveResult =
+  | { ok: true; offer: LaneMoveOffer; taskId: string }
+  | { ok: false; refusal: LaneMoveRefusal };
+
 /** Everything the decision reads, gathered by the caller. */
 export interface LaneMoveFacts {
   /** `runs.status` — only `rate_limited` is parked. */
-  runStatus: string;
+  runStatus: RunStatus;
   /** A task of this run already queued or running — the idempotency fact. */
   hasLiveTask: boolean;
   /** The kind of pass that would resume, or null when the run owns no
@@ -138,21 +162,16 @@ export function decideManualLaneMove(facts: LaneMoveFacts): LaneMoveDecision {
         `parked run can be moved.`
     );
   }
-  if (facts.hasLiveTask) {
-    return refuse(
-      "already-resuming",
-      "This run is already resuming — a pass for it is queued or running, so " +
-        "there is nothing to move."
-    );
-  }
-  if (facts.passKind === null) {
+  if (facts.hasLiveTask) return refuse("already-resuming", ALREADY_RESUMING);
+  const passKind = facts.passKind;
+  if (passKind === null) {
     return refuse(
       "no-pass",
       "This run owns no implement or repair pass to resume."
     );
   }
-  // The bound before the lanes, as the reducer judges it before the clock: a
-  // run with no continuations left is never going to resume anywhere, and the
+  // The bound before the clock and the lanes, as the reducer judges it: a run
+  // with no continuations left is never going to resume anywhere, and the
   // sweep is about to hand its ticket to a human — moving it would only defer
   // that.
   if (facts.resumesMade >= facts.maxResumes) {
@@ -167,11 +186,31 @@ export function decideManualLaneMove(facts: LaneMoveFacts): LaneMoveDecision {
             `hands its ticket to a human instead.`
     );
   }
+  // Only while the wall stands. Past the reset — or with no clock at all, which
+  // the reducer reads as eligible now — the run's own lane is free again and
+  // the ordinary resume is minutes away; a move would spend a continuation and
+  // be re-ranked straight back onto that lane as the pass started.
+  const from = facts.fromLaneId ?? "its lane";
+  if (facts.resumeAfter === null) {
+    return refuse(
+      "window-reset",
+      `This run carries no reset time, so it resumes on its own lane at the ` +
+        `next sweep — there is nothing to move.`
+    );
+  }
+  if (facts.now.getTime() >= facts.resumeAfter.getTime()) {
+    return refuse(
+      "window-reset",
+      `The window on ${from} reset at ${facts.resumeAfter.toUTCString()}, so ` +
+        `this run resumes on its own lane by itself within a few minutes. A ` +
+        `move now would pay for nothing: the lane is re-chosen as the pass ` +
+        `starts, and its own lane is free again.`
+    );
+  }
 
   const selection = facts.selection;
   const chosen = selection?.chosen ?? null;
   if (selection !== null && chosen !== null) {
-    const resumeAfter = facts.resumeAfter;
     return {
       ok: true,
       offer: {
@@ -183,9 +222,7 @@ export function decideManualLaneMove(facts: LaneMoveFacts): LaneMoveDecision {
         resume: facts.resumesMade + 1,
         maxResumes: facts.maxResumes,
         fromLaneId: facts.fromLaneId,
-        resumeAfter: resumeAfter?.toISOString() ?? null,
-        wallStands:
-          resumeAfter !== null && facts.now.getTime() < resumeAfter.getTime(),
+        resumeAfter: facts.resumeAfter.toISOString(),
       },
     };
   }
@@ -217,23 +254,31 @@ export function decideManualLaneMove(facts: LaneMoveFacts): LaneMoveDecision {
       "unconfirmed",
       `${held.label} could serve this run, but today's real-money spend is not ` +
         `confirmed. Real money: ${usd(money.spentUsd)} of ${usd(money.capUsd)} ` +
-        `spent today. Confirm real-money spend first (Settings ▸ Real money), ` +
-        `then press again.`,
+        `spent today. Confirm real-money spend first, then press again.`,
       heldLane
     );
   }
 
   return refuse(
     "no-lane",
-    `No other lane can serve this run: ${describeNoLane(facts, selection)}.`
+    `No other lane can serve this run: ${describeNoLane(facts.fromLaneId, passKind, selection)}.`
   );
 }
 
-function refuse(
+const ALREADY_RESUMING =
+  "This run is already resuming — a pass for it is queued or running, so " +
+  "there is nothing to move.";
+
+/**
+ * A refusal, built where the decision is made — exported so the one caller
+ * that can be refused *after* deciding (the move itself, when the run moved on
+ * between the decision and the write) says the same words rather than its own.
+ */
+export function refuse(
   reason: LaneMoveRefusalReason,
-  message: string,
+  message: string = reason === "already-resuming" ? ALREADY_RESUMING : reason,
   heldLane: LaneMoveRefusal["heldLane"] = null
-): LaneMoveDecision {
+): Extract<LaneMoveDecision, { ok: false }> {
   return { ok: false, refusal: { reason, message, heldLane } };
 }
 
@@ -250,26 +295,25 @@ function usd(amount: number): string {
  * Reached only when nothing is eligible and nothing is held for money alone,
  * so every candidate here is missing a credential, excluded by a pin or the
  * pass kind's floor, or walled itself — or the lane file declares nothing else.
- * The walled lane (`already-tried`) is not a reason: it is what the operator
- * is trying to leave.
+ * The walled lane is not a reason: it is what the operator is trying to leave.
  */
 function describeNoLane(
-  facts: LaneMoveFacts,
+  fromLaneId: string | null,
+  passKind: AgentPassKind,
   selection: LaneSelection | null
 ): string {
   if (selection === null) return "the lane file could not be read";
 
-  // The walled lane is what the operator is leaving, not a reason: it is
-  // dropped by id as well as by verdict, because the ranking judges a pin
-  // ahead of exclusion and so reports it as "not pinned" under a pin to a
-  // third lane.
+  // The walled lane is dropped by id as well as by verdict, because the
+  // ranking judges a pin ahead of exclusion and so reports it as "not pinned"
+  // under a pin to a third lane.
   const others = selection.candidates.filter(
-    (lane) => lane.ineligible !== "already-tried" && lane.id !== facts.fromLaneId
+    (lane) => lane.ineligible !== "already-tried" && lane.id !== fromLaneId
   );
   if (others.length === 0) {
-    return facts.fromLaneId === null
+    return fromLaneId === null
       ? "no lane is declared in lanes.yaml"
-      : `no lane other than ${facts.fromLaneId} is declared in lanes.yaml`;
+      : `no lane other than ${fromLaneId} is declared in lanes.yaml`;
   }
 
   const clauses: string[] = [];
@@ -292,8 +336,7 @@ function describeNoLane(
   if (belowFloor.length > 0 && selection.minLaneId !== null) {
     clauses.push(
       `${ids(belowFloor)} ${belowFloor.length === 1 ? "is" : "are"} below the ` +
-        `${facts.passKind ?? "implement"} pass's minimum lane ` +
-        `(${selection.minLaneId})`
+        `${passKind} pass's minimum lane (${selection.minLaneId})`
     );
   }
   const walled = byReason(others, "walled");

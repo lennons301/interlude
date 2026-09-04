@@ -71,7 +71,7 @@ lanes:
 `;
 
 const parsed = parseLaneConfig(LANES);
-if (!parsed.ok) throw new Error(parsed.error);
+if (!parsed.ok) throw new Error(parsed.reason);
 const catalog = parsed.catalog;
 
 const NOW = new Date("2026-09-04T10:00:00.000Z");
@@ -167,19 +167,8 @@ describe("a parked run is offered the move", () => {
     expect(move.maxResumes).toBe(3);
   });
 
-  it("says whether the wall it skips is still standing", () => {
-    expect(offer().wallStands).toBe(true);
+  it("names the wall it skips, which is still standing", () => {
     expect(offer().resumeAfter).toBe(RESUME_AFTER.toISOString());
-
-    // Past the reset the run's own lane is free again within the jitter
-    // window; a move then pays for what waiting would do for nothing, which is
-    // worth saying to someone about to pay.
-    const past = offer({ resumeAfter: new Date(NOW.getTime() - 60_000) });
-    expect(past.wallStands).toBe(false);
-
-    const clockless = offer({ resumeAfter: null });
-    expect(clockless.wallStands).toBe(false);
-    expect(clockless.resumeAfter).toBeNull();
   });
 
   it("is the failover ranking's own pick, so the sweep and the press agree", () => {
@@ -241,6 +230,35 @@ describe("the resume bound", () => {
 
   it("allows the last permitted continuation", () => {
     expect(offer({ resumesMade: 2, maxResumes: 3 }).resume).toBe(3);
+  });
+});
+
+describe("a wall that no longer stands", () => {
+  it("refuses once the window has reset — the run resumes free on its own lane anyway", () => {
+    // The reducer takes the ordinary resume here; a move would spend a
+    // continuation and be re-ranked straight back onto the free lane as the
+    // pass started.
+    const why = refusal({ resumeAfter: new Date(NOW.getTime() - 60_000) });
+
+    expect(why.reason).toBe("window-reset");
+    expect(why.message).toContain("reset at");
+    expect(why.message).toContain("resumes on its own lane by itself");
+    expect(why.message).toContain("pay for nothing");
+  });
+
+  it("refuses a clockless row, which is eligible now on its own lane", () => {
+    const why = refusal({ resumeAfter: null });
+
+    expect(why.reason).toBe("window-reset");
+    expect(why.message).toContain("no reset time");
+  });
+
+  it("is judged after the bound and before the lanes", () => {
+    expect(refusal({ resumeAfter: null, resumesMade: 3 }).reason).toBe("resume-bound");
+    // No lane on offer, but the clock is the answer first.
+    expect(
+      refusal({ resumeAfter: null, selection: ranking({ confirmedAt: null }) }).reason
+    ).toBe("window-reset");
   });
 });
 

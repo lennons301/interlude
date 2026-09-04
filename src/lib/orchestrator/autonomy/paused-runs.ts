@@ -57,6 +57,7 @@ import { eq, inArray } from "drizzle-orm";
 import { newId } from "../../ulid";
 import { getConfig } from "../../config";
 import { commentOnIssue } from "../../github/issues";
+import type { LaneBilling } from "../../lanes/lane-config";
 import { describeLaneCost } from "../../lanes/lane-rate";
 import { readMoneyGuards, type MoneyGuards } from "../../lanes/money-state";
 import {
@@ -69,8 +70,9 @@ import { resolveResumeBound } from "../../settings-resolver";
 import type { Action, PausedRun } from "./decide";
 import {
   decideManualLaneMove,
-  type LaneMoveDecision,
-  type LaneMoveOffer,
+  refuse,
+  type ManualLaneMoveReading,
+  type ManualLaneMoveResult,
 } from "./lane-move";
 import { buildLaneMovePrompt, buildResumePrompt } from "./workflow";
 
@@ -94,6 +96,25 @@ function latestWorkPass(owned: TaskRow[]): TaskRow | null {
 
 function hasLivePass(owned: TaskRow[]): boolean {
   return owned.some((task) => task.status === "queued" || task.status === "running");
+}
+
+/**
+ * The facts about one paused run that every reader of it decides from — the
+ * sweep's gatherer and the operator's manual move (issue #202) — in one place,
+ * so "read exactly as the sweep reads them" is structural rather than a claim.
+ *
+ * `upForDecision` is whether the lanes are worth ranking at all: a run that is
+ * not parked, is already resuming, or owns no pass to resume is refused before
+ * any lane is looked at, and nothing is ranked for it.
+ */
+function pausedRunFacts(run: RunRow, owned: TaskRow[]) {
+  const pass = latestWorkPass(owned);
+  const hasLiveTask = hasLivePass(owned);
+  return {
+    pass,
+    hasLiveTask,
+    upForDecision: run.status === "rate_limited" && !hasLiveTask && pass !== null,
+  };
 }
 
 /**
@@ -146,9 +167,10 @@ export function gatherPausedRuns(
   }
 
   return paused.map((run) => {
-    const owned = ownedByRun.get(run.id) ?? [];
-    const hasLiveTask = hasLivePass(owned);
-    const pass = latestWorkPass(owned);
+    const { pass, hasLiveTask, upForDecision } = pausedRunFacts(
+      run,
+      ownedByRun.get(run.id) ?? []
+    );
     return {
       runId: run.id,
       issueRef: run.githubIssue,
@@ -157,7 +179,7 @@ export function gatherPausedRuns(
       hasLiveTask,
       laneId: pass?.lane ?? null,
       laneFailover:
-        hasLiveTask || pass === null
+        !upForDecision || pass === null
           ? null
           : // `run.model` is the tier the run actually runs at — degraded, if
             // #170 stepped it — which is the row of each lane's price table
@@ -300,25 +322,82 @@ export async function executeResumeRun(
   });
 }
 
+/** Where a lane move is going and what it counts as — the pair of moves that
+ * share the wording below both carry exactly this. */
+interface LaneMoveTarget {
+  toLaneId: string;
+  toLaneLabel: string;
+  toLaneBilling: LaneBilling;
+  toLaneRateUsdPerMTok: number | null;
+  /** Which continuation of the attempt this is, and the bound it counts
+   * against. */
+  resume: number;
+  maxResumes: number;
+}
+
+/**
+ * What every lane move of a paused run says (issues #199, #202), given who
+ * decided it: the prompt is the failover's (`buildLaneMovePrompt`), because
+ * what the pass is about to notice is the same whichever way it was moved —
+ * it was refused mid-flight and is continuing on another lane instead of
+ * waiting the window out; and the comment names the lane and what it costs in
+ * the one sentence every lane move uses (`describeLaneCost`), then says the
+ * target is advisory (the lane is re-chosen as the pass starts, and
+ * `tasks.lane`, not the comment, records where it ran) and what the move
+ * spends (no attempt, no interruption, one continuation). One builder, so the
+ * sweep's move and the operator's read the same on the money — a human reading
+ * the thread should not have to wonder whether the two were charged
+ * differently.
+ *
+ * The opening is the caller's, because it is the one thing that differs: who
+ * moved the run, and why now.
+ */
+function laneMoveWording(
+  target: LaneMoveTarget,
+  say: {
+    /** The log line's lead, up to the arrow to the task. */
+    log: (run: RunRow) => string;
+    /** The comment's opening — who decided, and the wall it skips — ending on
+     * the conjunction that joins it to the lane. */
+    opening: (run: RunRow) => string;
+  }
+): ResumeWording {
+  return {
+    prompt: (paused) =>
+      buildLaneMovePrompt({
+        originalPrompt: paused.description,
+        branch: paused.branch ?? "the attempt's branch",
+        toLaneLabel: target.toLaneLabel,
+        move: target.resume,
+        maxMoves: target.maxResumes,
+      }),
+    log: ({ run, taskId, sessionId }) =>
+      `${say.log(run)} -> task ${taskId}` +
+      `${sessionId ? ` continuing session ${sessionId}` : " without its prior context"}`,
+    comment: ({ run, paused, sessionId }) =>
+      `${say.opening(run)} **${target.toLaneLabel}** can serve this run now, ` +
+      `so it is resuming there rather than waiting the window out ` +
+      `(resume ${target.resume}/${target.maxResumes}). ` +
+      `${describeLaneCost(target.toLaneBilling, target.toLaneRateUsdPerMTok)} ` +
+      `The lane is re-chosen as the pass starts, so a wall that lifts first ` +
+      `sends it back to the cheaper one; the task records where it actually ` +
+      `ran. A lane move consumes neither an attempt nor an interruption; it ` +
+      `counts against the same resume bound as any other. ` +
+      describeSession(paused, sessionId),
+  };
+}
+
 /**
  * A paused run resumed **early**, onto a lane other than the one that walled
  * it (issue #199). The same body as the clock-driven resume — the pass, the
- * lineage, the bound, the session — with the lane move's prompt in front of
- * the brief and an announcement that names the lane and what it costs, in the
- * same sentence #176's failover uses (`describeLaneCost`).
+ * lineage, the bound, the session — with the lane move's wording
+ * (`laneMoveWording`) in front of the brief and on the issue.
  *
  * The announcement says the run *is resuming* there, and says the lane is
  * re-chosen as the pass starts, because the target is advisory exactly as a
  * failover's is: `startTask` re-asks the ranking, so a wall that lifted in the
  * intervening half-minute sends the pass back to the cheaper lane, and
  * `tasks.lane` — not this comment — records where it actually ran.
- *
- * The prompt is the failover's (`buildLaneMovePrompt`) rather than the
- * resume's, because what the pass is about to notice is the same: it was
- * refused mid-flight and is continuing on another lane instead of waiting the
- * window out. It deliberately does not name the model or the provider — see
- * that builder — and it carries the original brief behind its preamble so it
- * stands on its own whichever way the transcript restore went.
  */
 export async function executeResumeRunOnLane(
   action: Extract<Action, { type: "resumeRunOnLane" }>
@@ -326,47 +405,20 @@ export async function executeResumeRunOnLane(
   const from = action.fromLaneId ?? "its lane";
   const resets = action.resumeAfter.toUTCString();
 
-  await queueResumedPass(action.runId, action.issueRef, {
-    prompt: (paused) =>
-      buildLaneMovePrompt({
-        originalPrompt: paused.description,
-        branch: paused.branch ?? "the attempt's branch",
-        toLaneLabel: action.toLaneLabel,
-        move: action.resume,
-        maxMoves: action.maxResumes,
-      }),
-    log: ({ run, taskId, sessionId }) =>
-      `[autonomy] Resuming ${action.issueRef} early on ${action.toLaneId} ` +
-      `(attempt ${run.attempt}, resume ${action.resume}/${action.maxResumes}; ` +
-      `the window on ${from} stands until ${resets}) -> task ${taskId}` +
-      `${sessionId ? ` continuing session ${sessionId}` : " without its prior context"}`,
-    comment: ({ run, paused, sessionId }) =>
-      `Resumed early on another lane (attempt ${run.attempt}): the window on ` +
-      `\`${from}\` does not reset until ${resets}, but **${action.toLaneLabel}** ` +
-      `can serve this run now, so it is resuming there rather than waiting the ` +
-      `window out (resume ${action.resume}/${action.maxResumes}). ` +
-      `${describeLaneCost(action.toLaneBilling, action.toLaneRateUsdPerMTok)} ` +
-      `The lane is re-chosen as the pass starts, so a wall that lifts first ` +
-      `sends it back to the cheaper one; the task records where it actually ` +
-      `ran. An early lane resumption consumes neither an attempt nor an ` +
-      `interruption; it counts against the same resume bound as any other. ` +
-      describeSession(paused, sessionId),
-  });
+  await queueResumedPass(
+    action.runId,
+    action.issueRef,
+    laneMoveWording(action, {
+      log: (run) =>
+        `[autonomy] Resuming ${action.issueRef} early on ${action.toLaneId} ` +
+        `(attempt ${run.attempt}, resume ${action.resume}/${action.maxResumes}; ` +
+        `the window on ${from} stands until ${resets})`,
+      opening: (run) =>
+        `Resumed early on another lane (attempt ${run.attempt}): the window on ` +
+        `\`${from}\` does not reset until ${resets}, but`,
+    })
+  );
 }
-
-/** What a press on the fleet card is told (issue #202): the decision, and —
- * so the route can answer without a second read — what it was decided about. */
-export interface ManualLaneMoveReading {
-  runId: string;
-  /** "owner/repo#n" */
-  issueRef: string;
-  decision: LaneMoveDecision;
-}
-
-/** The outcome of pressing it: the move as made, or the refusal. */
-export type ManualLaneMoveResult =
-  | { ok: true; offer: LaneMoveOffer; taskId: string }
-  | { ok: false; refusal: Extract<LaneMoveDecision, { ok: false }>["refusal"] };
 
 /**
  * What moving this run onto another lane *now* would do (issue #202), or why
@@ -390,9 +442,10 @@ export function readManualLaneMove(
   const run = db.select().from(runs).where(eq(runs.id, runId)).get();
   if (!run) return null;
 
-  const owned = db.select().from(tasks).where(eq(tasks.runId, run.id)).all();
-  const pass = latestWorkPass(owned);
-  const hasLiveTask = hasLivePass(owned);
+  const { pass, hasLiveTask, upForDecision } = pausedRunFacts(
+    run,
+    db.select().from(tasks).where(eq(tasks.runId, run.id)).all()
+  );
 
   // Read fresh, never the memoised config (issue #166's freshness rule): a
   // confirmation pressed on the settings screen a moment ago is the whole
@@ -404,7 +457,7 @@ export function readManualLaneMove(
   // a run already resuming, or with no pass to resume, is refused before it,
   // exactly as the gatherer ranks nothing for one.
   const selection =
-    run.status === "rate_limited" && !hasLiveTask && pass !== null
+    upForDecision && pass !== null
       ? readLaneFailoverSelection(
           pass.kind,
           // `run.model` is the tier the run actually runs at — degraded, if
@@ -470,56 +523,42 @@ export async function moveParkedRunToLane(
 
   const { offer } = reading.decision;
   const from = offer.fromLaneId ?? "its lane";
-  const resets = offer.resumeAfter === null ? null : new Date(offer.resumeAfter).toUTCString();
-  const wall =
-    resets === null
-      ? `the run carried no reset time for the window on \`${from}\``
-      : offer.wallStands
-        ? `the window on \`${from}\` does not reset until ${resets}`
-        : `the window on \`${from}\` reset at ${resets} and the run had not yet resumed`;
+  // Non-null by construction: a move is only offered while the wall stands.
+  const resets = new Date(offer.resumeAfter).toUTCString();
 
-  const taskId = await queueResumedPass(reading.runId, reading.issueRef, {
-    prompt: (paused) =>
-      buildLaneMovePrompt({
-        originalPrompt: paused.description,
-        branch: paused.branch ?? "the attempt's branch",
+  const taskId = await queueResumedPass(
+    reading.runId,
+    reading.issueRef,
+    laneMoveWording(
+      {
+        toLaneId: offer.toLaneId,
         toLaneLabel: offer.toLaneLabel,
-        move: offer.resume,
-        maxMoves: offer.maxResumes,
-      }),
-    log: ({ run, taskId, sessionId }) =>
-      `[autonomy] Operator moved ${reading.issueRef} onto ${offer.toLaneId} ` +
-      `(attempt ${run.attempt}, resume ${offer.resume}/${offer.maxResumes}; ` +
-      `${wall}) -> task ${taskId}` +
-      `${sessionId ? ` continuing session ${sessionId}` : " without its prior context"}`,
-    comment: ({ run, paused, sessionId }) =>
-      `Moved onto another lane by the operator (attempt ${run.attempt}): ` +
-      `${wall}, and **${offer.toLaneLabel}** can serve this run now, so it is ` +
-      `resuming there rather than waiting (resume ${offer.resume}/${offer.maxResumes}). ` +
-      `${offer.cost} ` +
-      `The lane is re-chosen as the pass starts, so a wall that lifts first ` +
-      `sends it back to the cheaper one; the task records where it actually ` +
-      `ran. A lane move consumes neither an attempt nor an interruption; it ` +
-      `counts against the same resume bound as any other. ` +
-      describeSession(paused, sessionId),
-  });
+        toLaneBilling: offer.billing,
+        toLaneRateUsdPerMTok: offer.rateUsdPerMTok,
+        resume: offer.resume,
+        maxResumes: offer.maxResumes,
+      },
+      {
+        log: (run) =>
+          `[autonomy] Operator moved ${reading.issueRef} onto ${offer.toLaneId} ` +
+          `(attempt ${run.attempt}, resume ${offer.resume}/${offer.maxResumes}; ` +
+          `the window on ${from} stands until ${resets})`,
+        opening: (run) =>
+          `Moved onto another lane by the operator (attempt ${run.attempt}): ` +
+          `the window on \`${from}\` does not reset until ${resets}, and`,
+      }
+    )
+  );
 
   // Nothing was queued: the run moved on between the decision and the write
   // (a sweep resumed it, or a human cancelled it). Judged again rather than
-  // reported as a success the ledger does not show.
+  // reported as a success the ledger does not show — and since every path
+  // that queues nothing is synchronous up to that point, the second reading
+  // sees exactly the state that refused the first, so it is always a refusal.
   if (taskId === null) {
     const again = readManualLaneMove(runId, now);
-    if (again !== null && !again.decision.ok) return again.decision;
-    return {
-      ok: false,
-      refusal: {
-        reason: "already-resuming",
-        message:
-          "This run moved on between the decision and the move — a pass for it " +
-          "is already queued or running, so nothing was queued.",
-        heldLane: null,
-      },
-    };
+    if (again === null) return null;
+    return again.decision.ok ? refuse("already-resuming") : again.decision;
   }
 
   return { ok: true, offer, taskId };

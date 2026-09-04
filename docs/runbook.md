@@ -402,19 +402,23 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   everything behind it, press **move to paid lane…** on its card under
   **running**. The card first asks the fleet what the move would be and puts it
   in front of you before anything is spent: the lane, what it costs per million
-  tokens, which continuation (n/bound) of the attempt it is, and whether the
-  wall it skips is still standing — past the reset the run resumes on its own
-  free lane within a few minutes anyway, so a move then pays to skip a short
-  wait, and the strip says so. **Move now** makes it; the issue gets a comment
-  saying the operator moved it, naming the lane and its cost exactly as the
-  sweep's own move would. It answers to the same guards as any crossing: with
-  the day's real money unconfirmed it is refused naming the press (make it under
-  **Settings ▸ Real money**, then press again — or let the sweep move the run
-  itself at its next tick, which it now will), at the cap it is refused naming
-  the cap, and with nowhere to go it names why — each other lane's missing
-  credential, the pass kind's minimum lane, a pin. It counts against the same
-  resume bound, and a run with none left is refused rather than moved, because
-  the sweep is about to hand its ticket to a human. Headless:
+  tokens, and which continuation (n/bound) of the attempt it is. **Move now**
+  makes it; the issue gets a comment saying the operator moved it, naming the
+  lane and its cost exactly as the sweep's own move would. It answers to the
+  same guards as any crossing: with the day's real money unconfirmed it is
+  refused naming the press, and offers that press right there — **confirm
+  real-money spend…** is the fleet's once-a-day confirmation, the same one as
+  under **Settings ▸ Real money**, and the strip says what it authorises; the
+  card then asks again and offers the move for a second press. (Once confirmed,
+  the sweep would also move the run itself at its next tick.) At the cap it is
+  refused naming the cap, and with nowhere to go it names why — each other
+  lane's missing credential, the pass kind's minimum lane, a pin. It counts
+  against the same resume bound, and a run with none left is refused rather
+  than moved, because the sweep is about to hand its ticket to a human. And it
+  is only for a wall that still stands: once the card reads *quota window has
+  reset* the run is minutes from resuming free on its own lane, so a press is
+  refused saying so rather than spending a continuation to be routed straight
+  back there. Headless:
 
   ```bash
   curl -s https://interludes.co.uk/api/runs/<run-id>/lane-move            # what a press would do

@@ -12,8 +12,10 @@ import type {
  * The panel decides nothing — the offer and the refusal arrive decided, from
  * the same pure function the route executes — so what is under test is what
  * it *says* and which control it offers: the lane and its cost before any
- * money is spent, a refusal that names its reason rather than going quiet,
- * and a way to the settings screen where the money holds are lifted.
+ * money is spent, a refusal that names its reason rather than going quiet, the
+ * day's-spend confirmation offered where the operator stands (issue #173's
+ * shape) with what it commits the fleet to, and a way to the settings screen
+ * for the holds no press here can lift.
  */
 
 const OFFER: LaneMoveOffer = {
@@ -28,24 +30,34 @@ const OFFER: LaneMoveOffer = {
   maxResumes: 3,
   fromLaneId: "claude-subscription",
   resumeAfter: "2026-09-04T14:00:00.000Z",
-  wallStands: true,
 };
 
 function refusal(over: Partial<LaneMoveRefusal>): LaneMoveRefusal {
   return { reason: "no-lane", message: "refused", heldLane: null, ...over };
 }
 
+const UNCONFIRMED = refusal({
+  reason: "unconfirmed",
+  message:
+    "OpenRouter (GLM open weights) could serve this run, but today's real-money " +
+    "spend is not confirmed.",
+  heldLane: { id: "openrouter-glm", label: "OpenRouter (GLM open weights)", spentUsd: 0, capUsd: 20 },
+});
+
 function render(
   phase: Parameters<typeof LaneMovePanel>[0]["phase"],
-  pressError: string | null = null
+  props: { pressError?: string | null; busy?: boolean } = {}
 ): string {
   return renderToStaticMarkup(
     <LaneMovePanel
       phase={phase}
       ticket="#34"
-      pressError={pressError}
+      pressError={props.pressError ?? null}
+      busy={props.busy ?? false}
       onAsk={() => {}}
       onMove={() => {}}
+      onOpenConfirm={() => {}}
+      onConfirmSpend={() => {}}
       onDismiss={() => {}}
     />
   );
@@ -73,13 +85,6 @@ describe("the lane-move control", () => {
     expect(html).toContain("cancel");
   });
 
-  it("warns when the wall has already reset, so the operator knows they are paying to skip a wait", () => {
-    const html = render({ kind: "offered", offer: { ...OFFER, wallStands: false } });
-
-    expect(html).toContain("already reset");
-    expect(html).toContain("pays for that");
-  });
-
   it("says a subscription target costs nothing, without inventing a rate", () => {
     const html = render({
       kind: "offered",
@@ -98,7 +103,7 @@ describe("the lane-move control", () => {
   it("keeps the offer on screen with a failed press under it", () => {
     const html = render(
       { kind: "offered", offer: OFFER },
-      "The move didn't happen — the server answered 500."
+      { pressError: "The move didn't happen — the server answered 500." }
     );
 
     expect(html).toContain("move now");
@@ -112,20 +117,59 @@ describe("the lane-move control", () => {
     expect(html).not.toContain("move now");
   });
 
-  it("states a money hold's reason and points at the settings screen, amber", () => {
-    const html = render({
-      kind: "refused",
-      refusal: refusal({
-        reason: "unconfirmed",
-        message: "OpenRouter (GLM open weights) could serve this run, but today's real-money spend is not confirmed.",
-      }),
-    });
+  it("offers the day's press when the move is held for it, amber, beside the settings screen", () => {
+    const html = render({ kind: "refused", refusal: UNCONFIRMED });
 
     expect(html).toContain("real-money spend is not confirmed");
+    expect(html).toContain("confirm real-money spend…");
     expect(html).toContain('href="/settings"');
     expect(html).toContain("real money");
     expect(html).toContain("text-fl-amber");
     expect(html).not.toContain("move now");
+  });
+
+  it("says what confirming commits the fleet to, not just this run", () => {
+    // The press is fleet-level (#174's gate), so the strip has to say that
+    // autonomous passes may spend on it too — otherwise a card-shaped question
+    // authorises unattended cash.
+    const html = render({ kind: "confirming", refusal: UNCONFIRMED });
+
+    expect(html).toContain("autonomous");
+    expect(html).toContain("$20.00");
+    expect(html).toContain("openrouter-glm");
+    expect(html).toContain("confirm spend");
+    expect(html).toContain("cancel");
+  });
+
+  it("offers no press at the cap — none would help before midnight", () => {
+    const html = render({
+      kind: "refused",
+      refusal: refusal({
+        reason: "cap-reached",
+        message: "OpenRouter (GLM open weights) could serve this run, but today's real-money cap of $20.00 is spent.",
+        heldLane: { id: "openrouter-glm", label: "OpenRouter (GLM open weights)", spentUsd: 20, capUsd: 20 },
+      }),
+    });
+
+    expect(html).toContain("cap of $20.00 is spent");
+    expect(html).not.toContain("confirm real-money spend");
+    expect(html).toContain('href="/settings"');
+  });
+
+  it("says quietly that a run past its reset is minutes from resuming free", () => {
+    const html = render({
+      kind: "refused",
+      refusal: refusal({
+        reason: "window-reset",
+        message: "The window on claude-subscription reset at Fri, 04 Sep 2026 09:00:00 GMT, so this run resumes on its own lane by itself within a few minutes.",
+      }),
+    });
+
+    expect(html).toContain("resumes on its own lane by itself");
+    // Nothing is wrong, so nothing is red and nothing points at settings.
+    expect(html).toContain("text-fl-amber");
+    expect(html).not.toContain("text-fl-red");
+    expect(html).not.toContain('href="/settings"');
   });
 
   it("states that nowhere can serve the run, red, with the lanes screen as the remedy", () => {

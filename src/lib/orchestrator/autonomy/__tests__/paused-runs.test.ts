@@ -498,7 +498,6 @@ describe("a run parked on the quota clock (issues #169, #199)", () => {
         fromLaneId: "claude-subscription",
         resume: 1,
         maxResumes: 3,
-        wallStands: true,
         resumeAfter: RESUME_AFTER.toISOString(),
       });
       expect(reading.decision.offer.cost).toContain("bills real money");
@@ -623,7 +622,7 @@ describe("a run parked on the quota clock (issues #169, #199)", () => {
       expect(comment).toContain("continues the same conversation");
     });
 
-    it("says the window had already reset when it moves a run past its clock", async () => {
+    it("refuses a run whose window has already reset — it resumes free by itself", async () => {
       testDb
         .update(schema.runs)
         .set({ resumeAfter: new Date(NOW.getTime() - 60_000) })
@@ -632,10 +631,11 @@ describe("a run parked on the quota clock (issues #169, #199)", () => {
 
       const result = await pausedRuns.moveParkedRunToLane(runId, NOW);
 
-      expect(result?.ok).toBe(true);
-      if (result?.ok !== true) return;
-      expect(result.offer.wallStands).toBe(false);
-      expect(github.comments.join("\n")).toContain("reset at");
+      expect(result?.ok).toBe(false);
+      if (result?.ok !== false) return;
+      expect(result.refusal.reason).toBe("window-reset");
+      expect(queuedTasks()).toEqual([]);
+      expect(github.comments).toEqual([]);
     });
 
     it("refuses without writing anything when the day's money is unconfirmed", async () => {

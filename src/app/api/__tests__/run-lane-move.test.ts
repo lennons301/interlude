@@ -166,7 +166,7 @@ describe("GET/POST /api/runs/[id]/lane-move", () => {
       resume: 1,
       maxResumes: 3,
       fromLaneId: "claude-subscription",
-      wallStands: true,
+      resumeAfter: RESUME_AFTER.toISOString(),
     });
     expect(reading.decision.offer.cost).toContain("per million tokens");
   });
