@@ -13,6 +13,8 @@ import {
   type ProjectPickupHold,
   type RecentItem,
   type RunningCard,
+  type TierOutcome,
+  type TierView,
 } from "./fleet-view";
 
 /** Half-open interval [start, end) — one local calendar day */
@@ -276,6 +278,53 @@ function completedLine(item: RecentItem): string {
   return parts.join(" · ");
 }
 
+/** "1 attempt" / "3 attempts" — the digest counts things in prose. */
+function counted(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+/** One tier's outcome row as a line (issue #198): what the work at that tier
+ * cost in attempts, verdicts and dollars, and how much of the row is routed
+ * work rather than the default landing there. */
+function tierLine(row: TierOutcome): string {
+  const verdicts = [
+    row.verdicts.approve > 0 ? `${row.verdicts.approve} approve` : null,
+    row.verdicts.requestChanges > 0 ? `${row.verdicts.requestChanges} changes` : null,
+    row.verdicts.escalate > 0 ? `${row.verdicts.escalate} escalate` : null,
+  ].filter((part) => part !== null);
+  return [
+    row.tier ?? "no tier recorded",
+    `${counted(row.attempts, "attempt")} on ${counted(row.tickets, "ticket")}`,
+    `${row.failed} failed`,
+    verdicts.length > 0 ? verdicts.join(" / ") : "no verdicts",
+    usd(row.spendUsd),
+    `${row.declared} declared` +
+      (row.degraded > 0 ? `, ${row.degraded} stepped down` : ""),
+  ].join(" · ");
+}
+
+/**
+ * Tier coverage, then outcome by tier (issue #198) — the figures the
+ * dashboard's Tiers panel shows, off the same read model, so the morning digest
+ * and the screen cannot describe the fleet's routing differently. The coverage
+ * line leads and names the claims that declared nothing, because a savings
+ * claim read off the routed tickets alone is drawn from a biased sample.
+ * Nothing claimed is said as such rather than as 0% coverage.
+ */
+function tierLines(tiers: TierView): string[] {
+  const { coverage } = tiers;
+  if (coverage.claimed === 0) {
+    return [`No tickets claimed in the last ${tiers.windowDays} days.`];
+  }
+  const lead =
+    `Coverage: ${coverage.declared} of ${counted(coverage.claimed, "claim")} ` +
+    `declared a tier (${coverage.percent}%)` +
+    (coverage.undeclared > 0
+      ? ` — ${coverage.undeclared} ran on the default.`
+      : ".");
+  return [lead, ...tiers.byTier.map(tierLine)];
+}
+
 /**
  * Render the digest over a FleetView built at the last instant of `window`
  * (`buildFleetView({...rows, now: window.end - 1ms})`), so the view's own
@@ -352,6 +401,13 @@ export function renderDailyDigest(
               ]
             : []),
         ],
+      },
+      {
+        // A weekly reading rather than yesterday's (issue #198): whether
+        // per-ticket tier routing is running, and what each tier has been
+        // costing, over the same window the dashboard's Tiers panel shows.
+        heading: `Tiers (last ${view.tiers.windowDays} days)`,
+        lines: tierLines(view.tiers),
       },
     ],
   };

@@ -88,6 +88,7 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     resumeAfter: null,
     model: null,
     degradedFrom: null,
+    declaredTier: null,
     claimedAt: aug(1, 9),
     startedAt: aug(1, 9),
     finishedAt: null,
@@ -794,5 +795,70 @@ describe("renderDailyDigest — title", () => {
 
     expect(content.title).toBe("Daily digest — Sat 1 Aug");
     expect(content.title.startsWith(DIGEST_TITLE_PREFIX)).toBe(true);
+  });
+});
+
+describe("renderDailyDigest — tiers (issue #198)", () => {
+  const tiers = (content: DigestContent) => section(content, "Tiers (last 7 days)");
+
+  it("reads the same figures the dashboard does: coverage first, then one line per tier", () => {
+    const content = render({
+      runs: [
+        makeRun({
+          id: "h1",
+          githubIssue: "o/r#1",
+          model: "heavy",
+          declaredTier: "heavy",
+          status: "merged",
+          reviewVerdict: "approve",
+          totalCostUsd: 12.5,
+          finishedAt: aug(1, 10),
+        }),
+        makeRun({
+          id: "l1",
+          githubIssue: "o/r#2",
+          model: "light",
+          declaredTier: null,
+          status: "failed",
+          reviewVerdict: "request-changes",
+          totalCostUsd: 4,
+          finishedAt: aug(1, 10),
+        }),
+        // Asked for standard, stepped down to light (#170): one attempt, under
+        // the tier it ended on, and said to have stepped down.
+        makeRun({
+          id: "l2",
+          githubIssue: "o/r#2",
+          attempt: 2,
+          model: "light",
+          degradedFrom: "standard",
+          declaredTier: "standard",
+          totalCostUsd: 6,
+        }),
+      ],
+    });
+
+    expect(tiers(content)).toEqual([
+      "Coverage: 2 of 3 claims declared a tier (67%) — 1 ran on the default.",
+      "heavy · 1 attempt on 1 ticket · 0 failed · 1 approve · $12.50 · 1 declared",
+      "light · 2 attempts on 1 ticket · 1 failed · 1 changes · $10.00 · 1 declared, 1 stepped down",
+    ]);
+  });
+
+  it("says so when nothing was claimed, rather than printing 0% coverage", () => {
+    expect(tiers(render())).toEqual([
+      "No tickets claimed in the last 7 days.",
+    ]);
+  });
+
+  it("says a tier has no verdicts yet, and shows runs that recorded no tier at all", () => {
+    const content = render({
+      runs: [makeRun({ id: "r1", githubIssue: "o/r#1", model: null })],
+    });
+
+    expect(tiers(content)).toEqual([
+      "Coverage: 0 of 1 claim declared a tier (0%) — 1 ran on the default.",
+      "no tier recorded · 1 attempt on 1 ticket · 0 failed · no verdicts · $0.00 · 0 declared",
+    ]);
   });
 });

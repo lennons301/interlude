@@ -24,6 +24,7 @@ import {
   type QuotaSeverity,
 } from "../quota/rate-limit-event";
 import { evaluateQuotaGate } from "../quota/quota-gate";
+import { MODEL_TIERS, normalizeModelTier } from "../model-tiers";
 
 export interface FleetRows {
   /** Current time — passed in, never read inside */
@@ -194,6 +195,11 @@ export interface FleetRunRow {
    * that tier (issue #170); null while it is still running at the tier it was
    * given. */
   degradedFrom: string | null;
+  /** The tier the ticket's Workflow section declared at claim (issue #198), or
+   * null when it declared none — `runs.declaredTier`. Never `model`: the
+   * implement pass writes the resolved tier there, after which a default and a
+   * declaration read the same. */
+  declaredTier: string | null;
   claimedAt: Date;
   startedAt: Date | null;
   finishedAt: Date | null;
@@ -405,6 +411,72 @@ export interface RecentItem {
   outcome: "merged" | "completed" | "failed" | "exhausted";
 }
 
+/**
+ * Whether per-ticket tier routing is actually running (issue #198): of the
+ * tickets claimed in the window, how many carried a declared tier.
+ *
+ * Counted per **claim**, not per distinct ticket: the directive is read at
+ * each claim, and a ticket edited between attempts can declare a tier on one
+ * and not the other — so the fact belongs to the run, and the figure shares
+ * its denominator with the outcome rows beside it.
+ */
+export interface TierCoverage {
+  /** Runs claimed in the window — one per attempt at a ticket. */
+  claimed: number;
+  /** Of those, claims whose ticket declared a tier in its Workflow section. */
+  declared: number;
+  /** The rest — claims that ran on the fleet's default. Said outright rather
+   * than left as a remainder, because the point of the figure is that any
+   * savings claim drawn from the declared tickets alone is drawn from a
+   * biased sample. */
+  undeclared: number;
+  /** `declared / claimed`, rounded to a whole percent; null when nothing was
+   * claimed, which is not 0% coverage. */
+  percent: number | null;
+}
+
+/**
+ * What running work at one tier has cost (issue #198): attempts consumed,
+ * review verdicts and spend — so that routing work *down* burning extra
+ * attempts and a repair, costing more than the tier saved, shows up as a
+ * number rather than an argument.
+ *
+ * One row per run, grouped by the tier the work ran at (`runs.model`). A run
+ * whose tier changed mid-attempt is counted once, under the tier it ended on.
+ */
+export interface TierOutcome {
+  /** `heavy` / `standard` / `light`; a pinned raw model id verbatim when the
+   * environment names one; null for runs that recorded no tier at all. */
+  tier: string | null;
+  /** Runs at this tier claimed in the window — each an attempt at a ticket. */
+  attempts: number;
+  /** Distinct tickets those attempts were at, so attempts per ticket — the
+   * burn rate — can be read off the row. */
+  tickets: number;
+  /** Attempts that ended `failed` or `exhausted`: the attempts burned. */
+  failed: number;
+  /** Attempts whose ticket declared a tier, whichever it declared — how much
+   * of this row is routed work rather than the default landing here. */
+  declared: number;
+  /** Attempts that arrived at this tier by stepping down the ladder (issue
+   * #170) rather than by being routed here. */
+  degraded: number;
+  /** The last verdict posted for each attempt, by kind. The remainder have
+   * none yet, or never reached review. */
+  verdicts: { approve: number; requestChanges: number; escalate: number };
+  /** Every dollar those runs spent — implement, review and repair passes
+   * alike, because the cost of running work at a tier includes gating it. */
+  spendUsd: number;
+}
+
+export interface TierView {
+  windowDays: number;
+  coverage: TierCoverage;
+  /** Tiers with at least one attempt in the window: the vocabulary most
+   * capable first, pinned ids after it, the no-tier row last. */
+  byTier: TierOutcome[];
+}
+
 export type SlotSegment =
   | { occupant: "free" }
   | {
@@ -446,6 +518,10 @@ export interface FleetView {
   needsYou: NeedsYouItem[];
   running: RunningCard[];
   recent: { windowDays: number; totalUsd: number; items: RecentItem[] };
+  /** Tier coverage and outcome by tier over the same window (issue #198),
+   * computed here so the dashboard and the digest cannot describe the fleet's
+   * routing differently. */
+  tiers: TierView;
   queue: {
     readyForAgent: number | null;
     /** Backlog depth per project, deepest first; null = never observed. `hold`
@@ -662,6 +738,90 @@ const TERMINAL_TASK_STATUSES = new Set<FleetTaskRow["status"]>([
  * predicate behind slot occupancy and every run's card face. */
 const isLiveTask = (t: FleetTaskRow): boolean =>
   t.containerStatus !== null && !TERMINAL_TASK_STATUSES.has(t.status);
+
+/**
+ * Tier coverage and outcome by tier (issue #198), over the runs *claimed* in
+ * the recent window.
+ *
+ * The unit is the **run** — one row per attempt at one ticket, in the ledger's
+ * own words — never the task. A run whose tier changed mid-attempt owns several
+ * task rows (a resume off a pause, a rung down the ladder, a lane move), and
+ * counting those would count one attempt twice; the run is grouped once, under
+ * `runs.model`, which is the tier the work actually ran at and the tier its
+ * spend is read against. A degraded run therefore sits under the tier it
+ * stepped *to*, and `degraded` says how many of a row's attempts arrived that
+ * way rather than by being routed there.
+ *
+ * Coverage reads `declaredTier`, never `model`: the implement pass writes the
+ * resolved tier to `model` so later passes resolve through it, and from that
+ * moment a default is indistinguishable from a declaration. A claim that
+ * declared none is counted, and said, rather than left out.
+ *
+ * Windowed by `claimedAt` — a claim is dated by when it was made — so coverage
+ * and the outcome rows share one denominator: the rows' attempts sum to
+ * `coverage.claimed`. Bounded above by `now` for the digest's sake, which
+ * evaluates the view at the end of a past day and must know nothing after it.
+ */
+function tierView(runs: FleetRunRow[], windowStart: number, now: number): TierView {
+  const claimed = runs.filter(
+    (r) => r.claimedAt.getTime() >= windowStart && r.claimedAt.getTime() <= now
+  );
+  const isDeclared = (r: FleetRunRow) => r.declaredTier !== null;
+  const declared = claimed.filter(isDeclared).length;
+
+  // A legacy alias (`opus`) names a tier and groups under it; a pinned raw
+  // model id names none and is kept verbatim, because "which model" is still
+  // the question when the answer is not a tier; a run that recorded nothing
+  // groups under null and is shown as such rather than dropped.
+  const tierOf = (r: FleetRunRow): string | null =>
+    r.model === null ? null : (normalizeModelTier(r.model) ?? r.model);
+
+  const groups = new Map<string | null, FleetRunRow[]>();
+  for (const run of claimed) {
+    const tier = tierOf(run);
+    groups.set(tier, [...(groups.get(tier) ?? []), run]);
+  }
+
+  // The vocabulary's own order (most to least capable), then any pinned ids
+  // by name, then the runs that recorded no tier.
+  const rank = (tier: string | null): number => {
+    if (tier === null) return MODEL_TIERS.length + 1;
+    const i = (MODEL_TIERS as readonly string[]).indexOf(tier);
+    return i === -1 ? MODEL_TIERS.length : i;
+  };
+  const count = (group: FleetRunRow[], test: (r: FleetRunRow) => boolean) =>
+    group.filter(test).length;
+  const byTier: TierOutcome[] = [...groups.entries()]
+    .sort(([a], [b]) => rank(a) - rank(b) || (a ?? "").localeCompare(b ?? ""))
+    .map(([tier, group]) => ({
+      tier,
+      attempts: group.length,
+      tickets: new Set(group.map((r) => r.githubIssue)).size,
+      // `exhausted` is the last failed attempt, relabelled when the ticket
+      // went to a human — a burned attempt under another name.
+      failed: count(group, (r) => r.status === "failed" || r.status === "exhausted"),
+      declared: count(group, isDeclared),
+      degraded: count(group, (r) => r.degradedFrom !== null),
+      verdicts: {
+        approve: count(group, (r) => r.reviewVerdict === "approve"),
+        requestChanges: count(group, (r) => r.reviewVerdict === "request-changes"),
+        escalate: count(group, (r) => r.reviewVerdict === "escalate"),
+      },
+      spendUsd: group.reduce((sum, r) => sum + r.totalCostUsd, 0),
+    }));
+
+  return {
+    windowDays: RECENT_WINDOW_DAYS,
+    coverage: {
+      claimed: claimed.length,
+      declared,
+      undeclared: claimed.length - declared,
+      percent:
+        claimed.length === 0 ? null : Math.round((declared / claimed.length) * 100),
+    },
+    byTier,
+  };
+}
 
 export function buildFleetView(rows: FleetRows): FleetView {
   const projectById = new Map(rows.projects.map((p) => [p.id, p]));
@@ -1337,6 +1497,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
       totalUsd: recentTotalUsd,
       items: recentItems,
     },
+    tiers: tierView(rows.runs, windowStart, rows.now.getTime()),
     queue: {
       readyForAgent: backlog
         ? backlog.reduce((sum, b) => sum + b.count, 0)
