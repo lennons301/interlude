@@ -27,8 +27,9 @@ import { getFleetSettings, type FleetSettings } from "../settings";
 import { resolveMinLane } from "../settings-resolver";
 import { getLaneCatalog } from "./catalog";
 import {
-  planLaneFailover,
+  failoverOption,
   selectLane,
+  selectLaneFailover,
   type LaneFailoverOption,
   type LaneSelection,
   type LaneSelectionInput,
@@ -113,16 +114,19 @@ export function readLaneSelection(
 }
 
 /**
- * Where a pass its lane's quota window has refused may move to instead of
- * pausing (issue #176), or null when there is nowhere both available and
- * permitted — in which case #168's pause is what happens, exactly as before.
+ * The whole failover ranking for a pass its lane's quota window has refused
+ * (issues #176, #199, #202): every declared lane judged, with the refused lane
+ * excluded, cheapest first.
  *
  * The same ranking `readLaneSelection` reads, with the refused lane excluded:
  * "which lane should this pass run on?" is one question, and asking it a
  * second way after a wall is how the routing and the failover would come to
- * disagree about which lane is cheapest.
+ * disagree about which lane is cheapest. Read whole here for the operator's
+ * manual move of a parked run (issue #202), which — refused — has to say *why*
+ * no lane can serve the run, and that answer is in the losers rather than in
+ * the winner.
  */
-export function readLaneFailover(
+export function readLaneFailoverSelection(
   kind: AgentPassKind,
   ticketModel: string | null,
   fromLaneId: string | null,
@@ -134,11 +138,32 @@ export function readLaneFailover(
    * only let the rankings of two runs on one sweep disagree by a booking that
    * landed between them. */
   guards: MoneyGuards = readMoneyGuards(now, settings)
-): LaneFailoverOption | null {
-  return planLaneFailover({
+): LaneSelection {
+  return selectLaneFailover({
     ...laneSelectionInput(kind, ticketModel, now, settings, guards),
     fromLaneId,
   });
+}
+
+/**
+ * Where a pass its lane's quota window has refused may move to instead of
+ * pausing (issue #176), or null when there is nowhere both available and
+ * permitted — in which case #168's pause is what happens, exactly as before.
+ *
+ * {@link readLaneFailoverSelection} reduced to its winner, which is all the
+ * reducer needs: it decides whether and when to move, and this says where.
+ */
+export function readLaneFailover(
+  kind: AgentPassKind,
+  ticketModel: string | null,
+  fromLaneId: string | null,
+  now: Date = new Date(),
+  settings: FleetSettings = getFleetSettings(),
+  guards: MoneyGuards = readMoneyGuards(now, settings)
+): LaneFailoverOption | null {
+  return failoverOption(
+    readLaneFailoverSelection(kind, ticketModel, fromLaneId, now, settings, guards)
+  );
 }
 
 /**

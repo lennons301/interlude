@@ -4,12 +4,14 @@ import type { QuotaObservation } from "../../quota/rate-limit-event";
 import type { SettingsOverrides } from "../../settings-resolver";
 import { parseLaneConfig, type LaneCatalog } from "../lane-config";
 import {
+  failoverOption,
   laneBlendedRateUsd,
   laneCapabilityRank,
   laneCostRank,
   planLaneFailover,
   rankLanes,
   selectLane,
+  selectLaneFailover,
   type LaneSelectionInput,
 } from "../lane-selection";
 
@@ -513,5 +515,50 @@ describe("the failover a wall buys", () => {
       fromLaneId: "subscription",
     });
     expect(move?.toLaneId).toBe("open-weights");
+  });
+});
+
+describe("the failover ranking, kept whole (issue #202)", () => {
+  const walled = { observations: { subscription: WALL } };
+
+  it("is what the failover option is reduced from, so the two cannot disagree", () => {
+    const selection = selectLaneFailover({ ...input(walled), fromLaneId: "subscription" });
+
+    expect(failoverOption(selection)).toEqual(
+      planLaneFailover({ ...input(walled), fromLaneId: "subscription" })
+    );
+    expect(selection.chosen?.id).toBe("open-weights");
+  });
+
+  it("marks the refused lane as already tried rather than dropping it", () => {
+    const selection = selectLaneFailover({ ...input(walled), fromLaneId: "subscription" });
+
+    expect(
+      selection.candidates.find((lane) => lane.id === "subscription")?.ineligible
+    ).toBe("already-tried");
+  });
+
+  it("keeps the lane a press would free, for a refusal to name", () => {
+    // Nothing is chosen, but the reason is a press away — which the operator's
+    // manual move has to say, and the reducer's option could not.
+    const selection = selectLaneFailover({
+      ...input({ ...walled, confirmedAt: null }),
+      fromLaneId: "subscription",
+    });
+
+    expect(selection.chosen).toBeNull();
+    expect(failoverOption(selection)).toBeNull();
+    expect(selection.heldForMoney?.id).toBe("open-weights");
+    expect(selection.heldForMoney?.ineligible).toBe("unconfirmed");
+  });
+
+  it("releases a pin naming the refused lane, and reports the pin as released", () => {
+    const selection = selectLaneFailover({
+      ...input({ ...walled, pinnedLaneId: "subscription" }),
+      fromLaneId: "subscription",
+    });
+
+    expect(selection.pinnedLaneId).toBeNull();
+    expect(selection.chosen?.id).toBe("open-weights");
   });
 });
