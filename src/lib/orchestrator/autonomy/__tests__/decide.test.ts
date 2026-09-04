@@ -7,6 +7,8 @@ import { ADVISORY_TRIAGE_LABELS, ARMING_LABEL } from "../ticket";
 import { parseTriageExit } from "../triage";
 import {
   decideNext,
+  describeDefaultTier,
+  describeRunTier,
   passOutcomeSnapshot,
   type AutonomySnapshot,
   type AwaitingReview,
@@ -449,6 +451,33 @@ describe("decideNext — claiming", () => {
       const claim = claims(decideNext(makeSnapshot()))[0];
 
       expect(claim).toMatchObject({ model: null, modelSource: null });
+    });
+  });
+
+  // The embed names the configured default where the pure comment cannot
+  // (issue #200): the executor resolves it against the primary lane and hands
+  // the resolution in as data, so the sentence stays the reducer's.
+  describe("describeDefaultTier", () => {
+    it("names the tier the primary lane resolves the default to", () => {
+      expect(describeDefaultTier({ tier: "standard", model: "claude-sonnet-4-5" })).toBe(
+        "Tier: `standard` (configured default — neither the ticket nor triage stated one)."
+      );
+    });
+
+    it("says a pinned raw model id is a model, never printing it as a tier", () => {
+      // The environment may pin `claude-opus-4-8`, which names no tier: the
+      // legal escape hatch `resolveLane` keeps (`tier: null`, `model` set).
+      const line = describeDefaultTier({ tier: null, model: "claude-opus-4-8" });
+
+      expect(line).toContain("pins the model `claude-opus-4-8` rather than a tier");
+      expect(line).not.toContain("Tier: `claude-opus-4-8`");
+    });
+
+    it("falls back to the reducer's own words when nothing resolves", () => {
+      // No catalog, an unavailable lane, or Anthropic-direct letting the
+      // harness choose: the embed says exactly what the issue comment says.
+      expect(describeDefaultTier(null)).toBe(describeRunTier(null));
+      expect(describeDefaultTier({ tier: null, model: null })).toBe(describeRunTier(null));
     });
   });
 

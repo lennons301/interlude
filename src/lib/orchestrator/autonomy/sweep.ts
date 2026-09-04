@@ -80,6 +80,7 @@ import { getQueueLastProgress, isQueueRunning, occupiedSlots } from "../queue";
 import { startOfLocalDay, todayAutonomousSpendUsd } from "../spend";
 import { getActiveTasks, isParked, releaseParkedImplementTask } from "../turn-manager";
 import {
+  describeDefaultTier,
   describeRunTier,
   describeTierSource,
   decideNext,
@@ -1434,8 +1435,14 @@ async function resolveArmedAt(
  * included — a re-triage that omitted the line means "the default", not
  * "whatever an earlier pass said about an earlier body" — while a pass that
  * died (`failed`, no exit) says nothing and leaves the last judgement
- * standing. The stored word is re-clamped to the vocabulary on the way in: a
- * row is data, and the reducer only ever sees a tier.
+ * standing. The status is a safe key because `finishTriagePass` writes the
+ * exit and `completed` in one statement: every pass the pending-triage gather
+ * above applied by its stored exit is `completed` from the same instant, and
+ * the only `failed` rows holding a result are the ones the turn manager's
+ * catch wrote for a pass that died — which the gather applies fail-closed and
+ * this read skips, so the embed and the claim always name the same pass. The
+ * stored word is re-clamped to the vocabulary on the way in: a row is data,
+ * and the reducer only ever sees a tier.
  */
 function latestTriageTier(issueRef: string): ModelTier | null {
   const row = db
@@ -1989,7 +1996,9 @@ async function executeApplyTriage(
  * lane resolves it to `standard` where Anthropic-direct lets the harness
  * choose (#175), and naming the step's answer would name a tier the run
  * does not use. A lane that cannot resolve (a missing credential) names
- * nothing: that run fails before it starts, and #172 reports why.
+ * nothing: that run fails before it starts, and #172 reports why. The
+ * sentence itself is the reducer's (`describeDefaultTier`), so the two
+ * surfaces cannot drift apart in wording.
  */
 function describeRunTierForEmbed(tier: RunTierChoice): string {
   if (tier !== null) return describeRunTier(tier);
@@ -2005,10 +2014,7 @@ function describeRunTierForEmbed(tier: RunTierChoice): string {
         laneId: null,
       })
     : null;
-  const named = resolution?.ok ? (resolution.lane.tier ?? resolution.lane.model) : null;
-  return named === null
-    ? "Tier: the configured default — neither the ticket nor triage stated one."
-    : `Tier: \`${named}\` (configured default — neither the ticket nor triage stated one).`;
+  return describeDefaultTier(resolution?.ok ? resolution.lane : null);
 }
 
 /**

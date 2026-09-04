@@ -29,6 +29,7 @@ import type { ModelTier } from "../../model-tiers";
 import type { QuotaRejection } from "../../quota/rate-limit-rejection";
 import { planTierDegrade } from "../../quota/tier-ladder";
 import { chooseRunTier, type RunTierChoice, type TriageExitKind, type TriageResult } from "./triage";
+import type { ResolvedLane } from "@/lib/lanes/resolve";
 import {
   buildFeedbackTurn,
   undeliverableFeedbackBody,
@@ -1088,17 +1089,46 @@ function isAuthorAllowed(repo: string, author: string, allowedAuthors: string[])
   return login === repoOwner || allowedAuthors.some((a) => a.toLowerCase() === login);
 }
 
+const NO_TIER_STATED = "neither the ticket nor triage stated one";
+
 /**
  * One sentence naming the tier a run will use and where it came from (issue
  * #200), for the issue comment and the Discord embed. Null names the
  * configured default without guessing which tier that resolves to: the
- * reducer is pure and the default is the executor's to read.
+ * reducer is pure and the default is the executor's to read — which then
+ * names it through `describeDefaultTier` below.
  */
 export function describeRunTier(tier: RunTierChoice): string {
   if (tier === null) {
-    return "Tier: the configured default — neither the ticket nor triage stated one.";
+    return `Tier: the configured default — ${NO_TIER_STATED}.`;
   }
   return `Tier: \`${tier.tier}\` (${describeTierSource(tier.source)}).`;
+}
+
+/**
+ * The embed's sentence for a run on the configured default (issue #200),
+ * given what the primary lane resolves that default to — the executor's
+ * reading, handed in as data so the sentence stays pure. A resolved tier is
+ * named as one. An environment that pins a raw model id names no tier
+ * (`tier: null`, `model` set — the legal escape hatch `resolveLane` keeps),
+ * so the sentence says a model was pinned rather than printing a model id
+ * under a "Tier:" label as if it were one. No resolution at all — no catalog,
+ * an unavailable lane, or Anthropic-direct letting the harness choose — falls
+ * back to the reducer's own words, so the embed never says more than it knows.
+ */
+export function describeDefaultTier(
+  resolved: Pick<ResolvedLane, "tier" | "model"> | null
+): string {
+  if (resolved?.tier != null) {
+    return `Tier: \`${resolved.tier}\` (configured default — ${NO_TIER_STATED}).`;
+  }
+  if (resolved?.model != null) {
+    return (
+      `Tier: the configured default, which pins the model \`${resolved.model}\` ` +
+      `rather than a tier — ${NO_TIER_STATED}.`
+    );
+  }
+  return describeRunTier(null);
 }
 
 /** The phrase naming where a run's tier came from — written once, because
