@@ -484,7 +484,23 @@ Since issue #197 every published ticket is expected to name its tier, chosen
 against the three-way rubric in the ticket contract in
 `docs/agents/issue-tracker.md` — the contract binds the producer (`/to-tickets`,
 a human, a generation session), not the executor: a ticket that arrives
-without one still runs at the configured default exactly as above.
+without one still runs at triage's suggestion where there is one (next
+paragraph), and otherwise at the configured default exactly as above.
+
+**Raw issues get their tier from triage** (issue #200). The triage pass judges
+every opened issue against that same rubric and returns the tier on a `TIER:`
+line of its structured exit; the orchestrator stores it on the triage task and
+the claim applies it — but only where the body states no `model:` directive. A
+tier you write in the Workflow section always outranks the suggestion, and an
+exit whose tier line is missing or mistyped keeps its verdict and simply
+suggests nothing. Because the suggestion reaches the run without appearing in
+the body, the recommendation embed in Discord and the assessment comment on
+the issue both state the tier the run will use, so you see the routing
+decision at the moment you arm the work (when neither named one, the embed
+names the configured default and the comment says so without naming it); the
+claim comment then records which of the two the run actually took. Triage still cannot arm, edit or close
+anything — the tier is advice about the work, never authority over the
+ticket, and there is no line it could write that names a lane.
 
 ### Spending real money (metered lanes)
 

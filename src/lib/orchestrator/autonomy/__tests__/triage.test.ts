@@ -1,7 +1,12 @@
 import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
-import { isArmingConfirmation, parseTriageExit } from "../triage";
+import {
+  chooseRunTier,
+  isArmingConfirmation,
+  parseTriageExit,
+  readStoredTriageResult,
+} from "../triage";
 
 // Fixtures follow the shape of __tests__/stream-fixture.ndjson: the raw
 // stream-json a triage pass emits, ending in a `result` event whose `result`
@@ -17,6 +22,7 @@ describe("parseTriageExit", () => {
       body:
         "Well specified: names the file, the behaviour and the done-signal. " +
         "Fits the existing frobnicator module; no open questions.",
+      tier: null,
     });
   });
 
@@ -26,6 +32,7 @@ describe("parseTriageExit", () => {
       body:
         "- Which page should the export button live on — the task list or the task detail view?\n" +
         "- CSV or JSON, and does the export include archived tasks?",
+      tier: null,
     });
   });
 
@@ -37,6 +44,61 @@ describe("parseTriageExit", () => {
         "1. What breaks with SQLite today — is this a real limit or a preference?\n" +
         "2. Migration story for the existing WAL database and backups.\n" +
         "3. Who operates the new server, and what does it cost?",
+      tier: null,
+    });
+  });
+
+  // The suggested tier (issue #200): a second structured line the reducer
+  // applies at claim where the ticket body states no tier. It is consumed
+  // out of the body, so the assessment posted to the issue does not carry a
+  // stray `TIER:` line.
+  describe("the TIER: line", () => {
+    it("carries a suggested tier alongside the verdict, consumed out of the body", () => {
+      expect(parseTriageExit(fixture("triage-recommend-tier.ndjson"))).toEqual({
+        kind: "recommend",
+        body:
+          "Well specified: names the file, the behaviour and the done-signal. " +
+          "The change is determined by the spec.",
+        tier: "light",
+      });
+    });
+
+    it("accepts the line after a blank, on any exit, and resolves a legacy alias", () => {
+      expect(parseTriageExit(fixture("triage-needs-info-tier-alias.ndjson"))).toEqual({
+        kind: "needs-info",
+        body:
+          "- Which storage engine replaces SQLite, and who operates it?\n" +
+          "- Is the WAL database migrated or started fresh?",
+        tier: "heavy",
+      });
+    });
+
+    it("leaves the suggestion empty for a value outside the tier vocabulary, without failing the verdict", () => {
+      // A pass may pick a tier, never name a model — the same clamp the
+      // directive parser applies to a ticket body.
+      expect(parseTriageExit(fixture("triage-recommend-bad-tier.ndjson"))).toEqual({
+        kind: "recommend",
+        body: "Well specified: names the page, the format and the done-signal.",
+        tier: null,
+      });
+    });
+
+    it("takes the marker in its own upper case only, so a prose line opening \"Tier:\" is kept in the body", () => {
+      // The exit marker tolerates case because a miss fails the exit closed;
+      // this one does not, because a false match is consumed out of the
+      // body and would silently eat the first line of the assessment. A real
+      // line in the wrong case costs the suggestion and stays visible.
+      const exit = parseTriageExit(fixture("triage-recommend-prose-tier.ndjson"));
+      expect(exit).toMatchObject({ kind: "recommend", tier: null });
+      expect((exit as { body: string }).body.split("\n")[0]).toBe(
+        "Tier: this reads as heavy work at first, but the issue already decides everything."
+      );
+    });
+
+    it("still requires a body — a tier is advice about the work, not the exit's output", () => {
+      expect(parseTriageExit(fixture("triage-tier-no-body.ndjson"))).toMatchObject({
+        kind: "unparseable",
+      });
     });
   });
 
@@ -72,6 +134,43 @@ describe("parseTriageExit", () => {
     it("rejects empty input", () => {
       expect(parseTriageExit("")).toMatchObject({ kind: "unparseable" });
     });
+  });
+});
+
+describe("readStoredTriageResult", () => {
+  it("coalesces a row written before the tier existed to no suggestion", () => {
+    // A stored exit from before issue #200 carries no `tier` key at all.
+    expect(readStoredTriageResult({ kind: "recommend", body: "Fine." })).toEqual({
+      kind: "recommend",
+      body: "Fine.",
+      tier: null,
+    });
+  });
+
+  it("re-clamps the stored word to the vocabulary and passes an unparseable exit through", () => {
+    expect(
+      readStoredTriageResult({ kind: "needs-info", body: "Which?", tier: "light" })
+    ).toEqual({ kind: "needs-info", body: "Which?", tier: "light" });
+    expect(readStoredTriageResult({ kind: "unparseable", reason: "no line" })).toEqual({
+      kind: "unparseable",
+      reason: "no line",
+    });
+  });
+});
+
+describe("chooseRunTier", () => {
+  // Triage fills the gap and never overrides it (issue #200): the one
+  // statement of precedence the claim and the recommendation embed share.
+  it("lets a tier stated in the ticket body outrank the stored suggestion", () => {
+    expect(chooseRunTier("heavy", "light")).toEqual({ tier: "heavy", source: "ticket" });
+  });
+
+  it("applies the suggestion only where the body states no tier", () => {
+    expect(chooseRunTier(null, "light")).toEqual({ tier: "light", source: "triage" });
+  });
+
+  it("chooses nothing when neither states a tier — the run keeps its configured default", () => {
+    expect(chooseRunTier(null, null)).toBeNull();
   });
 });
 

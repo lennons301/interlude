@@ -743,15 +743,13 @@ export async function startTask(taskId: string): Promise<void> {
       return;
     }
 
-    // A triage pass that died delivered no exit. Store the failure as an
-    // unparseable result so the fail-closed path (nothing applied, the
-    // owner told once, needs-triage kept) runs instead of a silent retry.
-    // But never clobber an exit finishTriagePass already stored — a teardown
-    // failure after the store must not turn a good exit into an unparseable
-    // one (the sweep applies stored exits regardless of task status).
-    const storedExit = isTriagePass
-      ? db.select().from(tasks).where(eq(tasks.id, taskId)).get()?.triageResult
-      : null;
+    // A triage pass that reaches this catch died before delivering an exit:
+    // `finishTriagePass` writes the exit and `completed` in one statement, so
+    // a pass that stored anything is already finished and was stood down for
+    // above (#159). Store the death as an unparseable result so the
+    // fail-closed path (nothing applied, the owner told once, needs-triage
+    // kept) runs instead of a silent retry. The row stays `failed`, which is
+    // what tells the claim's tier read that this pass says nothing.
     // A review pass the sweep already reaped as dead (issue #95) is `failed`
     // before this catch runs — the reaper queued its replacement, so this
     // dead pass must not store a verdict over it below.
@@ -759,7 +757,7 @@ export async function startTask(taskId: string): Promise<void> {
     updateTask(taskId, {
       status: "failed",
       containerStatus: null,
-      ...(isTriagePass && storedExit == null
+      ...(isTriagePass
         ? {
             triageResult: {
               kind: "unparseable" as const,
@@ -1883,15 +1881,36 @@ async function finishReviewPass(
  * End of a triage pass: parse the exit from the raw stream, store it on the
  * task for the sweep's next decision, and tear the container down. A triage
  * pass never pushes, labels, comments or posts anything itself.
+ *
+ * The exit, the suggested tier and the task's completion are **one write**.
+ * Two readers select triage rows by two different facts — the sweep gathers
+ * a pass to apply by its stored exit, and the claim reads the tier off the
+ * newest `completed` pass (issue #200) — and they name the same tier only if
+ * "holds a parsed exit" and "is completed" are the same rows. Written as two
+ * statements, a throw between them (a failed teardown, a refused write) left
+ * a `failed` row holding a good exit: the sweep applied it and the embed named
+ * its tier, while the claim skipped the row and ran the ticket on an earlier
+ * pass's tier or the default. One statement leaves no such row to write, and
+ * anything thrown after it finds the task already finished, which the
+ * caller's catch stands down for (#159). The tier has its own column because
+ * the exit is consumed when the sweep applies it and the tier has to survive
+ * that to be read at claim.
+ *
+ * Exported for its test; only `startTask` calls it.
  */
-async function finishTriagePass(
+export async function finishTriagePass(
   taskId: string,
   running: RunningContainer,
   rawStream: string
 ): Promise<void> {
   const exit = parseTriageExit(rawStream);
 
-  updateTask(taskId, { triageResult: exit });
+  updateTask(taskId, {
+    triageResult: exit,
+    triageTier: exit.kind === "unparseable" ? null : exit.tier,
+    status: "completed",
+    containerStatus: null,
+  });
 
   insertSystemMessage(
     taskId,
@@ -1901,7 +1920,7 @@ async function finishTriagePass(
   );
   console.log(`[orchestrator] Triage task ${taskId} exit: ${exit.kind}`);
 
-  await teardownTaskContainer(taskId, running);
+  await removeTaskContainer(taskId, running);
 }
 
 /**
@@ -2774,6 +2793,7 @@ function updateTask(
     pullRequestUrl: string | null;
     discordMessageId: string | null;
     triageResult: (typeof tasks.$inferSelect)["triageResult"];
+    triageTier: string | null;
     lane: string | null;
     laneBilling: "subscription" | "metered" | null;
     tier: string | null;

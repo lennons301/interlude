@@ -1,6 +1,7 @@
 import { int, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 import type { SettingsOverrides } from "../lib/settings-resolver";
+import type { StoredTriageResult } from "../lib/orchestrator/autonomy/triage";
 
 // Generation-session skills (issue #61): the estate's ticket-loop generation
 // half, runnable from an interactive session. The single source of truth for
@@ -346,10 +347,19 @@ export const tasks = sqliteTable("tasks", {
   // triage owns no run — so an exit survives an orchestrator restart
   // without re-running the pass. The issue's needs-triage label is the
   // "acted on" latch: once removed, the result is no longer gathered.
-  triageResult: text("triage_result", { mode: "json" }).$type<
-    | { kind: "recommend" | "needs-info" | "ready-for-human"; body: string }
-    | { kind: "unparseable"; reason: string }
-  >(),
+  // The shape is the parser's own (`StoredTriageResult`), with the tier
+  // optional because rows written before issue #200 carry no key; the one
+  // reader that turns a row back into a result coalesces it.
+  triageResult: text("triage_result", { mode: "json" }).$type<StoredTriageResult>(),
+  // The tier a finished triage pass suggested for the issue's *work* (issue
+  // #200) — `heavy`/`standard`/`light`, or null when the exit named none. Its
+  // own column beside the exit because the two have different lifetimes: the
+  // exit is consumed when the sweep applies it (so a re-labelled issue gets a
+  // fresh pass rather than a replay), while the suggestion has to outlive
+  // that and be read at *claim*, which may come hours later on a human's
+  // label click or Discord "yes". It is advice, never authority: the claim
+  // applies it only where the ticket body states no `model:` directive.
+  triageTier: text("triage_tier"),
   devPort: int("dev_port"),
   containerName: text("container_name"),
   previewSubdomain: text("preview_subdomain"),
