@@ -105,12 +105,16 @@ export function parseTriageExit(ndjson: string): TriageResult {
   return { kind, body, tier };
 }
 
+/** Who chose a run's tier (issue #200): the ticket's own `model:` directive,
+ * or the triage pass's stored suggestion filling the gap the body left. */
+export type TierSource = "ticket" | "triage";
+
 /**
  * The tier a run will use, and where it came from (issue #200). Null means
  * neither the ticket nor triage stated one, so the run resolves to the
  * configured default exactly as a ticket with no directive always has.
  */
-export type RunTierChoice = { tier: ModelTier; source: "ticket" | "triage" } | null;
+export type RunTierChoice = { tier: ModelTier; source: TierSource } | null;
 
 /**
  * Precedence between a ticket's own `model:` directive and the tier its

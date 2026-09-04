@@ -28,8 +28,14 @@ import {
 import type { ModelTier } from "../../model-tiers";
 import type { QuotaRejection } from "../../quota/rate-limit-rejection";
 import { planTierDegrade } from "../../quota/tier-ladder";
-import { chooseRunTier, type RunTierChoice, type TriageExitKind, type TriageResult } from "./triage";
-import type { ResolvedLane } from "@/lib/lanes/resolve";
+import {
+  chooseRunTier,
+  type RunTierChoice,
+  type TierSource,
+  type TriageExitKind,
+  type TriageResult,
+} from "./triage";
+import type { ResolvedLane } from "../../lanes/resolve";
 import {
   buildFeedbackTurn,
   undeliverableFeedbackBody,
@@ -589,12 +595,12 @@ export type Action =
        * to the tier vocabulary — or, where the body states none, the tier the
        * issue's triage pass suggested (issue #200); null = the configured
        * default tier. Recorded on runs.model. */
-      model: string | null;
+      model: ModelTier | null;
       /** Where `model` came from: the ticket's own directive, or triage's
        * stored suggestion filling the gap; null when neither stated one. The
        * claim comment names it so a tier that reached the run without
        * appearing in the body is still visible on the issue. */
-      modelSource: "ticket" | "triage" | null;
+      modelSource: TierSource | null;
       /** Reasoning-effort level from an `effort:` directive (issue #81),
        * clamped to the allowlist; null = the configured default. Recorded on
        * runs.effort. */
@@ -1133,7 +1139,7 @@ export function describeDefaultTier(
 
 /** The phrase naming where a run's tier came from — written once, because
  * the recommendation and the claim comment both say it (issue #200). */
-export function describeTierSource(source: "ticket" | "triage"): string {
+function describeTierSource(source: TierSource): string {
   return source === "ticket"
     ? "ticket directive"
     : "triage's suggestion — the ticket states none; a `model:` line in a Workflow section would outrank it";

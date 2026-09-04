@@ -12,7 +12,7 @@ import { newId } from "../../ulid";
 import { processSingleton } from "../../process-singleton";
 import { getConfig, PLATFORM_REPO_URL } from "../../config";
 import { getFleetSettings, getSettingsOverrides } from "../../settings";
-import { normalizeModelTier, type ModelTier } from "../../model-tiers";
+import { latestTriageTier } from "./triage-tasks";
 import { getLaneCatalog } from "../../lanes/catalog";
 import { resolveLane } from "../../lanes/resolve";
 import { readStoredTriageResult, type RunTierChoice } from "./triage";
@@ -82,7 +82,6 @@ import { getActiveTasks, isParked, releaseParkedImplementTask } from "../turn-ma
 import {
   describeDefaultTier,
   describeRunTier,
-  describeTierSource,
   decideNext,
   type Action,
   type AutonomySnapshot,
@@ -717,7 +716,7 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
           attemptsMade: issueRuns.filter((r) => r.status === "failed").length,
           interruptionsMade: issueRuns.filter((r) => r.status === "interrupted").length,
           hasActiveRun,
-          triageTier: latestTriageTier(issueRef),
+          triageTier: latestTriageTier(db, issueRef),
         });
       }
       // Feed the read model's backlog depth (dashboard + daily digest) from
@@ -1426,37 +1425,6 @@ async function resolveArmedAt(
   }
 }
 
-/**
- * The tier the issue's most recent *completed* triage pass suggested for its
- * work (issue #200), or null when it suggested none. Read off
- * `tasks.triageTier`, which outlives the exit's consumption for exactly this
- * read: the claim may come hours after the pass, on a human's label click or
- * Discord "yes". The newest pass that ran to completion decides, a null
- * included — a re-triage that omitted the line means "the default", not
- * "whatever an earlier pass said about an earlier body" — while a pass that
- * died (`failed`, no exit) says nothing and leaves the last judgement
- * standing. The status is a safe key because `finishTriagePass` writes the
- * exit and `completed` in one statement: every pass the pending-triage gather
- * above applied by its stored exit is `completed` from the same instant, and
- * the only `failed` rows holding a result are the ones the turn manager's
- * catch wrote for a pass that died — which the gather applies fail-closed and
- * this read skips, so the embed and the claim always name the same pass. The
- * stored word is re-clamped to the vocabulary on the way in: a row is data,
- * and the reducer only ever sees a tier.
- */
-function latestTriageTier(issueRef: string): ModelTier | null {
-  const row = db
-    .select({ tier: tasks.triageTier })
-    .from(tasks)
-    .where(
-      and(eq(tasks.githubIssue, issueRef), eq(tasks.kind, "triage"), eq(tasks.status, "completed"))
-    )
-    .orderBy(desc(tasks.createdAt))
-    .limit(1)
-    .get();
-  return normalizeModelTier(row?.tier ?? null);
-}
-
 /** Open blocker: a native GitHub issue dependency, or a `Blocked by: #n`
  * line naming a still-open issue in the same repo. */
 async function hasOpenBlocker(
@@ -1990,13 +1958,14 @@ async function executeApplyTriage(
  * sentence when the ticket or triage chose one, and otherwise the configured
  * default *named*, because the operator authorizing from Discord should see
  * the tier the run will use rather than a pointer to a settings screen. It is
- * read through `resolveLane` — the same resolution the implement pass makes
- * at start, fresh, against the primary lane — rather than the model-choice
- * step alone, because the lane has the last word on an unset tier: a priced
- * lane resolves it to `standard` where Anthropic-direct lets the harness
- * choose (#175), and naming the step's answer would name a tier the run
- * does not use. A lane that cannot resolve (a missing credential) names
- * nothing: that run fails before it starts, and #172 reports why. The
+ * read through `resolveLane` against the primary lane — the resolution the
+ * implement pass makes at start unless routing has moved it off a walled
+ * lane (#173/#176), the same boundary #171's gate reads at — rather than the
+ * model-choice step alone, because the lane has the last word on an unset
+ * tier: a priced lane resolves it to `standard` where Anthropic-direct lets
+ * the harness choose (#175), and naming the step's answer would name a tier
+ * the run does not use. A lane that cannot resolve (a missing credential)
+ * names nothing: that run fails before it starts, and #172 reports why. The
  * sentence itself is the reducer's (`describeDefaultTier`), so the two
  * surfaces cannot drift apart in wording.
  */
@@ -3381,7 +3350,7 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
     // sees that the fleet acted on a suggestion rather than on the ticket.
     let modelNote = "";
     if (action.model && action.modelSource) {
-      modelNote = `\n\nModel tier: \`${action.model}\` (${describeTierSource(action.modelSource)}).`;
+      modelNote = `\n\n${describeRunTier({ tier: action.model, source: action.modelSource })}`;
     }
     if (action.modelSource !== "ticket") {
       const rawModel = rawModelDirective(action.issueBody);
