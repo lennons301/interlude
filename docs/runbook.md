@@ -474,14 +474,18 @@ above the tier the run's implement pass ran at** — `light` work gets a
 through by an equally weak reviewer, and a repair is not a rerun of the attempt
 that just failed at the tier that just failed. The Review row and the Implement
 row are therefore **ceilings** on that derivation rather than fixed tiers: set
-(from the screen, or by a tier named in the variable the row reports), a row
+(from the screen, or by a tier named in the row's *own* variable —
+`AGENT_MODEL_REVIEW` for the review, `AGENT_MODEL` for the repair's step), a row
 caps the derivation there — set the review tier low as a cost measure and a
 heavy ticket's review is capped at it, which is the accepted trade; left unset,
-the derivation runs free. Two edges: a repair is never run *below* the tier its
-own work ran at (the Implement row is a default a ticket's directive outranks,
-so as a ceiling it bounds the repair's step, not the work), and a row pinning a
-raw model id rather than a tier cannot bound one — on the Review row the pin is
-run as pinned and nothing derives. A run whose implement pass resolved no tier
+the derivation runs free. The base `AGENT_MODEL` standing in for an unset
+`AGENT_MODEL_REVIEW` is what a review with nothing to derive from falls back to,
+**not** a ceiling on the review — read as one it would cap every review at the
+implement tier. Two edges: a repair is never run *below* the tier its own work
+ran at (the Implement row is a default a ticket's directive outranks, so as a
+ceiling it bounds the repair's step, not the work), and a row pinning a raw
+model id rather than a tier cannot bound one — on the Review row the pin is run
+as pinned and nothing derives. A run whose implement pass resolved no tier
 (a pinned id, or the harness default) derives nothing, and its review and
 repair resolve exactly as before. Triage and interactive are never derived:
 triage is standalone and armed by a human, and an interactive session has a
