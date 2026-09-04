@@ -8,6 +8,7 @@ import {
 } from "@/components/fleet/fleet-bits";
 import { FALL_THROUGH } from "@/components/settings-overrides";
 import type { LaneBilling } from "@/lib/lanes/lane-config";
+import { formatUsdPerMTok } from "@/lib/lanes/lane-rate";
 import type { LaneSettingsView } from "@/lib/lanes/resolve";
 import type { MinLaneFieldView } from "@/lib/settings-resolver";
 
@@ -188,14 +189,8 @@ function routedNote(routed: LaneRoutingRow | null): string {
       ? routed.billing === "metered"
         ? ", priced by the harness"
         : ""
-      : `, ${usdPerMTok(routed.rateUsdPerMTok)}/Mtok`;
+      : `, ${formatUsdPerMTok(routed.rateUsdPerMTok)}/Mtok`;
   const lead = routed.chosen ? "routes to" : "nothing qualifies — runs on";
   return `${lead} ${routed.laneId}${rate}`;
 }
 
-/** Two significant figures, because these span three orders of magnitude and
- * "$0.04" beside "$1.65" is the whole comparison. */
-function usdPerMTok(rate: number): string {
-  if (rate === 0) return "$0";
-  return `$${rate < 0.1 ? rate.toFixed(3) : rate.toFixed(2)}`;
-}

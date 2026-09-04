@@ -14,10 +14,7 @@ import { getConfig, PLATFORM_REPO_URL } from "../../config";
 import { getFleetSettings } from "../../settings";
 import { resolveQuotaThreshold, resolveResumeBound } from "../../settings-resolver";
 import { evaluateQuotaGate } from "../../quota/quota-gate";
-import {
-  discardTranscript,
-  hasTranscript,
-} from "../../quota/session-transcript";
+import { discardTranscript } from "../../quota/session-transcript";
 import { getOctokit, isGitHubConfigured } from "../../github/client";
 import { fetchFileFromDefaultBranch } from "../../github/contents";
 import {
@@ -83,7 +80,6 @@ import {
   type CandidateIssue,
   type ChecksFailingPr,
   type ConflictingPr,
-  type PausedRun,
   type PendingGateEvaluation,
   type PendingTriage,
   type PendingVerdict,
@@ -94,6 +90,11 @@ import {
   type TriageCandidate,
 } from "./decide";
 import { observeCheckRollup, type CheckObservation } from "./checks";
+import {
+  executeResumeRun,
+  executeResumeRunOnLane,
+  gatherPausedRuns,
+} from "./paused-runs";
 import { observeReviewedHead } from "./review-head";
 import {
   ESTATE_GATES_PATH,
@@ -116,7 +117,6 @@ import {
   buildCiRepairPrompt,
   buildImplementPrompt,
   buildRepairPrompt,
-  buildResumePrompt,
   buildReviewPrompt,
   buildTriagePrompt,
   type PriorAttempt,
@@ -847,7 +847,12 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     pendingTriageResults,
     queuedTriageCount: queuedTasks.filter((t) => t.kind === "triage").length,
     announcedTriageErrors: [...announcedTriageErrors],
-    pausedRuns: gatherPausedRuns(allRuns),
+    // Each paused run also carries where it could resume *now*, on a lane
+    // other than the one that walled it (issue #199) — ranked off this tick's
+    // one read of the money guards, so an authorisation on the settings screen
+    // reaches the next sweep and two paused runs are judged against one
+    // reading of the day's cash.
+    pausedRuns: gatherPausedRuns(allRuns, now, settings, money),
     // Off the same one-per-tick read of the settings row as the threshold
     // above, never the memoised config: a bound changed on the settings screen
     // must bind at the next sweep with no restart (issue #166's freshness
@@ -855,50 +860,6 @@ async function gatherSnapshot(now: Date): Promise<AutonomySnapshot> {
     maxResumesPerAttempt: resolveResumeBound(config, settings.overrides).resumes,
     resumeJitterMs: RESUME_JITTER_WINDOW_MS,
   };
-}
-
-/**
- * Runs parked on the quota clock (issue #169), with the two facts the reducer
- * decides from: how many resumes this attempt has spent, and whether one is
- * already under way.
- *
- * `hasLiveTask` is the idempotency latch and is deliberately a *task* fact
- * rather than a run-status one: the resume executor leaves the run
- * `rate_limited` until its pass actually starts, so that a restart between the
- * two leaves a paused run that is still visibly paused rather than one
- * pretending to be claimed.
- */
-function gatherPausedRuns(allRuns: Array<typeof runs.$inferSelect>): PausedRun[] {
-  const paused = allRuns.filter((run) => run.status === "rate_limited");
-  if (paused.length === 0) return [];
-
-  // One query for every paused run, as the sibling gatherers do — a sweep runs
-  // every 30 seconds and its cost should not scale with how walled the account
-  // happens to be.
-  const resuming = new Set(
-    db
-      .select({ runId: tasks.runId })
-      .from(tasks)
-      .where(
-        and(
-          inArray(
-            tasks.runId,
-            paused.map((run) => run.id)
-          ),
-          inArray(tasks.status, ["queued", "running"])
-        )
-      )
-      .all()
-      .map((task) => task.runId)
-  );
-
-  return paused.map((run) => ({
-    runId: run.id,
-    issueRef: run.githubIssue,
-    resumeAfter: run.resumeAfter,
-    resumesMade: run.resumeCount,
-    hasLiveTask: resuming.has(run.id),
-  }));
 }
 
 /**
@@ -1522,6 +1483,9 @@ async function executeActions(actions: Action[]): Promise<void> {
         break;
       case "resumeRun":
         await executeResumeRun(action);
+        break;
+      case "resumeRunOnLane":
+        await executeResumeRunOnLane(action);
         break;
       case "exhaustPausedRun":
         await executeExhaustPausedRun(action);
@@ -2751,133 +2715,6 @@ async function executeEscalateStaleReview(
  * counter — two failed runs, or four interruptions — granting exactly one
  * fresh claim instead of insta-exhausting.
  */
-/**
- * Resume a run parked on the quota clock (issue #169).
- *
- * A fresh task for the same run, on the same branch, carrying the paused
- * pass's own prompt behind a resume preamble — and, when the transcript
- * survived the teardown, the session id that makes the harness continue the
- * same conversation instead of re-orienting from scratch. The queue starts it
- * under the ordinary capacity check like any other queued pass, and
- * `startTask` provisions the container: nothing here touches Docker.
- *
- * Two pieces of bookkeeping, and what is *not* touched matters as much:
- *
- * - `resumeCount` is bumped here, at the moment the resume is decided, rather
- *   than when the pass starts. A resume whose task never starts (a lane
- *   misconfiguration, a container that will not build) would otherwise be
- *   retried every sweep forever; counted here, the bound catches it.
- * - The new row records the pass it resumed (`resumedFromTaskId`), which is
- *   what carries the attempt's budget across the pause: what this pass may
- *   spend is the allowance its predecessors started on, less what they spent.
- * - The run stays `rate_limited` until its pass actually starts, and keeps its
- *   `resumeAfter`. A restart in between then leaves a run that is still
- *   visibly paused rather than one pretending to be claimed, and the
- *   dashboard's countdown keeps naming the window it waited on. `startTask`
- *   moves it to `implementing` and clears the clock, as it does for every
- *   implement-shaped pass.
- *
- * A run whose status has moved on since the decision (a human cancelled it) is
- * left alone: the action is stale, not wrong.
- */
-async function executeResumeRun(
-  action: Extract<Action, { type: "resumeRun" }>
-): Promise<void> {
-  const run = db.select().from(runs).where(eq(runs.id, action.runId)).get();
-  if (!run || run.status !== "rate_limited") return;
-
-  // Re-read the idempotency fact the decision was made on. The run stays
-  // `rate_limited` while its resume is queued, so status alone cannot say
-  // whether one is already under way — and two sweeps can be in flight at once
-  // (a webhook-triggered one runs on the app router's module graph, issue
-  // #159), which would otherwise mean two containers for one run.
-  const alreadyResuming = db
-    .select({ id: tasks.id })
-    .from(tasks)
-    .where(and(eq(tasks.runId, run.id), inArray(tasks.status, ["queued", "running"])))
-    .all();
-  if (alreadyResuming.length > 0) return;
-
-  // The pass that was paused — its prompt, its kind and its session. The run's
-  // most recent work-carrying task: a repair pass can be walled exactly as an
-  // implement pass can, and resuming it as an implement pass would hand a
-  // conflict-repair brief to something that thinks it is building a feature.
-  const paused = db
-    .select()
-    .from(tasks)
-    .where(eq(tasks.runId, run.id))
-    .all()
-    .filter((task) => task.kind === "implement" || task.kind === "repair")
-    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
-    .pop();
-  if (!paused) {
-    console.error(
-      `[autonomy] Run ${action.runId} is paused but owns no implement pass to resume`
-    );
-    return;
-  }
-
-  // The session is only worth resuming if its transcript is actually on disk:
-  // `--resume` against a session the fresh container has never heard of would
-  // fail the pass outright, where the declared fallback is a pass that starts
-  // again on the same branch with its context lost.
-  const sessionId =
-    paused.sessionId !== null && hasTranscript(run.id) ? paused.sessionId : null;
-
-  const now = new Date();
-  const taskId = newId();
-  db.insert(tasks)
-    .values({
-      id: taskId,
-      projectId: run.projectId,
-      title: paused.title,
-      description: buildResumePrompt({
-        originalPrompt: paused.description,
-        branch: paused.branch ?? "the attempt's branch",
-        resume: action.resume,
-        maxResumes: action.maxResumes,
-      }),
-      status: "queued",
-      kind: paused.kind,
-      runId: run.id,
-      githubIssue: action.issueRef,
-      branch: paused.branch,
-      sessionId,
-      // Lineage, and with it the attempt's budget: a resume is a new row, so
-      // without this the turn manager would hand the attempt its whole
-      // per-attempt allowance again, once per resume (issue #169).
-      resumedFromTaskId: paused.id,
-      pullRequestNumber: paused.pullRequestNumber,
-      pullRequestUrl: paused.pullRequestUrl,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .run();
-
-  db.update(runs)
-    .set({ resumeCount: run.resumeCount + 1 })
-    .where(eq(runs.id, run.id))
-    .run();
-
-  console.log(
-    `[autonomy] Resuming ${action.issueRef} (attempt ${run.attempt}, resume ` +
-      `${action.resume}/${action.maxResumes}) -> task ${taskId}` +
-      `${sessionId ? ` continuing session ${sessionId}` : " without its prior context"}`
-  );
-
-  await commentOnIssue(
-    action.issueRef,
-    `The quota window has reset — resuming attempt ${run.attempt} ` +
-      `(resume ${action.resume}/${action.maxResumes}). ` +
-      (sessionId
-        ? `The paused pass's session was preserved, so it continues the same ` +
-          `conversation on \`${paused.branch}\`.`
-        : `The paused pass's session could not be preserved, so it starts again ` +
-          `on \`${paused.branch}\` with the work pushed so far and no prior ` +
-          `context.`)
-  );
-}
-
 /**
  * A run that has paused more often than one attempt may (issue #169): hand the
  * ticket to a human the way an exhausted one is handed over.

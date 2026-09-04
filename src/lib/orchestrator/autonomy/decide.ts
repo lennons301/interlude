@@ -241,6 +241,33 @@ export interface PausedRun {
   /** A task of this run already queued or running — the idempotency fact, so
    * re-deciding across sweeps cannot queue a second resumed pass */
   hasLiveTask: boolean;
+  /**
+   * The execution lane the paused pass ran on (issue #199) — the one that
+   * walled it — read off its task row exactly as `PassOutcome.laneId` is, and
+   * null when the row recorded none. The lane the gatherer excluded when it
+   * ranked `laneFailover`, and the one named in the early resume's
+   * announcement.
+   */
+  laneId: string | null;
+  /**
+   * Where this run could resume **now**, on a lane other than the one that
+   * walled it (issue #199), or null when nowhere is both available and
+   * permitted — in which case the run waits on its clock exactly as before.
+   *
+   * Re-ranked every sweep, through the same `planLaneFailover` a refused pass
+   * is offered at the moment of its wall, so the two paths cannot disagree
+   * about which lane is cheapest — and so a paid lane authorised a minute after
+   * the pause (the day's spend confirmed, a cap raised, a floor lifted) takes
+   * effect at the next tick rather than at the end of the window. #174's cap
+   * and confirm-once press are evaluated *inside* that ranking, per lane, so a
+   * money-held lane is simply never offered here: unattended work still starts
+   * spending real money only under the day's confirmation and cap.
+   *
+   * Handed in already ranked for the reason `PassOutcome.laneFailover` is: the
+   * ranking reads the lane file, the environment, every lane's quota row and
+   * the day's cash, and the reducer's job is the ordering and the bound.
+   */
+  laneFailover: LaneFailoverOption | null;
 }
 
 /** An open issue awaiting triage (`needs-triage`), as gathered by the sweep. */
@@ -526,7 +553,8 @@ export interface AutonomySnapshot {
   /** Task IDs whose unparseable triage exit was already announced */
   announcedTriageErrors: string[];
   /** Runs parked on the quota clock (issue #169) — resumed once their window
-   * has reset, or handed to a human once the resume bound is spent */
+   * has reset, resumed early on another lane that can serve them (issue
+   * #199), or handed to a human once the resume bound is spent */
   pausedRuns: PausedRun[];
   /** Resumes one attempt may have after a quota pause before its ticket is
    * routed to a human. UI-settable (issue #166's layer), so it is a snapshot
@@ -875,6 +903,10 @@ export type Action =
       /** What running there will cost — `metered` means real money, already
        * checked against #174's cap and confirm-once press by the ranking */
       toLaneBilling: LaneBilling;
+      /** USD per Mtok of the ranking mix on that lane, or null when the lane
+       * declares no prices — quoted in the announcement (issue #199), because
+       * a crossing onto a paid lane is never silent about what it costs */
+      toLaneRateUsdPerMTok: number | null;
       /** The window that refused it, verbatim, or null when it named none */
       limitType: string | null;
       /** When that window resets, or null when the event named none. Said for
@@ -901,6 +933,46 @@ export type Action =
        * attempt rather than as several */
       resume: number;
       /** The bound it is counted against, for the issue comment */
+      maxResumes: number;
+    }
+  | {
+      // A paused run resumed **early**, on a lane other than the one that
+      // walled it (issue #199). Before this the paused-run path resumed on
+      // exactly one condition — its clock expiring — so authorising a paid lane
+      // a minute after a run parked changed nothing for five hours, and on a
+      // one-slot box a dependency chain stalled behind the parked run.
+      //
+      // A lane move like any other (#176): the executor queues the paused pass
+      // again on the same branch, carrying its session where the transcript
+      // survived; it counts against the same resume bound; it answers to the
+      // same money guards (evaluated inside the ranking that produced the
+      // option, so an unconfirmed or capped lane was never a candidate); and
+      // it is announced with the lane and what that lane costs. The target is
+      // advisory exactly as a failover's is — the resumed pass re-asks the same
+      // ranking when it starts, so `runs.lane`/`tasks.lane` record where the
+      // work really ran.
+      type: "resumeRunOnLane";
+      runId: string;
+      /** "owner/repo#n" */
+      issueRef: string;
+      /** The lane that walled the paused pass; null when its row recorded none */
+      fromLaneId: string | null;
+      toLaneId: string;
+      toLaneLabel: string;
+      /** What running there costs — the effective kind, so an overage-covered
+       * subscription target reads as the cash it is */
+      toLaneBilling: LaneBilling;
+      /** USD per Mtok of the ranking mix on that lane, or null when the lane
+       * declares no prices — quoted in the announcement, because a crossing
+       * onto a paid lane is never silent about what it costs */
+      toLaneRateUsdPerMTok: number | null;
+      /** When the walled window resets — the clock this resume did not wait
+       * out. Non-null by construction: a clockless row is eligible now and
+       * takes the ordinary resume instead */
+      resumeAfter: Date;
+      /** Which continuation of this attempt it is, and the bound it counts
+       * against — the same pair a resume and a lane move report */
+      resume: number;
       maxResumes: number;
     }
   | {
@@ -1155,6 +1227,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
           toLaneId: pass.laneFailover.toLaneId,
           toLaneLabel: pass.laneFailover.toLaneLabel,
           toLaneBilling: pass.laneFailover.billing,
+          toLaneRateUsdPerMTok: pass.laneFailover.rateUsdPerMTok,
           limitType,
           resumeAfter,
           move: pass.resumesMade + 1,
@@ -1560,8 +1633,9 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // claim, because resuming existing work outranks starting new work: a run
   // parked on the quota clock already holds its ticket, has a branch with work
   // on it, and is one pass from a PR, while a claim is all of that still to
-  // buy. Each resume reserves a slot against new claims exactly as a queued
-  // review does (see claimableSlots below).
+  // buy. Each resume — on the clock, or early on another lane (issue #199) —
+  // reserves a slot against new claims exactly as a queued review does (see
+  // claimableSlots below).
   //
   // Deliberately *not* held by the daily cap or the kill switch. Both of those
   // gate pickup — "no claim, no triage pass" — and everything already in
@@ -1588,6 +1662,43 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
         runId: paused.runId,
         issueRef: paused.issueRef,
         resumesMade: paused.resumesMade,
+      });
+      continue;
+    }
+    // The second condition (issue #199): while the wall still stands by its
+    // own clock, a lane other than the walled one that can serve the run now
+    // resumes it there rather than waiting the window out. Only while the
+    // clock stands by *more than the jitter window*: once the window has reset
+    // the run's own lane can serve it again for nothing, so it takes the
+    // ordinary resume below (through its jitter, which exists to spread
+    // exactly that moment) — and a wall lifting inside that same window is not
+    // worth paying a lane move to skip either, since the move would buy at
+    // most the wait the jitter itself imposes, for cash and a fresh
+    // orientation. The bound above is judged first for the same reason it is
+    // judged before the clock: a run with no continuations left is never going
+    // to resume anywhere, so moving it would only defer telling the human.
+    // Whether the target is *permitted* — the floor, #174's confirmation and
+    // cap — was decided inside the ranking that produced the option, which is
+    // why a null here is "stay parked" and needs no second reading of the
+    // guards.
+    if (
+      paused.resumeAfter !== null &&
+      snapshot.now.getTime() + snapshot.resumeJitterMs < paused.resumeAfter.getTime() &&
+      paused.laneFailover !== null
+    ) {
+      resumesQueuedThisSweep++;
+      actions.push({
+        type: "resumeRunOnLane",
+        runId: paused.runId,
+        issueRef: paused.issueRef,
+        fromLaneId: paused.laneId,
+        toLaneId: paused.laneFailover.toLaneId,
+        toLaneLabel: paused.laneFailover.toLaneLabel,
+        toLaneBilling: paused.laneFailover.billing,
+        toLaneRateUsdPerMTok: paused.laneFailover.rateUsdPerMTok,
+        resumeAfter: paused.resumeAfter,
+        resume: paused.resumesMade + 1,
+        maxResumes: snapshot.maxResumesPerAttempt,
       });
       continue;
     }

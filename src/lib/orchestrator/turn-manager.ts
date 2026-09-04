@@ -37,6 +37,7 @@ import { getLaneCatalog } from "../lanes/catalog";
 import { bookTaskCost } from "./spend";
 import { resolveLane, type ResolvedLane } from "../lanes/resolve";
 import { readLaneCrossing, readLaneFailover } from "../lanes/overflow-state";
+import { describeLaneCost } from "../lanes/lane-rate";
 import { payerChanged, type LaneCrossing } from "../lanes/overflow";
 import type { LaneBilling } from "../lanes/lane-config";
 import { noteOnceOnFeed } from "../tasks/feed-note";
@@ -844,6 +845,14 @@ export async function restoreSessionTranscript(
   running: RunningContainer
 ): Promise<string | undefined> {
   if (task.sessionId === null || task.runId === null) return undefined;
+  // Stated limit, not yet a live branch (issue #199): this transcript is a
+  // Claude Code session, and a lane move (#176, #199) may carry one only
+  // because every declared lane runs that one adapter — see the foot of
+  // `harness/adapter.ts`. When a second adapter ships, enforce it here:
+  // `task.resumedFromTaskId` leads to the lane (and adapter) the conversation
+  // came from, and a mismatch must take the "resume without the transcript"
+  // outcome just below, never `--resume` against a session the new harness has
+  // never heard of.
 
   const transcript = readTranscript(task.runId);
   if (transcript === null) {
@@ -2351,10 +2360,9 @@ async function failOverRunLane(
     ? `the ${describeRateLimitType(move.limitType)}`
     : "the account's rate limit";
   const from = move.fromLaneId ?? "its lane";
-  const cost =
-    move.toLaneBilling === "metered"
-      ? " That lane bills per token, within today's confirmed real-money cap."
-      : "";
+  // One sentence for what a lane costs, shared with #199's early resume of a
+  // paused run — the two moves must quote the same figure the same way.
+  const cost = describeLaneCost(move.toLaneBilling, move.toLaneRateUsdPerMTok);
   const retryId = newId();
 
   console.log(
@@ -2371,7 +2379,7 @@ async function failOverRunLane(
       task.githubIssue,
       `Moved execution lane (attempt ${run?.attempt ?? "?"}): ${window} refused ` +
         `this pass on \`${from}\`, so the run continues on **${move.toLaneLabel}** ` +
-        `rather than waiting the window out (move ${move.move}/${move.maxMoves}).` +
+        `rather than waiting the window out (move ${move.move}/${move.maxMoves}). ` +
         `${cost} A lane move consumes neither an attempt nor an interruption — ` +
         `work so far is pushed to \`${task.branch}\`.`
     ).catch(console.error);
