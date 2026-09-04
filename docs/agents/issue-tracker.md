@@ -27,11 +27,85 @@ GitHub shares one number space across issues and PRs, so a bare `#42` may be eit
 
 ## When a skill says "publish to the issue tracker"
 
-Create a GitHub issue.
+Create a GitHub issue, in the shape the *Ticket contract* section below requires: every published ticket carries a `## Workflow` section naming a tier.
 
 ## When a skill says "fetch the relevant ticket"
 
 Run `gh issue view <number> --comments`.
+
+## Ticket contract: every published ticket declares a tier
+
+This section extends the generation skill's issue template. The skill (`/to-tickets`) is not forked, wrapped or vendored: its template is a shape, and this contract adds one section to that shape, the same way `docs/agents/review-gates.yaml` adds gates to the estate defaults without removing any. Read it whenever you publish a ticket to this repo — from `/to-tickets`, by hand, or inside an interlude generation session. All three have this file checked out.
+
+### The rule
+
+**Every published ticket carries a `## Workflow` section, and that section names a tier** on a `model:` line:
+
+```markdown
+## Workflow
+
+model: light
+```
+
+The tier says how hard the ticket's *work* is, so the fleet can run a one-line guard and a new state machine at different tiers instead of running both at whatever the fleet's configured default resolves to. Put the section after `## Acceptance criteria` and before `## Blocked by`. One `model:` line per ticket, on its own line, not inside a code fence; the executor reads whole lines inside the Workflow section and nothing else, so a tier mentioned in prose is data, not a decision.
+
+The key is `model:`, not `tier:`, because `model:` is the directive the executor already reads. The vendor names `opus`, `sonnet` and `haiku` still resolve as aliases for `heavy`, `standard` and `light`, but write the tier: the tier is what the fleet acts on, records on the run and reports.
+
+### Choosing the tier
+
+Three tiers, and each one is **chosen positively**. There is no default and no "otherwise" branch: read all three criteria and state the one that describes the work. The axis is what the spec leaves for the implementer to decide — nothing, the route, or a design decision — not how confident you feel about the ticket.
+
+- `light` — the change is determined by the spec: an explicit instruction, a mechanical edit, a well-bounded change with no ambiguity about what to write.
+- `standard` — judgement within a known pattern: multi-file, follows existing conventions, acceptance criteria clear but the route not spelled out.
+- `heavy` — a design decision the spec does not make: a new seam or abstraction, concurrency or state reasoning, a subtle invariant, or blast radius crossing module boundaries.
+
+`standard` is not the middle to settle on when the choice feels hard; it is chosen when the route is genuinely the implementer's to find within conventions the repo already has. `light` is not reserved for the trivially obvious; it is chosen whenever the spec has already made every decision the implementer would otherwise make, however many lines that takes. `heavy` is chosen for the decision the ticket asks the implementer to make, not for the size of the diff. When none of the three fits, the ambiguity is usually in the ticket rather than the rubric — sharpen *what to build* until one criterion describes it.
+
+### What a ticket may and may not say
+
+- **A tier, never a lane.** Which lane runs a pass — the subscription, the Anthropic API, OpenRouter — is fleet policy and cost routing. A ticket body is semi-trusted text and may not send the fleet somewhere that spends money. There is no lane directive, and the executor ignores unknown keys rather than interpreting them.
+- **A tier, never a raw model identifier.** `model: claude-opus-4-8` names no tier. The executor drops it, runs the pass at the configured default and notes on the issue that the directive was not recognised — so a mistyped tier is visible, never fatal, and never obeyed.
+- **The tier applies to the ticket's work passes only** — the implement pass and any repair pass of the run. Review and triage run at the fleet's own settings. A ticket cannot cheapen the gate that judges it or the pass that assesses it, and the Workflow section has no key that would let it.
+- `budget:`, `max-turns:`, `checkpoint:` and `effort:` stay hand-written escape hatches in the same section (see `docs/runbook.md`). They are not part of the tier decision: a budget is a ceiling, not a lever, and declaring a low one on a cheap ticket saves nothing.
+
+### A ticket that arrives without a tier
+
+It is not refused. It runs exactly as it did before this contract, at the configured default tier for the pass: a forgotten section costs the fleet nothing it was not already paying — it only forfeits the choice. Refusing to claim such a ticket would wedge the frontier over a missing doc section, so the contract is enforced by the producer writing the section, not by the executor.
+
+### The section and `workflow:<skill>` labels
+
+Know one consequence before you publish. The executor reads a body Workflow section as the ticket's *own* workflow: when one is present, the implement pass is told to follow the section, and a `workflow:<skill>` label (`workflow:tdd`) is **not** applied. This contract puts a section on every ticket, so a label alone no longer selects a method. The right fix is in the reader — a section carrying only directives should not count as a bespoke workflow — and is deliberately outside this contract, which changes no parser. Until it lands, a ticket that needs a named method writes the method into its Workflow section alongside the tier (the steps, the seams under test, the done-signal: the per-ticket override the estate contract already provides for) rather than relying on the label.
+
+### The extended shape
+
+The generation skill's issue template, with this contract's one addition:
+
+```markdown
+## Parent
+
+Spec: #<n> (omit when there is no parent)
+
+## What to build
+
+The end-to-end behaviour this ticket makes work, from the user's perspective.
+
+## Acceptance criteria
+
+- [ ] Criterion 1
+- [ ] Criterion 2
+
+## Workflow
+
+model: standard
+
+## Blocked by
+
+- #<n>, or "None — can start immediately"
+```
+
+### Scope
+
+The tier vocabulary is interlude's own. The estate's other executor ignores `model:`, so this contract lives here and not in the estate's workflow choice document; promoting it estate-wide is a later decision, deliberately not taken until the rubric is proven on this repo's tickets.
 
 ## Wayfinding operations
 

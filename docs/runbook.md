@@ -458,6 +458,11 @@ text is semi-trusted, so it may only select a tier, never name an arbitrary
 model); an unrecognised value is ignored — the run keeps its configured default
 and the claim comment notes that it was dropped. Review and triage passes keep
 their own (cheaper) tier regardless. The honoured tier is recorded on the run.
+Since issue #197 every published ticket is expected to name its tier, chosen
+against the three-way rubric in the ticket contract in
+`docs/agents/issue-tracker.md` — the contract binds the producer (`/to-tickets`,
+a human, a generation session), not the executor: a ticket that arrives
+without one still runs at the configured default exactly as above.
 
 ### Spending real money (metered lanes)
 
