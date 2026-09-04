@@ -329,7 +329,7 @@ This project's registry entry: products/interlude.yaml
 
 ### Issue tracker
 
-Issues live in this repo's GitHub Issues, operated via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues live in this repo's GitHub Issues, operated via the `gh` CLI. Every published ticket carries a `## Workflow` section naming a tier (`model: light | standard | heavy`), chosen against the three-way rubric in the ticket contract there (issue #197). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
