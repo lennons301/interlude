@@ -30,6 +30,13 @@ import type { SettingFieldView } from "@/lib/settings-resolver";
  * (issue #172), which is why this panel is presentational and shares its state
  * with the lane panel below — see `SettingsOverrides`.
  *
+ * Two of the rows are **ceilings** rather than fixed tiers (issue #201): a
+ * review pass runs one rung above the tier the run's implement pass ran at,
+ * and a repair pass does too, so the Review row bounds the review and the
+ * Implement row bounds the repair's step. Which rows those are is the
+ * resolver's to say (`caps`), not this component's — the pass and the screen
+ * read one description of the same rule.
+ *
  * A change lands on the settings row and is read fresh when the next pass
  * starts, so it takes effect at the next sweep with no restart. Runs already
  * in flight keep the tier they recorded.
@@ -61,7 +68,11 @@ export function ModelTierPanel({
         to. Left on <span className="font-plex-mono">{FALL_THROUGH}</span>, a
         row follows the deployment&apos;s own variable. A ticket&apos;s{" "}
         <span className="font-plex-mono">model:</span> directive still outranks
-        both.
+        both for the work it declares. Review and repair are not chosen here
+        but derived — one rung above the tier the implement pass ran at — so
+        their rows are <em>ceilings</em>: set, a row caps the derivation there;
+        left on <span className="font-plex-mono">{FALL_THROUGH}</span> with
+        the variable unset, the derivation runs free.
       </p>
 
       {fields.map((field) => (
@@ -144,9 +155,41 @@ function TierRow({
   );
 }
 
-/** What the pass actually runs on. Naming the model id beside the tier is the
- * bit that makes an override checkable against the harness's own logs. */
+/**
+ * What the row means for the passes that read it. For a field that is simply a
+ * tier, what the pass runs on — naming the model id beside the tier is the bit
+ * that makes an override checkable against the harness's own logs. For a field
+ * that is a **ceiling** on a derived kind (issue #201), the ceiling in force
+ * or its absence, and — where the field also decides an underived pass, or
+ * stands in when a run has no tier to derive from — what that runs.
+ */
 function effective(field: SettingFieldView): string {
+  if (field.caps.length === 0) return runs(field);
+
+  const derived = field.caps.join(" and ");
+  const onlyCeiling = field.kinds.every((kind) => field.caps.includes(kind));
+  const ceiling =
+    field.ceiling === null
+      ? `no ceiling — ${derived} runs one rung above the implement pass`
+      : `ceiling ${field.ceiling} on ${derived} (${field.model})`;
+
+  // The Review row: nothing but a ceiling, and what a review runs when the
+  // run has no implement tier to step from is the fall-back, not the rule.
+  // Except a pinned raw model id, which names no tier to bound with and is
+  // the operator's whole answer on the reviewer's own field: the review runs
+  // it and derives nothing (`resolveAgentModelChoice`).
+  if (onlyCeiling) {
+    if (field.tier === null && field.model !== null) {
+      return `pinned — ${derived} runs ${field.model} and derives nothing`;
+    }
+    return `${ceiling} · with no implement tier to derive from, ${runs(field)}`;
+  }
+  // The Implement row: the tier its own pass runs at, and the ceiling on the
+  // repair's step beside it.
+  return `${runs(field)} · ${ceiling}`;
+}
+
+function runs(field: SettingFieldView): string {
   if (field.model === null) return "no --model — the account default";
   return field.tier === null
     ? `runs ${field.model}`
