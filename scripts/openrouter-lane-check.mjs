@@ -19,7 +19,13 @@
  *      response? (`--check skin`)
  *   2. Does prompt caching work through it, and does the endpoint report cache
  *      reads and cache *writes*? (`--check cache` — sends the same cacheable
- *      prefix twice)
+ *      prefix twice, and audits each response against OpenRouter's
+ *      `GET /v1/generation` record: the billed truth, which also names the
+ *      upstream host that served the request. Issue #193's lesson: the skin's
+ *      `usage` block alone cannot distinguish "this model does not cache" from
+ *      "OpenRouter routed my two probes to two different hosts" — a first
+ *      reading of `cache_read: 0` on GLM was the latter, and the model caches
+ *      fine.)
  *   3. Does the endpoint emit any `anthropic-ratelimit-*` header? (Every check
  *      reports this: it is the fact `quota_state` being per-lane rests on.)
  *
@@ -109,6 +115,28 @@ async function call(args, key, body) {
   return { status: response.status, json, text, rateLimitHeaders };
 }
 
+/**
+ * OpenRouter's audit record for one response — what was actually billed, and
+ * by which upstream host. This is the ground truth the skin's `usage` block is
+ * a lossy view of: `provider_name` exposes the fan-out across a slug's ~20
+ * hosts (the cache-miss and rate-spread mechanism of issue #193), and
+ * `cache_discount` is the money the cache actually saved. Returns null off
+ * OpenRouter, or if the record never appears; the record lags the response by
+ * a second or two, hence the retry.
+ */
+async function fetchGeneration(args, key, id) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const response = await fetch(`${args.baseUrl}/v1/generation?id=${id}`, {
+      headers: { authorization: `Bearer ${key}` },
+    });
+    if (response.status === 200) {
+      return (await response.json()).data;
+    }
+  }
+  return null;
+}
+
 function reportQuotaHeaders(result) {
   if (result.rateLimitHeaders.length > 0) {
     console.log("  quota headers:", result.rateLimitHeaders.join("; "));
@@ -168,6 +196,7 @@ async function checkCache(args, key) {
     messages: [{ role: "user", content: "Say A" }],
   };
 
+  const hosts = [];
   for (const attempt of [1, 2]) {
     const result = await call(args, key, body);
     if (result.status !== 200) {
@@ -180,14 +209,37 @@ async function checkCache(args, key) {
         `cache_read=${usage.cache_read_input_tokens} ` +
         `cache_write=${usage.cache_creation_input_tokens}`
     );
+    const generation = await fetchGeneration(args, key, result.json.id);
+    if (generation !== null) {
+      hosts.push(generation.provider_name);
+      console.log(
+        `    billed: host=${generation.provider_name} ` +
+          `cost=$${generation.total_cost} ` +
+          `cached=${generation.native_tokens_cached}/${generation.native_tokens_prompt} ` +
+          `cache_discount=${generation.cache_discount}`
+      );
+    } else {
+      console.log("    billed: no generation record (not OpenRouter?)");
+    }
     if (attempt === 2) {
       const read = usage.cache_read_input_tokens ?? 0;
-      console.log(
-        read > 0
-          ? "  -> caching works through the skin; the lane's cache_read price applies."
-          : "  -> NO cache read on an identical prefix. Every turn re-pays full " +
-              "input price for the whole context, which dominates a long pass."
-      );
+      if (read > 0) {
+        console.log(
+          "  -> caching works through the skin; the lane's cache_read price applies."
+        );
+      } else if (hosts.length === 2 && hosts[0] !== hosts[1]) {
+        console.log(
+          `  -> no cache read, but the probes were served by two DIFFERENT hosts ` +
+            `(${hosts[0]}, ${hosts[1]}) — a routing miss, not evidence the model ` +
+            "cannot cache (issue #193). Re-run before concluding anything."
+        );
+      } else {
+        console.log(
+          "  -> NO cache read on an identical prefix on one host. Every turn " +
+            "re-pays full input price for the whole context, which dominates " +
+            "a long pass."
+        );
+      }
       // Null on OpenRouter today; undefined on a provider that omits the field
       // entirely. Both mean the same thing: no cache-write count to price.
       if (usage.cache_creation_input_tokens == null) {
