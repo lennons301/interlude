@@ -127,16 +127,16 @@ export function readLaneFailover(
   ticketModel: string | null,
   fromLaneId: string | null,
   now: Date = new Date(),
-  settings: FleetSettings = getFleetSettings()
+  settings: FleetSettings = getFleetSettings(),
+  /** The money guards, when the caller has already read them this instant —
+   * the sweep asks this once per paused run (issue #199) and has one read of
+   * the day's cash in hand for the whole tick, so re-counting it here would
+   * only let the rankings of two runs on one sweep disagree by a booking that
+   * landed between them. */
+  guards: MoneyGuards = readMoneyGuards(now, settings)
 ): LaneFailoverOption | null {
   return planLaneFailover({
-    ...laneSelectionInput(
-      kind,
-      ticketModel,
-      now,
-      settings,
-      readMoneyGuards(now, settings)
-    ),
+    ...laneSelectionInput(kind, ticketModel, now, settings, guards),
     fromLaneId,
   });
 }
