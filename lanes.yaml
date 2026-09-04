@@ -26,6 +26,15 @@
 # Because several providers expose Anthropic-compatible endpoints, every lane
 # here runs the SAME adapter — Claude Code — and differs only in base URL,
 # auth variable and model identifiers. That is the point: one adapter ships.
+#
+# It is also what lets a lane move carry the conversation (issues #176, #199):
+# a pass refused on one lane — or parked on its window and resumed early on
+# another — continues the same Claude Code session on the new lane, because
+# the session transcript is a Claude Code artefact and both ends run Claude
+# Code. A lane declaring a DIFFERENT `adapter` breaks that assumption: a move
+# onto it cannot carry the session and would have to start again on the
+# branch with the work already pushed. Read the stated limit in
+# `src/lib/harness/adapter.ts` before adding one.
 
 # The default primary, in preference order: the first lane whose named
 # variables are all present wins. This reproduces exactly what the platform did

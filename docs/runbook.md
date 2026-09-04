@@ -142,7 +142,10 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
   and phase (implement ▸ review ▸ merge). A run the account's quota refused sits
   here too, labelled **paused** with when its window resets (issue #168) — it is
   deliberately *not* in **needs you**, because a quota window asks nothing of you:
-  the sweep resumes it by itself once the clock runs out (issue #169).
+  the sweep resumes it by itself once the clock runs out (issue #169), or earlier
+  on another lane the moment one can serve it (issue #199) — confirming the day's
+  real-money spend is how you make that happen for a run that is blocking the
+  frontier.
   A run the tier ladder stepped down (issue #170) also sits here, working
   normally, with a line saying which tier it is running at and which it was
   asked for — the result came from a cheaper model than you chose, and that is
@@ -370,7 +373,18 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
 - **A paused run resumes itself** (issue #169). Once the window resets — plus up to
   five minutes of jitter, so a fleet-wide pause does not stampede — the ordinary
   30-second sweep queues the pass again in a fresh container on the same branch,
-  ahead of any new claim when slots are scarce. Where the paused pass's session
+  ahead of any new claim when slots are scarce. **It also re-checks lanes on
+  every sweep** (issue #199): while the window still stands, a paused run whose
+  work another lane can serve *now* resumes there instead of waiting the clock
+  out. So if a run is parked and you would rather pay than wait — a one-slot box
+  with a dependency chain behind it is the shape this exists for — press
+  **Confirm real-money spend** (or raise the cap, or lift the pass kind's minimum
+  lane) and the run moves at the next tick, with an issue comment naming the lane
+  and what it costs per million tokens. The same guards that hold a lane move
+  hold this one: nothing moves onto an unconfirmed or capped lane, nothing moves
+  onto a lane missing a credential, and the move counts against the resume bound
+  below. Once the window *has* reset the run resumes on its own (free) lane as
+  before, even if a paid one is on offer. Where the paused pass's session
   transcript was copied out before its container went, the resumed pass continues
   the *same conversation*; where it could not be, the pass starts again on the same
   branch with the work already pushed, and the issue comment says which happened.

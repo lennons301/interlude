@@ -35,6 +35,12 @@
  * could not be saved costs the resumed pass its context, which is the stated
  * fallback (restart on the same branch, prior context lost) — it must never
  * cost the pause itself, which is what protects the ticket's attempt.
+ *
+ * The transcript is a **Claude Code** artefact, and that is a limit rather
+ * than a detail (issue #199): a lane move (#176's failover, #199's early
+ * resume) carries it onto another lane only because every declared lane runs
+ * the same adapter. A move onto a lane running a different harness could not
+ * — see the stated limit in `src/lib/harness/adapter.ts`.
  */
 
 import fs from "fs";

@@ -844,6 +844,14 @@ export async function restoreSessionTranscript(
   running: RunningContainer
 ): Promise<string | undefined> {
   if (task.sessionId === null || task.runId === null) return undefined;
+  // Stated limit, not yet a live branch (issue #199): the transcript restored
+  // below is a Claude Code session, and a pass continued across a lane move
+  // (#176, #199) may carry one only because every declared lane runs that one
+  // adapter. When a second adapter ships, this is the seam to enforce it at —
+  // it knows the lane this pass is starting on, and `task.resumedFromTaskId`
+  // leads to the lane (and so the adapter) the conversation came from. A
+  // mismatch must take the "resume without the transcript" outcome just below,
+  // never `--resume` against a session the new harness has never heard of.
 
   const transcript = readTranscript(task.runId);
   if (transcript === null) {
