@@ -83,6 +83,18 @@ describe("parseTriageExit", () => {
       });
     });
 
+    it("takes the marker in its own upper case only, so a prose line opening \"Tier:\" is kept in the body", () => {
+      // The exit marker tolerates case because a miss fails the exit closed;
+      // this one does not, because a false match is consumed out of the
+      // body and would silently eat the first line of the assessment. A real
+      // line in the wrong case costs the suggestion and stays visible.
+      const exit = parseTriageExit(fixture("triage-recommend-prose-tier.ndjson"));
+      expect(exit).toMatchObject({ kind: "recommend", tier: null });
+      expect((exit as { body: string }).body.split("\n")[0]).toBe(
+        "Tier: this reads as heavy work at first, but the issue already decides everything."
+      );
+    });
+
     it("still requires a body — a tier is advice about the work, not the exit's output", () => {
       expect(parseTriageExit(fixture("triage-tier-no-body.ndjson"))).toMatchObject({
         kind: "unparseable",

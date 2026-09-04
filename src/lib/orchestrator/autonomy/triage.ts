@@ -49,17 +49,26 @@ export function readStoredTriageResult(stored: StoredTriageResult): TriageResult
 }
 
 const TRIAGE_LINE = /^TRIAGE:[ \t]*(recommend|needs-info|ready-for-human)[ \t]*$/i;
-const TIER_LINE = /^TIER:[ \t]*(.*?)[ \t]*$/i;
+/**
+ * Case-sensitive where the exit marker above is not, because the two fail in
+ * opposite directions. A `TRIAGE:` marker missed on case would fail the
+ * whole exit closed, so it tolerates one. A `TIER:` marker is consumed out of
+ * the body, so a false match would silently eat the first line of an
+ * assessment that happened to open "Tier: …" in prose — while a real line
+ * written in the wrong case costs only the suggestion, and stays visible in
+ * the body posted to the issue.
+ */
+const TIER_LINE = /^TIER:[ \t]*(.*?)[ \t]*$/;
 
 /**
  * Parse a triage pass's raw NDJSON stream into an exit. Every exit needs a
  * non-empty body — an assessment, questions or an agenda are the pass's
  * whole output; a bare marker drives nothing. The `TIER:` line, when the
- * pass wrote one, is the first non-blank line after the marker; it is
- * consumed rather than left in the body, and a value outside the tier
- * vocabulary reads as no suggestion — never as a fourth exit and never as a
- * failure, because the tier is advice about the work and the exit is the
- * decision about the issue.
+ * pass wrote one, is the first non-blank line after the marker, in the
+ * marker's own upper case; it is consumed rather than left in the body, and
+ * a value outside the tier vocabulary reads as no suggestion — never as a
+ * fourth exit and never as a failure, because the tier is advice about the
+ * work and the exit is the decision about the issue.
  */
 export function parseTriageExit(ndjson: string): TriageResult {
   const final = finalPassMessage(ndjson);
