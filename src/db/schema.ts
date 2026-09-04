@@ -1,6 +1,7 @@
 import { int, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 import type { SettingsOverrides } from "../lib/settings-resolver";
+import type { StoredTriageResult } from "../lib/orchestrator/autonomy/triage";
 
 // Generation-session skills (issue #61): the estate's ticket-loop generation
 // half, runnable from an interactive session. The single source of truth for
@@ -337,17 +338,10 @@ export const tasks = sqliteTable("tasks", {
   // triage owns no run — so an exit survives an orchestrator restart
   // without re-running the pass. The issue's needs-triage label is the
   // "acted on" latch: once removed, the result is no longer gathered.
-  triageResult: text("triage_result", { mode: "json" }).$type<
-    | {
-        kind: "recommend" | "needs-info" | "ready-for-human";
-        body: string;
-        /** The tier the pass suggested for the issue's work (issue #200).
-         * Optional in the stored shape because rows written before it
-         * existed carry no key; readers coalesce a missing one to null. */
-        tier?: "heavy" | "standard" | "light" | null;
-      }
-    | { kind: "unparseable"; reason: string }
-  >(),
+  // The shape is the parser's own (`StoredTriageResult`), with the tier
+  // optional because rows written before issue #200 carry no key; the one
+  // reader that turns a row back into a result coalesces it.
+  triageResult: text("triage_result", { mode: "json" }).$type<StoredTriageResult>(),
   // The tier a finished triage pass suggested for the issue's *work* (issue
   // #200) — `heavy`/`standard`/`light`, or null when the exit named none. Its
   // own column beside the exit because the two have different lifetimes: the

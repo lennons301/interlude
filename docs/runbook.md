@@ -473,8 +473,9 @@ exit whose tier line is missing or mistyped keeps its verdict and simply
 suggests nothing. Because the suggestion reaches the run without appearing in
 the body, the recommendation embed in Discord and the assessment comment on
 the issue both state the tier the run will use, so you see the routing
-decision at the moment you arm the work; the claim comment then records which
-of the two the run actually took. Triage still cannot arm, edit or close
+decision at the moment you arm the work (when neither named one, the embed
+names the configured default and the comment says so without naming it); the
+claim comment then records which of the two the run actually took. Triage still cannot arm, edit or close
 anything — the tier is advice about the work, never authority over the
 ticket, and there is no line it could write that names a lane.
 

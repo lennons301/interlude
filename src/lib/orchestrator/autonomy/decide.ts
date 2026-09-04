@@ -1098,10 +1098,15 @@ export function describeRunTier(tier: RunTierChoice): string {
   if (tier === null) {
     return "Tier: the configured default — neither the ticket nor triage stated one.";
   }
-  return tier.source === "ticket"
-    ? `Tier: \`${tier.tier}\` (ticket directive).`
-    : `Tier: \`${tier.tier}\` (triage's suggestion — the ticket states none; a ` +
-        "`model:` line in a Workflow section would outrank it).";
+  return `Tier: \`${tier.tier}\` (${describeTierSource(tier.source)}).`;
+}
+
+/** The phrase naming where a run's tier came from — written once, because
+ * the recommendation and the claim comment both say it (issue #200). */
+export function describeTierSource(source: "ticket" | "triage"): string {
+  return source === "ticket"
+    ? "ticket directive"
+    : "triage's suggestion — the ticket states none; a `model:` line in a Workflow section would outrank it";
 }
 
 export function decideNext(snapshot: AutonomySnapshot): Action[] {

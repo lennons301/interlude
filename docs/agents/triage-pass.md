@@ -70,15 +70,23 @@ the issue.
   concurrency or state reasoning, a subtle invariant, or blast radius crossing
   module boundaries.
 
-`standard` is not the middle to settle on when the choice feels hard, and
-`light` is not reserved for the trivially obvious. Judge the work as the issue
-stands: a `needs-info` issue is usually missing what would make its route
-clear, and a `ready-for-human` one is by its own criterion asking for a
-decision. Write the tier, not a model name — `TIER: light`, never a model
-identifier — and nothing else on the line. A word outside the vocabulary is
-dropped (the fleet's default applies); a missing line does the same. The tier
-is not a way to spend money: which lane runs the work is fleet policy, and
-there is no line you could write that changes it.
+`standard` is not the middle to settle on when the choice feels hard; it is
+chosen when the route is genuinely the implementer's to find within conventions
+the repo already has. `light` is not reserved for the trivially obvious; it is
+chosen whenever the spec has already made every decision the implementer would
+otherwise make, however many lines that takes. `heavy` is chosen for the
+decision the ticket asks the implementer to make, not for the size of the
+diff. When none of the three fits, the ambiguity is usually in the issue rather
+than the rubric — which is itself a reason to exit `needs-info`. Judge the
+work as the issue stands: a `needs-info` issue is usually missing what would
+make its route clear, and a `ready-for-human` one is by its own criterion
+asking for a decision.
+
+Write the tier, not a model name — `TIER: light`, never a model identifier —
+and nothing else on the line. A word outside the vocabulary is dropped (the
+fleet's default applies); a missing line does the same. The tier is not a way
+to spend money: which lane runs the work is fleet policy, and there is no line
+you could write that changes it.
 
 ## Suggested directives (recommend only)
 

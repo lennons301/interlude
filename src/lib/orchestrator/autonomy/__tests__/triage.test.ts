@@ -1,7 +1,12 @@
 import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
-import { chooseRunTier, isArmingConfirmation, parseTriageExit } from "../triage";
+import {
+  chooseRunTier,
+  isArmingConfirmation,
+  parseTriageExit,
+  readStoredTriageResult,
+} from "../triage";
 
 // Fixtures follow the shape of __tests__/stream-fixture.ndjson: the raw
 // stream-json a triage pass emits, ending in a `result` event whose `result`
@@ -116,6 +121,27 @@ describe("parseTriageExit", () => {
 
     it("rejects empty input", () => {
       expect(parseTriageExit("")).toMatchObject({ kind: "unparseable" });
+    });
+  });
+});
+
+describe("readStoredTriageResult", () => {
+  it("coalesces a row written before the tier existed to no suggestion", () => {
+    // A stored exit from before issue #200 carries no `tier` key at all.
+    expect(readStoredTriageResult({ kind: "recommend", body: "Fine." })).toEqual({
+      kind: "recommend",
+      body: "Fine.",
+      tier: null,
+    });
+  });
+
+  it("re-clamps the stored word to the vocabulary and passes an unparseable exit through", () => {
+    expect(
+      readStoredTriageResult({ kind: "needs-info", body: "Which?", tier: "light" })
+    ).toEqual({ kind: "needs-info", body: "Which?", tier: "light" });
+    expect(readStoredTriageResult({ kind: "unparseable", reason: "no line" })).toEqual({
+      kind: "unparseable",
+      reason: "no line",
     });
   });
 });

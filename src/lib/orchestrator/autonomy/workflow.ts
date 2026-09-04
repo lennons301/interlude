@@ -15,6 +15,7 @@ import path from "path";
 import fs from "fs";
 import type { FailedCheck } from "../../github/pull-requests";
 import type { WorkflowSelection } from "./ticket";
+import { MODEL_TIERS } from "@/lib/model-tiers";
 
 const WORKFLOWS_DIR = path.join(process.cwd(), "docs", "agents", "workflows");
 const REVIEW_PASS_DOC = path.join(process.cwd(), "docs", "agents", "review-pass.md");
@@ -230,10 +231,11 @@ export function buildTriagePrompt(ticket: TriageTicket): string {
     `- The first line is exactly one of \`TRIAGE: recommend\`, ` +
       `\`TRIAGE: needs-info\` or \`TRIAGE: ready-for-human\` — nothing else ` +
       `on that line, and TRIAGE: appears nowhere else in the message.`,
-    `- The second line is exactly one of \`TIER: light\`, \`TIER: standard\` ` +
-      `or \`TIER: heavy\` — the tier the issue's work runs at, chosen against ` +
-      `the rubric in *The tier* above. State it on every exit; a fourth word ` +
-      `is dropped, and a missing line leaves the tier to the fleet's default.`,
+    `- The second line is exactly one of ` +
+      `${MODEL_TIERS.map((tier) => `\`TIER: ${tier}\``).join(", ")} — the tier ` +
+      `the issue's work runs at, chosen against the rubric in *The tier* above. ` +
+      `State it on every exit; a word outside that set is dropped, and a ` +
+      `missing line leaves the tier to the fleet's default.`,
     `- Then a blank line, then the exit's body in markdown: the assessment, ` +
       `the specific questions, or the suggested grilling agenda. Every exit ` +
       `requires a non-empty body; most of it is posted to the issue verbatim.`,

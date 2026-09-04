@@ -10,9 +10,11 @@ import { messages, projects, runs, tasks } from "@/db/schema";
 import { and, asc, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { newId } from "../../ulid";
 import { processSingleton } from "../../process-singleton";
-import { getConfig, PLATFORM_REPO_URL, resolveAgentModelChoice } from "../../config";
+import { getConfig, PLATFORM_REPO_URL } from "../../config";
 import { getFleetSettings, getSettingsOverrides } from "../../settings";
 import { normalizeModelTier, type ModelTier } from "../../model-tiers";
+import { getLaneCatalog } from "../../lanes/catalog";
+import { resolveLane } from "../../lanes/resolve";
 import { readStoredTriageResult, type RunTierChoice } from "./triage";
 import { resolveQuotaThreshold, resolveResumeBound } from "../../settings-resolver";
 import { evaluateQuotaGate } from "../../quota/quota-gate";
@@ -79,6 +81,7 @@ import { startOfLocalDay, todayAutonomousSpendUsd } from "../spend";
 import { getActiveTasks, isParked, releaseParkedImplementTask } from "../turn-manager";
 import {
   describeRunTier,
+  describeTierSource,
   decideNext,
   type Action,
   type AutonomySnapshot,
@@ -1423,19 +1426,23 @@ async function resolveArmedAt(
 }
 
 /**
- * The tier the issue's most recent triage pass suggested for its work (issue
- * #200), or null when none did. Read off `tasks.triageTier`, which outlives
- * the exit's consumption for exactly this read: the claim may come hours
- * after the pass, on a human's label click or Discord "yes". The stored word
- * is re-clamped to the vocabulary on the way in — a row is data, and the
- * reducer only ever sees a tier.
+ * The tier the issue's most recent *completed* triage pass suggested for its
+ * work (issue #200), or null when it suggested none. Read off
+ * `tasks.triageTier`, which outlives the exit's consumption for exactly this
+ * read: the claim may come hours after the pass, on a human's label click or
+ * Discord "yes". The newest pass that ran to completion decides, a null
+ * included — a re-triage that omitted the line means "the default", not
+ * "whatever an earlier pass said about an earlier body" — while a pass that
+ * died (`failed`, no exit) says nothing and leaves the last judgement
+ * standing. The stored word is re-clamped to the vocabulary on the way in: a
+ * row is data, and the reducer only ever sees a tier.
  */
 function latestTriageTier(issueRef: string): ModelTier | null {
   const row = db
     .select({ tier: tasks.triageTier })
     .from(tasks)
     .where(
-      and(eq(tasks.githubIssue, issueRef), eq(tasks.kind, "triage"), isNotNull(tasks.triageTier))
+      and(eq(tasks.githubIssue, issueRef), eq(tasks.kind, "triage"), eq(tasks.status, "completed"))
     )
     .orderBy(desc(tasks.createdAt))
     .limit(1)
@@ -1975,18 +1982,32 @@ async function executeApplyTriage(
  * The tier line for the recommendation embed (issue #200): the reducer's own
  * sentence when the ticket or triage chose one, and otherwise the configured
  * default *named*, because the operator authorizing from Discord should see
- * the tier the run will use rather than a pointer to a settings screen. Read
- * through the same `resolveAgentModelChoice` the implement pass resolves
- * with, fresh, so a UI override made since boot is what is named. A
- * deployment pinning a raw model id names that id; one that lets the harness
- * choose says so.
+ * the tier the run will use rather than a pointer to a settings screen. It is
+ * read through `resolveLane` — the same resolution the implement pass makes
+ * at start, fresh, against the primary lane — rather than the model-choice
+ * step alone, because the lane has the last word on an unset tier: a priced
+ * lane resolves it to `standard` where Anthropic-direct lets the harness
+ * choose (#175), and naming the step's answer would name a tier the run
+ * does not use. A lane that cannot resolve (a missing credential) names
+ * nothing: that run fails before it starts, and #172 reports why.
  */
 function describeRunTierForEmbed(tier: RunTierChoice): string {
   if (tier !== null) return describeRunTier(tier);
-  const resolved = resolveAgentModelChoice("implement", getConfig(), null, getSettingsOverrides());
-  const named = resolved.tier ?? resolved.pinnedModel;
+  const catalog = getLaneCatalog();
+  const resolution = catalog.ok
+    ? resolveLane({
+        catalog: catalog.catalog,
+        kind: "implement",
+        config: getConfig(),
+        ticketModel: null,
+        overrides: getSettingsOverrides(),
+        env: process.env,
+        laneId: null,
+      })
+    : null;
+  const named = resolution?.ok ? (resolution.lane.tier ?? resolution.lane.model) : null;
   return named === null
-    ? "Tier: the harness default — neither the ticket nor triage stated one, and none is configured."
+    ? "Tier: the configured default — neither the ticket nor triage stated one."
     : `Tier: \`${named}\` (configured default — neither the ticket nor triage stated one).`;
 }
 
@@ -3353,11 +3374,8 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
     // without appearing in the body, so the claim comment is where a human
     // sees that the fleet acted on a suggestion rather than on the ticket.
     let modelNote = "";
-    if (action.model) {
-      modelNote =
-        action.modelSource === "triage"
-          ? `\n\nModel tier: \`${action.model}\` (triage's suggestion — the ticket states none).`
-          : `\n\nModel tier: \`${action.model}\` (ticket directive).`;
+    if (action.model && action.modelSource) {
+      modelNote = `\n\nModel tier: \`${action.model}\` (${describeTierSource(action.modelSource)}).`;
     }
     if (action.modelSource !== "ticket") {
       const rawModel = rawModelDirective(action.issueBody);
