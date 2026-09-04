@@ -903,6 +903,10 @@ export type Action =
       /** What running there will cost — `metered` means real money, already
        * checked against #174's cap and confirm-once press by the ranking */
       toLaneBilling: LaneBilling;
+      /** USD per Mtok of the ranking mix on that lane, or null when the lane
+       * declares no prices — quoted in the announcement (issue #199), because
+       * a crossing onto a paid lane is never silent about what it costs */
+      toLaneRateUsdPerMTok: number | null;
       /** The window that refused it, verbatim, or null when it named none */
       limitType: string | null;
       /** When that window resets, or null when the event named none. Said for
@@ -1223,6 +1227,7 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
           toLaneId: pass.laneFailover.toLaneId,
           toLaneLabel: pass.laneFailover.toLaneLabel,
           toLaneBilling: pass.laneFailover.billing,
+          toLaneRateUsdPerMTok: pass.laneFailover.rateUsdPerMTok,
           limitType,
           resumeAfter,
           move: pass.resumesMade + 1,
@@ -1663,19 +1668,22 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     // The second condition (issue #199): while the wall still stands by its
     // own clock, a lane other than the walled one that can serve the run now
     // resumes it there rather than waiting the window out. Only while the
-    // clock stands — once the window has reset the run's own lane can serve it
-    // again for nothing, so it takes the ordinary resume below (through its
-    // jitter, which exists to spread exactly that moment) rather than spending
-    // cash to save at most the jitter window. The bound above is judged first
-    // for the same reason it is judged before the clock: a run with no
-    // continuations left is never going to resume anywhere, so moving it would
-    // only defer telling the human. Whether the target is *permitted* — the
-    // floor, #174's confirmation and cap — was decided inside the ranking that
-    // produced the option, which is why a null here is "stay parked" and needs
-    // no second reading of the guards.
+    // clock stands by *more than the jitter window*: once the window has reset
+    // the run's own lane can serve it again for nothing, so it takes the
+    // ordinary resume below (through its jitter, which exists to spread
+    // exactly that moment) — and a wall lifting inside that same window is not
+    // worth paying a lane move to skip either, since the move would buy at
+    // most the wait the jitter itself imposes, for cash and a fresh
+    // orientation. The bound above is judged first for the same reason it is
+    // judged before the clock: a run with no continuations left is never going
+    // to resume anywhere, so moving it would only defer telling the human.
+    // Whether the target is *permitted* — the floor, #174's confirmation and
+    // cap — was decided inside the ranking that produced the option, which is
+    // why a null here is "stay parked" and needs no second reading of the
+    // guards.
     if (
       paused.resumeAfter !== null &&
-      snapshot.now < paused.resumeAfter &&
+      snapshot.now.getTime() + snapshot.resumeJitterMs < paused.resumeAfter.getTime() &&
       paused.laneFailover !== null
     ) {
       resumesQueuedThisSweep++;

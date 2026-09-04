@@ -5,6 +5,7 @@ import * as schema from "@/db/schema";
 import { newId } from "@/lib/ulid";
 import { resetConfig } from "@/lib/config";
 import { resetLaneCatalog } from "@/lib/lanes/catalog";
+import { describeLaneCost } from "@/lib/lanes/lane-rate";
 
 /**
  * What the sweep knows about a run parked on the quota clock, and what a
@@ -302,6 +303,17 @@ describe("a run parked on the quota clock (issues #169, #199)", () => {
       expect(gather()[0].laneFailover?.toLaneId).toBe("openrouter-glm");
     });
 
+    it("honours a pin to a third lane, which a wall on the walled one does not release", () => {
+      // The operator's explicit choice names a lane that can serve the work,
+      // so cost routing stays off (#172): the pinned lane is the only
+      // candidate, even though GLM is cheaper.
+      writeSettings({
+        overrides: { maxResumesPerAttempt: "3", primaryLane: "openrouter" },
+      });
+
+      expect(gather()[0].laneFailover?.toLaneId).toBe("openrouter");
+    });
+
     it("ranks at the tier the run actually runs at", () => {
       // A run #170 stepped down to `light` is priced off each lane's light
       // row — so the figure the announcement quotes is the one the resumed
@@ -438,7 +450,7 @@ describe("a run parked on the quota clock (issues #169, #199)", () => {
       });
       expect(github.comments.at(-1)).toContain("declares no prices");
 
-      expect(pausedRuns.describeLaneCost("subscription", null)).toContain(
+      expect(describeLaneCost("subscription", null)).toContain(
         "costs nothing at the margin"
       );
     });

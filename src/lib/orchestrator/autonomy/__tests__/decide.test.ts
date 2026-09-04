@@ -4266,6 +4266,28 @@ describe("decideNext — resuming a paused run early on another lane (issue #199
     ).toHaveLength(1);
   });
 
+  it("does not pay to skip a wall that lifts within the jitter window", () => {
+    // Three minutes from reset under a five-minute spread: the ordinary resume
+    // is at most eight minutes away, and a lane move would cost cash and a
+    // fresh orientation to save it. Six minutes out, it moves.
+    const snapshot = makeSnapshot({
+      candidates: [],
+      resumeJitterMs: 5 * 60_000,
+      pausedRuns: [parked({ resumeAfter: new Date(NOW.getTime() + 3 * 60_000) })],
+    });
+
+    expect(early(decideNext(snapshot))).toEqual([]);
+    expect(resumes(decideNext(snapshot))).toEqual([]);
+    expect(
+      early(
+        decideNext({
+          ...snapshot,
+          pausedRuns: [parked({ resumeAfter: new Date(NOW.getTime() + 6 * 60_000) })],
+        })
+      )
+    ).toHaveLength(1);
+  });
+
   it("resumes a clockless row on its own lane, never onto another", () => {
     // #168 never writes one; a row with no clock is eligible now, and "now" is
     // the ordinary resume — there is no wall standing to move away from.
@@ -4409,6 +4431,7 @@ describe("decideNext — cross-lane failover (issue #176)", () => {
         toLaneId: "openrouter-glm",
         toLaneLabel: "OpenRouter (GLM open weights)",
         toLaneBilling: "metered",
+        toLaneRateUsdPerMTok: 0.03875,
         limitType: "five_hour",
         resumeAfter: RESUME_AFTER,
         move: 1,

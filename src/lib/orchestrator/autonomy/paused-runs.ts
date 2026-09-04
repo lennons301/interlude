@@ -47,7 +47,7 @@ import { runs, tasks } from "@/db/schema";
 import { eq, inArray } from "drizzle-orm";
 import { newId } from "../../ulid";
 import { commentOnIssue } from "../../github/issues";
-import type { LaneBilling } from "../../lanes/lane-config";
+import { describeLaneCost } from "../../lanes/lane-rate";
 import type { MoneyGuards } from "../../lanes/money-state";
 import { readLaneFailover } from "../../lanes/overflow-state";
 import { hasTranscript } from "../../quota/session-transcript";
@@ -149,7 +149,7 @@ export function gatherPausedRuns(
 }
 
 /** What the two resumes say — everything else about them is the same. */
-interface ResumeVoice {
+interface ResumeWording {
   /** The resumed pass's prompt, built over the paused pass's own brief. */
   prompt: (paused: TaskRow) => string;
   /** The orchestrator log line. */
@@ -191,7 +191,7 @@ interface ResumeVoice {
 async function queueResumedPass(
   runId: string,
   issueRef: string,
-  voice: ResumeVoice
+  wording: ResumeWording
 ): Promise<void> {
   const run = db.select().from(runs).where(eq(runs.id, runId)).get();
   if (!run || run.status !== "rate_limited") return;
@@ -217,7 +217,7 @@ async function queueResumedPass(
       id: taskId,
       projectId: run.projectId,
       title: paused.title,
-      description: voice.prompt(paused),
+      description: wording.prompt(paused),
       status: "queued",
       kind: paused.kind,
       runId: run.id,
@@ -240,8 +240,8 @@ async function queueResumedPass(
     .where(eq(runs.id, run.id))
     .run();
 
-  console.log(voice.log({ run, taskId, sessionId }));
-  await commentOnIssue(issueRef, voice.comment({ run, paused, sessionId }));
+  console.log(wording.log({ run, taskId, sessionId }));
+  await commentOnIssue(issueRef, wording.comment({ run, paused, sessionId }));
 }
 
 /** How the resumed pass stands with respect to its conversation, for the
@@ -280,39 +280,18 @@ export async function executeResumeRun(
   });
 }
 
-/** The settings screen's own rendering of a rate, so the issue comment and
- * the routing row quote the same figure the same way. */
-function usdPerMTok(rate: number): string {
-  if (rate === 0) return "$0";
-  return `$${rate < 0.1 ? rate.toFixed(3) : rate.toFixed(2)}`;
-}
-
-/**
- * What running on the target lane costs, in one sentence (issue #199): a
- * crossing onto a paid lane is never silent about the money. The rate is the
- * ranking's own — USD per million tokens of a typical pass, off the lane's
- * declared prices — and a metered lane declaring none is said to be exactly
- * that, rather than dressed up with a number nothing wrote down.
- */
-export function describeLaneCost(
-  billing: LaneBilling,
-  rateUsdPerMTok: number | null
-): string {
-  if (billing !== "metered") {
-    return "That lane runs on subscription quota, so the move costs nothing at the margin.";
-  }
-  const rate =
-    rateUsdPerMTok === null
-      ? "at a rate its lane declares no prices for (the harness's own figure is charged)"
-      : `at about ${usdPerMTok(rateUsdPerMTok)} per million tokens of a typical pass`;
-  return `That lane bills real money ${rate}, within today's confirmed real-money cap.`;
-}
-
 /**
  * A paused run resumed **early**, onto a lane other than the one that walled
  * it (issue #199). The same body as the clock-driven resume — the pass, the
  * lineage, the bound, the session — with the lane move's prompt in front of
- * the brief and an announcement that names the lane and what it costs.
+ * the brief and an announcement that names the lane and what it costs, in the
+ * same sentence #176's failover uses (`describeLaneCost`).
+ *
+ * The announcement says the run *is resuming* there, and says the lane is
+ * re-chosen as the pass starts, because the target is advisory exactly as a
+ * failover's is: `startTask` re-asks the ranking, so a wall that lifted in the
+ * intervening half-minute sends the pass back to the cheaper lane, and
+ * `tasks.lane` — not this comment — records where it actually ran.
  *
  * The prompt is the failover's (`buildLaneMovePrompt`) rather than the
  * resume's, because what the pass is about to notice is the same: it was
@@ -338,16 +317,18 @@ export async function executeResumeRunOnLane(
       }),
     log: ({ run, taskId, sessionId }) =>
       `[autonomy] Resuming ${action.issueRef} early on ${action.toLaneId} ` +
-      `(attempt ${run.attempt}, resume ${action.resume}/${action.maxResumes}) — ` +
-      `the window on ${from} stands until ${resets} — -> task ${taskId}` +
+      `(attempt ${run.attempt}, resume ${action.resume}/${action.maxResumes}; ` +
+      `the window on ${from} stands until ${resets}) -> task ${taskId}` +
       `${sessionId ? ` continuing session ${sessionId}` : " without its prior context"}`,
     comment: ({ run, paused, sessionId }) =>
       `Resumed early on another lane (attempt ${run.attempt}): the window on ` +
       `\`${from}\` does not reset until ${resets}, but **${action.toLaneLabel}** ` +
-      `can serve this run now, so it continues there rather than waiting the ` +
+      `can serve this run now, so it is resuming there rather than waiting the ` +
       `window out (resume ${action.resume}/${action.maxResumes}). ` +
       `${describeLaneCost(action.toLaneBilling, action.toLaneRateUsdPerMTok)} ` +
-      `An early lane resumption consumes neither an attempt nor an ` +
+      `The lane is re-chosen as the pass starts, so a wall that lifts first ` +
+      `sends it back to the cheaper one; the task records where it actually ` +
+      `ran. An early lane resumption consumes neither an attempt nor an ` +
       `interruption; it counts against the same resume bound as any other. ` +
       describeSession(paused, sessionId),
   });
