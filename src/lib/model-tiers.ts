@@ -44,6 +44,34 @@ export const TIER_MODEL_IDS: Readonly<Record<ModelTier, string>> = {
 };
 
 /**
+ * One rung more capable than `tier`, capped at the top of the vocabulary
+ * (issue #201): the derivation a review or repair pass makes from the tier the
+ * run's implement pass ran at. `heavy` stays `heavy` rather than overflowing —
+ * there is no rung above the top, and a derived pass must still resolve.
+ */
+export function tierAbove(tier: ModelTier): ModelTier {
+  const index = MODEL_TIERS.indexOf(tier);
+  return MODEL_TIERS[Math.max(0, index - 1)];
+}
+
+/**
+ * The less capable of two tiers — how a **ceiling** is applied (issue #201): a
+ * derived tier held under an operator's explicit setting is whichever of the
+ * two is lower, and a ceiling above the derivation changes nothing. Named for
+ * what it returns rather than `min`, because the vocabulary is ordered most to
+ * least capable and "minimum" reads the wrong way round there.
+ */
+export function weakerTier(a: ModelTier, b: ModelTier): ModelTier {
+  return MODEL_TIERS.indexOf(a) >= MODEL_TIERS.indexOf(b) ? a : b;
+}
+
+/** The more capable of two tiers — how a **floor** is applied: a repair pass is
+ * never run below the tier the work it continues ran at (issue #201). */
+export function strongerTier(a: ModelTier, b: ModelTier): ModelTier {
+  return MODEL_TIERS.indexOf(a) <= MODEL_TIERS.indexOf(b) ? a : b;
+}
+
+/**
  * The tier a written value names, or null if it names none. Accepts a tier or
  * a legacy vendor alias, case-insensitively. Null is not an error at every
  * call site: an env var may legitimately pin a full model id

@@ -363,3 +363,174 @@ describe("the model tier with UI overrides (issue #166)", () => {
     ).toBe("haiku");
   });
 });
+
+/**
+ * Review and repair derive their tier from the run's implement tier (issue
+ * #201): one rung above it, capped at the top of the vocabulary, held under
+ * the kind's own fleet setting only when an operator has explicitly set one.
+ * `ticketModel` here is what the turn manager passes on every later pass of a
+ * run — `runs.model`, the tier the implement pass actually ran at.
+ */
+describe("derived tiers for review and repair (issue #201)", () => {
+  /** Nothing set anywhere for review, so the derivation runs free; the base
+   * is set so an implement pass with no directive still resolves. */
+  const free = cfg({ agentModel: null });
+
+  it("resolves a review pass one rung above the run's implement tier", () => {
+    expect(modelOn("review", free, "light", NO_OVERRIDES)).toBe("sonnet");
+    expect(modelOn("review", free, "standard", NO_OVERRIDES)).toBe("opus");
+  });
+
+  it("resolves a repair pass one rung above the run's implement tier", () => {
+    // Before this, a repair copied the implement tier — a second attempt at
+    // work that had just failed, at the tier that had just failed.
+    expect(modelOn("repair", free, "light", NO_OVERRIDES)).toBe("sonnet");
+    expect(modelOn("repair", free, "standard", NO_OVERRIDES)).toBe("opus");
+  });
+
+  it("caps the derivation at the top of the vocabulary rather than overflowing", () => {
+    expect(modelOn("review", free, "heavy", NO_OVERRIDES)).toBe("opus");
+    expect(modelOn("repair", free, "opus", NO_OVERRIDES)).toBe("opus");
+  });
+
+  it("holds the derivation under an explicitly set per-kind tier — a UI override", () => {
+    // The operator set the review tier low as a cost measure; a heavy
+    // ticket's review is capped there. That is the accepted consequence, and
+    // the same treatment an explicit lane choice gets.
+    expect(
+      modelOn("review", free, "heavy", { modelTierReview: "light" })
+    ).toBe("haiku");
+    expect(
+      modelOn("review", free, "standard", { modelTierReview: "standard" })
+    ).toBe("sonnet");
+    // Repair answers to the implement field, as it always has.
+    expect(
+      modelOn("repair", free, "standard", { modelTierImplement: "standard" })
+    ).toBe("sonnet");
+  });
+
+  it("holds the derivation under an explicitly set per-kind tier — the environment", () => {
+    const c = cfg({ agentModel: null, agentModelReview: "standard" });
+    expect(modelOn("review", c, "standard", NO_OVERRIDES)).toBe("sonnet");
+    // A tier named in the *base* variable supplies the review field too, and
+    // is the field's own environment default — so it is the ceiling the
+    // screen shows, not a bound the derivation may quietly step over.
+    const base = cfg({ agentModel: "standard" });
+    expect(modelOn("review", base, "standard", NO_OVERRIDES)).toBe("sonnet");
+    expect(modelOn("repair", base, "standard", NO_OVERRIDES)).toBe("sonnet");
+  });
+
+  it("never lets a ceiling raise the derivation — it is a cap, not a floor", () => {
+    expect(
+      modelOn("review", free, "light", { modelTierReview: "heavy" })
+    ).toBe("sonnet");
+    const c = cfg({ agentModel: null, agentModelReview: "heavy" });
+    expect(modelOn("repair", c, "light", { modelTierImplement: "heavy" })).toBe(
+      "sonnet"
+    );
+  });
+
+  it("lets an unset per-kind tier run the derivation free", () => {
+    // Only triage is set: the review field is untouched, so a light ticket's
+    // review runs one rung up rather than at anything the operator chose.
+    const c = cfg({ agentModel: null, agentModelTriage: "light" });
+    expect(
+      modelOn("review", c, "light", { modelTierTriage: "light" })
+    ).toBe("sonnet");
+    expect(modelOn("review", c, "standard", NO_OVERRIDES)).toBe("opus");
+  });
+
+  it("derives nothing for a run with no resolved implement tier, resolving exactly as before", () => {
+    const c = cfg({ agentModel: "claude-opus-4-8", agentModelReview: "light" });
+    // No run tier at all — the fleet setting decides, as it did before.
+    expect(modelOn("review", c, null, NO_OVERRIDES)).toBe("haiku");
+    expect(modelOn("repair", c, null, NO_OVERRIDES)).toBe("claude-opus-4-8");
+    // A pinned raw model id recorded on the run row names no tier to step
+    // from, so it is treated exactly as none.
+    expect(modelOn("review", c, "claude-opus-4-8", NO_OVERRIDES)).toBe("haiku");
+    expect(
+      modelOn("review", c, "claude-opus-4-8", { modelTierReview: "standard" })
+    ).toBe("sonnet");
+    expect(modelOn("review", free, null, NO_OVERRIDES)).toBeNull();
+  });
+
+  it("runs a review as pinned when its own field pins a raw model id, whatever the run's tier", () => {
+    // `AGENT_MODEL_REVIEW=claude-opus-4-8` names an identifier, not a tier, so
+    // there is nothing to bound a tier with — and the reviewer's field is the
+    // operator's own, which a ticket may not touch: the pin is the answer, as
+    // it always was.
+    const c = cfg({ agentModel: null, agentModelReview: "claude-opus-4-8" });
+    expect(modelOn("review", c, "light", NO_OVERRIDES)).toBe("claude-opus-4-8");
+    expect(modelOn("review", c, "heavy", NO_OVERRIDES)).toBe("claude-opus-4-8");
+  });
+
+  it("derives a repair past a pin on the implement field, as the implement pass ran past it", () => {
+    // `AGENT_MODEL=claude-opus-4-8` is the implement pass's default, which a
+    // ticket's directive outranks (issue #80); the run's tier is that
+    // directive, so the repair steps up from it rather than falling back to
+    // the pin the implement pass never ran.
+    const c = cfg({ agentModel: "claude-opus-4-8" });
+    expect(modelOn("repair", c, "light", NO_OVERRIDES)).toBe("sonnet");
+    expect(modelOn("repair", c, "heavy", NO_OVERRIDES)).toBe("opus");
+    // With no run tier, the pin is what a repair runs — exactly as before.
+    expect(modelOn("repair", c, null, NO_OVERRIDES)).toBe("claude-opus-4-8");
+  });
+
+  it("never runs a repair below the tier the work ran at — the ceiling bounds the step, not the work", () => {
+    // The implement field is a default the ticket's directive outranks for
+    // the implement pass (issue #80). As a hard cap on the repair it would run
+    // the continuation of heavy work at light because the fleet default was
+    // light — undoing the directive for the second half of the same work.
+    expect(
+      modelOn("repair", free, "heavy", { modelTierImplement: "light" })
+    ).toBe("opus");
+    expect(
+      modelOn("repair", free, "standard", { modelTierImplement: "light" })
+    ).toBe("sonnet");
+    const c = cfg({ agentModel: "light" });
+    expect(modelOn("repair", c, "standard", NO_OVERRIDES)).toBe("sonnet");
+    // Review has no such floor: the review field is the reviewer's own, a
+    // ticket may not touch it, and a review tier set low caps a heavy
+    // ticket's review below its implement pass — the accepted consequence.
+    expect(
+      modelOn("review", free, "heavy", { modelTierReview: "light" })
+    ).toBe("haiku");
+  });
+
+  it("derives nothing for triage and interactive, which keep their chosen settings", () => {
+    const c = cfg({ agentModel: "standard", agentModelTriage: "light" });
+    // Triage never reads the run's tier at all.
+    expect(modelOn("triage", c, "heavy", NO_OVERRIDES)).toBe("haiku");
+    expect(modelOn("triage", c, "light", { modelTierTriage: "standard" })).toBe(
+      "sonnet"
+    );
+    // Interactive still takes the run's tier as its own — a human is present
+    // to ask for something else — and otherwise its field.
+    expect(modelOn("interactive", c, "light", NO_OVERRIDES)).toBe("haiku");
+    expect(
+      modelOn("interactive", c, null, { modelTierInteractive: "heavy" })
+    ).toBe("opus");
+  });
+
+  it("still never lets a ticket set its own review or triage tier", () => {
+    // A ticket declaring `light` does not buy itself a light gate: the only
+    // way its tier reaches the review is one rung up, never level.
+    expect(modelOn("review", free, "light", NO_OVERRIDES)).not.toBe("haiku");
+    // And a ticket declaring `heavy` cannot lift a review the operator capped.
+    expect(
+      modelOn("review", free, "heavy", { modelTierReview: "light" })
+    ).toBe("haiku");
+    expect(modelOn("triage", cfg({ agentModel: "light" }), "heavy", NO_OVERRIDES)).toBe(
+      "haiku"
+    );
+  });
+
+  it("leaves the implement pass exactly as it was", () => {
+    const c = cfg({ agentModel: "standard" });
+    expect(modelOn("implement", c, "light", NO_OVERRIDES)).toBe("haiku");
+    expect(modelOn("implement", c, null, NO_OVERRIDES)).toBe("sonnet");
+    expect(
+      modelOn("implement", c, null, { modelTierImplement: "heavy" })
+    ).toBe("opus");
+  });
+});

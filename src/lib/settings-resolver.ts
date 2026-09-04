@@ -238,13 +238,13 @@ export const SETTINGS_FIELDS: Readonly<Record<SettingKey, SettingSpec>> = {
   modelTierImplement: modelTierField(
     "modelTierImplement",
     "Implement",
-    "The tier an implement pass — and the repair pass that fixes up its PR — runs on. A ticket's own model: directive still outranks it.",
+    "The tier an implement pass runs on when its ticket declares none — a ticket's own model: directive outranks it. It is also the ceiling on the step a repair pass takes: a repair runs one rung above the tier the implement pass ran at, so a second attempt at failed work is not a rerun of the first, but no higher than this — and never below the tier the work itself ran at.",
     baseModelEnv
   ),
   modelTierReview: modelTierField(
     "modelTierReview",
     "Review",
-    "The tier a review pass runs on. Reviewing is read-heavy, so it is the first thing worth running cheaper than the work it reads.",
+    "A ceiling, not a fixed tier: a review pass runs one rung above the tier the implement pass ran at, so a misclassified ticket is caught by its gate rather than waved through by an equally weak reviewer — but never above this when it is set. Unset, the derivation runs free.",
     (config) =>
       cheaperTierEnv("AGENT_MODEL_REVIEW", config.agentModelReview, config)
   ),
@@ -714,6 +714,45 @@ export const MODEL_TIER_FIELD_BY_KIND: Readonly<
 };
 
 /**
+ * The pass kinds whose tier is **derived** from the run's implement tier rather
+ * than chosen (issue #201): one rung above it, capped at the top of the
+ * vocabulary, and held under the kind's own field above when that field is
+ * explicitly set. A single fleet review tier cannot be right for both a
+ * one-line guard and a new state machine, and a repair pass is by definition a
+ * second attempt at work that already failed, so retrying at the tier that
+ * just failed repeats the failure. Triage and interactive are deliberately
+ * absent: triage is standalone and gated by a human authorising arming, and
+ * interactive has a human present who can ask for something else.
+ *
+ * The derivation itself is `resolveAgentModelChoice`'s (`config.ts`) — the one
+ * pure model-choice function every pass resolves through — so this list only
+ * names *which* kinds it applies to, where the settings screen can read it
+ * beside the field each kind answers to.
+ */
+export const DERIVED_TIER_KINDS: readonly AgentPassKind[] = ["review", "repair"];
+
+export function isDerivedTierKind(kind: AgentPassKind): boolean {
+  return DERIVED_TIER_KINDS.includes(kind);
+}
+
+/**
+ * The tier an explicitly set field holds a derived pass under (issue #201), or
+ * null when the field is unset and the derivation runs free.
+ *
+ * "Explicitly set" is a stored override or a tier named in the environment —
+ * the same two ways a lane choice is explicit — read off the resolved field
+ * rather than re-deriving them, so the pass and the settings screen judge the
+ * ceiling from one reading. Two things are deliberately *not* a ceiling: a
+ * lane's default tier standing in over an unset field (issue #175) is what an
+ * underived pass runs, not a bound anyone chose, and a pinned raw model id
+ * names no tier to bound with — a pass whose field pins one runs the pin, as
+ * it always has.
+ */
+export function tierCeiling(resolved: ResolvedModelTier): ModelTier | null {
+  return resolved.override ?? normalizeModelTier(resolved.envValue);
+}
+
+/**
  * The model-tier setting in force for one pass kind. Each field falls through
  * to *its own* environment default, never to another field's override: an
  * override says "this pass kind runs here", and quietly spreading it to the
@@ -917,6 +956,29 @@ export interface SettingFieldView {
   /** What actually reaches the harness (null = no `--model`; the CLI resolves
    * the account default, which is the pre-#74 behaviour). */
   model: string | null;
+  /** The pass kinds that resolve through this field — one, except the
+   * implement field, which repair reads too. */
+  kinds: readonly AgentPassKind[];
+  /** The derived pass kinds this field is the ceiling for (issue #201) — empty
+   * for a field that is simply the tier its kinds run at. */
+  caps: readonly AgentPassKind[];
+  /** The ceiling in force for those kinds, or null when the field is unset and
+   * their derivation runs free (and always null for a row that caps nothing).
+   * Distinct from `tier`, which a lane's default may supply over an unset
+   * field without anyone having chosen a bound, and from a pinned raw model
+   * id, which names no tier — on the reviewer's own field a pin is run as
+   * pinned and nothing derives; see `resolveAgentModelChoice`. */
+  ceiling: ModelTier | null;
+}
+
+/** The pass kinds a field decides, read off the kind→field map rather than
+ * the pass-kind list in `config.ts`, which this module may import only as a
+ * type: `config.ts` imports this one's values, and a value import back would
+ * be a cycle. */
+function kindsReadingField(key: ModelTierSettingKey): AgentPassKind[] {
+  return (Object.keys(MODEL_TIER_FIELD_BY_KIND) as AgentPassKind[]).filter(
+    (kind) => MODEL_TIER_FIELD_BY_KIND[kind] === key
+  );
 }
 
 /**
@@ -942,6 +1004,9 @@ export function describeModelTierSettings(
       tierModels,
       fallbackTier
     );
+    const caps = DERIVED_TIER_KINDS.filter(
+      (kind) => MODEL_TIER_FIELD_BY_KIND[kind] === key
+    );
     return {
       key,
       label: spec.label,
@@ -953,6 +1018,10 @@ export function describeModelTierSettings(
       envValue: resolved.envValue,
       tier: resolved.tier,
       model: resolved.model,
+      kinds: kindsReadingField(key),
+      caps,
+      // A row that caps nothing has no ceiling to report, whatever it holds.
+      ceiling: caps.length > 0 ? tierCeiling(resolved) : null,
     };
   });
 }
