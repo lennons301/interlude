@@ -3,6 +3,7 @@ import path from "path";
 import { describe, expect, it } from "vitest";
 import { parseLaneConfig, laneIds } from "../lane-config";
 import { LANE_CONFIG_FILE } from "../catalog";
+import { DESCRIPTORS_WITH_FAKE } from "@/test/fake-harness";
 
 /**
  * The lane-file parser (issue #172). Two jobs are tested here: that a valid
@@ -126,9 +127,23 @@ lanes:
       expect(reason).toContain("never the secret itself");
     });
 
-    it("rejects an unknown harness adapter", () => {
+    it("rejects an unknown harness adapter, naming the described ones", () => {
       expect(reasonFor(VALID.replace("adapter: claude-code", "adapter: opencode")))
         .toContain("claude-code");
+    });
+
+    it("accepts an adapter only when the descriptor table it is handed describes it (issue #214)", () => {
+      // The parser's list of adapters is the descriptor table, shared with the
+      // registry; a test may describe the fake adapter to it, and the
+      // production table never does.
+      const onFake = VALID.replace("adapter: claude-code", "adapter: fake");
+      expect(reasonFor(onFake)).toContain('names adapter "fake"');
+      expect(reasonFor(onFake)).toContain("claude-code");
+      const result = parseLaneConfig(onFake, DESCRIPTORS_WITH_FAKE);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.catalog.lanes[0].adapter).toBe("fake");
+      }
     });
 
     it("rejects an unknown billing kind", () => {
