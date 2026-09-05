@@ -96,13 +96,20 @@ export function resolveTranscriptDir(databaseUrl: string | undefined): string {
 }
 
 /**
- * A run's directory in the store. The run id is a ULID, but it arrives here
- * from a database row rather than from a literal, so it is checked against
- * that shape before it becomes a path: this function joins onto a directory,
- * and a value carrying `..` or a separator would escape it.
+ * The shape of a run id as the store will accept it. A ULID matches; so does
+ * anything without a separator or a dot, which is the point — an id arrives
+ * here from a database row rather than a literal, and the store joins it onto
+ * a directory, so a value carrying `..` or `/` would escape it.
  */
+const RUN_ID_SHAPE = /^[A-Za-z0-9_-]+$/;
+
+/** The suffix of a run's directory while it is being written — see
+ * `saveTranscript`. */
+const IN_PROGRESS_SUFFIX = ".tmp";
+
+/** A run's directory in the store. Refuses an id that would escape it. */
 export function transcriptDir(runId: string, dir: string): string {
-  if (!/^[A-Za-z0-9_-]+$/.test(runId)) {
+  if (!RUN_ID_SHAPE.test(runId)) {
     throw new Error(`Refusing to build a transcript path for id "${runId}"`);
   }
   return path.join(dir, runId);
@@ -136,10 +143,12 @@ export const MAX_TRANSCRIPT_BYTES = 32 * 1024 * 1024;
  * prior context lost), and the run should say so rather than resume against a
  * session the container does not have.
  *
- * The manifest is written **last**: `hasTranscript` reads its presence, so a
- * crash between two artefact files leaves a run with no transcript rather than
- * one with half of one — which is the same all-or-nothing rule the size ceiling
- * applies.
+ * Written **beside** the run's directory first and moved into place last, so
+ * the earlier transcript stands until the new one is whole: a second pause
+ * whose copy fails part-way (a full disk) must not leave the run with neither.
+ * The manifest is the last file written, and `hasTranscript` reads its
+ * presence, so nothing half-written is ever read as a transcript — the same
+ * all-or-nothing rule the size ceiling applies.
  */
 export function saveTranscript(
   runId: string,
@@ -158,12 +167,13 @@ export function saveTranscript(
     );
     return false;
   }
+  const runDir = transcriptDir(runId, dir);
+  const inProgress = runDir + IN_PROGRESS_SUFFIX;
   try {
-    const runDir = transcriptDir(runId, dir);
-    fs.rmSync(runDir, { recursive: true, force: true });
-    fs.mkdirSync(runDir, { recursive: true });
+    fs.rmSync(inProgress, { recursive: true, force: true });
+    fs.mkdirSync(inProgress, { recursive: true });
     transcript.artefacts.forEach((artefact, index) => {
-      fs.writeFileSync(path.join(runDir, artefactFileName(index)), artefact.contents);
+      fs.writeFileSync(path.join(inProgress, artefactFileName(index)), artefact.contents);
     });
     const manifest: Manifest = {
       version: 1,
@@ -171,9 +181,13 @@ export function saveTranscript(
       sessionId: transcript.sessionId,
       paths: transcript.artefacts.map((a) => a.path),
     };
-    fs.writeFileSync(path.join(runDir, MANIFEST_FILE), JSON.stringify(manifest));
+    fs.writeFileSync(path.join(inProgress, MANIFEST_FILE), JSON.stringify(manifest));
+    // Only now is the earlier transcript given up — the new one is whole.
+    fs.rmSync(runDir, { recursive: true, force: true });
+    fs.renameSync(inProgress, runDir);
     return true;
   } catch (err) {
+    fs.rmSync(inProgress, { recursive: true, force: true });
     console.error(`[transcripts] Failed to save the transcript of run ${runId}:`, err);
     return false;
   }
@@ -254,19 +268,25 @@ export interface StoreEntry {
  * cancelled run, or an id with no run row at all — is finished with its
  * conversation.
  *
- * A transcript is a directory named for its run. A `.jsonl` *file* is the
- * store's pre-#217 shape (one Claude Code transcript per run, named for it),
- * which nothing reads any more, so it is stale whatever run it names; any
- * other file is not the store's and is left alone.
+ * A transcript is a directory named for its run, and only a directory whose
+ * name has a run id's shape is the store's to remove — a save that was
+ * interrupted leaves its in-progress directory behind, and that is stale too.
+ * A `.jsonl` *file* is the store's pre-#217 shape (one Claude Code transcript
+ * per run, named for it), which nothing reads any more, so it is stale whatever
+ * run it names. Anything else is not the store's and is left alone.
  */
 export function staleTranscriptEntries(
   entries: readonly StoreEntry[],
   liveRunIds: ReadonlySet<string>
 ): string[] {
   return entries
-    .filter((entry) =>
-      entry.isDirectory ? !liveRunIds.has(entry.name) : entry.name.endsWith(".jsonl")
-    )
+    .filter((entry) => {
+      if (!entry.isDirectory) return entry.name.endsWith(".jsonl");
+      if (entry.name.endsWith(IN_PROGRESS_SUFFIX)) {
+        return RUN_ID_SHAPE.test(entry.name.slice(0, -IN_PROGRESS_SUFFIX.length));
+      }
+      return RUN_ID_SHAPE.test(entry.name) && !liveRunIds.has(entry.name);
+    })
     .map((entry) => entry.name);
 }
 

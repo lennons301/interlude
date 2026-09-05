@@ -81,11 +81,15 @@ describe("a move across two different adapters (issue #217)", () => {
     expect(note).toContain("costs the conversation, not the attempt");
   });
 
-  it("refuses even when the continuation carries no session — the owner still learns why", () => {
-    const carry = decide({ to: codex, sessionId: null, storedAdapter: null });
-
-    expect(carry).toMatchObject({ kind: "fresh", reason: "different-adapter" });
-    expect(carry.kind === "fresh" && carry.note).toContain("Codex (OpenAI)");
+  it("says nothing for a continuation queued without a session, even across adapters", () => {
+    // Nothing was meant to carry — a degrade, or a pause whose copy failed —
+    // and that was said at the time; which lane the continuation lands on does
+    // not make it news.
+    expect(decide({ to: codex, sessionId: null, storedAdapter: null })).toEqual({
+      kind: "fresh",
+      reason: "none-carried",
+      note: null,
+    });
   });
 
   it("trusts the store's own manifest over a lane file that re-pointed a lane id", () => {
@@ -124,6 +128,14 @@ describe("a harness that declares no session resume (issue #217)", () => {
   it("is judged before the origin — it is certain whatever the conversation came from", () => {
     expect(
       decide({ to: noResume, from: { laneId: "gone", laneLabel: null, adapterId: null } })
+    ).toMatchObject({ reason: "no-session-resume" });
+  });
+
+  it("is the one reason said even for a continuation queued without a session", () => {
+    // A run on such a lane pauses with nothing copied out, so its resume
+    // carries no session — and the spec wants that resume to get this note.
+    expect(
+      decide({ to: noResume, from: { ...CLAUDE, adapterId: "opencode" }, sessionId: null, storedAdapter: null })
     ).toMatchObject({ reason: "no-session-resume" });
   });
 });

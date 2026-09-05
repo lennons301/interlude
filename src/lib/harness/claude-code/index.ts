@@ -28,6 +28,7 @@
  */
 
 import { getConfig } from "../../config";
+import { AGENT_WORKDIR } from "../../docker/workdir";
 import { ALLOWED_TICKET_EFFORTS } from "../../orchestrator/autonomy/budgets";
 import type {
   HarnessAdapter,
@@ -107,11 +108,11 @@ export function buildClaudeTurnCommand(input: HarnessCommandInput): string {
   const config = getConfig();
 
   const cmdParts = [
-    // The pass's working directory (`AGENT_WORKDIR`). Also encoded, mangled,
-    // in the path the harness keeps its session transcript at — see
-    // `claudeTranscriptDir` below, which a resumed pass (#169) restores into:
-    // changing this changes that.
-    "cd /workspace/repo",
+    // The pass's working directory. Also encoded, mangled, in the path the
+    // harness keeps its session transcript at — see `claudeTranscriptDir`
+    // below, which a resumed pass (#169) restores into: the turn manager hands
+    // the adapter this same constant as the `cwd` those paths derive from.
+    `cd ${AGENT_WORKDIR}`,
     "&&",
     "claude",
     "-p",

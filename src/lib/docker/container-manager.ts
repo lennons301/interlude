@@ -1,5 +1,6 @@
 import Docker from "dockerode";
 import { getDocker } from "./client";
+import { AGENT_WORKDIR } from "./workdir";
 import { getImageName, ensureImage } from "./image-builder";
 import { getConfig, PLATFORM_REPO_URL } from "../config";
 import { getInstallationToken } from "../github/client";
@@ -54,15 +55,6 @@ function checkoutCommand(mode: BranchCheckoutMode): string {
  * image, warm, live network) on `claude plugin` commands that only Claude
  * Code could run (issue #60's mechanism).
  */
-/**
- * The working directory every agent pass runs in: where setup clones the
- * project and where each turn's command starts. The one statement of it,
- * because a harness adapter derives its session artefact paths from the pass's
- * cwd (`sessionArtifactPaths(sessionId, cwd)`, issues #169, #217) and the turn
- * manager has to hand it the same directory the pass actually worked in.
- */
-export const AGENT_WORKDIR = "/workspace/repo";
-
 export function buildSetupScript(
   platformRepoUrl: string,
   checkout: BranchCheckoutMode = "create"

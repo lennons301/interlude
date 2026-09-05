@@ -20,27 +20,32 @@
  * known until then. A leaf with no imports, so the turn manager and the tests
  * that pin the wording read one function.
  *
- * Three refusals, each saying so on the pass's own feed, because the owner
- * reading a fresh start next to an issue comment that promised a continuation
- * should be told why in the place they are looking:
+ * Every fresh start has a reason, and the reasons an owner would not otherwise
+ * know say so on the pass's own feed — because an owner reading a fresh start
+ * next to an issue comment that promised a continuation should be told why in
+ * the place they are looking:
  *
+ * - **no session resume**: the harness the pass is starting on declares it
+ *   cannot resume a session at all, so nothing could be put back — and nothing
+ *   was copied out at the pause either. Judged first and said whether or not
+ *   the continuation carries a session, which is how a run that paused and
+ *   resumed on such a lane gets the same note a cross-adapter move does.
  * - **different adapter**: the conversation is one harness's and the pass is
  *   starting on another. It starts again on the branch with the work already
  *   pushed — the cost is the conversation, never the attempt, so a cross-
  *   adapter lane remains a legal failover target for the ranking.
- * - **no session resume**: the harness the pass is starting on declares it
- *   cannot resume a session at all, so nothing could be put back — and
- *   nothing was copied out at the pause either, which is why the same note
- *   answers for a run that paused and resumed on such a lane.
  * - **lane unknown**: the lane the conversation came from is no longer
  *   declared, so which harness the artefacts belong to cannot be told. Cautious
  *   by design: the store's own manifest may disagree with a lane file that has
  *   since re-pointed an id, and a session resumed against the wrong harness
  *   fails the pass outright where a fresh start merely costs its context.
+ * - **not kept**: the same adapter on both ends, but the store holds nothing
+ *   for the run — the pause's copy failed. The one note that predates #217.
  *
- * A continuation queued with **no** session says nothing here: a degrade (#170)
- * carries none by design, and a pause whose transcript did not survive already
- * said so on the refused pass's feed and on the issue.
+ * Otherwise a continuation queued with **no** session says nothing here
+ * (`none-carried`): a degrade (#170) carries none by design, and a pause whose
+ * transcript did not survive already said so on the refused pass's feed and on
+ * the issue — whichever lane the continuation lands on.
  */
 
 /** Where the conversation came from: the predecessor's lane, as the catalog
@@ -69,9 +74,10 @@ export interface SessionCarryInput {
   to: SessionDestination;
 }
 
-export type SessionCarryRefusal =
-  | "different-adapter"
+/** Why a continuation starts fresh — see the module note for each. */
+export type FreshStartReason =
   | "no-session-resume"
+  | "different-adapter"
   | "lane-unknown"
   | "not-kept"
   | "none-carried";
@@ -80,7 +86,7 @@ export type SessionCarry =
   | { kind: "restore"; sessionId: string }
   | {
       kind: "fresh";
-      reason: SessionCarryRefusal;
+      reason: FreshStartReason;
       /** What the pass's feed says, or null when there is nothing new to say. */
       note: string | null;
     };
@@ -88,7 +94,7 @@ export type SessionCarry =
 const FRESH_START =
   "This pass continues on the same branch with the work pushed so far and no prior context.";
 
-function fresh(reason: SessionCarryRefusal, note: string | null): SessionCarry {
+function fresh(reason: FreshStartReason, note: string | null): SessionCarry {
   return { kind: "fresh", reason, note };
 }
 
@@ -107,8 +113,10 @@ export function decideSessionCarry(input: SessionCarryInput): SessionCarry {
     );
   }
 
+  // Nothing was meant to carry: whatever the reason, it was said at the time.
+  if (sessionId === null) return fresh("none-carried", null);
+
   if (from.adapterId === null) {
-    if (sessionId === null) return fresh("none-carried", null);
     return fresh(
       "lane-unknown",
       `Starting again on the branch: the lane the paused pass ran on ` +
@@ -133,8 +141,6 @@ export function decideSessionCarry(input: SessionCarryInput): SessionCarry {
         `That costs the conversation, not the attempt.`
     );
   }
-
-  if (sessionId === null) return fresh("none-carried", null);
 
   if (storedAdapter === null) {
     return fresh(

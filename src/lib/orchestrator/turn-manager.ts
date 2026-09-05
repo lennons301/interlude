@@ -2,8 +2,8 @@ import { db } from "@/db";
 import { tasks, messages, projects, runs, isGenerationSession } from "@/db/schema";
 import { eq, and, isNull, asc, desc } from "drizzle-orm";
 import { newId } from "../ulid";
+import { AGENT_WORKDIR } from "../docker/workdir";
 import {
-  AGENT_WORKDIR,
   observeContainerAbsent,
   createWorkspaceContainer,
   execSetup,
@@ -44,7 +44,12 @@ import { resolveLane, type ResolvedLane } from "../lanes/resolve";
 import { readLaneCrossing, readLaneFailover } from "../lanes/overflow-state";
 import { describeLaneCost } from "../lanes/lane-rate";
 import { payerChanged, type LaneCrossing } from "../lanes/overflow";
-import { findLane, type LaneBilling, type LaneDefinition } from "../lanes/lane-config";
+import {
+  findLane,
+  lanesShareAdapter,
+  type LaneBilling,
+  type LaneDefinition,
+} from "../lanes/lane-config";
 import { noteOnceOnFeed } from "../tasks/feed-note";
 import {
   chargeForTurn,
@@ -836,11 +841,12 @@ export async function startTask(taskId: string): Promise<void> {
 }
 
 /**
- * The lane a pass's task row records, as the catalog now describes it, with
- * the adapter that lane runs — or null when the row names no lane, or names one
- * the file no longer declares (issue #217). Both ends of a session carry are
- * read through this: the lane the conversation came from, off the predecessor
- * row, and the lane the pass is starting on.
+ * The lane a task row records, as the catalog now describes it, with the
+ * adapter that lane runs — or null when the row names no lane, or names one the
+ * file no longer declares (issue #217). The *origin* end of a session carry is
+ * read through this, off the predecessor row, at both the pause and the
+ * resume; the destination is the lane the pass is starting on, already
+ * resolved.
  */
 function laneAdapter(
   laneId: string | null
@@ -2494,6 +2500,12 @@ async function failOverRunLane(
   // paused run — the two moves must quote the same figure the same way.
   const cost = describeLaneCost(move.toLaneBilling, move.toLaneRateUsdPerMTok);
   const retryId = newId();
+  // Whether the target runs a different harness (issue #217): a session is one
+  // harness's, so the note below can only promise a continuation onto the same
+  // adapter. Hedged, because the target is advisory and re-chosen at start.
+  const catalog = getLaneCatalog();
+  const crossesAdapter =
+    !catalog.ok || lanesShareAdapter(catalog.catalog, task.lane, move.toLaneId) !== true;
 
   console.log(
     `[autonomy] Run ${move.runId} (${run?.githubIssue ?? "?"}) moving lane ` +
@@ -2530,10 +2542,14 @@ async function failOverRunLane(
       `${window} refused this pass on ${from} — moving to ${move.toLaneLabel} ` +
       `and retrying there (move ${move.move}/${move.maxMoves}); no attempt or ` +
       `interruption was consumed.` +
-      (preserved
-        ? " The session was copied out, so the retry continues this conversation."
-        : " The session could not be copied out, so the retry starts again on" +
-          " the same branch."),
+      (!preserved
+        ? " The session could not be copied out, so the retry starts again on" +
+          " the same branch."
+        : crossesAdapter
+          ? " The session was copied out, but that lane runs a different harness," +
+            " which cannot resume it — the retry starts again on the same branch" +
+            " unless the lane re-chosen at start runs this one."
+          : " The session was copied out, so the retry continues this conversation."),
     runPatch: {
       // A move is a continuation of this attempt, counted where a resume is
       // counted (issue #169) so one bound holds both. Deliberately not

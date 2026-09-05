@@ -1,7 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_TRANSCRIPT_BYTES,
   discardTranscript,
@@ -121,6 +121,23 @@ describe("keeping and forgetting a run's transcript", () => {
     expect(fs.readdirSync(transcriptDir("run-1", dir)).sort()).toEqual(["artefact-0", "manifest.json"]);
   });
 
+  it("keeps the earlier transcript when a later save fails part-way", () => {
+    // A second pause whose copy dies on a full disk must not leave the run
+    // with neither transcript: the new one is written beside the old and only
+    // moved into place once whole.
+    saveTranscript("run-1", transcript(), dir);
+    const writes = vi.spyOn(fs, "writeFileSync");
+    writes.mockImplementationOnce(() => {
+      throw new Error("ENOSPC: no space left on device");
+    });
+
+    expect(saveTranscript("run-1", transcript({ sessionId: "sess-2" }), dir)).toBe(false);
+    writes.mockRestore();
+
+    expect(readTranscript("run-1", dir)?.sessionId).toBe("sess-1");
+    expect(fs.readdirSync(dir)).toEqual(["run-1"]);
+  });
+
   it("refuses a transcript past the ceiling rather than truncating it", () => {
     // Half a transcript is not a smaller transcript — it is a conversation the
     // harness would resume into. Refusing leaves the caller with the fallback
@@ -191,8 +208,20 @@ describe("which transcripts are stale", () => {
     ).toEqual(["paused.jsonl", "merged.jsonl"]);
   });
 
+  it("drops an interrupted save's in-progress directory", () => {
+    expect(staleTranscriptEntries([runDir("paused.tmp")], new Set(["paused"]))).toEqual([
+      "paused.tmp",
+    ]);
+  });
+
   it("ignores anything that is not the store's", () => {
-    expect(staleTranscriptEntries([file("README"), file("notes.txt")], new Set())).toEqual([]);
+    // Only a directory with a run id's shape is the store's to remove.
+    expect(
+      staleTranscriptEntries(
+        [file("README"), file("notes.txt"), runDir("lost+found"), runDir("not a run")],
+        new Set()
+      )
+    ).toEqual([]);
   });
 
   it("prunes what it names, and only that", () => {

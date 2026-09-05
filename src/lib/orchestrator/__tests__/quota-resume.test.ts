@@ -8,7 +8,7 @@ import * as schema from "@/db/schema";
 import { newId } from "@/lib/ulid";
 import { readTranscript, saveTranscript } from "@/lib/quota/session-transcript";
 import { claudeTranscriptPath } from "@/lib/harness/claude-code";
-import { AGENT_WORKDIR } from "@/lib/docker/container-manager";
+import { AGENT_WORKDIR } from "@/lib/docker/workdir";
 import type { ResolvedLane } from "@/lib/lanes/resolve";
 
 /**

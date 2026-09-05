@@ -7,7 +7,7 @@ import { createTestDb } from "@/test/create-test-db";
 import * as schema from "@/db/schema";
 import { newId } from "@/lib/ulid";
 import { hasTranscript, readTranscript, saveTranscript } from "@/lib/quota/session-transcript";
-import { AGENT_WORKDIR } from "@/lib/docker/container-manager";
+import { AGENT_WORKDIR } from "@/lib/docker/workdir";
 import {
   createFakeHarness,
   fakeExecStream,
@@ -52,6 +52,10 @@ const docker = vi.hoisted(() => ({
   fileContents: Buffer.from('{"fake":"session"}\n'),
   /** Files written into the container: path -> bytes. */
   written: new Map<string, string>(),
+  /** Every task's session id as the rows stood when a turn was exec'd —
+   * the one moment a cleared id is observable, since the turn's own id
+   * overwrites the row once it ends. */
+  sessionIdsAtExec: [] as { id: string; sessionId: string | null }[],
 }));
 
 vi.mock("../../docker/container-manager", async (importOriginal) => {
@@ -70,6 +74,10 @@ vi.mock("../../docker/container-manager", async (importOriginal) => {
     execSetup: async () => undefined,
     execAgentTurn: async () => {
       docker.calls.push("execAgentTurn");
+      docker.sessionIdsAtExec = testDb
+        .select({ id: schema.tasks.id, sessionId: schema.tasks.sessionId })
+        .from(schema.tasks)
+        .all();
       return fakeExecStream();
     },
     execFallbackCommitAndPush: async () => {
@@ -332,6 +340,7 @@ describe("a session crossing lanes on different adapters (issue #217)", () => {
     process.env.DATABASE_URL = path.join(storeRoot, "interlude.db");
     docker.calls.length = 0;
     docker.written.clear();
+    docker.sessionIdsAtExec = [];
     github.comments.length = 0;
     declared.only = null;
     seedRun();
@@ -371,9 +380,12 @@ describe("a session crossing lanes on different adapters (issue #217)", () => {
     expect(note).toContain(FAKE_OTHER_HARNESS_ID);
     expect(note).toContain("cannot be carried between two different harnesses");
 
-    // The row records the new harness's own session, never the old one; the
-    // pass completed as an ordinary implement pass, and the move cost the
-    // attempt nothing.
+    // The session id was cleared before the turn ran — the one moment it is
+    // observable, since the turn's own id then overwrites the row — so the
+    // row never named a conversation the pass was not in; afterwards it
+    // records the new harness's own session. The pass completed as an
+    // ordinary implement pass, and the move cost the attempt nothing.
+    expect(docker.sessionIdsAtExec.find((t) => t.id === taskId)?.sessionId).toBeNull();
     expect(task(taskId).sessionId).toBe("other-session-9");
     expect(task(taskId).lane).toBe("other-lane");
     expect(run().status).toBe("implementing");
@@ -454,7 +466,7 @@ describe("a session crossing lanes on different adapters (issue #217)", () => {
       { sessionId: "forgetful-session", costUsd: 0 }
     );
 
-  it("fails over onto another adapter's lane, whose replacement starts fresh and says so", async () => {
+  it("fails over from a harness that cannot resume onto another adapter's lane; the replacement starts fresh, told at the wall", async () => {
     const taskId = seedFirstPass();
     await boot("no-resume-lane");
     noResume.script(WALLED());
@@ -469,6 +481,11 @@ describe("a session crossing lanes on different adapters (issue #217)", () => {
     expect(run().attempt).toBe(1);
     expect(run().resumeCount).toBe(2);
     expect(docker.calls.some((c) => c.startsWith("readContainerFile"))).toBe(false);
+    // The reducer chose the cross-adapter lane: the move's own announcement
+    // names it, and the refused pass's feed says the conversation is not
+    // coming.
+    expect(github.comments.join("\n")).toContain("continues on **Fake harness**");
+    expect(systemNotes(taskId).join("\n")).toContain("could not be copied out");
     const replacement = testDb
       .select()
       .from(schema.tasks)
@@ -492,11 +509,96 @@ describe("a session crossing lanes on different adapters (issue #217)", () => {
     expect(fake.execs[0].laneId).toBe("fake-lane");
     expect(fake.execs[0].command.sessionId).toBeUndefined();
     expect(docker.calls.some((c) => c.includes("ContainerFile"))).toBe(false);
-    const note = systemNotes(replacement[0].id).find((n) => n.startsWith("Starting again on the branch"));
-    expect(note).toContain("Forgetful harness");
-    expect(note).toContain("Fake harness");
-    expect(note).toContain("cannot be carried between two different harnesses");
+    // Queued with no session, so the replacement's own feed says nothing about
+    // one: the owner was told at the wall, and repeating it here would be noise.
+    expect(systemNotes(replacement[0].id).some((n) => n.startsWith("Starting again"))).toBe(false);
     expect(task(replacement[0].id).sessionId).toBe("fake-fresh");
+  });
+
+  it("fails over with the session preserved onto another adapter's lane: announced as not carrying, then refused at start", async () => {
+    // Two lanes on two adapters: the wall on the first has only the second to
+    // fail over to.
+    declared.only = ["fake-lane", "other-lane"];
+    const taskId = seedFirstPass();
+    await boot("fake-lane");
+    fake.script(WALLED());
+
+    await turns.startTask(taskId);
+
+    // The transcript was copied out (the first fake can resume), the move
+    // named its target, and both the feed and the comment say what the
+    // conversation will do there.
+    expect(docker.calls.some((c) => c.startsWith("readContainerFile"))).toBe(true);
+    expect(hasTranscript(runId)).toBe(true);
+    expect(github.comments.join("\n")).toContain("continues on **Other harness**");
+    expect(systemNotes(taskId).join("\n")).toContain(
+      "runs a different harness, which cannot resume it"
+    );
+    const replacement = testDb
+      .select()
+      .from(schema.tasks)
+      .where(eq(schema.tasks.status, "queued"))
+      .all();
+    expect(replacement).toHaveLength(1);
+    expect(replacement[0].sessionId).toBe("forgetful-session");
+
+    // The replacement starts on the other adapter (pinned there for the reason
+    // the test above gives): the restore is refused, the id cleared before the
+    // turn, and the feed names both lanes.
+    await pin("other-lane");
+    docker.calls.length = 0;
+    other.script(scriptedTurn({ kind: "completed" }, { sessionId: "other-fresh" }));
+    await turns.startTask(replacement[0].id);
+
+    expect(other.execs).toHaveLength(1);
+    expect(other.execs[0].command.sessionId).toBeUndefined();
+    expect(docker.calls.some((c) => c.startsWith("writeContainerFile"))).toBe(false);
+    expect(docker.sessionIdsAtExec.find((t) => t.id === replacement[0].id)?.sessionId).toBeNull();
+    const note = systemNotes(replacement[0].id).find((n) => n.startsWith("Starting again on the branch"));
+    expect(note).toContain("Fake harness");
+    expect(note).toContain("Other harness");
+    expect(run().attempt).toBe(1);
+  });
+
+  it("announces an early resume onto another adapter's lane as not carrying the conversation", async () => {
+    // #199's move of a parked run, decided by the sweep: the comment must not
+    // promise a continuation the restore will refuse.
+    storeFakeTranscript();
+    const predecessor = seedPredecessor("fake-lane");
+    testDb
+      .update(schema.runs)
+      .set({ status: "rate_limited", resumeAfter: RESUME_AFTER })
+      .where(eq(schema.runs.id, runId))
+      .run();
+    await boot("fake-lane");
+
+    await pausedRuns.executeResumeRunOnLane({
+      type: "resumeRunOnLane",
+      runId,
+      issueRef: ISSUE_REF,
+      fromLaneId: "fake-lane",
+      toLaneId: "other-lane",
+      toLaneLabel: "Other harness",
+      toLaneBilling: "subscription",
+      toLaneRateUsdPerMTok: null,
+      resume: 2,
+      maxResumes: 3,
+      resumeAfter: RESUME_AFTER,
+    });
+
+    const queued = testDb
+      .select()
+      .from(schema.tasks)
+      .where(eq(schema.tasks.status, "queued"))
+      .all();
+    expect(queued).toHaveLength(1);
+    expect(queued[0].resumedFromTaskId).toBe(predecessor);
+    // Still carried on the row: the target is advisory, and the restore decides.
+    expect(queued[0].sessionId).toBe(SESSION);
+    const comment = github.comments.join("\n");
+    expect(comment).toContain("Other harness");
+    expect(comment).toContain("runs a different harness, which cannot resume it");
+    expect(comment).not.toContain("continues the same conversation");
   });
 
   describe("a run on an adapter that declares no session resume", () => {

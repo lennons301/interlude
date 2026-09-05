@@ -408,7 +408,10 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   branch with the work already pushed, and the issue comment says which happened.
   A move onto a lane running a *different harness adapter* never carries it
   (issue #217): the pass starts again on the branch, and its own feed says which
-  two lanes and why — the cost is the conversation, never the attempt.
+  two lanes and why — the cost is the conversation, never the attempt. One-off:
+  a run that was parked when #217 deployed had its transcript in the store's
+  earlier one-file shape, which nothing reads now, so it resumes without its
+  context exactly as a failed copy always has.
 - **Move a parked run yourself** (issue #202). When the sweep would *not* move a
   parked run — the day's spend unconfirmed, most often — and that run is gating
   everything behind it, press **move to paid lane…** on its card under
