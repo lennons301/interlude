@@ -59,15 +59,20 @@ USER node
 # — installed at image build through the open Agent Skills standard (issue
 # #215). This replaces the `claude plugin install` that ran at every container
 # setup (issue #60): that was Claude-only by construction, cost ~9s of
-# wall-clock on every start, and, being unpinned, let an upstream release
-# change a pass mid-day. The installer writes the canonical skill folders to
+# wall-clock on every start (8.7s measured on the pre-#215 image, warm, live
+# network), and, being unpinned, let an upstream release change a pass mid-day. The installer writes the canonical skill folders to
 # `~/.agents/skills/<name>/SKILL.md` — the standard location Codex and OpenCode
 # read natively — and links `~/.claude/skills/<name>` to them for Claude Code.
 # All three agents are targeted so the canonical folders exist at all: given a
 # single target the installer copies straight into that agent's directory.
 # The `/tree/<tag>` URL is how the ref is pinned (the `add` command has no ref
 # flag; the bare `mattpocock/skills` source installs `main`), and the lock file
-# then records the ref per skill, which the assertion below checks.
+# then records the ref per skill, which the assertion below checks — reading
+# the installer's own lock (`~/.agents/.skill-lock.json`, version 3), so an
+# installer release that reshaped the lock would fail this build for a reason
+# other than a missing skill. That is the right failure: the pin would then be
+# unverified, and the installer is pinned too so it happens on a deliberate
+# bump rather than overnight.
 #
 # SKILLS_REF is the one statement of the pinned ref: this RUN installs it, the
 # LABEL stamps it on the image — the orchestrator lifts it from there into the

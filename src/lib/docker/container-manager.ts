@@ -1,6 +1,6 @@
 import Docker from "dockerode";
 import { getDocker } from "./client";
-import { getImageName, ensureImage, imageSkillsRef } from "./image-builder";
+import { getImageName, ensureImage } from "./image-builder";
 import { getConfig, PLATFORM_REPO_URL } from "../config";
 import { getInstallationToken } from "../github/client";
 import { getCapacity } from "../orchestrator/capacity";
@@ -50,8 +50,9 @@ function checkoutCommand(mode: BranchCheckoutMode): string {
  * Nothing here installs skills any more (issue #215): the estate's skills are
  * baked into the agent image at build, pinned, so a `workflow:<skill>` label
  * or a `/grill-me` session names a skill the image asserted it has — and
- * setup no longer spends ~9s per container on `claude plugin` commands that
- * only Claude Code could run (issue #60's mechanism).
+ * setup no longer spends ~9s per container (8.7s measured on the pre-#215
+ * image, warm, live network) on `claude plugin` commands that only Claude
+ * Code could run (issue #60's mechanism).
  */
 export function buildSetupScript(
   platformRepoUrl: string,
@@ -137,15 +138,15 @@ export interface RunningContainer {
   /** How setup gets onto the branch (default `create`) — see `BranchCheckoutMode` */
   checkout?: BranchCheckoutMode;
   /**
-   * The skills ref stamped on the image this container was created from
-   * (issue #215) — what the turn manager writes to the run ledger's
-   * skills-version column and the task feed as the pass starts. Set by
-   * `createWorkspaceContainer` (null there only for an image built before the
-   * label existed); a handle rebuilt for a container that already started —
-   * boot re-adoption, a follow-up turn's reconnect — carries none, because the
-   * version was recorded when that container started.
+   * The `mattpocock/skills` ref stamped on the image this container was
+   * created from (issue #215) — what the turn manager writes to the run
+   * ledger's skills-version column and the task feed as the pass starts. Set
+   * by `createWorkspaceContainer` from what `ensureImage` reports; a handle
+   * rebuilt for a container that already started — boot re-adoption, a
+   * follow-up turn's reconnect — carries none, because the ref was recorded
+   * when that container started.
    */
-  skillsVersion?: string | null;
+  skillsRef?: string | null;
 }
 
 export async function createWorkspaceContainer(
@@ -154,11 +155,11 @@ export async function createWorkspaceContainer(
   const docker = getDocker();
   const config = getConfig();
 
-  await ensureImage();
-  // Read off the image the container is about to be created from, rather than
-  // reported by the container: the skills are pinned into the image at build
-  // (issue #215), so the image is the authority on which ref a pass runs with.
-  const skillsVersion = await imageSkillsRef();
+  // The skills ref comes off the image the container is about to be created
+  // from, not from anything the container reports: the skills are pinned into
+  // the image at build (issue #215), so the image is the authority on which
+  // ref a pass runs with.
+  const { skillsRef } = await ensureImage();
 
   const env = [
     `GIT_URL=${options.gitUrl}`,
@@ -226,7 +227,7 @@ export async function createWorkspaceContainer(
     name: containerName,
     previewSubdomain,
     checkout: options.checkout,
-    skillsVersion,
+    skillsRef,
   };
 }
 

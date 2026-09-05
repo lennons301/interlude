@@ -21,9 +21,8 @@ vi.mock("@/lib/docker/client", () => ({
   getDocker: () => ({ createContainer: createContainerSpy }),
 }));
 vi.mock("@/lib/docker/image-builder", () => ({
-  ensureImage: vi.fn(async () => {}),
+  ensureImage: vi.fn(async () => ({ skillsRef: "v1.2.3" })),
   getImageName: () => "interlude-agent:test",
-  imageSkillsRef: vi.fn(async () => "v1.2.3"),
 }));
 vi.mock("@/lib/orchestrator/capacity", () => ({
   getCapacity: vi.fn(async () => ({
@@ -186,9 +185,9 @@ describe("createWorkspaceContainer", () => {
 
   /**
    * Issue #215: the skills version a pass runs with is the ref pinned into the
-   * image at build, read off the image's label as the container is created —
-   * the container reports nothing. The turn manager writes this to the feed
-   * and the run ledger, so it has to arrive on the handle it is given.
+   * image at build, reported by `ensureImage` off the image the container is
+   * created from — the container reports nothing. The turn manager writes it
+   * to the feed and the run ledger, so it has to arrive on the handle.
    */
   it("carries the skills ref stamped on the image it was created from", async () => {
     const running = await createWorkspaceContainer({
@@ -196,7 +195,7 @@ describe("createWorkspaceContainer", () => {
       gitUrl: "https://github.com/lennons301/interlude.git",
       branch: "agent/issue-215",
     });
-    expect(running.skillsVersion).toBe("v1.2.3");
+    expect(running.skillsRef).toBe("v1.2.3");
   });
 
   /**

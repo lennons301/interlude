@@ -578,12 +578,9 @@ export async function startTask(taskId: string): Promise<void> {
     // `mattpocock/skills` ref pinned into the agent image at build, read off
     // the image's label when the container was created: the pass reports
     // nothing, so nothing a pass does can leave the trail blank.
-    const { skillsVersion } = running;
-    if (skillsVersion) {
-      insertSystemMessage(
-        taskId,
-        `Skills ${skillsVersion} (mattpocock/skills, pinned at image build)`
-      );
+    const { skillsRef } = running;
+    if (skillsRef) {
+      insertSystemMessage(taskId, `Skills ${skillsRef} (mattpocock/skills, pinned at image build)`);
       // First-write-wins on the ledger: a run's later review/repair pass runs
       // in its own container, but the forensic value is the implement pass's
       // version (the run's first pass) — mirroring how model/effort pin to the
@@ -592,15 +589,16 @@ export async function startTask(taskId: string): Promise<void> {
       // not rewrite what the implement pass ran with.
       if (task.runId) {
         db.update(runs)
-          .set({ skillsVersion })
+          .set({ skillsVersion: skillsRef })
           .where(and(eq(runs.id, task.runId), isNull(runs.skillsVersion)))
           .run();
       }
     } else {
-      // The label is written by the Dockerfile itself, so a null here means the
-      // container came from an image built before the label existed — surface
-      // it rather than silently dropping the forensic trail.
-      console.warn(`[orchestrator] Task ${taskId} runs from an agent image with no skills ref label`);
+      // The Dockerfile stamps the label on every image it builds and a stale
+      // image was rebuilt as this container was created, so this is reachable
+      // only if the Dockerfile stopped stamping it — surface that rather than
+      // silently dropping the forensic trail.
+      console.warn(`[orchestrator] Task ${taskId} runs from an agent image carrying no skills ref label`);
     }
 
     insertSystemMessage(taskId, "Agent started.");

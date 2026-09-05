@@ -36,13 +36,7 @@ vi.mock("@/lib/docker/client", () => ({
 // is still read for real by node:fs/promises, which is what yields realHash.
 vi.mock("tar-fs", () => ({ pack: () => "TAR_STREAM" }));
 
-import {
-  ensureImage,
-  buildImage,
-  imageExists,
-  imageSkillsRef,
-  SKILLS_REF_LABEL,
-} from "../image-builder";
+import { ensureImage, buildImage, imageExists, SKILLS_REF_LABEL } from "../image-builder";
 
 const missing = async (): Promise<never> => {
   throw new Error("no such image: interlude-agent:latest");
@@ -104,22 +98,33 @@ describe("imageExists", () => {
   });
 });
 
-describe("imageSkillsRef (issue #215)", () => {
-  it("reads the pinned skills ref off the image's label", async () => {
-    state.inspect = async () => ({
-      Config: { Labels: { [HASH_LABEL]: realHash, [SKILLS_REF_LABEL]: "v1.2.3" } },
-    });
-    expect(await imageSkillsRef()).toBe("v1.2.3");
+/**
+ * Issue #215: `ensureImage` reports the skills ref stamped on the image it
+ * leaves in place, off the inspect the staleness check already made — one
+ * daemon round trip on the warm path, not a second one for the label.
+ */
+describe("ensureImage reports the pinned skills ref (issue #215)", () => {
+  const fresh = { Config: { Labels: { [HASH_LABEL]: realHash, [SKILLS_REF_LABEL]: "v1.2.3" } } };
+
+  it("reads it off a current image without building", async () => {
+    state.inspect = async () => fresh;
+    expect(await ensureImage()).toEqual({ skillsRef: "v1.2.3" });
+    expect(buildImageSpy).not.toHaveBeenCalled();
   });
 
-  it("is null for an image built before the label existed", async () => {
-    state.inspect = async () => ({ Config: { Labels: { [HASH_LABEL]: "old" } } });
-    expect(await imageSkillsRef()).toBeNull();
+  it("reads it off the image it just rebuilt, not the stale one", async () => {
+    let inspects = 0;
+    state.inspect = async () =>
+      inspects++ === 0
+        ? { Config: { Labels: { [HASH_LABEL]: "stale", [SKILLS_REF_LABEL]: "v1.0.0" } } }
+        : fresh;
+    expect(await ensureImage()).toEqual({ skillsRef: "v1.2.3" });
+    expect(buildImageSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("is null when the image is absent", async () => {
-    state.inspect = missing;
-    expect(await imageSkillsRef()).toBeNull();
+  it("is null when the image carries no skills label", async () => {
+    state.inspect = async () => ({ Config: { Labels: { [HASH_LABEL]: realHash } } });
+    expect(await ensureImage()).toEqual({ skillsRef: null });
   });
 });
 
