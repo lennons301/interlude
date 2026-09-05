@@ -175,6 +175,12 @@ const SUBSCRIPTION_LANE: ResolvedLane = {
   id: "claude-subscription",
   label: "Claude subscription (Pro)",
   adapter: "claude-code",
+  capabilities: {
+    userInvokedSkills: true,
+    quotaTelemetry: true,
+    reportsCost: true,
+    sessionResume: true,
+  },
   billing: "subscription",
   auth: { CLAUDE_CODE_OAUTH_TOKEN: "oauth" },
   baseUrl: null,

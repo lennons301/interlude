@@ -55,27 +55,32 @@ export const FAKE_HARNESS_CAPABILITIES: HarnessCapabilities = {
   sessionResume: true,
 };
 
-/** The descriptor a test hands the lane parser so a lane may name a fake. */
-export function fakeHarnessDescriptor(
-  id: string = FAKE_HARNESS_ID,
+/** A descriptor for a fake adapter of `id` with the given capabilities — what
+ * a test hands the lane parser so a lane may name that fake (issue #217). */
+export function describeFakeHarness(
+  id: string,
   capabilities: HarnessCapabilities = FAKE_HARNESS_CAPABILITIES
 ): HarnessAdapterDescriptor {
   return { id, capabilities };
 }
 
+/** The descriptor a test hands the lane parser so a lane may name the fake. */
+export const fakeHarnessDescriptor: HarnessAdapterDescriptor =
+  describeFakeHarness(FAKE_HARNESS_ID);
+
 /** The production table plus the fake — what a test's lane file is parsed
  * against. */
 export const DESCRIPTORS_WITH_FAKE: readonly HarnessAdapterDescriptor[] = [
   ...HARNESS_ADAPTER_DESCRIPTORS,
-  fakeHarnessDescriptor(),
+  fakeHarnessDescriptor,
 ];
 
 /** The production table plus every fake a multi-adapter test declares: the
  * second fake, and one that cannot resume a session. */
 export const DESCRIPTORS_WITH_ALL_FAKES: readonly HarnessAdapterDescriptor[] = [
   ...DESCRIPTORS_WITH_FAKE,
-  fakeHarnessDescriptor(FAKE_OTHER_HARNESS_ID),
-  fakeHarnessDescriptor(FAKE_NO_RESUME_HARNESS_ID, {
+  describeFakeHarness(FAKE_OTHER_HARNESS_ID),
+  describeFakeHarness(FAKE_NO_RESUME_HARNESS_ID, {
     ...FAKE_HARNESS_CAPABILITIES,
     sessionResume: false,
   }),
