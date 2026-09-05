@@ -11,8 +11,8 @@
  *
  * **Per lane, and never fleet-wide.** A rate limit is a fact about one account
  * at one provider. The unified-window machinery is subscription-only (#165's
- * finding 6, re-confirmed against OpenRouter on 2026-09-02 — no rate-limit
- * response headers from the provider, no `rate_limit_event` anywhere on the
+ * finding 6, re-confirmed against OpenRouter on 2026-09-02 — no unified
+ * rate-limit response header, no `rate_limit_event` anywhere on the
  * stream), so a metered lane never produces an observation at all. Keyed by
  * lane, that reads as null, which is the truth: nothing to gate on, and the
  * lane is bounded by spend instead. Keyed by the fleet, the subscription's last

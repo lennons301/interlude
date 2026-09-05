@@ -148,8 +148,8 @@ export interface AppConfig {
    * other pass falls back to (issue #81). One of the fleet's five levels
    * (`ALLOWED_TICKET_EFFORTS`: low | medium | high | xhigh | max), orthogonal
    * to the model tier; each harness adapter maps the level onto its own dial
-   * through `mapEffort`, or omits it with a note where it has no equivalent
-   * (issue #214). Null = no level named, letting the harness resolve its own
+   * through `mapEffort`, or omits it where it has no equivalent (issue #214).
+   * Null = no level named, letting the harness resolve its own
    * default (the pre-#81 behaviour), so leaving it unset changes nothing. Set
    * it to pin the depth and record it on the run row.
    */

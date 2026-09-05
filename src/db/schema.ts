@@ -444,8 +444,8 @@ export const messages = sqliteTable("messages", {
  * Keyed by lane rather than by the fleet (issue #175) because a rate limit is a
  * fact about one account at one provider, and the lanes do not share one. The
  * unified-window machinery is subscription-only (#165's finding 6, re-confirmed
- * against OpenRouter on 2026-09-02: no rate-limit response header from the
- * provider, no rate-limit event anywhere on the stream), so a metered lane has *no*
+ * against OpenRouter on 2026-09-02: no unified rate-limit response header,
+ * no rate-limit event anywhere on the stream), so a metered lane has *no*
  * observation, permanently. Under one fleet-wide row, the fleet's last
  * subscription reading would stand as the current state of a lane that cannot
  * produce one — which is exactly how a lane bounded by spend would come to be

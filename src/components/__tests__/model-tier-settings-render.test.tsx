@@ -123,6 +123,21 @@ describe("the model-tier settings panel", () => {
     expect(html).toContain("with no implement tier to derive from, runs light (haiku)");
   });
 
+  it("names a ceiling without a model when no lane's map could say what it means (issue #226)", () => {
+    const html = render({
+      source: "override",
+      override: "light",
+      envValue: null,
+      model: null,
+      tier: "light",
+      chooses: [],
+      derived: [{ kind: "review", rule: "capped", ceiling: "light" }],
+    });
+
+    expect(html).toContain("ceiling light on review");
+    expect(html).not.toContain("(null)");
+  });
+
   it("says the derivation runs free when a ceiling row is unset", () => {
     const html = render({
       envValue: null,

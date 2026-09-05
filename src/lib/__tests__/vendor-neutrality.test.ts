@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { HARNESS_ADAPTER_DESCRIPTORS } from "@/lib/harness/descriptors";
 
 /**
  * Nothing outside a harness adapter knows a vendor's name (issue #226).
@@ -15,8 +16,10 @@ import { describe, expect, it } from "vitest";
  *
  * Where a vendor name is *allowed*, and why each place is on the list:
  *
- * - **An adapter's own directory** (`src/lib/harness/<adapter id>/`): the
- *   adapter is the vendor, by construction.
+ * - **An adapter's own directory** (`src/lib/harness/<adapter id>/`, for a
+ *   **registered** id — read off the descriptor table, so an unregistered
+ *   directory under the seam is scanned like any other source): the adapter is
+ *   the vendor, by construction.
  * - **The registration points** (`registry.ts`, `descriptors.ts`): each row is
  *   one adapter's id, and both tables must name every adapter that exists —
  *   `descriptors.test.ts` pins the two to each other.
@@ -27,8 +30,8 @@ import { describe, expect, it } from "vitest";
  *   endpoint and the variables its harness reads — vendor facts as
  *   configuration, which is the point of the file.
  * - **`CLAUDE.md`**: the estate's tool-specific include of `AGENTS.md`, not a
- *   coupling. Docs are not scanned at all: they may use one adapter as a
- *   worked example.
+ *   coupling. It falls outside the scan with the rest of the documentation,
+ *   which is not scanned at all: docs may use one adapter as a worked example.
  *
  * Outside those, a vendor name in source is a coupling — even in a comment,
  * because a comment that says "the CLI" or "Claude" is how the next reader
@@ -61,11 +64,15 @@ const REGISTRATION_POINTS = new Set([
   "src/lib/harness/descriptors.ts",
 ]);
 
+const REGISTERED_ADAPTER_IDS = new Set<string>(
+  HARNESS_ADAPTER_DESCRIPTORS.map((descriptor) => descriptor.id)
+);
+
 function isAdapterDirectory(rel: string): boolean {
-  // `src/lib/harness/<adapter id>/...` — but not the seam's own test directory,
-  // which is covered by the test rule anyway.
+  // `src/lib/harness/<registered adapter id>/...` and nothing else under the
+  // seam: the contract files beside it are the fleet's.
   const match = /^src\/lib\/harness\/([^/]+)\//.exec(rel);
-  return match !== null && match[1] !== "__tests__";
+  return match !== null && REGISTERED_ADAPTER_IDS.has(match[1]);
 }
 
 function isTest(rel: string): boolean {
@@ -76,7 +83,7 @@ function isTest(rel: string): boolean {
   );
 }
 
-export function mayNameVendor(rel: string): boolean {
+function mayNameVendor(rel: string): boolean {
   return isAdapterDirectory(rel) || REGISTRATION_POINTS.has(rel) || isTest(rel);
 }
 
@@ -95,7 +102,7 @@ function sourceFiles(root: string): string[] {
 }
 
 /** Every `file:line: text` in scanned source that names a vendor. */
-export function vendorNameOffences(): string[] {
+function vendorNameOffences(): string[] {
   const offences: string[] = [];
   for (const root of SOURCE_ROOTS) {
     for (const rel of sourceFiles(root)) {
@@ -121,7 +128,9 @@ describe("vendor names stay behind the harness adapter seam (issue #226)", () =>
 
   it("allows the places the ticket names, and nothing beside them", () => {
     expect(mayNameVendor("src/lib/harness/claude-code/index.ts")).toBe(true);
-    expect(mayNameVendor("src/lib/harness/codex/stream-parser.ts")).toBe(true);
+    // A directory under the seam that no descriptor registers is not an
+    // adapter's, however it is named.
+    expect(mayNameVendor("src/lib/harness/some-unregistered-harness/stream-parser.ts")).toBe(false);
     expect(mayNameVendor("src/lib/harness/registry.ts")).toBe(true);
     expect(mayNameVendor("src/lib/harness/descriptors.ts")).toBe(true);
     expect(mayNameVendor("src/lib/harness/__tests__/claude-code.test.ts")).toBe(true);

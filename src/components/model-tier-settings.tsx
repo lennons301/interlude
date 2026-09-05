@@ -172,7 +172,11 @@ function effective(field: SettingFieldView): string {
   const clauses = field.derived.map((entry) => {
     switch (entry.rule) {
       case "capped":
-        return `ceiling ${entry.ceiling} on ${entry.kind} (${field.model})`;
+        // The model beside the ceiling is the primary lane's word for it; with
+        // no lane's map to read (issue #226) the tier stands alone.
+        return field.model === null
+          ? `ceiling ${entry.ceiling} on ${entry.kind}`
+          : `ceiling ${entry.ceiling} on ${entry.kind} (${field.model})`;
       case "pinned":
         return `pinned — ${entry.kind} runs ${field.model} and derives nothing`;
       case "free":

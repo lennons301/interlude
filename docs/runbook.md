@@ -799,8 +799,8 @@ dial alongside `AGENT_MODEL`; `AGENT_EFFORT_REVIEW` / `AGENT_EFFORT_TRIAGE` give
 the read-heavy passes a lower level. What a level *means* is the lane's
 harness adapter's to say (`mapEffort`): Claude Code maps the five one to one
 onto its own effort flag; a harness with a coarser dial collapses the top
-levels together; one with no equivalent omits it and notes so on the task, so
-a directive is never silently ignored. Leave the variables unset and each
+levels together; one with no equivalent passes no flag and runs at its own
+default. Leave the variables unset and each
 harness keeps its own default. A value outside the five is refused at boot
 with the list, and the level stays unset — the warning names the fleet's
 vocabulary, not any harness's flag.

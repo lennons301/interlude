@@ -20,10 +20,10 @@ import {
   SETTABLE_KEYS,
   applySettingsPatch,
   describeMinLaneSettings,
-  describeModelTierSettings as describeModelTierSettingsOn,
+  describeModelTierSettings as describeModelTierSettingsWithMap,
   parseSettingsPatch,
   resolveMinLane,
-  resolveModelTier as resolveModelTierOn,
+  resolveModelTier as resolveModelTierWithMap,
   resolveQuotaThreshold,
   resolveResumeBound,
   sanitizeOverrides,
@@ -32,7 +32,7 @@ import {
   type TierModelIds,
   DERIVED_TIER_KINDS,
   tierCeiling,
-  resolveModelTierField as resolveModelTierFieldOn,
+  resolveModelTierField as resolveModelTierFieldWithMap,
   tierDerivation,
   isWorkPassKind,
 } from "../settings-resolver";
@@ -57,7 +57,7 @@ function resolveModelTier(
   overrides: SettingsOverrides,
   tierModels: TierModelIds | null = LANE_MODELS
 ) {
-  return resolveModelTierOn(kind, config, overrides, tierModels);
+  return resolveModelTierWithMap(kind, config, overrides, tierModels);
 }
 
 function resolveModelTierField(
@@ -67,7 +67,7 @@ function resolveModelTierField(
   tierModels: TierModelIds | null = LANE_MODELS,
   fallbackTier: ModelTier | null = null
 ) {
-  return resolveModelTierFieldOn(key, config, overrides, tierModels, fallbackTier);
+  return resolveModelTierFieldWithMap(key, config, overrides, tierModels, fallbackTier);
 }
 
 function describeModelTierSettings(
@@ -76,7 +76,7 @@ function describeModelTierSettings(
   tierModels: TierModelIds | null = LANE_MODELS,
   fallbackTier: ModelTier | null = null
 ) {
-  return describeModelTierSettingsOn(config, overrides, tierModels, fallbackTier);
+  return describeModelTierSettingsWithMap(config, overrides, tierModels, fallbackTier);
 }
 
 /**

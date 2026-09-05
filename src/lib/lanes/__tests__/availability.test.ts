@@ -125,10 +125,4 @@ describe("describeLaneAvailability", () => {
     expect(refused.ok).toBe(false);
     expect(line).toBe(refused.ok ? "" : refused.reason);
   });
-
-  it("names no vendor: the report is the catalog's, in the lane file's own words", () => {
-    for (const line of describeLaneAvailability(catalog, {})) {
-      expect(line).not.toMatch(/claude|anthropic/i);
-    }
-  });
 });

@@ -7,7 +7,7 @@ import {
   type AppConfig,
   type AgentPassKind,
 } from "../config";
-import type { SettingsOverrides } from "../settings-resolver";
+import type { SettingsOverrides, TierModelIds } from "../settings-resolver";
 import { ALLOWED_TICKET_EFFORTS } from "../orchestrator/autonomy/budgets";
 
 /** No UI overrides stored — the state a fresh install is in, where every
@@ -24,7 +24,7 @@ const NO_OVERRIDES: SettingsOverrides = {};
  * answer. The lane-specific mapping is tested in
  * `src/lib/lanes/__tests__/resolve.test.ts`.
  */
-const LANE_MODELS: Record<"heavy" | "standard" | "light", string> = {
+const LANE_MODELS: TierModelIds = {
   heavy: "opus",
   standard: "sonnet",
   light: "haiku",

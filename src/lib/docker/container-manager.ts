@@ -196,11 +196,13 @@ export async function createWorkspaceContainer(
   //   - the `interlude` Docker network (for preview routing), and
   //   - a fresh, short-lived GitHub App token per exec (GIT_AUTH_TOKEN).
   // Model-provider auth arrives the same exec-scoped way, as whichever
-  // variables the resolved execution lane's `auth` maps name (issue #172) —
-  // the VPS-verified live path (#48), carried into the exec by the lane's
-  // harness adapter, which is the only thing that knows how its harness reads
-  // a credential (#214: a variable, or a file it materialises per exec and
-  // removes when the turn ends). There is NO bind mount of any kind: the
+  // variables the resolved execution lane's `auth` maps name (issue #172; the
+  // shipped subscription lane's token is the VPS-verified live path, #48),
+  // carried into the exec by the lane's harness adapter, which is the only
+  // thing that knows how its harness reads a credential. Today that is a
+  // variable in the exec's environment; the seam's rule for a harness that
+  // wants a file (#213) is that the adapter materialises it per exec and
+  // removes it when the turn ends. There is NO bind mount of any kind: the
   // container never sees the host user's harness home directory, so it cannot
   // read or write the host's harness configuration, history, project state or
   // credentials for any harness, and whatever the image installs into its own

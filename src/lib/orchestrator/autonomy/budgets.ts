@@ -29,8 +29,8 @@ export const MAX_TURNS_CEILING = 100;
  * is semi-trusted input, so it may only choose from this fixed set — never
  * name an arbitrary value — mirroring the reasoning behind the budget clamp.
  * The vocabulary is the fleet's, not any harness's: each adapter maps a level
- * onto its own dial through `mapEffort`, or omits it with a note where it has
- * no equivalent (issue #214). An unrecognised value is ignored (the run keeps
+ * onto its own dial through `mapEffort`, or omits it where it has no
+ * equivalent (issue #214). An unrecognised value is ignored (the run keeps
  * its default effort), never fatal. Clamped in the directive parser, validated
  * in `config.ts`, resolved through `resolveAgentEffort`. */
 export const ALLOWED_TICKET_EFFORTS = [
