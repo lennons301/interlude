@@ -583,8 +583,8 @@ export function laneIds(catalog: LaneCatalog): string[] {
  * the fleet cannot attribute telemetry to, and the cautious answer is the same
  * one the gate gives silence — decide nothing on it.
  */
-export function laneReportsQuota(
-  lane: Pick<LaneDefinition, "capabilities"> | null
-): boolean {
+export function laneReportsQuota<T extends Pick<LaneDefinition, "capabilities">>(
+  lane: T | null
+): lane is T {
   return lane !== null && lane.capabilities.quotaTelemetry;
 }

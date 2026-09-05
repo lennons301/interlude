@@ -202,9 +202,10 @@ export interface ResolvedLane {
   id: string;
   label: string;
   adapter: LaneAdapterId;
-  /** What that adapter can do (issue #219), off the lane definition — the
-   * turn manager reads `quotaTelemetry` to tell the reducer whether a wall's
-   * window may step the tier ladder. */
+  /** What that adapter can do (issue #219), off the lane definition — carried
+   * so a pass's lane answers the same capability questions the screen's does,
+   * without a second lookup. Nothing on the pass path branches on it today:
+   * the wall ordering reads the refusal's own window, not a capability. */
   capabilities: HarnessCapabilities;
   billing: LaneBilling;
   /** Harness environment variable -> the secret it carries. Exec-scoped by

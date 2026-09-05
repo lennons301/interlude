@@ -117,7 +117,7 @@ export function readMoneyGuards(
   // the admission gate, the overage check and the dashboard's tile all take
   // this value, so a lane on a harness that reports no quota reads as having
   // none here, once, rather than at each of them.
-  const quota = laneReportsQuota(lane) ? getQuotaObservation(lane!.id) : null;
+  const quota = laneReportsQuota(lane) ? getQuotaObservation(lane.id) : null;
   const overage = overagePaysNow(quota, now);
   const billing =
     lane === null ? null : effectiveBilling(lane.billing, overage);

@@ -20,6 +20,7 @@
 
 import { DOCKER_PROBE_TIMEOUT_MS } from "../docker/agent-containers";
 import { probeImageBuilt } from "../docker/image-builder";
+import type { LaneAdapterId } from "../lanes/lane-config";
 import { runBoundedProbe } from "../timeout";
 import { getHarnessAdapter } from "./registry";
 
@@ -29,7 +30,7 @@ export const IMAGE_PROBE_TIMEOUT_MS = DOCKER_PROBE_TIMEOUT_MS;
 
 export interface HarnessImageState {
   /** The adapter id, as a lane names it. */
-  id: string;
+  id: LaneAdapterId;
   /** The image reference the adapter's containers run (`name:tag`). */
   image: string;
   /** Whether the daemon holds that image; null when it did not answer inside
@@ -45,7 +46,7 @@ export interface HarnessImageState {
  * throwing, and `descriptors.test.ts` pins against.
  */
 export async function readHarnessImageStates(
-  adapterIds: Iterable<string>,
+  adapterIds: Iterable<LaneAdapterId>,
   timeoutMs: number = IMAGE_PROBE_TIMEOUT_MS
 ): Promise<HarnessImageState[]> {
   const ids = [...new Set(adapterIds)];
