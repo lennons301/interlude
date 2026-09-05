@@ -73,6 +73,20 @@ export type TurnOutcome =
   | { kind: "refused"; refusal: TurnRefusal }
   | { kind: "failed"; reason: string | null };
 
+/**
+ * The quota wall a turn hit, or null when it hit none — the one reading of a
+ * refusal's *kind* the fleet makes outside the adapter. The turn manager asks
+ * it to know whether a failover is worth pricing, and the reducer to run the
+ * wall ordering (degrade, failover, pause: issues #170, #176, #168); a refusal
+ * of another kind is not a wall, since the account has not run out of
+ * anything, and a null outcome hit nothing. Written once so the two cannot
+ * disagree about what counts.
+ */
+export function quotaRefusalOf(outcome: TurnOutcome | null): TurnRefusal | null {
+  if (outcome === null || outcome.kind !== "refused") return null;
+  return outcome.refusal.kind === "quota" ? outcome.refusal : null;
+}
+
 export interface TurnResult {
   sessionId: string | null;
   /** What the turn cost, as the harness reported it. `runTurn` replaces this

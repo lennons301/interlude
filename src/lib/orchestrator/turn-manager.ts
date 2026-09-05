@@ -17,7 +17,11 @@ import {
 } from "../docker/container-manager";
 import { checkMemoryAdmission } from "./capacity";
 import { runBoundedProbe } from "../timeout";
-import type { TurnOutcome, TurnResult } from "../harness/turn-result";
+import {
+  quotaRefusalOf,
+  type TurnOutcome,
+  type TurnResult,
+} from "../harness/turn-result";
 import { getStreamRecorder } from "./stream-recorder";
 import { parseReviewVerdict } from "./autonomy/verdict";
 import { parseTriageExit } from "./autonomy/triage";
@@ -2051,11 +2055,10 @@ export async function evaluatePassOutcome(
     task.kind !== "implement" || task.pullRequestNumber != null;
 
   const now = new Date();
-  // The wall, if this turn hit one — the one reading of the outcome this seam
-  // makes, and only to know whether to price a failover (below); the reducer
-  // makes its own from the same outcome.
-  const walled =
-    turn.outcome?.kind === "refused" && turn.outcome.refusal.kind === "quota";
+  // Whether this turn hit a wall — read through the same helper the reducer
+  // reads it through, and only to know whether a failover is worth pricing
+  // (below); the reducer decides what the wall means from the same outcome.
+  const walled = quotaRefusalOf(turn.outcome) !== null;
   const settings = getFleetSettings();
   const tier = normalizeModelTier(run?.model ?? null);
 

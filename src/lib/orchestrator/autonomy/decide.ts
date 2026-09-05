@@ -26,7 +26,7 @@ import {
   type WorkflowSelection,
 } from "./ticket";
 import type { ModelTier } from "../../model-tiers";
-import type { TurnOutcome } from "../../harness/turn-result";
+import { quotaRefusalOf, type TurnOutcome } from "../../harness/turn-result";
 import { planTierDegrade } from "../../quota/tier-ladder";
 import {
   chooseRunTier,
@@ -1226,20 +1226,6 @@ function describeTierSource(source: TierSource): string {
     : "triage's suggestion — the ticket states none; a `model:` line in a Workflow section would outrank it";
 }
 
-/**
- * The quota wall a finished turn hit, or null when it hit none — the one
- * reading of a turn outcome the reducer makes (issue #214). A refusal of
- * another kind is not a wall: the account has not run out of anything, so
- * the wall ordering (degrade, failover, pause) has nothing to offer it.
- */
-function quotaWall(
-  outcome: TurnOutcome | null
-): { resumeAfter: Date | null; limitType: string | null } | null {
-  if (outcome === null || outcome.kind !== "refused") return null;
-  if (outcome.refusal.kind !== "quota") return null;
-  return { resumeAfter: outcome.refusal.resumeAfter, limitType: outcome.refusal.limitType };
-}
-
 export function decideNext(snapshot: AutonomySnapshot): Action[] {
   const actions: Action[] = [];
 
@@ -1273,7 +1259,10 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     // is the CLI's own session-limit line and the empty diff is the wall's, so
     // both the blocked-marker detector and the empty-pass check below would be
     // judging the account's quota as if it were the work.
-    const wall = quotaWall(pass.outcome);
+    // The one reading of the outcome the reducer makes (issue #214): a wall,
+    // or nothing. A refusal of another kind is not a wall — the account has
+    // not run out of anything — so the ordering below has nothing for it.
+    const wall = quotaRefusalOf(pass.outcome);
     if (wall) {
       // Which consequence a wall has is the whole of issue #170, and it turns
       // on one field: the window that refused the pass. A **tier-scoped** one

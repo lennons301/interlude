@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 // The registry pulls the Claude Code adapter in, and its stream parser writes
 // to the feed; nothing here exercises it, so the DB is stubbed rather than
@@ -8,7 +8,6 @@ vi.mock("@/lib/config", () => ({
   getConfig: () => ({ maxTurns: 50, maxBudgetUsd: 20 }),
 }));
 
-import { vi } from "vitest";
 import {
   HARNESS_ADAPTER_DESCRIPTORS,
   describeHarnessAdapter,
