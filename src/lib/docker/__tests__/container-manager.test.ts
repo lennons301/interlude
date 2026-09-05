@@ -1,10 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { spawn } from "child_process";
+import { PassThrough } from "stream";
 import {
   buildSetupScript,
   buildPushScript,
+  buildStopTurnScript,
   COMMITS_AHEAD_MARKER,
   parseCommitsAhead,
   createWorkspaceContainer,
+  execAgentTurn,
+  STOP_TURN_GRACE_SECONDS,
+  STOP_TURN_TARGET_ENV,
+  TURN_ID_ENV,
 } from "../container-manager";
 
 // Capture the options passed to docker.createContainer so we can assert on the
@@ -18,7 +25,12 @@ const { createContainerSpy } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/docker/client", () => ({
-  getDocker: () => ({ createContainer: createContainerSpy }),
+  getDocker: () => ({
+    createContainer: createContainerSpy,
+    // `execAgentTurn` demuxes the exec's raw stream through the modem; the
+    // test below cares about what the exec was asked for, not the bytes.
+    modem: { demuxStream: () => undefined },
+  }),
 }));
 const { ensureImageSpy } = vi.hoisted(() => ({
   ensureImageSpy: vi.fn<(image: unknown) => Promise<{ skillsRef: string | null }>>(
@@ -243,4 +255,96 @@ describe("createWorkspaceContainer", () => {
     }
     expect(env.join(" ")).not.toContain("sk-ant-");
   });
+});
+
+/**
+ * Issue #220: the orchestrator's wall-clock ceiling needs to end one turn's
+ * process tree inside a container without knowing which harness it is. The
+ * exec marks its processes with a turn id in their environment, and the stop
+ * script finds exactly those by it.
+ */
+describe("execAgentTurn", () => {
+  it("marks the exec's environment with a turn id it hands back, beside the adapter's env", async () => {
+    const execSpy = vi.fn<(options: unknown) => Promise<{ start: () => Promise<PassThrough> }>>(
+      async () => ({ start: async () => new PassThrough() })
+    );
+    const { turnId } = await execAgentTurn({
+      container: { exec: execSpy } as never,
+      command: "fake-harness --model 'x'",
+      env: ["FAKE_PROMPT=hello", "GIT_AUTH_TOKEN=ghs_x"],
+    });
+
+    expect(execSpy).toHaveBeenCalledTimes(1);
+    const opts = execSpy.mock.calls[0][0] as unknown as { Env: string[]; Cmd: string[] };
+    expect(opts.Cmd).toEqual(["bash", "-c", "fake-harness --model 'x'"]);
+    expect(opts.Env).toEqual([
+      "FAKE_PROMPT=hello",
+      "GIT_AUTH_TOKEN=ghs_x",
+      `${TURN_ID_ENV}=${turnId}`,
+    ]);
+    expect(turnId).not.toBe("");
+  });
+});
+
+describe("buildStopTurnScript", () => {
+  const script = buildStopTurnScript();
+
+  it("finds the turn's processes by a whole-line match on the marker, handed the target under another name", () => {
+    // The killer's own processes carry the target variable, never the marker,
+    // so a whole-line match cannot find the killer itself.
+    expect(script).toContain(`target="${TURN_ID_ENV}=$${STOP_TURN_TARGET_ENV}"`);
+    expect(script).toContain("/proc/[0-9]*");
+    expect(script).toContain('grep -qxF -- "$target"');
+    expect(script).toContain('[ "$pid" = "$$" ] && continue');
+  });
+
+  it("sends TERM, waits out the grace, then KILLs what is left, and always exits 0", () => {
+    const term = script.indexOf("kill -TERM");
+    const grace = script.indexOf(`seq 1 ${STOP_TURN_GRACE_SECONDS}`);
+    const kill = script.indexOf("kill -KILL");
+    expect(term).toBeGreaterThan(-1);
+    expect(grace).toBeGreaterThan(term);
+    expect(kill).toBeGreaterThan(grace);
+    expect(script.trimEnd().endsWith("exit 0")).toBe(true);
+  });
+
+  // The script reads `/proc`, so it can only be run where there is one. The
+  // fleet's containers are Linux; a box without `/proc` pins the shape above
+  // and skips the behaviour.
+  it.skipIf(process.platform !== "linux")(
+    "ends a process carrying the marker and leaves one that does not",
+    async () => {
+      const turnId = `turn-${process.pid}-${Date.now()}`;
+      const marked = spawn("sleep", ["60"], {
+        env: { ...process.env, [TURN_ID_ENV]: turnId },
+        stdio: "ignore",
+      });
+      const bystander = spawn("sleep", ["60"], {
+        env: { ...process.env, [TURN_ID_ENV]: `${turnId}-other` },
+        stdio: "ignore",
+      });
+      const markedExit = new Promise<string | null>((resolve) =>
+        marked.on("exit", (_code, signal) => resolve(signal))
+      );
+
+      try {
+        const stop = spawn("bash", ["-c", script], {
+          env: { ...process.env, [STOP_TURN_TARGET_ENV]: turnId },
+          stdio: "ignore",
+        });
+        const stopExit = await new Promise<number | null>((resolve) =>
+          stop.on("exit", (code) => resolve(code))
+        );
+
+        expect(stopExit).toBe(0);
+        expect(await markedExit).toBe("SIGTERM");
+        expect(bystander.exitCode).toBeNull();
+        expect(bystander.signalCode).toBeNull();
+      } finally {
+        bystander.kill("SIGKILL");
+        marked.kill("SIGKILL");
+      }
+    },
+    20_000
+  );
 });

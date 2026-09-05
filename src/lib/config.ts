@@ -7,6 +7,7 @@ import {
   DEFAULT_OWED_REVIEW_STALL_MS,
   DEFAULT_PICKUP_WEDGED_MS,
   DEFAULT_QUEUE_HEARTBEAT_STALE_MS,
+  DEFAULT_TURN_WALL_CLOCK_MS,
 } from "./orchestrator/autonomy/budgets";
 import type { FleetHealthThresholds } from "./fleet/health";
 import {
@@ -217,6 +218,14 @@ export interface AppConfig {
    * QUEUE_HEARTBEAT_STALE_MINUTES. */
   fleetHealthThresholds: FleetHealthThresholds;
   /**
+   * The most wall-clock time one agent exec may run before the orchestrator
+   * ends it as a turn limit (issue #220), in ms — `DEFAULT_TURN_WALL_CLOCK_MS`
+   * unless TURN_WALL_CLOCK_MINUTES says otherwise. Adapter-agnostic: a
+   * harness with no turn or budget flag of its own is bounded by this alone,
+   * and the Claude lane by this beside its flags.
+   */
+  turnWallClockMs: number;
+  /**
    * Quota utilization (percent) at or above which no new ticket is claimed
    * (issue #171), from QUOTA_PICKUP_THRESHOLD_PERCENT — held **verbatim**, as
    * `agentModel` is, and validated in `resolveQuotaThreshold` rather than here.
@@ -329,6 +338,10 @@ export function getConfig(): AppConfig {
         DEFAULT_UNDELIVERED_ANSWER_MS
       ),
     },
+    turnWallClockMs: minutesEnvMs(
+      process.env.TURN_WALL_CLOCK_MINUTES,
+      DEFAULT_TURN_WALL_CLOCK_MS
+    ),
     quotaPickupThresholdPercent:
       process.env.QUOTA_PICKUP_THRESHOLD_PERCENT || null,
   };

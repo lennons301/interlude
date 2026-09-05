@@ -13,6 +13,7 @@ import {
 } from "./agent-containers";
 import { isRecreatedNetworkFailure, planNetworkReattach } from "./stale-network";
 import { raceWithTimeout, runBoundedProbe, TIMED_OUT } from "../timeout";
+import { newId } from "../ulid";
 
 /**
  * How setup gets onto `$GIT_BRANCH`:
@@ -312,12 +313,16 @@ export async function execAgentTurn(options: {
   command: string;
   /** The environment the harness adapter built from the resolved lane. */
   env: string[];
-}): Promise<{ stream: NodeJS.ReadableStream; exec: Docker.Exec }> {
+}): Promise<{ stream: NodeJS.ReadableStream; exec: Docker.Exec; turnId: string }> {
   const docker = getDocker();
 
+  // The turn's own marker (issue #220), beside the adapter's environment: the
+  // one thing every process of this exec and no other process in the container
+  // carries, so `stopAgentTurn` can find the tree without knowing the harness.
+  const turnId = newId();
   const exec = await options.container.exec({
     Cmd: ["bash", "-c", options.command],
-    Env: options.env,
+    Env: [...options.env, `${TURN_ID_ENV}=${turnId}`],
     AttachStdout: true,
     AttachStderr: true,
   });
@@ -343,7 +348,109 @@ export async function execAgentTurn(options: {
   stdout.on("end", onEnd);
   stderr.on("end", onEnd);
 
-  return { stream: merged, exec };
+  return { stream: merged, exec, turnId };
+}
+
+/**
+ * The exec-scoped variable that marks every process of one agent turn (issue
+ * #220). Set by `execAgentTurn` on the exec's environment — so the harness's
+ * process and everything it spawns inherit it, and nothing else in the
+ * container (PID 1, a dev server left by an earlier turn) does — and read
+ * back by `stopAgentTurn` off `/proc/<pid>/environ`. Harness-agnostic by
+ * construction: it names no binary, so a harness that renames itself, forks
+ * helpers or scrubs its command line is still found.
+ */
+export const TURN_ID_ENV = "INTERLUDE_TURN_ID";
+
+/** The variable the stop script is handed its target through. A *different*
+ * name from the marker on purpose: the stop exec's own processes carry this
+ * one, so a whole-line match on the marker cannot find the killer itself. */
+export const STOP_TURN_TARGET_ENV = "INTERLUDE_STOP_TURN_ID";
+
+/** How long a turn's processes get to exit on SIGTERM before SIGKILL. A hung
+ * process — the suspended-host case this exists for — ignores the first, and
+ * ten seconds is long enough for a healthy harness to flush what it has. */
+export const STOP_TURN_GRACE_SECONDS = 10;
+
+/** The bound on the whole stop exec (issue #151's rule): the grace above plus
+ * the daemon's round trips, with room. Past it the caller stops waiting — the
+ * container is torn down or parked by what follows, which ends the process
+ * tree either way. */
+const STOP_TURN_TIMEOUT_MS = 30_000;
+
+/**
+ * The script that ends one turn's process tree inside the container (issue
+ * #220): every process whose environment carries the turn's marker gets
+ * SIGTERM, then — if any is still there after the grace — SIGKILL. Exported
+ * for the test that pins its shape.
+ *
+ * Found by *environment*, not by name or ancestry: `pkill -f` on the command
+ * line would catch the `bash -c` wrapper and orphan the harness it forked, a
+ * parent-pid walk needs the tree intact at the moment of reading, and neither
+ * knows which binary a given harness is. `/proc/<pid>/environ` is the initial
+ * environment of each process, inherited down the tree, readable for every
+ * process of the same user — which the turn's are, since both execs run as
+ * the container's user. The script's own shell is skipped by pid and its
+ * helpers carry a differently-named variable, so a whole-line match on the
+ * marker finds exactly the turn. Always exits 0: the caller's question is
+ * "did the stop complete", answered by the exec ending inside its bound.
+ */
+export function buildStopTurnScript(): string {
+  return [
+    "set -u",
+    `target="${TURN_ID_ENV}=\$${STOP_TURN_TARGET_ENV}"`,
+    "matching() {",
+    "  for d in /proc/[0-9]*; do",
+    '    pid="${d#/proc/}"',
+    '    [ "$pid" = "$$" ] && continue',
+    `    if tr '\\0' '\\n' < "$d/environ" 2>/dev/null | grep -qxF -- "$target"; then`,
+    "      printf '%s\\n' \"$pid\"",
+    "    fi",
+    "  done",
+    "}",
+    'pids="$(matching)"',
+    '[ -z "$pids" ] && exit 0',
+    "kill -TERM $pids 2>/dev/null",
+    `for _ in $(seq 1 ${STOP_TURN_GRACE_SECONDS}); do`,
+    "  sleep 1",
+    '  pids="$(matching)"',
+    '  [ -z "$pids" ] && exit 0',
+    "done",
+    "kill -KILL $pids 2>/dev/null",
+    "exit 0",
+  ].join("\n");
+}
+
+/** Whether the stop completed inside its bound, or how it did not. */
+export type StopTurnOutcome = "stopped" | "timeout" | "error";
+
+/**
+ * End the turn `execAgentTurn` marked `turnId` (issue #220) — the orchestrator's
+ * half of the wall-clock ceiling, for a harness whose own flags did not stop
+ * it or which has none. Runs the stop script in a second exec of the same
+ * container, bounded (issue #151): a daemon that stops answering must not
+ * freeze the turn manager on top of the turn it was already waiting out.
+ *
+ * Deliberately not a `docker stop`: that ends every process in the container
+ * — the dev server an interactive session left running for its preview along
+ * with the turn — and the container may have a next turn to run. The turn's
+ * own tree is what overran, so the turn's own tree is what goes.
+ */
+export async function stopAgentTurn(
+  container: Docker.Container,
+  turnId: string
+): Promise<StopTurnOutcome> {
+  const outcome = await runBoundedProbe(async () => {
+    const exec = await container.exec({
+      Cmd: ["bash", "-c", buildStopTurnScript()],
+      Env: [`${STOP_TURN_TARGET_ENV}=${turnId}`],
+      AttachStdout: true,
+      AttachStderr: true,
+    });
+    const stream = await exec.start({});
+    return awaitExecExit(exec, stream);
+  }, STOP_TURN_TIMEOUT_MS);
+  return outcome.ok ? "stopped" : outcome.reason;
 }
 
 /**

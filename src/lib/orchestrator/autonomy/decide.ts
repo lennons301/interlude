@@ -26,7 +26,12 @@ import {
   type WorkflowSelection,
 } from "./ticket";
 import type { ModelTier } from "../../model-tiers";
-import { quotaRefusalOf, type TurnOutcome } from "../../harness/turn-result";
+import {
+  quotaRefusalOf,
+  refusedCredential,
+  type TurnOutcome,
+} from "../../harness/turn-result";
+import { DEFAULT_REFUSAL_BACKOFF_MS } from "./budgets";
 import { planTierDegrade } from "../../quota/tier-ladder";
 import {
   chooseRunTier,
@@ -179,12 +184,17 @@ export interface PassOutcome {
    * ticket's attempt budget.
    *
    * It does not say *which* consequence follows — a tier-scoped window steps
-   * the run down the ladder and an account-wide one parks it (issue #170) —
-   * because that is the reducer's decision to make, from this and `tier`.
-   * The other outcomes decide nothing here: a `turn-limit` exhausted its
-   * attempt before it reached the reducer, and a `failed` or non-quota
-   * `refused` turn takes the ordinary path exactly as it did before the
-   * vocabulary existed — what an `auth` refusal should do is issue #220's.
+   * the run down the ladder, an account-wide one moves lanes or parks it
+   * (issues #170, #176), and a park with no stated reset waits the default
+   * backoff (issue #220) — because that is the reducer's decision to make,
+   * from this and `tier`.
+   *
+   * A `refused { auth }` outranks the same readings for the same reason
+   * (issue #220): the pass never reached the model. It is a lane-availability
+   * failure, not a wall, so the pass ends without a retry on that lane. The
+   * other outcomes decide nothing here: a `turn-limit` exhausted its attempt
+   * before it reached the reducer, and a `failed` or `refused { other }` turn
+   * takes the ordinary path exactly as it did before the vocabulary existed.
    */
   outcome: TurnOutcome | null;
   /**
@@ -248,10 +258,11 @@ export interface PausedRun {
   /**
    * When the refusing window resets — the run's `resumeAfter`.
    *
-   * Null means the row carries no clock, which #168 never writes (a rejection
-   * with no reset time takes the ordinary failure path precisely so a run is
-   * never parked on a window nobody knows the length of). If one appears
-   * anyway it is treated as eligible now rather than left waiting forever:
+   * Null means the row carries no clock, which no pause writes: a rejection
+   * that named a reset parks on it, and one that named none parks on the
+   * default backoff (issue #220), precisely so a run is never parked on a
+   * window nobody knows the length of. If one appears anyway it is treated as
+   * eligible now rather than left waiting forever:
    * stranding a run where no later ticket can find it is the failure this
    * whole ticket exists to prevent, and a wall that is still up simply pauses
    * it again — which the bound below counts.
@@ -610,6 +621,15 @@ export type PauseReason =
    * work it could not finish. Lifted by the window resetting, not by a human */
   | "quota-gate";
 
+/**
+ * What a paused run's clock is (issue #220): the refusing window's own reset,
+ * as the harness stated it, or the fleet's default backoff because it stated
+ * none. Carried on the pause so the issue comment and the feed can say which
+ * — a countdown read as a reset time when it is a wait would send the operator
+ * looking for a window that does not exist.
+ */
+export type PauseClock = "harness" | "default-backoff";
+
 export type Action =
   | {
       type: "claimIssue";
@@ -878,10 +898,34 @@ export type Action =
       taskId: string;
       /** "owner/repo#n" */
       issueRef: string;
-      /** When the refusing window resets — the run's `resumeAfter` */
+      /** When the run may be tried again — the run's `resumeAfter`: the
+       * refusing window's own reset, or now plus the default backoff when the
+       * harness named none (issue #220) */
       resumeAfter: Date;
+      /** Where that clock came from, so the announcement can say whether the
+       * countdown is the window's reset or a wait the fleet chose */
+      clock: PauseClock;
       /** Which window refused it, verbatim, or null when the event named none */
       limitType: string | null;
+    }
+  | {
+      // A pass whose **credential** the provider refused (issue #220). Not a
+      // wall — the account has not run out of anything — and not the work's
+      // either: the pass never reached the model. It is the runtime discovery
+      // of an unavailable lane, the failure #172 reports before a pass starts
+      // when a lane's variables are unset, and it ends the same way: the pass
+      // ends naming the lane and its credential, and nothing is retried on
+      // that lane under this run. What the run then does is the executor's,
+      // by pass kind, mirroring what an unavailable lane at pass start does —
+      // an implement pass to the bounded interruption path (no attempt
+      // spent), a repair pass ended for the sweep's own bound to escalate.
+      type: "endPassOnRefusedCredential";
+      runId: string;
+      taskId: string;
+      /** "owner/repo#n" */
+      issueRef: string;
+      /** The lane whose credential was refused; null when the pass recorded none */
+      laneId: string | null;
     }
   | {
       // A pass refused on a **tier-scoped** window (issue #170): the account
@@ -1247,8 +1291,9 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
   // A finished pass that leads with the blocked marker is parked and its
   // question escalated; a healthy pass gets no action here — the turn
   // manager proceeds to completion. A run parked by its pass outcome is driven
-  // by exactly one thing — its question, its quota clock, or its retry a tier
-  // lower (issue #170): the executors
+  // by exactly one thing — its question, its quota clock, its retry a tier
+  // lower (issue #170) or on another lane (#176), or the end its refused
+  // credential put to it (#220): the executors
   // never gather such a run into the review pipeline (it leaves the
   // reviewing/gated set), but the combination is representable in a snapshot,
   // so the reducer refuses to double-drive it rather than trusting the callers.
@@ -1332,22 +1377,54 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
         });
         continue;
       }
-      // A pause needs a clock, and a rejection that named no reset time gives
-      // it none. Pausing on an invented one would strand the run where no
-      // later ticket can find it, so — exactly as before #170 — such a pass
-      // falls through to its ordinary path and spends the attempt.
-      if (resumeAfter !== null) {
-        parkedRunIds.add(pass.runId);
-        actions.push({
-          type: "pauseRunOnRateLimit",
-          runId: pass.runId,
-          taskId: pass.taskId,
-          issueRef: pass.issueRef,
-          resumeAfter,
-          limitType,
-        });
-        continue;
-      }
+      // Otherwise park (issue #168). A pause needs a clock: the window's own
+      // reset when the harness named one, and the default backoff when it did
+      // not (issue #220). Before #220 a reset-less account-wide wall fell
+      // through here to its ordinary path and spent the attempt, because a
+      // run parked on an *invented window* would have been stranded where no
+      // later ticket could find it. A backoff is not an invented window: it is
+      // a stated wait, said as such on the issue, and a run parked on it is
+      // found by the same sweep that finds every other paused run — it
+      // resumes on its own lane when the backoff elapses, a wall that still
+      // stands parks it again, and the resume bound hands the ticket to a
+      // human with its attempts intact. That is what makes a refusal from a
+      // harness with no rate-limit event — which never names a reset — cost
+      // the ticket latency rather than attempts.
+      parkedRunIds.add(pass.runId);
+      actions.push({
+        type: "pauseRunOnRateLimit",
+        runId: pass.runId,
+        taskId: pass.taskId,
+        issueRef: pass.issueRef,
+        resumeAfter:
+          resumeAfter ?? new Date(snapshot.now.getTime() + DEFAULT_REFUSAL_BACKOFF_MS),
+        clock: resumeAfter !== null ? "harness" : "default-backoff",
+        limitType,
+      });
+      continue;
+    }
+    // A refused credential (issue #220) is not a wall — the account has not
+    // run out of anything — and it is judged ahead of the readings below for
+    // the wall's own reason: the pass never reached the model, so its final
+    // message is the provider's "unauthorized" (which the blocked-marker
+    // detector would read as a question) and its empty diff is the refusal's
+    // (which the empty-pass check would charge as a strike). It is a
+    // lane-availability failure, the kind #172 reports when a lane's variables
+    // are unset, and it ends the same way: the pass ends naming the lane and
+    // its credential, and nothing is retried on that lane under this run — no
+    // degrade, no pause, no move, and deliberately no failover either, since
+    // routing around a misconfiguration by spending at another provider is
+    // what #176 refuses for an unavailable lane.
+    if (refusedCredential(pass.outcome)) {
+      parkedRunIds.add(pass.runId);
+      actions.push({
+        type: "endPassOnRefusedCredential",
+        runId: pass.runId,
+        taskId: pass.taskId,
+        issueRef: pass.issueRef,
+        laneId: pass.laneId,
+      });
+      continue;
     }
     const question = detectBlockedQuestion(pass.finalMessage);
     if (question) {
@@ -1636,7 +1713,14 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       // pass earns one bounded re-queue with the parse failure fed back before
       // anyone is paged (issue #89). Like a first review, this reserves intent,
       // not a slot: the queue applies the capacity check when it starts.
-      if (pending.reviewUnparseableCount < snapshot.maxUnparseableRetries) {
+      // A verdict the parser marked non-retryable is not a format slip: the
+      // lane's provider refused the review's credential (issue #220), so the
+      // same review on the same lane would meet the same refusal, and the
+      // retry is not spent on it — it fails closed below, naming the lane.
+      if (
+        result.retryable !== false &&
+        pending.reviewUnparseableCount < snapshot.maxUnparseableRetries
+      ) {
         reviewsQueuedThisSweep++;
         actions.push({
           type: "retryReview",
