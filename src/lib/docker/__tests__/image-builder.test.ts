@@ -5,6 +5,7 @@ import path from "node:path";
 import { SESSION_SKILLS } from "@/db/schema";
 import { CLAUDE_CODE_IMAGE } from "@/lib/harness/claude-code/image";
 import { OPENCODE_IMAGE } from "@/lib/harness/opencode/image";
+import { OPENCODE_DB_PATH } from "@/lib/harness/opencode";
 import type { HarnessImage } from "@/lib/harness/adapter";
 
 const HASH_LABEL = "co.interlude.agent-dockerfile-sha256";
@@ -399,8 +400,10 @@ describe("the OpenCode layer (issue #222)", () => {
 
   it("installs the OpenCode CLI and creates its data directory, and nothing of Claude Code", () => {
     expect(layerInstructions).toContain("RUN npm install -g opencode-ai");
+    // The directory the adapter pins the session database into, so the two
+    // cannot name different places.
     expect(layerInstructions).toContain(
-      "RUN mkdir -p /home/node/.local/share/opencode && chown -R node:node /home/node/.local"
+      `RUN mkdir -p ${path.dirname(OPENCODE_DB_PATH)} && chown -R node:node /home/node/.local`
     );
     expect(layerInstructions).not.toContain("@anthropic-ai");
     expect(layerInstructions).not.toContain(".claude");

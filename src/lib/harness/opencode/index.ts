@@ -205,6 +205,9 @@ export function buildOpenCodeTurnCommand(input: HarnessCommandInput): string {
 
   return [
     "set -o pipefail",
+    // Before the terminal event is armed, deliberately: a workspace that is
+    // not there is the container's failure, and a stream with no exit event
+    // is the null outcome the interruption bound owns.
     `cd ${AGENT_WORKDIR} || exit 1`,
     `mkdir -p "$(dirname ${OPENCODE_CONFIG_PATH})"`,
     // The per-exec config: permissions allowed outright, and the lane's

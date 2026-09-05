@@ -59,18 +59,25 @@ import {
  * `reasoning` is added to `output`. `part.cost` is summed the same way into
  * `costUsd`: it is the CLI's estimate from the models.dev catalogue, not the
  * provider's bill, which is why the adapter declares no `reportsCost` and a
- * metered OpenCode lane must declare prices — the estimate rides on the result
- * as the harness's reported figure (`reportedUsd` on the feed) and nothing is
- * charged from it.
+ * metered OpenCode lane must declare prices — on the shipped lane the lane's
+ * prices charge the turn and the estimate rides beside them as the harness's
+ * reported figure (`reportedUsd` on the feed). A *subscription* OpenCode lane
+ * (legal under #219, none shipped) declares no prices, so `chargeForTurn`
+ * would book this estimate against the daily autonomous cap as the harness's
+ * figure — a catalogue price for quota already bought, the over-stating side.
  *
- * **What reaches the recorder (issue #165).** As the Codex parser argues, the
- * recorder's allowlist is the Claude Code parser's vocabulary and caps each
- * type per turn, so this parser forwards only what it did not act on: an event
- * of a type this build has not met. The refusal's own body is kept another way
- * — the terminal result handed back carries the last `error` event verbatim
- * under `lastError`, and `runTurn` records the terminal result whole. A line
- * that is not JSON is handed over and noted on the feed, because it is the
- * CLI's stderr (merged into the stream) saying something went wrong.
+ * **What reaches the recorder (issue #165).** The recorder's allowlist
+ * (`KNOWN_STREAM_EVENT_TYPES`) is the Claude Code parser's vocabulary and it
+ * caps each event type per turn, so this parser forwards only what it did not
+ * act on: an event of a type this build has not met. One collision, known and
+ * bounded: `error` is a name both harnesses use, so a malformed `error` event
+ * forwarded by type would be dropped there as one of Claude's known types —
+ * it is handed over as an unparseable line instead, which the recorder always
+ * keeps, because to this parser that is what it is. A well-formed refusal is
+ * kept another way — the terminal result handed back carries the last `error`
+ * event verbatim under `lastError`, and `runTurn` records the terminal result
+ * whole. A line that is not JSON is handed over and noted on the feed, because
+ * it is the CLI's stderr (merged into the stream) saying something went wrong.
  */
 
 /** The wire's tool names that do not capitalise to the transcript's verb by
@@ -272,7 +279,9 @@ export function createOutputHandler(
       case OPENCODE_ERROR_EVENT: {
         const error = readOpenCodeError(event);
         if (error === null) {
-          recorder.streamEvent(taskId, event);
+          // Not by type: `error` is one of Claude Code's known types too, and
+          // the recorder would drop it (module note).
+          recorder.unparseableLine(taskId, JSON.stringify(event));
           return;
         }
         lastErrorEvent = event;

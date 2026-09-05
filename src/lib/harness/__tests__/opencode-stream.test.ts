@@ -364,6 +364,17 @@ describe("tool parts", () => {
     ).toEqual({ tool: "Bash", input: { command: "false" }, output: "exit code 1", exit_code: 1 });
   });
 
+  it("hands a malformed error event to the recorder as an unparseable line, not by type (which the recorder would drop)", () => {
+    const { handler, recorder } = handlerFor();
+    const malformed = { type: "error", sessionID: SESSION_ID, error: "boom" };
+    handler.write(JSON.stringify(malformed) + "\n");
+    expect(recorder.events).toEqual([]);
+    expect(recorder.lines).toEqual([JSON.stringify(malformed)]);
+    expect(messagesOf(TASK_ID)).toHaveLength(0);
+    // Not a refusal either: nothing to read a status off.
+    expect(play(handler, withExit("", 1)).outcome).toEqual({ kind: "failed", reason: "exit 1" });
+  });
+
   it("is null for a part carrying no tool state, which the parser then records verbatim", () => {
     expect(describeToolPart({ type: "tool" })).toBeNull();
     const { handler, recorder } = handlerFor();

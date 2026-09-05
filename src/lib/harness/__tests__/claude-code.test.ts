@@ -327,7 +327,7 @@ describe("buildClaudeTurnCommand", () => {
 });
 
 describe("the adapter registry (issue #172)", () => {
-  it("resolves the one adapter that ships", () => {
+  it("resolves a shipped adapter", () => {
     expect(getHarnessAdapter("claude-code")).toBe(claudeCodeAdapter);
   });
 
