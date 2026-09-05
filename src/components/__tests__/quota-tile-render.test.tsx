@@ -6,8 +6,9 @@ import type { QuotaGlance, QuotaLaneGlance } from "@/lib/fleet/fleet-view";
 /**
  * The quota tile (issue #167). What the read model decides is tested in
  * `fleet-view.test.ts`; what this covers is the tile's own job — that each of
- * the three states it can be in says something true, including the two where
- * the fleet knows less than the tile's shape suggests.
+ * the states it can be in says something true, including the ones where the
+ * fleet knows less than the tile's shape suggests, and (issue #219) that a
+ * lane whose harness cannot report is told apart from one that has not yet.
  */
 
 const NOW = new Date("2026-09-01T12:00:00.000Z").getTime();
@@ -16,19 +17,33 @@ const NOW = new Date("2026-09-01T12:00:00.000Z").getTime();
  * tile, is drawn at this height. */
 const GAUGE = "h-[3px]";
 
-/** The subscription lane — the one kind that can report a window at all. */
+/** The subscription lane on Claude Code — a harness that reports a window. */
 const SUBSCRIPTION_LANE: QuotaLaneGlance = {
   id: "claude-subscription",
   label: "Claude subscription",
   billing: "subscription",
+  adapter: "claude-code",
   reportsQuota: true,
 };
 
-/** A metered lane, which reports none, ever (issue #175). */
+/** A metered lane on Claude Code: the harness *could* report, the provider
+ * behind it does not (issue #175) — so nothing has been observed, and the
+ * lane is bounded by spend. */
 const METERED_LANE: QuotaLaneGlance = {
   id: "openrouter-glm",
   label: "OpenRouter (GLM open weights)",
   billing: "metered",
+  adapter: "claude-code",
+  reportsQuota: true,
+};
+
+/** A subscription lane on a harness that emits no quota telemetry at all
+ * (issue #219) — subscription-billed, and still can never report. */
+const SILENT_LANE: QuotaLaneGlance = {
+  id: "codex-subscription",
+  label: "Codex subscription",
+  billing: "subscription",
+  adapter: "codex",
   reportsQuota: false,
 };
 
@@ -54,9 +69,10 @@ describe("quota tile", () => {
     // as a quota of zero.
     const html = render(null);
 
-    expect(html).toContain("not observed yet");
+    expect(html).toContain("nothing observed yet");
     expect(html).toContain("no pass has reported a limit window");
     expect(html).not.toContain("0%");
+    expect(html).not.toContain("cannot report");
   });
 
   it("shows utilization, the closest limit, its reset and when it was seen", () => {
@@ -129,23 +145,39 @@ describe("quota tile", () => {
     expect(unknown).toContain("border-fl-line");
   });
 
-  it("says a metered lane is bounded by spend, not that it is unobserved", () => {
-    // The distinction issue #175 turns on. "Not observed yet" implies a reading
-    // is coming; on a metered lane none ever is, because the unified-window
-    // machinery is subscription-only. An operator told the wrong one waits.
+  it("says a lane whose harness emits no telemetry cannot report, whatever it bills (issue #219)", () => {
+    // The distinction #175 drew, now keyed on the harness: "nothing observed"
+    // implies a reading is coming, and on a harness without quota telemetry
+    // none ever is — a subscription lane on it included. An operator told the
+    // wrong one waits for a reading that never comes.
+    const html = render(null, SILENT_LANE);
+
+    expect(html).toContain("cannot report");
+    expect(html).toContain("Codex subscription");
+    expect(html).toContain("codex");
+    expect(html).toContain("emits no quota telemetry");
+    expect(html).not.toContain("nothing observed");
+  });
+
+  it("says nothing has been observed on a metered lane whose harness could report, and that it is bounded by spend", () => {
+    // Claude Code can report a window; OpenRouter behind it does not. The tile
+    // vouches only for the harness, and adds the fact that still helps: the
+    // gauge above this tile is what bounds the lane.
     const html = render(null, METERED_LANE);
 
+    expect(html).toContain("nothing observed yet");
     expect(html).toContain("bounded by spend");
     expect(html).toContain("OpenRouter (GLM open weights)");
-    expect(html).not.toContain("not observed yet");
+    expect(html).not.toContain("cannot report");
   });
 
   it("falls back to the pending wording when no lane resolves at all", () => {
     // An unusable lanes.yaml: nothing is known about the lane, so the tile may
-    // not claim the fleet is metered.
+    // not claim it cannot report, nor that it is metered.
     const html = render(null, null);
 
-    expect(html).toContain("not observed yet");
+    expect(html).toContain("nothing observed yet");
+    expect(html).not.toContain("cannot report");
     expect(html).not.toContain("bounded by spend");
   });
 

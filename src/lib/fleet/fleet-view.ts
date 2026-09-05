@@ -15,7 +15,7 @@ import {
 } from "../orchestrator/autonomy/budgets";
 import { resumeEligibleAt } from "../orchestrator/autonomy/resume-jitter";
 import { formatDuration, type FleetHealthSignals } from "./health";
-import type { LaneBilling } from "../lanes/lane-config";
+import type { LaneAdapterId, LaneBilling } from "../lanes/lane-config";
 import { evaluateMeteredSpend, type MeteredHold } from "../lanes/money";
 import {
   describeRateLimitType,
@@ -103,8 +103,9 @@ export interface FleetRows {
   quotaThresholdPercent: number;
   /** The **primary lane's** last observed quota state (issue #167, per-lane
    * since #175), from the durable row; null = no pass on that lane has ever
-   * reported one, which is also the permanent state of every metered lane,
-   * where the provider emits no quota telemetry at all. */
+   * reported one — the permanent state of a lane whose harness declares no
+   * quota telemetry (issue #219, where the row is not even read), and in
+   * practice of every metered lane, where the provider emits none. */
   quota: QuotaObservation | null;
   /** The lane work would run on right now (issue #175) — what the quota above
    * is an observation *of*, and what a missing observation means. null when no
@@ -113,20 +114,26 @@ export interface FleetRows {
 }
 
 /**
- * The primary execution lane, as much of it as the dashboard needs (issue
- * #175).
+ * The primary execution lane, as much of it as the dashboard needs (issues
+ * #175, #219).
  *
- * Deliberately three fields and no credential: this crosses an API route, and
- * a lane's auth is variable *names* even on the settings screen.
+ * Deliberately a handful of fields and no credential: this crosses an API
+ * route, and a lane's auth is variable *names* even on the settings screen.
  */
 export interface FleetLaneRow {
   id: string;
   label: string;
-  /** Which billing posture — and so, whether quota telemetry is even possible.
-   * The unified-window machinery is subscription-only (#165), so `metered` is
-   * exactly the set of lanes for which "no observation" is permanent rather
-   * than pending. */
+  /** Which billing posture — who pays for work on it. Not, since issue #219,
+   * whether quota telemetry is possible: that is the harness's fact below. */
   billing: LaneBilling;
+  /** The harness adapter the lane runs — named on the tile when it is the
+   * reason no reading will ever arrive. */
+  adapter: LaneAdapterId;
+  /** Whether that harness reports quota telemetry at all (issue #219), off the
+   * adapter's declared capabilities. False is permanent and by design, and is
+   * true of a subscription lane on such a harness exactly as of a metered
+   * one — which is why it is not derived from `billing`. */
+  quotaTelemetry: boolean;
 }
 
 export interface FleetProjectRow {
@@ -549,18 +556,24 @@ export interface FleetView {
 }
 
 /**
- * The lane the quota tile is speaking about (issue #175).
+ * The lane the quota tile is speaking about (issues #175, #219).
  *
- * `reportsQuota` is the whole point of carrying it. A metered lane's quota is
- * null forever, and the tile must say something different from what it says on
- * a subscription lane that simply has not run a pass yet — one is "bounded by
- * spend, by design", the other is "not observed yet".
+ * `reportsQuota` is the whole point of carrying it. A lane whose harness emits
+ * no quota telemetry has a null quota forever, and the tile must say something
+ * different from what it says on a lane that could report one and simply has
+ * not run a pass yet — one is "cannot report, by design", the other is
+ * "nothing observed yet". Keyed on the harness's declared capability, not on
+ * who pays: a subscription lane on a harness without telemetry is
+ * subscription-billed and still cannot report.
  */
 export interface QuotaLaneGlance {
   id: string;
   label: string;
   billing: LaneBilling;
-  /** Whether this lane's provider emits rate-limit telemetry at all. */
+  /** The harness the lane runs on — what the tile names as the reason when no
+   * reading will ever come. */
+  adapter: LaneAdapterId;
+  /** Whether this lane's harness emits quota telemetry at all. */
   reportsQuota: boolean;
 }
 
@@ -612,12 +625,14 @@ function quotaGlance(observation: QuotaObservation | null): QuotaGlance | null {
 /**
  * The primary lane, in the terms the quota tile renders.
  *
- * `reportsQuota` is derived from the billing kind rather than stored, because
- * that *is* the discriminator: the unified-window machinery is an
- * Anthropic-subscription construct (#165's finding 6), so a metered lane —
- * Anthropic's own API included — emits nothing. Confirmed against OpenRouter on
- * 2026-09-02: no `anthropic-ratelimit-*` response headers, and no
- * `rate_limit_event` on a full harness turn.
+ * `reportsQuota` is the harness's declared capability (issue #219), carried in
+ * on the row rather than derived from the billing kind as it was under #175.
+ * Billing was the wrong discriminator the moment a second harness existed: a
+ * subscription lane on a harness that emits no rate-limit event is
+ * subscription-billed and still cannot report, while a metered lane on Claude
+ * Code *could* — the provider behind it merely does not (the unified-window
+ * machinery is an Anthropic-subscription construct, #165's finding 6,
+ * re-confirmed against OpenRouter on 2026-09-02). The tile says which.
  */
 function quotaLaneGlance(lane: FleetLaneRow | null): QuotaLaneGlance | null {
   if (!lane) return null;
@@ -625,11 +640,8 @@ function quotaLaneGlance(lane: FleetLaneRow | null): QuotaLaneGlance | null {
     id: lane.id,
     label: lane.label,
     billing: lane.billing,
-    // Only `subscription`, positively — a billing kind added later reads as
-    // "reports nothing", which is the fail-safe direction: it costs a tile its
-    // colour, where the reverse would have the fleet waiting on a reading that
-    // never comes.
-    reportsQuota: lane.billing === "subscription",
+    adapter: lane.adapter,
+    reportsQuota: lane.quotaTelemetry,
   };
 }
 

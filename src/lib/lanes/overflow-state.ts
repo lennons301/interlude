@@ -34,6 +34,7 @@ import {
   type LaneSelection,
   type LaneSelectionInput,
 } from "./lane-selection";
+import { actionableObservations } from "./lane-wall";
 import { readMoneyGuards, type MoneyGuards } from "./money-state";
 import { decideLaneCrossing, type LaneCrossing } from "./overflow";
 
@@ -81,8 +82,12 @@ function laneSelectionInput(
     // Every lane's window, because whether a lane can serve a request is a
     // fact about that lane (issue #175's per-lane keying). A lane with no row
     // is absent here, which the ranking reads as "no observation" — never as a
-    // closed door, since a metered provider reports none at all.
-    observations: getQuotaObservations(),
+    // closed door, since a metered provider reports none at all. A row under a
+    // lane whose *harness* reports no quota is dropped for the same reason
+    // (issue #219): it is nothing the fleet may act on.
+    observations: catalog.ok
+      ? actionableObservations(catalog.catalog, getQuotaObservations())
+      : {},
     config,
     overrides: settings.overrides,
     spentTodayUsd: guards.spentTodayUsd,

@@ -235,6 +235,13 @@ chat/preview is never affected.
   subscription-only, so such an install reports no quota at all, and silence it
   cannot break must not read as a wall.
 
+  Nor is a lane whose **harness** declares no quota telemetry (issue #219): its
+  quota row is not even read, so the gate cannot hold on it, the tier ladder
+  never steps a run on a stored window from it, and the dashboard's quota tile reads
+  "cannot report" (naming the harness) rather than "nothing observed yet".
+  Which harness runs each lane, whether its image is built and whether its
+  credentials are present is on **Settings → Execution lane**.
+
   Raise or lower the threshold in **Settings → Quota** (100 = only ever gate on
   an outright rejection), or set `QUOTA_PICKUP_THRESHOLD_PERCENT`. There is
   deliberately **no headroom reserved** for your own Claude Code sessions: the

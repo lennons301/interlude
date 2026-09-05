@@ -21,6 +21,7 @@ import {
   laneFallbackTier,
   type LaneSettingsView,
 } from "@/lib/lanes/resolve";
+import { readHarnessImageStates } from "@/lib/harness/image-state";
 
 /**
  * The UI-editable settings layer (issues #166, #172): env config with a stored
@@ -37,6 +38,12 @@ import {
  * incidental: a project API route has previously leaked a stored token in
  * cleartext, so nothing on this path may serve a credential, and no lane secret
  * is stored in the database to be served in the first place.
+ *
+ * Beside each lane the screen shows its harness, whether that harness's image
+ * is built and whether its credentials are present (issue #219). The image
+ * state is a bounded Docker probe made once per adapter the file names — the
+ * one outbound call in this route, and one that cannot hold the response
+ * hostage: a daemon that does not answer reads as *unknown*.
  */
 function laneState(overrides: SettingsOverrides): {
   lanes: LaneSettingsView | null;
@@ -118,7 +125,7 @@ function routingState(now: Date) {
   });
 }
 
-function state(overrides: SettingsOverrides, updatedAt: Date | null) {
+async function state(overrides: SettingsOverrides, updatedAt: Date | null) {
   const { tierModels, fallbackTier, lanes, laneError } = laneState(overrides);
   return {
     fields: describeModelTierSettings(
@@ -129,6 +136,12 @@ function state(overrides: SettingsOverrides, updatedAt: Date | null) {
     ),
     lanes,
     laneError,
+    // Each harness the file names, with whether its image is built (issue
+    // #219) — one probe per adapter, not per lane, since lanes on one harness
+    // share one image; the panel joins on the lane's adapter id.
+    harnesses: await readHarnessImageStates(
+      lanes?.lanes.map((lane) => lane.adapter) ?? []
+    ),
     // The lane floors (issue #176), beside the lane panel they restrict: one
     // per pass kind, in the same order the tier rows are, so the two read as
     // one table.
@@ -149,7 +162,7 @@ function state(overrides: SettingsOverrides, updatedAt: Date | null) {
 
 export async function GET() {
   const settings = getFleetSettings();
-  return NextResponse.json(state(settings.overrides, settings.updatedAt));
+  return NextResponse.json(await state(settings.overrides, settings.updatedAt));
 }
 
 export async function PATCH(request: Request) {
@@ -178,5 +191,5 @@ export async function PATCH(request: Request) {
       .join(", ")}`
   );
 
-  return NextResponse.json(state(settings.overrides, settings.updatedAt));
+  return NextResponse.json(await state(settings.overrides, settings.updatedAt));
 }

@@ -16,6 +16,7 @@ import type {
   SettingFieldView,
 } from "@/lib/settings-resolver";
 import type { LaneSettingsView } from "@/lib/lanes/resolve";
+import type { HarnessImageState } from "@/lib/harness/image-state";
 import type {
   QuotaThresholdView,
   ResumeBoundView,
@@ -43,6 +44,9 @@ interface OverridesState {
   lanes: LaneSettingsView | null;
   /** Why the lane file could not be read, when it could not be. */
   laneError: string | null;
+  /** Each harness the lane file names, with whether its image is built
+   * (#219) — joined onto the lane rows by adapter id. */
+  harnesses: HarnessImageState[];
   /** The per-pass-kind lane floors cost routing is bounded by (#176). */
   minLanes: MinLaneFieldView[];
   /** What routing would pick for each kind right now — the same ranking a
@@ -173,6 +177,7 @@ export function SettingsOverrides() {
         <ExecutionLanePanel
           lanes={state.lanes}
           laneError={state.laneError}
+          harnesses={state.harnesses}
           busy={busyKey === LANE_KEY}
           disabled={busyKey !== null}
           saveError={errorFor(saveError, "lane")}

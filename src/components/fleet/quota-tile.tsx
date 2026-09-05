@@ -11,17 +11,20 @@ import { Chip, Gauge, TONES, formatCountdown, formatElapsed } from "./fleet-bits
  *
  * Five states, all of them ordinary:
  *
- *  - **A lane that cannot report quota at all.** Every metered lane: the
- *    unified-window machinery is an Anthropic-subscription construct (#165,
- *    finding 6), re-confirmed against OpenRouter on 2026-09-02 — no
- *    `anthropic-ratelimit-*` headers, no `rate_limit_event` on a full harness
- *    turn. That is a *different sentence* from "not observed yet" (issue
- *    #175): one is permanent and by design, the other is pending. Saying the
- *    wrong one would have an operator waiting for a reading that will never
- *    come.
- *  - **Nothing observed.** A fresh install on a lane that could report one.
+ *  - **A lane that cannot report quota at all.** One whose *harness* declares
+ *    no quota telemetry (issue #219) — keyed on the adapter's capability,
+ *    whatever the lane's billing kind, because a subscription lane on such a
+ *    harness is subscription-billed and still cannot report. That is a
+ *    *different sentence* from "nothing observed yet" (issue #175): one is
+ *    permanent and by design, the other is pending. Saying the wrong one would
+ *    have an operator waiting for a reading that will never come.
+ *  - **Nothing observed.** A lane whose harness could report one and has not.
  *    Said plainly rather than drawn as an empty gauge, which would read as
- *    "0% used".
+ *    "0% used". On a metered lane the tile adds that the lane is bounded by
+ *    spend: the unified-window machinery is an Anthropic-subscription construct
+ *    (#165, finding 6; re-confirmed against OpenRouter on 2026-09-02), so a
+ *    metered provider is unlikely ever to emit one — but that is a fact about
+ *    the provider, not the harness, and this tile only vouches for the harness.
  *  - **Observed without a utilization.** The *usual* shape on the owner's
  *    account: the figure only appears when the reported window has a
  *    claim-scoped utilization header. The gauge is omitted rather than drawn
@@ -63,23 +66,25 @@ export function QuotaTile({
   now: number;
 }) {
   if (quota === null) {
-    // A lane that emits no quota telemetry is not an unobserved one — it is
-    // bounded by spend, which is the gauge directly above this tile. Naming the
-    // lane matters here: it is the one thing that would tell an operator why
-    // the tile went quiet after they switched lanes.
-    const laneless = lane !== null && !lane.reportsQuota;
+    // A lane whose harness emits no quota telemetry is not an unobserved one —
+    // no reading is ever coming (issue #219). Naming the lane and its harness
+    // matters here: it is the one thing that would tell an operator why the
+    // tile went quiet after they switched lanes.
+    const cannotReport = lane !== null && !lane.reportsQuota;
     return (
       <section aria-label="Quota" className="space-y-1.5">
         <div className="flex items-baseline justify-between gap-2 font-plex-mono text-[11px] text-fl-ink-2">
           <span>quota</span>
           <span className="truncate text-fl-ink-3">
-            {laneless ? "bounded by spend" : "not observed yet"}
+            {cannotReport ? "cannot report" : "nothing observed yet"}
           </span>
         </div>
         <p className="font-plex-mono text-[11px] text-fl-ink-3">
-          {laneless
-            ? `${lane.label} reports no limit window — this lane is metered`
-            : "no pass has reported a limit window"}
+          {cannotReport
+            ? `${lane.label} runs on ${lane.adapter}, a harness that emits no quota telemetry`
+            : lane?.billing === "metered"
+              ? `no pass has reported a limit window — ${lane.label} is metered and bounded by spend`
+              : "no pass has reported a limit window"}
         </p>
       </section>
     );
