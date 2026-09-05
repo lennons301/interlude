@@ -27,9 +27,11 @@ import type { TurnTokenUsage } from "../lanes/lane-cost";
  *   with its wall ordering (tier degrade, lane failover, pause: issues #168,
  *   #170, #176). The only kind that acts today.
  * - `auth`: the credential was rejected. A lane-availability problem, never a
- *   wall; what the fleet does about it is issue #220's.
+ *   wall (issue #220): the pass ends naming the lane and its credential, and
+ *   nothing is retried on that lane under the run — read through
+ *   `refusedCredential` below.
  * - `other`: the provider said no for a reason this build does not model
- *   (overloaded, a 5xx). Takes the ordinary failure path until #220.
+ *   (overloaded, a 5xx). Takes the ordinary path: nothing branches on it.
  */
 export type TurnRefusalKind = "quota" | "auth" | "other";
 
@@ -85,6 +87,20 @@ export type TurnOutcome =
 export function quotaRefusalOf(outcome: TurnOutcome | null): TurnRefusal | null {
   if (outcome === null || outcome.kind !== "refused") return null;
   return outcome.refusal.kind === "quota" ? outcome.refusal : null;
+}
+
+/**
+ * Whether the provider refused the turn's **credential** (issue #220) — the
+ * only other reading of a refusal's kind the fleet makes outside the adapter.
+ * The reducer asks it after the wall ordering has found no wall: a refused
+ * credential is a lane-availability failure, so the pass ends without a retry
+ * on that lane rather than being read as the work's (its final message is the
+ * provider's, its empty diff the refusal's). A boolean rather than the
+ * refusal, because an `auth` refusal carries no clock and no window — there
+ * is nothing on it to read.
+ */
+export function refusedCredential(outcome: TurnOutcome | null): boolean {
+  return outcome !== null && outcome.kind === "refused" && outcome.refusal.kind === "auth";
 }
 
 export interface TurnResult {

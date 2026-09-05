@@ -25,6 +25,7 @@ import {
   type StaleReview,
   type TriageCandidate,
 } from "../decide";
+import { DEFAULT_REFUSAL_BACKOFF_MS } from "../budgets";
 import type { ModelTier } from "../../../model-tiers";
 import type { QuotaObservation } from "../../../quota/rate-limit-event";
 
@@ -3056,6 +3057,7 @@ describe("decideNext — pausing a pass on a quota wall (issue #168)", () => {
     taskId: "task-1",
     issueRef: "acme/widgets#7",
     resumeAfter: RESUME_AFTER,
+    clock: "harness",
     limitType: "five_hour",
   };
 
@@ -3287,6 +3289,7 @@ describe("decideNext — the tier degrade ladder (issue #170)", () => {
             taskId: "task-1",
             issueRef: "acme/widgets#7",
             resumeAfter: RESUME_AFTER,
+            clock: "harness",
             limitType,
           },
         ]);
@@ -3345,9 +3348,9 @@ describe("decideNext — the tier degrade ladder (issue #170)", () => {
   });
 
   it("degrades a rejection that named no reset time, where a pause could not", () => {
-    // The asymmetry #170 introduces: a pause needs a clock and a degrade does
-    // not, so a reset-less tier wall steps down where a reset-less account-wide
-    // one still falls through to the ordinary path.
+    // A degrade waits on no clock, so a reset-less tier wall steps down —
+    // ahead of the backoff a reset-less account-wide wall parks on (#220),
+    // because the account still has quota one rung down.
     const actions = decideNext(
       passOutcomeSnapshot(
         NOW,
@@ -3372,10 +3375,11 @@ describe("decideNext — the tier degrade ladder (issue #170)", () => {
     ]);
   });
 
-  it("spends the attempt on a reset-less account-wide wall, exactly as before", () => {
-    // No clock to wait on and no rung to step to: a run paused on an invented
-    // window is stranded where no later ticket can find it, so the pass takes
-    // its ordinary path — here #106's empty-pass finalize.
+  it("parks a reset-less account-wide wall on the default backoff rather than spending the attempt (issue #220)", () => {
+    // No rung to step to and no clock stated: before #220 the pass fell
+    // through to its ordinary path — here #106's empty-pass finalize — and the
+    // wall cost the ticket an attempt. Now it parks on the fleet's own
+    // backoff, said as such, and the resume bound does the rest.
     const actions = decideNext(
       passOutcomeSnapshot(
         NOW,
@@ -3388,13 +3392,15 @@ describe("decideNext — the tier degrade ladder (issue #170)", () => {
     );
 
     expect(degrades(actions)).toEqual([]);
-    expect(pauses(actions)).toEqual([]);
     expect(actions).toEqual([
       {
-        type: "finalizeEmptyPass",
+        type: "pauseRunOnRateLimit",
         runId: "run-1",
         taskId: "task-1",
         issueRef: "acme/widgets#7",
+        resumeAfter: new Date(NOW.getTime() + DEFAULT_REFUSAL_BACKOFF_MS),
+        clock: "default-backoff",
+        limitType: "five_hour",
       },
     ]);
   });
@@ -3463,6 +3469,217 @@ describe("decideNext — the tier degrade ladder (issue #170)", () => {
     );
 
     expect(actions.map((a) => a.type)).toEqual(["degradeRunTier"]);
+  });
+});
+
+describe("decideNext — refusals from a harness with no rate-limit event (issue #220)", () => {
+  const RESUME_AFTER = new Date(2026, 7, 1, 17, 0, 0);
+  /** Where a reset-less park's clock lands: the snapshot's now plus the
+   * backoff named in the budgets module. */
+  const BACKOFF_RESUME = new Date(NOW.getTime() + DEFAULT_REFUSAL_BACKOFF_MS);
+  const CHEAPER = {
+    toLaneId: "fake-other-lane",
+    toLaneLabel: "Fake (other harness)",
+    billing: "subscription" as const,
+    rateUsdPerMTok: null,
+  };
+
+  /** A turn the provider refused for its credential, in the adapter's
+   * normalised vocabulary: no clock and no window, because a refused
+   * credential has neither. */
+  const REFUSED_CREDENTIAL: PassOutcome["outcome"] = {
+    kind: "refused",
+    refusal: { kind: "auth", resumeAfter: null, limitType: null },
+  };
+
+  function pauses(actions: ReturnType<typeof decideNext>) {
+    return actions.filter((a) => a.type === "pauseRunOnRateLimit");
+  }
+
+  /** One refused pass, decided at the seam the turn manager decides it, with
+   * a resume bound in force so a lane move is possible where one is offered. */
+  function decide(pass: Partial<PassOutcome>) {
+    return decideNext(passOutcomeSnapshot(NOW, makePass(pass), 3));
+  }
+
+  it("follows the wall ordering on any refused { quota }: a named tier steps down first", () => {
+    // The reducer reads the refusal's own window and nothing about the lane,
+    // so a harness with no telemetry whose refusal names a tier degrades
+    // exactly as the Claude lane's does.
+    const actions = decide({
+      tier: "heavy",
+      laneFailover: CHEAPER,
+      outcome: refusedByQuota({ resumeAfter: null, limitType: "seven_day_opus" }),
+    });
+
+    expect(actions.map((a) => a.type)).toEqual(["degradeRunTier"]);
+  });
+
+  it("then moves lanes where another lane can serve the run", () => {
+    const actions = decide({
+      tier: "light",
+      laneFailover: CHEAPER,
+      outcome: refusedByQuota({ resumeAfter: null, limitType: "five_hour" }),
+    });
+
+    expect(actions.map((a) => a.type)).toEqual(["failOverRunLane"]);
+  });
+
+  it("and only then parks — on the default backoff when the harness named no reset", () => {
+    const actions = decide({
+      tier: "light",
+      laneFailover: null,
+      outcome: refusedByQuota({ resumeAfter: null, limitType: "five_hour" }),
+    });
+
+    expect(actions).toEqual([
+      {
+        type: "pauseRunOnRateLimit",
+        runId: "run-1",
+        taskId: "task-1",
+        issueRef: "acme/widgets#7",
+        resumeAfter: BACKOFF_RESUME,
+        clock: "default-backoff",
+        limitType: "five_hour",
+      },
+    ]);
+  });
+
+  it("parks a refusal that named neither a window nor a reset on the backoff too", () => {
+    // The shape a harness with no rate-limit event produces: it knows it was
+    // refused for quota and nothing else.
+    const actions = decide({
+      tier: "light",
+      outcome: refusedByQuota({ resumeAfter: null, limitType: null }),
+    });
+
+    expect(pauses(actions)).toEqual([
+      expect.objectContaining({
+        resumeAfter: BACKOFF_RESUME,
+        clock: "default-backoff",
+        limitType: null,
+      }),
+    ]);
+  });
+
+  it("keeps the harness's own reset when it stated one", () => {
+    const actions = decide({
+      tier: "light",
+      outcome: refusedByQuota({ resumeAfter: RESUME_AFTER, limitType: null }),
+    });
+
+    expect(pauses(actions)).toEqual([
+      expect.objectContaining({ resumeAfter: RESUME_AFTER, clock: "harness" }),
+    ]);
+  });
+
+  it("does not read a backoff-parked pass's empty diff or final message as the work's", () => {
+    // The pause's own argument (#168): a refused turn never reached the model,
+    // so #106 must not charge a strike and #107 must not page the owner.
+    const actions = decide({
+      tier: "light",
+      producedPr: false,
+      finalMessage: "BLOCKED: which database?",
+      outcome: refusedByQuota({ resumeAfter: null, limitType: "five_hour" }),
+    });
+
+    expect(actions.map((a) => a.type)).toEqual(["pauseRunOnRateLimit"]);
+  });
+
+  it("counts a backoff park's resume against the existing resume bound", () => {
+    // Once the backoff has elapsed the run is an ordinary paused run: its
+    // resume is the (n+1)th continuation of the attempt, judged against the
+    // same bound a stated-reset pause answers to.
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        now: new Date(BACKOFF_RESUME.getTime() + 1),
+        pausedRuns: [makePausedRun({ resumeAfter: BACKOFF_RESUME, resumesMade: 2 })],
+        maxResumesPerAttempt: 3,
+      })
+    );
+
+    expect(actions).toEqual([
+      expect.objectContaining({ type: "resumeRun", resume: 3, maxResumes: 3 }),
+    ]);
+  });
+
+  it("exhausts a backoff-parked run to a human at the bound, before waiting the backoff out", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pausedRuns: [makePausedRun({ resumeAfter: BACKOFF_RESUME, resumesMade: 3 })],
+        maxResumesPerAttempt: 3,
+      })
+    );
+
+    expect(actions).toEqual([
+      expect.objectContaining({ type: "exhaustPausedRun", resumesMade: 3 }),
+    ]);
+  });
+
+  it("ends a pass whose credential was refused, naming its lane, and retries nothing on it", () => {
+    // Not a wall: no degrade, no move, no pause. A lane-availability failure,
+    // reported, and judged ahead of the blocked and empty-pass readings for
+    // the wall's own reason — the pass never reached the model.
+    const actions = decide({
+      tier: "heavy",
+      laneId: "fake-lane",
+      producedPr: false,
+      finalMessage: "BLOCKED: 401 Unauthorized",
+      outcome: REFUSED_CREDENTIAL,
+    });
+
+    expect(actions).toEqual([
+      {
+        type: "endPassOnRefusedCredential",
+        runId: "run-1",
+        taskId: "task-1",
+        issueRef: "acme/widgets#7",
+        laneId: "fake-lane",
+      },
+    ]);
+  });
+
+  it("does not move a refused credential onto another lane, even one that could serve", () => {
+    // Routing around a misconfiguration by spending at another provider is
+    // what #176 refuses for an unavailable lane; a refused credential is that
+    // lane, discovered at runtime.
+    const actions = decide({
+      tier: "heavy",
+      laneFailover: CHEAPER,
+      outcome: REFUSED_CREDENTIAL,
+    });
+
+    expect(actions.map((a) => a.type)).toEqual(["endPassOnRefusedCredential"]);
+  });
+
+  it("drives nothing else for a run whose credential was refused", () => {
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        completedPasses: [makePass({ outcome: REFUSED_CREDENTIAL })],
+        conflictingPrs: [makeConflictingPr()],
+        awaitingReview: [makeAwaitingReview()],
+        settledPrs: [
+          { runId: "run-1", issueRef: "acme/widgets#7", prNumber: 41, merged: true },
+        ],
+      })
+    );
+
+    expect(actions.map((a) => a.type)).toEqual(["endPassOnRefusedCredential"]);
+  });
+
+  it("leaves a refused { other } on its ordinary path, as before the vocabulary existed", () => {
+    const actions = decide({
+      producedPr: false,
+      outcome: {
+        kind: "refused",
+        refusal: { kind: "other", resumeAfter: null, limitType: null },
+      },
+    });
+
+    expect(actions.map((a) => a.type)).toEqual(["finalizeEmptyPass"]);
   });
 });
 
@@ -4169,9 +4386,9 @@ describe("decideNext — resuming a paused run (issue #169)", () => {
   });
 
   it("resumes a run parked with no clock at all rather than stranding it", () => {
-    // #168 never writes one — a rejection with no reset time takes the ordinary
-    // failure path — but a paused run nothing can reach is the failure this
-    // ticket exists to prevent, so a clockless row is eligible now.
+    // No pause writes one — a rejection with no reset time parks on the
+    // default backoff (#220) — but a paused run nothing can reach is the
+    // failure this ticket exists to prevent, so a clockless row is eligible now.
     const actions = decideNext(
       makeSnapshot({ candidates: [], pausedRuns: [makePausedRun({ resumeAfter: null })] })
     );
