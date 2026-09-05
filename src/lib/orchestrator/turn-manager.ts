@@ -3,6 +3,7 @@ import { tasks, messages, projects, runs, isGenerationSession } from "@/db/schem
 import { eq, and, isNull, asc, desc } from "drizzle-orm";
 import { newId } from "../ulid";
 import {
+  AGENT_WORKDIR,
   observeContainerAbsent,
   createWorkspaceContainer,
   execSetup,
@@ -43,7 +44,7 @@ import { resolveLane, type ResolvedLane } from "../lanes/resolve";
 import { readLaneCrossing, readLaneFailover } from "../lanes/overflow-state";
 import { describeLaneCost } from "../lanes/lane-rate";
 import { payerChanged, type LaneCrossing } from "../lanes/overflow";
-import type { LaneBilling } from "../lanes/lane-config";
+import { findLane, type LaneBilling, type LaneDefinition } from "../lanes/lane-config";
 import { noteOnceOnFeed } from "../tasks/feed-note";
 import {
   chargeForTurn,
@@ -51,6 +52,8 @@ import {
   type TurnCharge,
 } from "../lanes/lane-cost";
 import { getHarnessAdapter } from "../harness/registry";
+import type { HarnessAdapter } from "../harness/adapter";
+import { decideSessionCarry } from "../harness/session-carry";
 import { getDocker } from "../docker/client";
 import { getInstallationToken } from "../github/client";
 import { commentOnIssue, parseIssueRef } from "../github/issues";
@@ -66,10 +69,10 @@ import type { ParkedAdoption } from "./parked-adoption";
 import { describeRateLimitType } from "../quota/rate-limit-event";
 import { normalizeModelTier } from "../model-tiers";
 import {
-  containerTranscriptPath,
   MAX_TRANSCRIPT_BYTES,
   readTranscript,
   saveTranscript,
+  type SessionArtifact,
 } from "../quota/session-transcript";
 
 /**
@@ -618,10 +621,12 @@ export async function startTask(taskId: string): Promise<void> {
 
     // A resumed pass (issue #169) opens with the paused pass's conversation put
     // back where the harness keeps it, and continues that session rather than
-    // starting a new one. Every other pass gets `undefined` and behaves exactly
-    // as before.
+    // starting a new one — when the lane it is starting on runs the same
+    // harness the conversation came from (issue #217); otherwise it starts
+    // again on the branch and says so. Every other pass gets `undefined` and
+    // behaves exactly as before.
     const resumeSessionId = isImplementShaped
-      ? await restoreSessionTranscript(task, running)
+      ? await restoreSessionTranscript(task, running, passLane)
       : undefined;
 
     // Run initial turn. An autonomous pass is one whole turn, carrying the
@@ -831,8 +836,25 @@ export async function startTask(taskId: string): Promise<void> {
 }
 
 /**
+ * The lane a pass's task row records, as the catalog now describes it, with
+ * the adapter that lane runs — or null when the row names no lane, or names one
+ * the file no longer declares (issue #217). Both ends of a session carry are
+ * read through this: the lane the conversation came from, off the predecessor
+ * row, and the lane the pass is starting on.
+ */
+function laneAdapter(
+  laneId: string | null
+): { lane: LaneDefinition; adapter: HarnessAdapter } | null {
+  const catalog = getLaneCatalog();
+  if (!catalog.ok) return null;
+  const lane = findLane(catalog.catalog, laneId);
+  if (lane === null) return null;
+  return { lane, adapter: getHarnessAdapter(lane.adapter) };
+}
+
+/**
  * Put a paused pass's conversation back into its fresh container, and say
- * which session the turn should continue (issue #169).
+ * which session the turn should continue (issues #169, #217).
  *
  * Returns the session id only when the transcript actually landed. Everything
  * that can go wrong here — no session recorded, no saved transcript, a write
@@ -843,8 +865,21 @@ export async function startTask(taskId: string): Promise<void> {
  * heard of would be the one genuinely bad outcome, so it is the one thing this
  * refuses to do.
  *
- * The task's `sessionId` is set only by the resume executor, so an ordinary
- * first pass never reaches past the first line.
+ * This is also where the fleet **enforces** that a session crosses lanes only
+ * between lanes on the same adapter (issue #217; the limit issue #199 wrote
+ * down at the foot of `harness/adapter.ts`). It is the one seam that knows
+ * both ends: the pass it continues — `task.resumedFromTaskId`, whose row's
+ * `lane` names the adapter the conversation belongs to — and the lane this
+ * pass is starting on, resolved a moment ago. The decision itself is the pure
+ * `decideSessionCarry`; a refusal clears the task's session id, so the row
+ * stops naming a conversation the new harness has never heard of, and tells
+ * the owner on the feed why the pass starts fresh. A harness declaring no
+ * session resume is refused the same way, which is how a run on such a lane
+ * pauses and resumes as a fresh start with the same note.
+ *
+ * Only a continuation reaches past the first line: `resumedFromTaskId` is set
+ * by the resume, move and degrade executors and by nothing else, so an
+ * ordinary first pass never goes looking for a transcript.
  *
  * Exported as the seam it is, like `evaluatePassOutcome`: whether a resumed
  * pass continues its session or falls back is decided here, and a test that
@@ -852,39 +887,66 @@ export async function startTask(taskId: string): Promise<void> {
  */
 export async function restoreSessionTranscript(
   task: typeof tasks.$inferSelect,
-  running: RunningContainer
+  running: RunningContainer,
+  lane: ResolvedLane
 ): Promise<string | undefined> {
-  if (task.sessionId === null || task.runId === null) return undefined;
-  // Stated limit, not yet a live branch (issue #199): this transcript is a
-  // Claude Code session, and a lane move (#176, #199) may carry one only
-  // because every declared lane runs that one adapter — see the foot of
-  // `harness/adapter.ts`. When a second adapter ships, enforce it here:
-  // `task.resumedFromTaskId` leads to the lane (and adapter) the conversation
-  // came from, and a mismatch must take the "resume without the transcript"
-  // outcome just below, never `--resume` against a session the new harness has
-  // never heard of.
+  if (task.runId === null || task.resumedFromTaskId === null) return undefined;
 
-  const transcript = readTranscript(task.runId);
-  if (transcript === null) {
-    insertSystemMessage(
-      task.id,
-      "Resuming without the paused session's transcript — this pass continues " +
-        "on the same branch, with the work pushed so far but no prior context."
-    );
+  const predecessor = db
+    .select({ lane: tasks.lane })
+    .from(tasks)
+    .where(eq(tasks.id, task.resumedFromTaskId))
+    .get();
+  const from = laneAdapter(predecessor?.lane ?? null);
+  const to = getHarnessAdapter(lane.adapter);
+  const stored = to.capabilities.sessionResume ? readTranscript(task.runId) : null;
+
+  const carry = decideSessionCarry({
+    sessionId: task.sessionId,
+    storedAdapter: stored?.adapter ?? null,
+    from: {
+      laneId: predecessor?.lane ?? null,
+      laneLabel: from?.lane.label ?? null,
+      adapterId: from?.adapter.id ?? null,
+    },
+    to: {
+      laneId: lane.id,
+      laneLabel: lane.label,
+      adapterId: to.id,
+      sessionResume: to.capabilities.sessionResume,
+    },
+  });
+
+  if (carry.kind === "fresh") {
+    if (task.sessionId !== null) {
+      // The row must not keep naming a conversation this pass is not in: the
+      // turn's own session id overwrites it once the turn ends, but until then
+      // the surfaces would read a continuation that is not happening.
+      updateTask(task.id, { sessionId: null });
+    }
+    if (carry.note !== null) insertSystemMessage(task.id, carry.note);
+    if (carry.reason !== "none-carried") {
+      console.log(
+        `[orchestrator] Task ${task.id} starts fresh on ${lane.id} (${carry.reason}) ` +
+          `rather than continuing session ${task.sessionId ?? "-"}`
+      );
+    }
     return undefined;
   }
 
   try {
-    await writeContainerFile(
-      running.container,
-      containerTranscriptPath(task.sessionId),
-      transcript
-    );
+    // Every artefact back where the adapter read it from — the manifest's
+    // paths, so a deploy between the pause and the resume that changed what an
+    // adapter names cannot misplace a file. `stored` is non-null on this
+    // branch: the decision only restores what the store holds.
+    for (const artefact of stored!.artefacts) {
+      await writeContainerFile(running.container, artefact.path, artefact.contents);
+    }
     insertSystemMessage(
       task.id,
-      `Restored the paused session (${task.sessionId}) — continuing the same conversation.`
+      `Restored the paused session (${carry.sessionId}) — continuing the same conversation.`
     );
-    return task.sessionId;
+    return carry.sessionId;
   } catch (err) {
     console.error(
       `[orchestrator] Could not restore the session transcript for task ${task.id}:`,
@@ -901,7 +963,14 @@ export async function restoreSessionTranscript(
 
 /**
  * Copy a paused pass's conversation out of the container that is about to be
- * torn down (issue #169), and report whether it survived.
+ * torn down (issues #169, #217), and report whether it survived.
+ *
+ * What to copy is the adapter's to say: the lane the pass ran on names its
+ * adapter, and the adapter names the container paths that hold the session
+ * (`sessionArtifactPaths`). Exactly those are copied, all or none — a partial
+ * set is not a smaller session but one the harness would resume into — and an
+ * adapter declaring no session resume has nothing copied out at all, because
+ * nothing could ever be put back.
  *
  * Best-effort by design, and the ordering is the point: this runs before the
  * teardown and its failure changes nothing about the pause. A pause protects
@@ -909,29 +978,55 @@ export async function restoreSessionTranscript(
  * some re-orientation, so a transcript that cannot be copied must never cost
  * the pause itself.
  */
-async function preserveSessionTranscript(
-  runId: string,
-  sessionId: string | null,
-  container: RunningContainer | null
-): Promise<boolean> {
+async function preserveSessionTranscript(args: {
+  runId: string;
+  sessionId: string | null;
+  /** The lane the refused pass ran on, off its task row — which names the
+   * adapter whose artefacts these are. */
+  laneId: string | null;
+  container: RunningContainer | null;
+}): Promise<boolean> {
+  const { runId, sessionId, laneId, container } = args;
   if (sessionId === null || container === null) return false;
-  try {
-    const transcript = await readContainerFile(
-      container.container,
-      containerTranscriptPath(sessionId),
-      // The store's ceiling, handed to the container so an over-size transcript
-      // is refused before it is encoded rather than after it has been decoded
-      // into this process.
-      MAX_TRANSCRIPT_BYTES
+
+  const from = laneAdapter(laneId);
+  if (from === null) {
+    console.warn(
+      `[autonomy] Run ${runId} paused on a lane (${laneId ?? "none recorded"}) the ` +
+        `lane file does not declare — its session ${sessionId} is not copied out`
     );
-    if (transcript === null) {
-      console.warn(
-        `[autonomy] Run ${runId} paused with no readable transcript for session ` +
-          `${sessionId} — its resume will start again on the same branch`
+    return false;
+  }
+  if (!from.adapter.capabilities.sessionResume) {
+    console.log(
+      `[autonomy] Run ${runId} paused on ${from.lane.id}, whose harness ` +
+        `(${from.adapter.id}) cannot resume a session — nothing to copy out; its ` +
+        `resume will start again on the same branch`
+    );
+    return false;
+  }
+
+  try {
+    const artefacts: SessionArtifact[] = [];
+    for (const artefactPath of from.adapter.sessionArtifactPaths(sessionId, AGENT_WORKDIR)) {
+      const contents = await readContainerFile(
+        container.container,
+        artefactPath,
+        // The store's ceiling, handed to the container so an over-size artefact
+        // is refused before it is encoded rather than after it has been decoded
+        // into this process.
+        MAX_TRANSCRIPT_BYTES
       );
-      return false;
+      if (contents === null) {
+        console.warn(
+          `[autonomy] Run ${runId} paused with no readable ${artefactPath} for session ` +
+            `${sessionId} — its resume will start again on the same branch`
+        );
+        return false;
+      }
+      artefacts.push({ path: artefactPath, contents });
     }
-    return saveTranscript(runId, transcript);
+    return saveTranscript(runId, { adapter: from.adapter.id, sessionId, artefacts });
   } catch (err) {
     console.error(`[autonomy] Could not copy the transcript of run ${runId} out:`, err);
     return false;
@@ -2219,6 +2314,9 @@ async function endRefusedPass(args: {
    *  (issue #169). Null when there is no session, or when the successor is not
    *  a continuation of this pass. */
   sessionId?: string | null;
+  /** The lane the refused pass ran on, off its task row: it names the adapter
+   *  whose session artefacts are copied out (issue #217). */
+  laneId?: string | null;
   /** Said on the task's own feed, in place of a failure. Takes whether the
    *  conversation survived the teardown, which only this knows. */
   note: (preserved: boolean) => string;
@@ -2237,11 +2335,12 @@ async function endRefusedPass(args: {
   // conversation only exists inside the container that is about to go (issue
   // #169). Its failure is reported, never fatal — the ending protects the
   // attempt whether or not the context survives.
-  const preserved = await preserveSessionTranscript(
-    args.runId,
-    args.sessionId ?? null,
-    container
-  );
+  const preserved = await preserveSessionTranscript({
+    runId: args.runId,
+    sessionId: args.sessionId ?? null,
+    laneId: args.laneId ?? null,
+    container,
+  });
 
   insertSystemMessage(args.taskId, args.note(preserved));
   updateTask(args.taskId, { status: "failed", containerStatus: null });
@@ -2421,8 +2520,12 @@ async function failOverRunLane(
     runId: move.runId,
     // Carried, unlike the degrade's: the pass that continues here is the same
     // pass doing the same work, and losing its conversation to a provider
-    // change would make the move cost what the pause was protecting.
+    // change would make the move cost what the pause was protecting. Whether
+    // the target lane can *receive* it is decided as the replacement starts
+    // (issue #217): the target is advisory, and a lane on another adapter
+    // starts again on the branch rather than carrying it.
     sessionId: task.sessionId,
+    laneId: task.lane,
     note: (preserved) =>
       `${window} refused this pass on ${from} — moving to ${move.toLaneLabel} ` +
       `and retrying there (move ${move.move}/${move.maxMoves}); no attempt or ` +
@@ -2518,6 +2621,7 @@ async function pauseRunOnRateLimit(
     taskId,
     runId: pause.runId,
     sessionId: task?.sessionId ?? null,
+    laneId: task?.lane ?? null,
     note: (kept) =>
       `Paused on ${window} — the account's quota refused this pass. ` +
       `The window resets at ${resumes}; no attempt or interruption was consumed.` +

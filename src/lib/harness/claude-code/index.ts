@@ -13,11 +13,12 @@
  * one image (`./image.ts`), effort maps one to one (the fleet's five levels
  * *are* the CLI's `--effort` enum), a skill is invoked by the slash the seed
  * composer has always emitted, the session artefact is the one transcript
- * file `session-transcript.ts` copies today, and the turn outcome is
- * classified once, under this adapter (`./outcome.ts`), from the exit
- * vocabulary the orchestrator used to read for itself. The stream parser
- * moved here from the orchestrator (`./stream-parser.ts`) for the same
- * reason: it is the adapter's, not the fleet's.
+ * file the CLI keeps (derived here, at `claudeTranscriptPath` — the store in
+ * `session-transcript.ts` copies whatever an adapter names, issue #217), and
+ * the turn outcome is classified once, under this adapter (`./outcome.ts`),
+ * from the exit vocabulary the orchestrator used to read for itself. The
+ * stream parser moved here from the orchestrator (`./stream-parser.ts`) for
+ * the same reason: it is the adapter's, not the fleet's.
  *
  * The security posture is unchanged and load-bearing (issues #28, #62):
  * auth is exec-scoped, never in the container's persistent environment; the
@@ -28,7 +29,6 @@
 
 import { getConfig } from "../../config";
 import { ALLOWED_TICKET_EFFORTS } from "../../orchestrator/autonomy/budgets";
-import { containerTranscriptPath } from "../../quota/session-transcript";
 import type {
   HarnessAdapter,
   HarnessCommandInput,
@@ -107,10 +107,10 @@ export function buildClaudeTurnCommand(input: HarnessCommandInput): string {
   const config = getConfig();
 
   const cmdParts = [
-    // The pass's working directory. Also encoded, mangled, in the path the
-    // harness keeps its session transcript at — see `containerTranscriptDir`
-    // in `src/lib/quota/session-transcript.ts`, which a resumed pass (#169)
-    // restores into: changing this changes that.
+    // The pass's working directory (`AGENT_WORKDIR`). Also encoded, mangled,
+    // in the path the harness keeps its session transcript at — see
+    // `claudeTranscriptDir` below, which a resumed pass (#169) restores into:
+    // changing this changes that.
     "cd /workspace/repo",
     "&&",
     "claude",
@@ -209,14 +209,35 @@ export function composeClaudeSkillInvocation(
 }
 
 /**
+ * Where this harness keeps a session's transcript inside the container, for a
+ * pass working in `cwd`.
+ *
+ * Claude Code mangles the working directory into a single directory name by
+ * replacing each path separator with a dash — `/workspace/repo` becomes
+ * `-workspace-repo`. Written as a function of the cwd rather than a constant
+ * so the derivation is visible (and testable) rather than a magic string
+ * someone would have to reverse-engineer from a container. This adapter's
+ * fact, not the store's (issue #217): `session-transcript.ts` copies whatever
+ * paths an adapter names and names none itself.
+ */
+export function claudeTranscriptDir(cwd: string): string {
+  return `/home/node/.claude/projects/${cwd.replace(/\//g, "-")}`;
+}
+
+/** The transcript file inside the container for one session id. */
+export function claudeTranscriptPath(sessionId: string, cwd: string): string {
+  return `${claudeTranscriptDir(cwd)}/${sessionId}.jsonl`;
+}
+
+/**
  * One file is the whole session (the #165 spike's measurement): the JSONL
  * transcript the CLI keeps under the container user's `.claude/projects`,
- * found by session id under `--resume`. The derivation stays in
- * `session-transcript.ts`, which owns copying it in and out, until issue #217
- * makes that module ask the adapter instead of naming the path.
+ * found by session id under `--resume`. A pass killed mid-tool-call resumes
+ * from it knowing how far it got, and a resume appends to the same file, so
+ * pausing repeatedly grows one artefact rather than a chain.
  */
 export function claudeSessionArtifactPaths(sessionId: string, cwd: string): string[] {
-  return [containerTranscriptPath(sessionId, cwd)];
+  return [claudeTranscriptPath(sessionId, cwd)];
 }
 
 const descriptor = describeHarnessAdapter(CLAUDE_CODE_ADAPTER_ID);

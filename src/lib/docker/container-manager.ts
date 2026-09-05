@@ -54,6 +54,15 @@ function checkoutCommand(mode: BranchCheckoutMode): string {
  * image, warm, live network) on `claude plugin` commands that only Claude
  * Code could run (issue #60's mechanism).
  */
+/**
+ * The working directory every agent pass runs in: where setup clones the
+ * project and where each turn's command starts. The one statement of it,
+ * because a harness adapter derives its session artefact paths from the pass's
+ * cwd (`sessionArtifactPaths(sessionId, cwd)`, issues #169, #217) and the turn
+ * manager has to hand it the same directory the pass actually worked in.
+ */
+export const AGENT_WORKDIR = "/workspace/repo";
+
 export function buildSetupScript(
   platformRepoUrl: string,
   checkout: BranchCheckoutMode = "create"
@@ -62,9 +71,9 @@ export function buildSetupScript(
     'git config --global user.name "$GIT_USER_NAME"',
     'git config --global user.email "$GIT_USER_EMAIL"',
     `git config --global credential.helper '!f() { test "$1" = get && echo username=x-access-token && echo "password=$GIT_AUTH_TOKEN"; }; f'`,
-    'git clone "$GIT_URL" /workspace/repo',
+    `git clone "$GIT_URL" ${AGENT_WORKDIR}`,
     `git clone --depth 1 ${platformRepoUrl} /workspace/platform 2>/dev/null || echo "WARN: platform repo clone failed, continuing without platform context"`,
-    "cd /workspace/repo",
+    `cd ${AGENT_WORKDIR}`,
     checkoutCommand(checkout),
     'if [ -n "$DOPPLER_TOKEN" ]; then curl -sf --request GET "https://api.doppler.com/v3/configs/config/secrets/download?format=env" --header "Authorization: Bearer $DOPPLER_TOKEN" > .env.local && echo "Doppler: wrote .env.local ($(wc -l < .env.local) vars)" || echo "Doppler: API request failed"; fi',
   ].join(" && ");
@@ -100,7 +109,7 @@ export const COMMITS_AHEAD_MARKER = "INTERLUDE_COMMITS_AHEAD:";
  */
 export function buildPushScript(): string {
   return [
-    "cd /workspace/repo",
+    `cd ${AGENT_WORKDIR}`,
     'git add -A && git diff --cached --quiet || git commit -m "agent: uncommitted changes"',
     "git push origin HEAD",
     `echo "${COMMITS_AHEAD_MARKER}$(git rev-list --count origin/HEAD..HEAD 2>/dev/null || echo unknown)"`,
