@@ -208,6 +208,19 @@ export function laneUnavailableReason(laneId: string, why: string): string {
   return `execution lane "${laneId}" is unavailable: ${why}`;
 }
 
+/**
+ * The `why` for a lane whose named variables the environment does not supply
+ * — shared by the resolver refusing a pass and the boot-time availability
+ * report (issue #226), so the line an operator reads in the boot log is the
+ * line the pass would fail with.
+ */
+export function missingEnvReason(missing: readonly string[]): string {
+  return (
+    `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not set in the ` +
+    "orchestrator's environment"
+  );
+}
+
 export interface ResolvedLane {
   id: string;
   label: string;
@@ -320,11 +333,7 @@ export function resolveLane({
     return {
       ok: false,
       choice,
-      reason: laneUnavailableReason(
-        lane.id,
-        `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not set in the ` +
-          "orchestrator's environment"
-      ),
+      reason: laneUnavailableReason(lane.id, missingEnvReason(missing)),
     };
   }
 

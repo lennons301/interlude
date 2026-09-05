@@ -184,8 +184,8 @@ export const runs = sqliteTable("runs", {
   // Reasoning-effort level the implement pass ran at (issue #81) — the other
   // half of the cost/quality dial alongside model. A ticket's `effort:`
   // directive pins it from claim time; otherwise it is set when the implement
-  // pass starts. Null means AGENT_EFFORT was unset (no directive) and the CLI
-  // resolved its own default.
+  // pass starts. Null means AGENT_EFFORT was unset (no directive) and the
+  // harness resolved its own default.
   effort: text("effort"),
   // The tier this run was *asked* for, once the quota degrade ladder has moved
   // it off that tier (issue #170). Null on every run still running at the tier

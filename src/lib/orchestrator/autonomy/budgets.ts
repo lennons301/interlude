@@ -24,13 +24,15 @@ export const MAX_TURNS_CEILING = 100;
  * clamp. Clamped in the directive parser, resolved through
  * `resolveAgentModelChoice`. */
 
-/** Reasoning-effort levels a ticket's `effort:` directive may select (issue
- * #81), the exact set the headless CLI's `--effort` flag accepts. A ticket
- * body is semi-trusted input, so it may only choose from this fixed set —
- * never name an arbitrary value — mirroring the reasoning behind the budget
- * clamp. The level reaches the CLI as `--effort`; an unrecognised value is
- * ignored (the run keeps its default effort), never fatal. Clamped in the
- * directive parser, resolved through `resolveAgentEffort`. */
+/** The fleet's reasoning-effort vocabulary (issue #81): the levels a ticket's
+ * `effort:` directive and the `AGENT_EFFORT*` settings may name. A ticket body
+ * is semi-trusted input, so it may only choose from this fixed set — never
+ * name an arbitrary value — mirroring the reasoning behind the budget clamp.
+ * The vocabulary is the fleet's, not any harness's: each adapter maps a level
+ * onto its own dial through `mapEffort`, or omits it with a note where it has
+ * no equivalent (issue #214). An unrecognised value is ignored (the run keeps
+ * its default effort), never fatal. Clamped in the directive parser, validated
+ * in `config.ts`, resolved through `resolveAgentEffort`. */
 export const ALLOWED_TICKET_EFFORTS = [
   "low",
   "medium",

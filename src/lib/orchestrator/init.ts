@@ -20,6 +20,8 @@ import { pruneTranscripts } from "../quota/session-transcript";
 import { startPreflightRefresh } from "./autonomy/preflight";
 import { startDailyDigest } from "./digest-schedule";
 import { getConfig } from "../config";
+import { getLaneCatalog } from "../lanes/catalog";
+import { describeLaneAvailability } from "../lanes/availability";
 import { isGlobalAutonomyPaused } from "../settings";
 import { isGitHubConfigured } from "../github/client";
 import { isDiscordConfigured, startDiscordBot } from "../discord/client";
@@ -484,9 +486,31 @@ async function reapStaleContainers(): Promise<void> {
   }
 }
 
+/**
+ * Say at boot which execution lanes cannot run and why (issue #226) — one line
+ * per unavailable lane, naming the orchestrator variables it lacks, in the
+ * wording a pass on it would fail with. Nothing when every lane is available:
+ * a fully configured fleet boots quietly. Read off the lane catalog, because
+ * the lane file is the one statement of which variables the fleet needs; this
+ * replaced a warning that named one vendor's two variables and could say
+ * nothing about any other lane.
+ *
+ * An unusable lane file is not repeated here — `getLaneCatalog` already logs
+ * the reason, and there are no lanes to report on.
+ */
+function reportLaneAvailability(): void {
+  const catalog = getLaneCatalog();
+  if (!catalog.ok) return;
+  for (const line of describeLaneAvailability(catalog.catalog, process.env)) {
+    console.warn(`[lanes] ${line}`);
+  }
+}
+
 export async function initOrchestrator(): Promise<void> {
   if (initialized) return;
   initialized = true;
+
+  reportLaneAvailability();
 
   const dockerAvailable = await isDockerAvailable();
   if (dockerAvailable) {

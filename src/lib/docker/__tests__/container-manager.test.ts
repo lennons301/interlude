@@ -56,8 +56,6 @@ vi.mock("@/lib/github/client", () => ({
 vi.mock("@/lib/config", () => ({
   PLATFORM_REPO_URL: "https://github.com/lennons301/platform.git",
   getConfig: () => ({
-    anthropicApiKey: "sk-ant-api-test",
-    claudeCodeOauthToken: "sk-ant-oat01-test",
     gitUserName: "Interlude Agent",
     gitUserEmail: "agent@interlude.dev",
     maxTurns: 50,
