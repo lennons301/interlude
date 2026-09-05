@@ -152,6 +152,18 @@ export const runs = sqliteTable("runs", {
   // billing history of every past run. The ledger's job is to say what was
   // true when the work ran. Null for a run that predates lanes.
   laneBilling: text("lane_billing", { enum: ["subscription", "metered"] }),
+  // The harness adapter the implement pass ran on (issue #223) — the id the
+  // resolved lane named (`claude-code`, ...), stamped when the pass starts and
+  // rewritten by each later implement-shaped pass of the attempt exactly as
+  // `lane` is, so a run that moved lanes across adapters reads as the harness
+  // that did the work last. Its own column beside `lane`, and never inferred
+  // from the lane id later: `lanes.yaml` is version-controlled configuration
+  // that changes under a deployment, and a lane re-pointed at another harness
+  // would silently rewrite which vendor ran every past attempt — the one
+  // question outcome-by-harness exists to answer. Null for a run written
+  // before the column existed, which the surfaces read as "unknown harness"
+  // rather than attributing it to any adapter.
+  harness: text("harness"),
   // Model the implement pass ran on (issue #74), so this run's spend is
   // interpretable against its tier. A ticket's `model:` directive (issue #80)
   // pins it from claim time; otherwise it is set when the implement pass
@@ -318,6 +330,15 @@ export const tasks = sqliteTable("tasks", {
   // predates lanes.
   lane: text("lane"),
   laneBilling: text("lane_billing", { enum: ["subscription", "metered"] }),
+  // The harness adapter this pass ran on (issue #223), stamped from the
+  // resolved lane when the pass starts (a follow-up turn re-records it, as it
+  // does the lane). Per task as well as per run because the task is the unit
+  // work is done by: a run that moved lanes across adapters owns a pass on
+  // each, and attributing its spend per pass is what lets "is the cheaper
+  // vendor costing me attempts?" be answered from the ledger. Null for a pass
+  // written before the column existed — read as "unknown harness", never
+  // looked up from the lane id (see `runs.harness`).
+  harness: text("harness"),
   // The model tier this pass ran at (issue #173) — `heavy`/`standard`/`light`,
   // or a raw model id for an environment that pins one (naming no tier).
   // Recorded beside the lane for the same reason the lane is recorded beside
