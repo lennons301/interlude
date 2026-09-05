@@ -181,9 +181,12 @@ describe("quota tile", () => {
     expect(html).not.toContain("bounded by spend");
   });
 
-  it("names the lane an observed reading belongs to", () => {
+  it("names the lane an observed reading belongs to, and the harness running it", () => {
     // With more than one lane declared, a reading with no owner is a reading
-    // nobody can act on.
-    expect(render(OBSERVED)).toContain("Claude subscription");
+    // nobody can act on — and telemetry is the harness's capability (issues
+    // #219, #223), so the lane row names which one.
+    const html = render(OBSERVED);
+    expect(html).toContain("Claude subscription");
+    expect(html).toContain("claude-code");
   });
 });

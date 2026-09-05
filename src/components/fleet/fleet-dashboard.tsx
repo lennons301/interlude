@@ -15,6 +15,7 @@ import { NeedsYou } from "./needs-you";
 import { RunningList } from "./running-list";
 import { RecentLedger } from "./recent-ledger";
 import { TierOutcomes } from "./tier-outcomes";
+import { HarnessOutcomes } from "./harness-outcomes";
 
 function useFleetStream() {
   const [view, setView] = useState<FleetView | null>(null);
@@ -88,6 +89,9 @@ export function FleetDashboard() {
               {/* The week's tier routing under the week's completions (issue
                   #198): the same window, read one column over. */}
               <TierOutcomes view={view} />
+              {/* The same window read by harness (issue #223): which vendor
+                  did what, beside which tier did what. */}
+              <HarnessOutcomes view={view} />
             </div>
           </div>
         </div>

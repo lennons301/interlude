@@ -111,6 +111,19 @@ describe("running list", () => {
   });
 });
 
+describe("the card names its harness (issue #223)", () => {
+  it("says which harness is doing the work, beside the ticket", () => {
+    expect(render([WORKING])).toContain("· claude-code");
+  });
+
+  it("calls a run from before the stamp unknown rather than naming an adapter", () => {
+    const html = render([{ ...WORKING, harness: null }]);
+
+    expect(html).toContain("unknown harness");
+    expect(html).not.toContain("claude-code");
+  });
+});
+
 describe("the paused card's lane-move control (issue #202)", () => {
   it("offers a paused run the move, outside the card's link", () => {
     const html = render([PAUSED]);
