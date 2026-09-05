@@ -1,6 +1,6 @@
 /**
  * Pure interpretation on the triage pass's boundaries (issue #23): parsing
- * a triage container's stream-json output into an exit, and recognising the
+ * a triage turn's result into an exit, and recognising the
  * owner's explicit arming confirmation in Discord. Triage reads semi-trusted
  * input, so its ceiling is enforced here and in the reducer, not requested
  * in a prompt: the parser can only ever return one of three exits (or
@@ -15,7 +15,7 @@
  */
 
 import { normalizeModelTier, type ModelTier } from "@/lib/model-tiers";
-import { finalPassMessage } from "./pass-output";
+import { finalPassMessage, type PassTurn } from "./pass-output";
 
 export type TriageExitKind = "recommend" | "needs-info" | "ready-for-human";
 
@@ -61,7 +61,7 @@ const TRIAGE_LINE = /^TRIAGE:[ \t]*(recommend|needs-info|ready-for-human)[ \t]*$
 const TIER_LINE = /^TIER:[ \t]*(.*?)[ \t]*$/;
 
 /**
- * Parse a triage pass's raw NDJSON stream into an exit. Every exit needs a
+ * Parse a triage pass's turn result into an exit. Every exit needs a
  * non-empty body — an assessment, questions or an agenda are the pass's
  * whole output; a bare marker drives nothing. The `TIER:` line, when the
  * pass wrote one, is the first non-blank line after the marker, in the
@@ -70,8 +70,8 @@ const TIER_LINE = /^TIER:[ \t]*(.*?)[ \t]*$/;
  * fourth exit and never as a failure, because the tier is advice about the
  * work and the exit is the decision about the issue.
  */
-export function parseTriageExit(ndjson: string): TriageResult {
-  const final = finalPassMessage(ndjson);
+export function parseTriageExit(turn: PassTurn): TriageResult {
+  const final = finalPassMessage(turn);
   if (!final.ok) {
     return { kind: "unparseable", reason: `triage ${final.reason}` };
   }

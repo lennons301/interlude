@@ -71,28 +71,15 @@ const ISSUE_REF = "lennons301/lemons#34";
 const RESETS_AT_EPOCH = 1788310954;
 const RESUME_AFTER = new Date(RESETS_AT_EPOCH * 1000);
 
-/** The turn result the CLI hands back at a wall — `subtype: "success"` and
- * all. Shaped exactly like the captured rejection fixture's tail. */
+/** The turn result the adapter hands back at a wall (issue #214): the CLI's
+ * `subtype: "success"`-and-all exit, already read by the adapter into the
+ * fleet's own word for it. The bytes-to-outcome half is pinned under the
+ * adapter (`claude-code-rate-limit-fixture.test.ts`). */
 const WALLED_TURN = {
   finalMessage: "You've hit your session limit · resets 2:02am (Europe/London)",
-  terminalResult: {
-    type: "result",
-    subtype: "success",
-    is_error: true,
-    terminal_reason: "api_error",
-    api_error_status: 429,
-    total_cost_usd: 0,
-  } as Record<string, unknown>,
-  rateLimit: {
-    status: "rejected",
-    rateLimitType: "five_hour",
-    utilization: null,
-    resetsAt: RESUME_AFTER,
-    overageStatus: null,
-    overageResetsAt: null,
-    isUsingOverage: false,
-    overageInUse: null,
-    observedAt: new Date("2026-09-01T12:00:00.000Z"),
+  outcome: {
+    kind: "refused" as const,
+    refusal: { kind: "quota" as const, resumeAfter: RESUME_AFTER, limitType: "five_hour" },
   },
 };
 
@@ -260,8 +247,7 @@ describe("an implement pass refused by the account's quota (issue #168)", () => 
 
     const decision = await turns.evaluatePassOutcome(taskId, {
       finalMessage: "Implemented the frobnicator; tests and lint pass.",
-      terminalResult: { type: "result", subtype: "success", is_error: false },
-      rateLimit: { ...WALLED_TURN.rateLimit, status: "allowed" },
+      outcome: { kind: "completed" },
     });
 
     expect(decision).toBe("proceed");

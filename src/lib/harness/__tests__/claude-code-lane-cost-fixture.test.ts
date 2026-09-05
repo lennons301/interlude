@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { describe, expect, it } from "vitest";
-import { readTurnUsage } from "../output-parser";
+import { readTurnUsage } from "../claude-code/stream-parser";
 import {
   chargeForTurn,
   costOverstatement,

@@ -1,31 +1,53 @@
 /**
- * The harness adapter seam (issue #172) — what it takes to run one agent turn,
- * expressed as an interface so the substrate is pluggable.
+ * The harness adapter seam (issues #172, #214) — what it takes to run one
+ * agent turn, expressed as an interface so the substrate is pluggable.
  *
- * The three functions below are the ones issue #164 named, and they were
- * chosen because they were already pure and already unit-tested: build the
- * exec environment, build the harness command, create the output handler. A
- * harness is exactly those three answers plus the variable names it reads its
- * credentials from — everything else about running a pass (provisioning the
- * container, minting the git token, streaming into the feed, parking and
- * resuming) is the orchestrator's and does not vary by vendor.
+ * Issue #172 drew the seam at the three functions that were already pure and
+ * already unit-tested: build the exec environment, build the harness command,
+ * create the output handler. Everything else about running a pass —
+ * provisioning the container, minting the git token, streaming into the feed,
+ * parking and resuming — is the orchestrator's and does not vary by vendor.
  *
- * **One adapter ships** — Claude Code. The interface is reviewed against what
- * an OpenCode or Codex adapter would need, and that review is what shaped it:
+ * Issue #214 widened it to what a **second** harness actually needs, in an
+ * expand step that changes nothing about the Claude lane. A second harness
+ * has its own image, its own way of being asked to load a skill, its own
+ * session artefacts, its own effort dial, and — the load-bearing one — its
+ * own way of saying how a turn ended. So an adapter now also declares:
  *
- * - Nothing here names a vendor. A resolved lane hands over `auth` as
- *   `harness variable -> value` rather than "the OAuth token", because which
- *   variable a harness reads is the harness's fact and which secret goes in it
- *   is the lane's; a second adapter changes the former without touching
- *   `lanes.yaml`'s shape.
+ * - `image`: which agent image its containers run. Image selection is the
+ *   adapter's fact; the container manager is handed it (issue #216).
+ * - `capabilities`: static booleans — skills, quota telemetry, cost
+ *   reporting, session resume — read by the lane parser, the router and the
+ *   dashboard. Declared once, and pinned to the descriptor table the parser
+ *   reads (`descriptors.ts`), so the two cannot drift.
+ * - `composeSkillInvocation`: the text that makes this harness load a named
+ *   skill with an agenda. Claude Code keeps its slash; Codex mentions a
+ *   `$skill`; a harness that loads skills through a tool is told to.
+ * - `sessionArtifactPaths`: the container paths that hold a session's
+ *   replayable state — what a pause copies out and a resume copies back.
+ * - `mapEffort`: the harness's own name for a fleet effort level, or null for
+ *   "no equivalent" — the level is then omitted, never guessed at.
+ * - A **normalised outcome** on the turn result (`turn-result.ts`): the turn
+ *   manager and the reducer branch on `completed | turn-limit | refused |
+ *   failed` and on nothing else. The vendor's verbatim fields stay on the
+ *   result for the recorder.
+ *
+ * The review that shaped the seam still holds, and is why nothing here names
+ * a vendor:
+ *
+ * - A resolved lane hands over `auth` as `harness variable -> value` rather
+ *   than "the OAuth token", because which variable a harness reads is the
+ *   harness's fact and which secret goes in it is the lane's; a second adapter
+ *   changes the former without touching `lanes.yaml`'s shape.
  * - A lane's `baseUrl` is handed over as a *value*, not as a variable name: a
  *   lane knows *which endpoint*, and how a harness is told about it — Claude
  *   Code's `ANTHROPIC_BASE_URL`, some other harness's flag or config file — is
  *   the adapter's own business, settled inside `buildExecEnv`.
  * - `createOutputHandler` is part of the interface rather than a shared
- *   utility because a different harness emits a different stream format. It is
- *   the member most likely to be mistaken for orchestrator code, and the one a
- *   second adapter would most certainly have to replace.
+ *   utility because a different harness emits a different stream format. It
+ *   is the member most likely to be mistaken for orchestrator code, which is
+ *   why the Claude Code stream parser lives under its adapter
+ *   (`claude-code/stream-parser.ts`) and the orchestrator does not import it.
  * - Prompt delivery is deliberately *not* a parameter of the command builder:
  *   Claude Code takes the prompt through an environment variable so it never
  *   lands in a shell command line, and another harness may take a file or
@@ -46,16 +68,25 @@
  * would name a conversation the new harness has never heard of. Such a move
  * has to fall back to the same declared fallback a failed restore takes —
  * start again on the branch, with the work already pushed and no prior
- * context. Nothing enforces that today because nothing can exercise it; the
- * place to enforce it is `restoreSessionTranscript` in the turn manager, which
- * is the one seam that knows both the lane the pass is starting on and the
- * pass it continues (`tasks.resumedFromTaskId` -> its `lane` -> its adapter),
- * and which already owns "resume without the transcript" as an outcome.
+ * context. `sessionArtifactPaths` is the member that makes the artefacts the
+ * adapter's rather than a fixed path; enforcing the fallback is issue #217's,
+ * at `restoreSessionTranscript` in the turn manager — the one seam that knows
+ * both the lane the pass is starting on and the pass it continues
+ * (`tasks.resumedFromTaskId` -> its `lane` -> its adapter), and which already
+ * owns "resume without the transcript" as an outcome.
  */
 
 import type { ResolvedLane } from "../lanes/resolve";
-import type { LaneAdapterId } from "../lanes/lane-config";
-import type { TurnResult } from "../orchestrator/output-parser";
+import type { HarnessCapabilities } from "./descriptors";
+import type { TurnResult } from "./turn-result";
+
+export type {
+  TurnOutcome,
+  TurnRefusal,
+  TurnRefusalKind,
+  TurnResult,
+} from "./turn-result";
+export type { HarnessCapabilities } from "./descriptors";
 
 export interface HarnessExecEnvInput {
   /** The turn's prompt. */
@@ -80,7 +111,12 @@ export interface HarnessCommandInput {
   maxBudgetUsd?: number;
   /** Per-exec turn ceiling; falls back to the configured default. */
   maxTurns?: number;
-  /** Reasoning-effort level (issue #81), or null for the harness's default. */
+  /**
+   * The fleet's reasoning-effort level (issue #81), or null for the harness's
+   * default. Always one of `ALLOWED_TICKET_EFFORTS` — both entry points
+   * validate against that list — and the adapter maps it through its own
+   * `mapEffort`, omitting the flag where it has no equivalent.
+   */
   effort?: string | null;
   /** The lane this turn runs on — the model identifier comes from it. */
   lane: ResolvedLane;
@@ -93,8 +129,30 @@ export interface HarnessOutputHandler {
   onDone(callback: () => void): void;
 }
 
+/**
+ * The agent image an adapter's containers run: the tag to run and the
+ * Dockerfile it is built from, both relative to the repo root. One image per
+ * adapter is issue #216's; today the one adapter declares the one image.
+ */
+export interface HarnessImage {
+  /** The image reference, as `docker run` takes it (`name:tag`). */
+  name: string;
+  /** The Dockerfile at the repo root the image is built from. */
+  dockerfile: string;
+}
+
 export interface HarnessAdapter {
-  readonly id: LaneAdapterId;
+  /**
+   * The id a lane names in `lanes.yaml`. A string rather than the production
+   * table's literal union, because the registry accepts a test double
+   * (`registerHarnessAdapter`) that the table deliberately does not describe;
+   * the pin test holds the production registry to the table.
+   */
+  readonly id: string;
+  /** The agent image this adapter's containers run. */
+  readonly image: HarnessImage;
+  /** What this harness can do, declared once — see `descriptors.ts`. */
+  readonly capabilities: HarnessCapabilities;
   /** The environment one `docker exec` of a turn runs with. */
   buildExecEnv(input: HarnessExecEnvInput): string[];
   /** The shell command that runs one turn inside the container. */
@@ -109,4 +167,23 @@ export interface HarnessAdapter {
    * quota from inheriting one.
    */
   createOutputHandler(taskId: string, lane: ResolvedLane): HarnessOutputHandler;
+  /**
+   * The text that makes this harness load the named skill and follow it, with
+   * the agenda (if any) as the skill's argument. The seed composer and the
+   * follow-on slash router ask this rather than emitting `/skill` text (issue
+   * #218); on Claude Code it is exactly the slash they emit today.
+   */
+  composeSkillInvocation(skill: string, agenda: string | null): string;
+  /**
+   * The container paths holding everything needed to resume `sessionId` for a
+   * pass working in `cwd` — what a pause copies out and a resume copies back
+   * (issues #169, #217). Empty for a harness that cannot resume a session.
+   */
+  sessionArtifactPaths(sessionId: string, cwd: string): string[];
+  /**
+   * This harness's own name for a fleet effort level, or null when it has no
+   * equivalent — in which case the level is omitted from the command (and,
+   * from issue #220, noted on the task), never approximated silently.
+   */
+  mapEffort(level: string): string | null;
 }

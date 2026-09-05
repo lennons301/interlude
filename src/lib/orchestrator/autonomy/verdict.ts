@@ -1,6 +1,6 @@
 /**
  * Verdict parsing for the review pass (issue #17) — pure interpretation of
- * a review container's stream-json output. The reviewer holds no credential
+ * a review turn's result. The reviewer holds no credential
  * that can post a review; it *returns* a verdict, and trusted code acts on
  * it. An unparseable verdict is an error, not a maybe: the caller must never
  * treat it as an approval, and `decideNext` maps it to "block the merge and
@@ -13,7 +13,7 @@
  * after that line is the review body posted verbatim to GitHub.
  */
 
-import { finalPassMessage } from "./pass-output";
+import { finalPassMessage, type PassTurn } from "./pass-output";
 
 export type ReviewVerdictKind = "approve" | "request-changes" | "escalate";
 
@@ -56,13 +56,13 @@ export function undeliverableFeedbackBody(findings: string): string {
 }
 
 /**
- * Parse a review pass's raw NDJSON stream into a verdict. The final message
- * is taken from the terminal `result` event — the same signal the turn
- * manager treats as "turn complete" — so a stream that never finished
- * cleanly is unparseable by construction.
+ * Parse a review pass's turn result into a verdict. The final message is read
+ * only from a turn the harness reports as completed — the same normalised
+ * outcome the turn manager judges the pass by (issue #214) — so a turn that
+ * never finished cleanly is unparseable by construction.
  */
-export function parseReviewVerdict(ndjson: string): ReviewVerdictResult {
-  const final = finalPassMessage(ndjson);
+export function parseReviewVerdict(turn: PassTurn): ReviewVerdictResult {
+  const final = finalPassMessage(turn);
   if (!final.ok) {
     return { kind: "unparseable", reason: `review ${final.reason}` };
   }

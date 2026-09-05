@@ -1,12 +1,23 @@
 /**
- * The Claude Code adapter (issue #172) — the one harness that ships.
+ * The Claude Code adapter (issues #172, #214) — the one harness that ships.
  *
  * Everything here was already in the container manager and already tested;
- * what this ticket changed is where the values come from. The exec environment
- * and the command are now built **from a resolved lane**: its auth map, its
+ * what issue #172 changed is where the values come from. The exec environment
+ * and the command are built **from a resolved lane**: its auth map, its
  * base URL, and the model identifier it gives the pass's tier. Nothing in this
  * module reads `getConfig()` for a credential or an endpoint, which is what
  * makes "flip the subscription for a metered API" a configuration change.
+ *
+ * Issue #214 widened the contract and this adapter implements every member of
+ * it, each one answering the way the fleet already behaved: the image is the
+ * one image (`./image.ts`), effort maps one to one (the fleet's five levels
+ * *are* the CLI's `--effort` enum), a skill is invoked by the slash the seed
+ * composer has always emitted, the session artefact is the one transcript
+ * file `session-transcript.ts` copies today, and the turn outcome is
+ * classified once, under this adapter (`./outcome.ts`), from the exit
+ * vocabulary the orchestrator used to read for itself. The stream parser
+ * moved here from the orchestrator (`./stream-parser.ts`) for the same
+ * reason: it is the adapter's, not the fleet's.
  *
  * The security posture is unchanged and load-bearing (issues #28, #62):
  * auth is exec-scoped, never in the container's persistent environment; the
@@ -15,13 +26,19 @@
  * carries no GitHub CLI token by construction rather than by a check here.
  */
 
-import { getConfig } from "../config";
-import { createOutputHandler } from "../orchestrator/output-parser";
+import { getConfig } from "../../config";
+import { ALLOWED_TICKET_EFFORTS } from "../../orchestrator/autonomy/budgets";
+import { containerTranscriptPath } from "../../quota/session-transcript";
 import type {
   HarnessAdapter,
   HarnessCommandInput,
   HarnessExecEnvInput,
-} from "./adapter";
+} from "../adapter";
+import { describeHarnessAdapter } from "../descriptors";
+import { CLAUDE_CODE_IMAGE } from "./image";
+import { createOutputHandler } from "./stream-parser";
+
+export const CLAUDE_CODE_ADAPTER_ID = "claude-code";
 
 /**
  * Where a lane's base URL lands for this harness. Claude Code speaks the
@@ -65,6 +82,18 @@ export function buildTurnEnv(input: HarnessExecEnvInput): string[] {
 }
 
 /**
+ * The fleet's effort vocabulary *is* this CLI's (issue #81): the five levels
+ * a ticket's `effort:` directive may choose from were taken from `--effort`'s
+ * own enum, so the mapping is the identity on that set. Anything outside it
+ * has no equivalent — and cannot reach here from either entry point, both of
+ * which validate against the same list — so it maps to null and the flag is
+ * omitted rather than a stranger's word being handed to the CLI.
+ */
+export function mapClaudeEffort(level: string): string | null {
+  return (ALLOWED_TICKET_EFFORTS as readonly string[]).includes(level) ? level : null;
+}
+
+/**
  * The bash command a Claude turn runs inside the container. Pure and exported
  * so the flag wiring — the lane's `--model` (issues #74, #172) and the
  * `--effort` level (issue #81) — is unit-testable without a live Docker exec.
@@ -104,10 +133,10 @@ export function buildClaudeTurnCommand(input: HarnessCommandInput): string {
   // what the same tokens cost on the lane's published prices. Handing it a
   // ceiling in the fleet's currency would therefore stop a turn at roughly a
   // sixtieth of the budget the operator set — and the orchestrator would not
-  // see a failure, because a budget-stopped turn is not `error_max_turns`: the
-  // pass would end early, mid-work, and be parked as though it had finished.
-  // "A lane that is cheap and fails every ticket is not cheap" is exactly that
-  // failure.
+  // see a failure, because a budget-stopped turn is not the turn-limit exit:
+  // the pass would end early, mid-work, and be parked as though it had
+  // finished. "A lane that is cheap and fails every ticket is not cheap" is
+  // exactly that failure.
   //
   // So a lane that declares prices is not given a ceiling the harness would
   // misapply. A lane with no prices — Anthropic-direct, where the CLI's figure
@@ -148,13 +177,14 @@ export function buildClaudeTurnCommand(input: HarnessCommandInput): string {
     cmdParts.push("--model", `'${input.lane.model}'`);
   }
 
-  if (input.effort) {
-    // The value is always one of the CLI's bounded levels — both entry points
-    // validate against the same allowlist (the ticket directive clamps, the
-    // env is checked in config.ts), so no metacharacter can reach here. Still
-    // single-quoted for the same defence-in-depth reason as the model above,
-    // since this runs under `bash -c`.
-    cmdParts.push("--effort", `'${input.effort}'`);
+  // Through the adapter's own mapping (issue #214), which on this harness is
+  // the identity on the fleet's vocabulary — so the value is always one of the
+  // CLI's bounded levels and no metacharacter can reach here. Still
+  // single-quoted for the same defence-in-depth reason as the model above,
+  // since this runs under `bash -c`.
+  const effort = input.effort ? mapClaudeEffort(input.effort) : null;
+  if (effort) {
+    cmdParts.push("--effort", `'${effort}'`);
   }
 
   if (input.sessionId) {
@@ -164,12 +194,52 @@ export function buildClaudeTurnCommand(input: HarnessCommandInput): string {
   return cmdParts.join(" ");
 }
 
+/**
+ * How Claude Code is asked to run a skill: the slash the CLI expands natively
+ * at every turn position (the #59 spike), with the agenda as the skill's
+ * argument. Byte-identical to the head the seed composer has always emitted —
+ * issue #218 makes the composer ask here rather than write it itself.
+ */
+export function composeClaudeSkillInvocation(
+  skill: string,
+  agenda: string | null
+): string {
+  const trimmed = agenda?.trim();
+  return trimmed ? `/${skill} ${trimmed}` : `/${skill}`;
+}
+
+/**
+ * One file is the whole session (the #165 spike's measurement): the JSONL
+ * transcript the CLI keeps under the container user's `.claude/projects`,
+ * found by session id under `--resume`. The derivation stays in
+ * `session-transcript.ts`, which owns copying it in and out, until issue #217
+ * makes that module ask the adapter instead of naming the path.
+ */
+export function claudeSessionArtifactPaths(sessionId: string, cwd: string): string[] {
+  return [containerTranscriptPath(sessionId, cwd)];
+}
+
+const descriptor = describeHarnessAdapter(CLAUDE_CODE_ADAPTER_ID);
+if (descriptor === null) {
+  // Unreachable while the table names this adapter; a throw at load rather
+  // than a silent default is what "cannot be registered without a descriptor"
+  // means at runtime, ahead of the test that pins it.
+  throw new Error(`harness adapter "${CLAUDE_CODE_ADAPTER_ID}" has no descriptor`);
+}
+
 export const claudeCodeAdapter: HarnessAdapter = {
-  id: "claude-code",
+  id: CLAUDE_CODE_ADAPTER_ID,
+  image: CLAUDE_CODE_IMAGE,
+  // Read from the table rather than restated, so the adapter cannot disagree
+  // with what the lane parser was told about it.
+  capabilities: descriptor.capabilities,
   buildExecEnv: buildTurnEnv,
   buildCommand: buildClaudeTurnCommand,
   // The lane's id, not the lane: the parser only needs to know which account's
   // quota an observed `rate_limit_event` describes (issue #175), and handing it
   // the auth values as well would put credentials on the logging path.
   createOutputHandler: (taskId, lane) => createOutputHandler(taskId, lane.id),
+  composeSkillInvocation: composeClaudeSkillInvocation,
+  sessionArtifactPaths: claudeSessionArtifactPaths,
+  mapEffort: mapClaudeEffort,
 };

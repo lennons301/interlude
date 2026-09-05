@@ -24,13 +24,22 @@
 
 import { parse as parseYaml } from "yaml";
 import { MODEL_TIERS, type ModelTier } from "../model-tiers";
+import {
+  HARNESS_ADAPTER_DESCRIPTORS,
+  harnessAdapterIds,
+  type HarnessAdapterDescriptor,
+} from "../harness/descriptors";
 import { isLaneIdShaped } from "./lane-id";
 
-/** The harness adapters that exist. Exactly one ships (issue #172) — the
- * interface is designed against what an OpenCode or Codex adapter would need,
- * but building a second is explicitly out of scope. */
-export const LANE_ADAPTERS = ["claude-code"] as const;
-export type LaneAdapterId = (typeof LANE_ADAPTERS)[number];
+/**
+ * A harness adapter id, as a lane names one. Validated at parse against the
+ * descriptor table the parser is handed (issue #214) — the static table of
+ * every adapter that ships, shared with the registry so the two cannot drift
+ * — so the type is a string rather than the table's literal union: the table
+ * a test hands in may describe a double the production table deliberately
+ * does not.
+ */
+export type LaneAdapterId = string;
 
 /** Who pays. `subscription` work draws on a fixed-price plan's quota;
  * `metered` work spends real money per token, which is why issue #175's
@@ -172,8 +181,17 @@ function fail(reason: string): LaneConfigResult {
 /**
  * Parse the checked-in lane file. Rejects the whole document on any problem —
  * see the module note on why a near-miss is worse than a hard failure.
+ *
+ * `descriptors` is the table of adapters a lane may name (issue #214): the
+ * production table by default, which is the one the registry is pinned to.
+ * A parameter rather than an import of the registry so the parser stays pure
+ * — and so a test can describe the fake adapter to it, which the production
+ * table deliberately never does.
  */
-export function parseLaneConfig(text: string): LaneConfigResult {
+export function parseLaneConfig(
+  text: string,
+  descriptors: readonly HarnessAdapterDescriptor[] = HARNESS_ADAPTER_DESCRIPTORS
+): LaneConfigResult {
   let doc: unknown;
   try {
     doc = parseYaml(text);
@@ -192,9 +210,10 @@ export function parseLaneConfig(text: string): LaneConfigResult {
     return fail("`lanes` is not a non-empty list of lane definitions");
   }
 
+  const adapterIds = harnessAdapterIds(descriptors);
   const lanes: LaneDefinition[] = [];
   for (const [index, raw] of rawLanes.entries()) {
-    const parsed = parseLane(raw, index);
+    const parsed = parseLane(raw, index, adapterIds);
     if ("reason" in parsed) return fail(parsed.reason);
     if (lanes.some((lane) => lane.id === parsed.lane.id)) {
       return fail(`duplicate lane id "${parsed.lane.id}"`);
@@ -215,7 +234,11 @@ export function parseLaneConfig(text: string): LaneConfigResult {
 
 type LaneParse = { lane: LaneDefinition } | { reason: string };
 
-function parseLane(raw: unknown, index: number): LaneParse {
+function parseLane(
+  raw: unknown,
+  index: number,
+  adapterIds: readonly string[]
+): LaneParse {
   const at = `lane #${index + 1}`;
   if (!isMapping(raw)) return { reason: `${at} is not a mapping` };
 
@@ -233,14 +256,11 @@ function parseLane(raw: unknown, index: number): LaneParse {
   }
 
   const adapter = raw.adapter;
-  if (
-    typeof adapter !== "string" ||
-    !(LANE_ADAPTERS as readonly string[]).includes(adapter)
-  ) {
+  if (typeof adapter !== "string" || !adapterIds.includes(adapter)) {
     return {
       reason:
         `${where} names adapter "${String(adapter)}" — expected one of ` +
-        `${LANE_ADAPTERS.join(", ")}.`,
+        `${adapterIds.join(", ")}.`,
     };
   }
 
@@ -275,7 +295,7 @@ function parseLane(raw: unknown, index: number): LaneParse {
     lane: {
       id,
       label,
-      adapter: adapter as LaneAdapterId,
+      adapter,
       billing: billing as LaneBilling,
       auth: auth.auth,
       baseUrl: baseUrl.baseUrl,

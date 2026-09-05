@@ -1,17 +1,29 @@
 import { db } from "@/db";
 import { messages } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { newId } from "../ulid";
-import { getStreamRecorder, type StreamRecorder } from "./stream-recorder";
+import { newId } from "../../ulid";
+import {
+  getStreamRecorder,
+  type StreamRecorder,
+} from "../../orchestrator/stream-recorder";
 import {
   parseRateLimitEvent,
   type QuotaObservation,
-} from "../quota/rate-limit-event";
-import { recordQuotaObservation } from "../quota/quota-store";
-import type { TurnTokenUsage } from "../lanes/lane-cost";
+} from "../../quota/rate-limit-event";
+import { recordQuotaObservation } from "../../quota/quota-store";
+import type { TurnTokenUsage } from "../../lanes/lane-cost";
+import type { TurnResult } from "../turn-result";
+import { classifyClaudeExit } from "./outcome";
 
 /**
  * Parse Claude Code stream-json output and insert messages into DB.
+ *
+ * The Claude Code adapter's own stream parser (issue #214): it lived in the
+ * orchestrator as `output-parser.ts` until this ticket moved it under the
+ * adapter, because it is the member of the seam most likely to be mistaken for
+ * orchestrator code and the one a second harness most certainly replaces. The
+ * orchestrator sees only the `TurnResult` it hands back, whose `outcome` is
+ * the fleet's vocabulary (`./outcome.ts`) and never this stream's.
  *
  * Claude Code `--output-format stream-json --verbose` emits NDJSON with these top-level types:
  * - system: init events, hook events (ignored)
@@ -20,7 +32,7 @@ import type { TurnTokenUsage } from "../lanes/lane-cost";
  * - result: final result with session_id, total_cost_usd
  * - rate_limit_event: quota state, confirmed to reach stdout (issue #165) —
  *   read into the turn result and recorded as the fleet's quota state (#167).
- *   Nothing *decides* on it yet: pausing (#168) and admission (#171) do that
+ *   Pausing (#168) and admission (#171) decide on it downstream
  *
  * Anything else, and any line that is not JSON at all, is handed to the passive
  * recorder rather than dropped silently (issue #165). Nothing about how a
@@ -28,53 +40,6 @@ import type { TurnTokenUsage } from "../lanes/lane-cost";
  * that carries no unrecognised event produces exactly the messages it did
  * before.
  */
-
-export interface TurnResult {
-  sessionId: string | null;
-  costUsd: number;
-  /** The turn's last assistant text message — what the blocked-marker
-   * detector reads. Null when the turn produced no text at all. */
-  finalMessage: string | null;
-  /** The result event's subtype ("success", "error_max_turns", ...) — how
-   * turn exhaustion is detected. Null when no result event arrived. */
-  subtype: string | null;
-  /**
-   * The terminal `result` event verbatim, or null when none arrived (issue
-   * #165) — what the passive recorder writes down as the pass's exit
-   * condition.
-   *
-   * Carried whole rather than as picked fields because `subtype` above is not
-   * enough to classify an exit and the spike found the specific way it is not:
-   * a rate-limit rejection arrives as `subtype: "success"` with `is_error:
-   * true`, `terminal_reason: "api_error"` and `api_error_status: 429`. Nothing
-   * reads those yet — #167 and #168 will — so the log keeps the whole event
-   * instead of a summary chosen before anyone knew which fields mattered.
-   */
-  terminalResult: Record<string, unknown> | null;
-  /**
-   * The last `rate_limit_event` of the turn, read into an observation (issue
-   * #167), or null when the stream carried none — which is the ordinary case
-   * on a metered lane, where the unified-window machinery emits nothing at all.
-   *
-   * The last, not the first: the CLI emits one per API attempt, so a turn that
-   * retried carries several and only the newest describes the account now.
-   */
-  rateLimit: QuotaObservation | null;
-  /**
-   * The tokens the turn consumed, or null when no `result` event arrived
-   * (issue #175) — what a lane's own prices are applied to when the harness's
-   * dollar figure cannot be trusted.
-   *
-   * Read from `modelUsage` and *only* from it — never the sibling `usage`
-   * object, which is the last API iteration rather than the turn. Pinned by
-   * observation on 2026-09-02: a subscription turn reported
-   * `usage.input_tokens: 10` beside `modelUsage.inputTokens: 909`, and only
-   * the latter reproduces the CLI's own `total_cost_usd` at list prices to the
-   * cent. See `readTurnUsage` for why that rules the fallback out rather than
-   * making it a second-best.
-   */
-  usage: TurnTokenUsage | null;
-}
 
 interface ContentBlock {
   type: string;
@@ -201,7 +166,6 @@ export function createOutputHandler(
   let sessionId: string | null = null;
   let costUsd = 0;
   let finalMessage: string | null = null;
-  let subtype: string | null = null;
   let terminalResult: Record<string, unknown> | null = null;
   let rateLimit: QuotaObservation | null = null;
   let usage: TurnTokenUsage | null = null;
@@ -233,7 +197,10 @@ export function createOutputHandler(
         sessionId,
         costUsd,
         finalMessage,
-        subtype,
+        // Classified here, at the end, rather than as the result event arrives:
+        // a quota wall is only legible from the terminal event and the last
+        // rate-limit event together, and the latter may land after the former.
+        outcome: classifyClaudeExit(terminalResult, rateLimit),
         terminalResult,
         rateLimit,
         usage,
@@ -361,8 +328,18 @@ export function createOutputHandler(
 
       if (type === "result") {
         sessionId = (event.session_id as string) ?? null;
-        subtype = (event.subtype as string) ?? null;
         terminalResult = event;
+        // The CLI's own statement of the turn's final message, when it makes
+        // one. It is what the review-verdict and triage-exit readers read
+        // before this ticket (off the raw stream), and on every captured
+        // stream it is byte-identical to the last assistant text block above —
+        // so preferring it changes nothing observed while making the final
+        // message one notion rather than two. The text block stays the
+        // fallback for a result event that carries none.
+        const stated = event.result;
+        if (typeof stated === "string" && stated.trim() !== "") {
+          finalMessage = stated;
+        }
         costUsd =
           (event.total_cost_usd as number) ??
           (event.cost_usd as number) ??

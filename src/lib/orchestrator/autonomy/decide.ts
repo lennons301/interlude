@@ -26,7 +26,7 @@ import {
   type WorkflowSelection,
 } from "./ticket";
 import type { ModelTier } from "../../model-tiers";
-import type { QuotaRejection } from "../../quota/rate-limit-rejection";
+import type { TurnOutcome } from "../../harness/turn-result";
 import { planTierDegrade } from "../../quota/tier-ladder";
 import {
   chooseRunTier,
@@ -165,19 +165,28 @@ export interface PassOutcome {
    * operates on an existing PR, so its callers report `true`. */
   producedPr: boolean;
   /**
-   * The quota wall this turn hit, or null when it hit none (issue #168) — read
-   * off the turn's own result by `detectQuotaRejection`, never re-derived here.
+   * How the turn ended, in the harness adapter's normalised vocabulary (issue
+   * #214) — read off the turn's own result, never re-derived here, and the
+   * **only** thing the reducer reads about how the harness exited. Null when
+   * the harness never said (the container died mid-turn), which the
+   * interruption bound owns upstream (issue #97); the reducer reads nothing
+   * from a null and takes the ordinary readings below.
    *
-   * Non-null outranks every other reading of the pass: a refused turn ran no
-   * agent, so its final message is the CLI's own "you've hit your session
-   * limit" and its empty diff is the wall's, not the work's. Judging either
-   * would charge the account's quota to the ticket's attempt budget.
+   * A `refused { quota }` outranks every other reading of the pass (issue
+   * #168): a refused turn ran no agent, so its final message is the harness's
+   * own "you've hit your session limit" and its empty diff is the wall's, not
+   * the work's. Judging either would charge the account's quota to the
+   * ticket's attempt budget.
    *
    * It does not say *which* consequence follows — a tier-scoped window steps
    * the run down the ladder and an account-wide one parks it (issue #170) —
    * because that is the reducer's decision to make, from this and `tier`.
+   * The other outcomes decide nothing here: a `turn-limit` exhausted its
+   * attempt before it reached the reducer, and a `failed` or non-quota
+   * `refused` turn takes the ordinary path exactly as it did before the
+   * vocabulary existed — what an `auth` refusal should do is issue #220's.
    */
-  rateLimited: QuotaRejection | null;
+  outcome: TurnOutcome | null;
   /**
    * The tier this pass actually ran at (issue #170), read off the run's
    * `model` column — the only place that records it — and normalised, so a
@@ -1217,6 +1226,20 @@ function describeTierSource(source: TierSource): string {
     : "triage's suggestion — the ticket states none; a `model:` line in a Workflow section would outrank it";
 }
 
+/**
+ * The quota wall a finished turn hit, or null when it hit none — the one
+ * reading of a turn outcome the reducer makes (issue #214). A refusal of
+ * another kind is not a wall: the account has not run out of anything, so
+ * the wall ordering (degrade, failover, pause) has nothing to offer it.
+ */
+function quotaWall(
+  outcome: TurnOutcome | null
+): { resumeAfter: Date | null; limitType: string | null } | null {
+  if (outcome === null || outcome.kind !== "refused") return null;
+  if (outcome.refusal.kind !== "quota") return null;
+  return { resumeAfter: outcome.refusal.resumeAfter, limitType: outcome.refusal.limitType };
+}
+
 export function decideNext(snapshot: AutonomySnapshot): Action[] {
   const actions: Action[] = [];
 
@@ -1250,14 +1273,15 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     // is the CLI's own session-limit line and the empty diff is the wall's, so
     // both the blocked-marker detector and the empty-pass check below would be
     // judging the account's quota as if it were the work.
-    if (pass.rateLimited) {
+    const wall = quotaWall(pass.outcome);
+    if (wall) {
       // Which consequence a wall has is the whole of issue #170, and it turns
       // on one field: the window that refused the pass. A **tier-scoped** one
       // (`seven_day_opus`) leaves the account with quota the fleet can still
       // spend, one rung down, so the run steps down and retries. Only an
       // account-wide window — or the bottom of the ladder, where there is
       // nowhere left to step — actually stops the run.
-      const { limitType, resumeAfter } = pass.rateLimited;
+      const { limitType, resumeAfter } = wall;
       if (limitType !== null) {
         const degrade = planTierDegrade(pass.tier, limitType);
         if (degrade !== null) {

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
+import { turnFromClaudeStream } from "@/test/claude-stream-fixture";
 import { observeCheckRollup } from "../checks";
 import { observeReviewedHead } from "../review-head";
 import { ADVISORY_TRIAGE_LABELS, ARMING_LABEL } from "../ticket";
@@ -243,6 +244,15 @@ function makePendingTriage(overrides: Partial<PendingTriage> = {}): PendingTriag
   };
 }
 
+/** A turn the account's quota refused, in the adapter's normalised vocabulary
+ * (issue #214) — the only reading of a turn outcome the reducer makes. */
+function refusedByQuota(wall: {
+  resumeAfter: Date | null;
+  limitType: string | null;
+}): PassOutcome["outcome"] {
+  return { kind: "refused", refusal: { kind: "quota", ...wall } };
+}
+
 function makePass(overrides: Partial<PassOutcome> = {}): PassOutcome {
   return {
     runId: "run-1",
@@ -250,7 +260,7 @@ function makePass(overrides: Partial<PassOutcome> = {}): PassOutcome {
     issueRef: "acme/widgets#7",
     finalMessage: "Implemented the frobnicator; tests and lint pass.",
     producedPr: true,
-    rateLimited: null,
+    outcome: { kind: "completed" },
     // The top of the ladder, so a degrade test has somewhere to step and a
     // pause test is not passing by accident (issue #170).
     tier: "heavy",
@@ -3053,7 +3063,7 @@ describe("decideNext — pausing a pass on a quota wall (issue #168)", () => {
     const actions = decideNext(
       makeSnapshot({
         candidates: [],
-        completedPasses: [makePass({ rateLimited: WALL })],
+        completedPasses: [makePass({ outcome: refusedByQuota(WALL) })],
       })
     );
 
@@ -3066,7 +3076,7 @@ describe("decideNext — pausing a pass on a quota wall (issue #168)", () => {
         candidates: [],
         completedPasses: [
           makePass({
-            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "thirty_day_haiku" },
+            outcome: refusedByQuota({ resumeAfter: RESUME_AFTER, limitType: "thirty_day_haiku" }),
           }),
         ],
       })
@@ -3084,7 +3094,7 @@ describe("decideNext — pausing a pass on a quota wall (issue #168)", () => {
     const actions = decideNext(
       makeSnapshot({
         candidates: [],
-        completedPasses: [makePass({ producedPr: false, rateLimited: WALL })],
+        completedPasses: [makePass({ producedPr: false, outcome: refusedByQuota(WALL) })],
       })
     );
 
@@ -3100,7 +3110,7 @@ describe("decideNext — pausing a pass on a quota wall (issue #168)", () => {
         candidates: [],
         completedPasses: [
           makePass({
-            rateLimited: WALL,
+            outcome: refusedByQuota(WALL),
             finalMessage: "BLOCKED: which database?",
           }),
         ],
@@ -3117,7 +3127,7 @@ describe("decideNext — pausing a pass on a quota wall (issue #168)", () => {
     const actions = decideNext(
       makeSnapshot({
         candidates: [],
-        completedPasses: [makePass({ rateLimited: WALL })],
+        completedPasses: [makePass({ outcome: refusedByQuota(WALL) })],
         conflictingPrs: [makeConflictingPr()],
         awaitingReview: [makeAwaitingReview()],
         settledPrs: [
@@ -3136,7 +3146,7 @@ describe("decideNext — pausing a pass on a quota wall (issue #168)", () => {
     // own counters are the executor's business — it writes neither.)
     const actions = decideNext(
       makeSnapshot({
-        completedPasses: [makePass({ rateLimited: WALL })],
+        completedPasses: [makePass({ outcome: refusedByQuota(WALL) })],
         candidates: [
           makeCandidate({ attemptsMade: 2, interruptionsMade: 4, hasActiveRun: true }),
         ],
@@ -3167,7 +3177,7 @@ describe("decideNext — pausing a pass on a quota wall (issue #168)", () => {
     const actions = decideNext(
       makeSnapshot({
         globalPaused: true,
-        completedPasses: [makePass({ rateLimited: WALL })],
+        completedPasses: [makePass({ outcome: refusedByQuota(WALL) })],
         candidates: [makeCandidate()],
       })
     );
@@ -3183,7 +3193,7 @@ describe("decideNext — pausing a pass on a quota wall (issue #168)", () => {
     const actions = decideNext(
       makeSnapshot({
         projects: [makeProject({ autonomyEnabled: false })],
-        completedPasses: [makePass({ rateLimited: WALL })],
+        completedPasses: [makePass({ outcome: refusedByQuota(WALL) })],
         candidates: [makeCandidate()],
       })
     );
@@ -3201,7 +3211,7 @@ describe("decideNext — pausing a pass on a quota wall (issue #168)", () => {
     // The turn manager's own path: one pass, decided the moment its turn ends,
     // with every pickup and pipeline input inert.
     expect(
-      decideNext(passOutcomeSnapshot(NOW, makePass({ rateLimited: WALL })))
+      decideNext(passOutcomeSnapshot(NOW, makePass({ outcome: refusedByQuota(WALL) })))
     ).toEqual([PAUSE_ACTION]);
   });
 
@@ -3225,7 +3235,7 @@ describe("decideNext — the tier degrade ladder (issue #170)", () => {
     return decideNext(
       passOutcomeSnapshot(
         NOW,
-        makePass({ tier, rateLimited: { resumeAfter: RESUME_AFTER, limitType } })
+        makePass({ tier, outcome: refusedByQuota({ resumeAfter: RESUME_AFTER, limitType }) })
       )
     );
   }
@@ -3307,7 +3317,7 @@ describe("decideNext — the tier degrade ladder (issue #170)", () => {
         NOW,
         makePass({
           tier: "heavy",
-          rateLimited: { resumeAfter: null, limitType: "seven_day_opus" },
+          outcome: refusedByQuota({ resumeAfter: null, limitType: "seven_day_opus" }),
         })
       )
     );
@@ -3336,7 +3346,7 @@ describe("decideNext — the tier degrade ladder (issue #170)", () => {
         makePass({
           tier: "heavy",
           producedPr: false,
-          rateLimited: { resumeAfter: null, limitType: "five_hour" },
+          outcome: refusedByQuota({ resumeAfter: null, limitType: "five_hour" }),
         })
       )
     );
@@ -3364,7 +3374,7 @@ describe("decideNext — the tier degrade ladder (issue #170)", () => {
           tier: "heavy",
           producedPr: false,
           finalMessage: "BLOCKED: which database?",
-          rateLimited: { resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" },
+          outcome: refusedByQuota({ resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" }),
         })
       )
     );
@@ -3381,7 +3391,7 @@ describe("decideNext — the tier degrade ladder (issue #170)", () => {
         completedPasses: [
           makePass({
             tier: "heavy",
-            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" },
+            outcome: refusedByQuota({ resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" }),
           }),
         ],
         candidates: [
@@ -3405,7 +3415,7 @@ describe("decideNext — the tier degrade ladder (issue #170)", () => {
         completedPasses: [
           makePass({
             tier: "heavy",
-            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" },
+            outcome: refusedByQuota({ resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" }),
           }),
         ],
         conflictingPrs: [makeConflictingPr()],
@@ -3939,14 +3949,17 @@ describe("arming boundary — interlude never applies ready-for-agent", () => {
       "triage-armed-exit.ndjson",
       "triage-malformed.ndjson",
     ].map((name) =>
-      fs.readFileSync(path.join(__dirname, "fixtures", name), "utf8")
+      // As the adapter would hand the stream to the turn manager (issue #214).
+      turnFromClaudeStream(
+        fs.readFileSync(path.join(__dirname, "fixtures", name), "utf8")
+      )
     );
 
-    const pending = streams.map((ndjson, i) =>
+    const pending = streams.map((turn, i) =>
       makePendingTriage({
         taskId: `task-stream-${i}`,
         issueRef: `acme/widgets#${20 + i}`,
-        result: parseTriageExit(ndjson),
+        result: parseTriageExit(turn),
       })
     );
 
@@ -4514,7 +4527,7 @@ describe("decideNext — resuming a paused run early on another lane (issue #199
             tier: "light",
             laneId: "claude-subscription",
             laneFailover: ELSEWHERE,
-            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "five_hour" },
+            outcome: refusedByQuota({ resumeAfter: RESUME_AFTER, limitType: "five_hour" }),
           }),
         ],
         pausedRuns: [parked({ runId: "run-1", resumeAfter: RESUME_AFTER })],
@@ -4559,7 +4572,7 @@ describe("decideNext — cross-lane failover (issue #176)", () => {
           tier: "light",
           laneId: "claude-subscription",
           laneFailover: CHEAPER,
-          rateLimited: { resumeAfter: RESUME_AFTER, limitType: "five_hour" },
+          outcome: refusedByQuota({ resumeAfter: RESUME_AFTER, limitType: "five_hour" }),
           ...pass,
         }),
         maxResumes
@@ -4594,7 +4607,7 @@ describe("decideNext — cross-lane failover (issue #176)", () => {
     // a fresh conversation's worth of orientation.
     const actions = decide({
       tier: "heavy",
-      rateLimited: { resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" },
+      outcome: refusedByQuota({ resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" }),
     });
 
     expect(degrades(actions)).toHaveLength(1);
@@ -4604,7 +4617,7 @@ describe("decideNext — cross-lane failover (issue #176)", () => {
   it("moves off the bottom of the ladder, where a step down has nowhere to go", () => {
     const actions = decide({
       tier: "light",
-      rateLimited: { resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" },
+      outcome: refusedByQuota({ resumeAfter: RESUME_AFTER, limitType: "seven_day_opus" }),
     });
 
     expect(degrades(actions)).toEqual([]);
@@ -4625,7 +4638,7 @@ describe("decideNext — cross-lane failover (issue #176)", () => {
     // one of the ticket's three attempts.
     const actions = decide({
       producedPr: false,
-      rateLimited: { resumeAfter: null, limitType: "five_hour" },
+      outcome: refusedByQuota({ resumeAfter: null, limitType: "five_hour" }),
     });
 
     expect(moves(actions)).toHaveLength(1);
@@ -4672,7 +4685,7 @@ describe("decideNext — cross-lane failover (issue #176)", () => {
             tier: "light",
             laneId: "claude-subscription",
             laneFailover: CHEAPER,
-            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "five_hour" },
+            outcome: refusedByQuota({ resumeAfter: RESUME_AFTER, limitType: "five_hour" }),
           }),
         ],
         candidates: [makeCandidate()],
@@ -4692,7 +4705,7 @@ describe("decideNext — cross-lane failover (issue #176)", () => {
             tier: "light",
             laneId: "claude-subscription",
             laneFailover: CHEAPER,
-            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "five_hour" },
+            outcome: refusedByQuota({ resumeAfter: RESUME_AFTER, limitType: "five_hour" }),
           }),
         ],
         candidates: [makeCandidate()],
@@ -4717,7 +4730,7 @@ describe("decideNext — cross-lane failover (issue #176)", () => {
             tier: "light",
             laneId: "claude-subscription",
             laneFailover: CHEAPER,
-            rateLimited: { resumeAfter: RESUME_AFTER, limitType: "five_hour" },
+            outcome: refusedByQuota({ resumeAfter: RESUME_AFTER, limitType: "five_hour" }),
           }),
         ],
         candidates: [
