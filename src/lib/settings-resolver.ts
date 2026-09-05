@@ -43,7 +43,6 @@ import { isLaneIdShaped } from "./lanes/lane-id";
 import { MAX_METERED_DAILY_CAP_USD } from "./orchestrator/autonomy/budgets";
 import {
   MODEL_TIERS,
-  TIER_MODEL_IDS,
   type ModelTier,
   describeModelTierVocabulary,
   normalizeModelTier,
@@ -52,8 +51,13 @@ import {
 /**
  * What each tier means as a model identifier. A parameter since execution
  * lanes (issue #172): the tier is the durable choice, and what it resolves to
- * belongs to the lane the pass will run on. Defaulted to the pre-lane map only
- * so a caller with no lane in hand still resolves something.
+ * belongs to the lane the pass will run on. There is no default (issue #226):
+ * a caller with a lane in hand passes that lane's `models`, the settings
+ * screen passes the **primary lane's** — the map the pass it describes would
+ * run on — and a caller that stops at the tier (`resolveAgentModelChoice`)
+ * passes null, resolving a tier and no model. The pre-lane fleet-wide map that
+ * used to stand in here was one harness's aliases, which named a model no pass
+ * on another lane would ever run.
  */
 export type TierModelIds = Readonly<Record<ModelTier, string>>;
 
@@ -599,11 +603,14 @@ export function resolveMeteredCapSetting(
 }
 
 /**
- * A model-tier field, resolved. `model` is what reaches the CLI's `--model`
- * flag; `tier` is the same choice in the durable vocabulary, and is null only
- * when the environment pins a raw model id that names no tier — which stays
- * legal and is passed through verbatim, because a deployment that pins
- * `claude-opus-4-8` today must keep running it.
+ * A model-tier field, resolved. `model` is the identifier the harness is
+ * handed, read off the tier map the caller supplied; `tier` is the same choice
+ * in the durable vocabulary, and is null only when the environment pins a raw
+ * model id that names no tier — which stays legal and is passed through
+ * verbatim, because a deployment that pins a provider's own model id today
+ * must keep running it. `model` is also null when a tier resolved but the
+ * caller had no lane's map to read it from (issue #226): the tier is still the
+ * answer, and nothing invents an identifier for it.
  */
 export interface ResolvedModelTier {
   key: ModelTierSettingKey;
@@ -829,7 +836,7 @@ export function resolveModelTier(
   kind: AgentPassKind,
   config: AppConfig,
   overrides: SettingsOverrides,
-  tierModels: TierModelIds = TIER_MODEL_IDS
+  tierModels: TierModelIds | null
 ): ResolvedModelTier {
   return resolveModelTierField(
     MODEL_TIER_FIELD_BY_KIND[kind],
@@ -845,7 +852,7 @@ export function resolveModelTierField(
   key: ModelTierSettingKey,
   config: AppConfig,
   overrides: SettingsOverrides,
-  tierModels: TierModelIds = TIER_MODEL_IDS,
+  tierModels: TierModelIds | null,
   fallbackTier: ModelTier | null = null
 ): ResolvedModelTier {
   const spec = SETTINGS_FIELDS[key];
@@ -856,7 +863,7 @@ export function resolveModelTierField(
     return {
       key,
       tier: override,
-      model: tierModels[override],
+      model: tierModels?.[override] ?? null,
       source: "override",
       override,
       envVar,
@@ -866,9 +873,9 @@ export function resolveModelTierField(
   }
 
   // A tier named in the environment goes through the same map an override
-  // does — `AGENT_MODEL=heavy` must reach the CLI as a model it accepts, not
-  // as the word "heavy". Anything that names no tier is a pinned model id and
-  // is passed through verbatim.
+  // does — `AGENT_MODEL=heavy` must reach the harness as a model identifier
+  // its lane accepts, not as the word "heavy". Anything that names no tier is
+  // a pinned model id and is passed through verbatim.
   //
   // `fallbackTier` covers the state where the variable is unset too: on a lane
   // that declares its own prices the pass runs that lane's default tier rather
@@ -881,7 +888,7 @@ export function resolveModelTierField(
   return {
     key,
     tier,
-    model: tier !== null ? tierModels[tier] : envValue,
+    model: tier !== null ? (tierModels?.[tier] ?? null) : envValue,
     source: "environment",
     override: null,
     envVar,
@@ -1021,8 +1028,10 @@ export interface SettingFieldView {
   envValue: string | null;
   /** The tier in force, or null when the environment pins a raw model id. */
   tier: ModelTier | null;
-  /** What actually reaches the harness (null = no `--model`; the CLI resolves
-   * the account default, which is the pre-#74 behaviour). */
+  /** What actually reaches the harness, off the primary lane's map (null with
+   * no tier = no model named, the harness resolves its own default, which is
+   * the pre-#74 behaviour; null beside a tier = no lane's map to read it from,
+   * issue #226). */
   model: string | null;
   /** The pass kinds that run this row's tier as their own — empty for a row
    * that is nothing but a ceiling (Review). */
@@ -1048,14 +1057,15 @@ function kindsReadingField(key: ModelTierSettingKey): AgentPassKind[] {
  * Every field, resolved for display. The API and the screen both read this, so
  * the value the UI shows is the value the resolver would hand a pass — which
  * is why `tierModels` must be the *primary lane's* map (issue #172) and
- * `fallbackTier` its answer for an unset field (issue #175). Show the pre-lane
- * map while the fleet runs on OpenRouter and the row would name a model no
- * pass will ever run.
+ * `fallbackTier` its answer for an unset field (issue #175). Show some other
+ * map while the fleet runs on a third-party lane and the row would name a
+ * model no pass will ever run. Null when there is no primary lane to read —
+ * an unusable lane file — and the rows then name the tier alone.
  */
 export function describeModelTierSettings(
   config: AppConfig,
   overrides: SettingsOverrides,
-  tierModels: TierModelIds = TIER_MODEL_IDS,
+  tierModels: TierModelIds | null,
   fallbackTier: ModelTier | null = null
 ): SettingFieldView[] {
   return MODEL_TIER_FIELD_ORDER.map((key) => {

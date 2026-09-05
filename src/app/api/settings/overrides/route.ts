@@ -49,8 +49,10 @@ function laneState(overrides: SettingsOverrides): {
   lanes: LaneSettingsView | null;
   laneError: string | null;
   /** The primary lane's tier map — what the model-tier rows must be resolved
-   * against, so the screen names the model a pass would actually run. */
-  tierModels: TierModelIds | undefined;
+   * against, so the screen names the model a pass would actually run. Null
+   * with no primary lane to read (an unusable lane file): the rows then name
+   * the tier alone rather than a model off some other lane's map. */
+  tierModels: TierModelIds | null;
   /** And what that lane answers an *unset* row with (issue #175): a priced
    * lane runs its own default tier rather than no `--model` at all. */
   fallbackTier: ModelTier | null;
@@ -58,12 +60,12 @@ function laneState(overrides: SettingsOverrides): {
   const catalog = getLaneCatalog();
   if (!catalog.ok) {
     // No catalog means no pass can start at all, which the lane panel says in
-    // as many words; the tier rows fall back to the pre-lane map rather than
-    // rendering blank beside it.
+    // as many words; the tier rows keep their tiers and name no model beside
+    // them, since there is no lane whose map could say what a tier means.
     return {
       lanes: null,
       laneError: catalog.reason,
-      tierModels: undefined,
+      tierModels: null,
       fallbackTier: null,
     };
   }
@@ -77,7 +79,7 @@ function laneState(overrides: SettingsOverrides): {
   return {
     lanes,
     laneError: null,
-    tierModels: primary?.models,
+    tierModels: primary?.models ?? null,
     fallbackTier: primary ? laneFallbackTier(primary) : null,
   };
 }

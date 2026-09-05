@@ -4,7 +4,8 @@
  * one", "the everyday one", "the cheap one" — and it survives a change of
  * provider, which a model id does not. Everything that lets a human express a
  * model choice (the settings UI, a ticket's `model:` directive) speaks tiers;
- * only the last step, reaching the CLI's `--model` flag, speaks ids.
+ * only the last step — the execution lane's own tier→model map, handed to the
+ * harness by its adapter — speaks ids.
  *
  * A leaf module on purpose. Three surfaces speak the vocabulary — the
  * directive parser, the settings resolver and `config.ts` — and it imports
@@ -19,28 +20,19 @@ export const MODEL_TIERS = ["heavy", "standard", "light"] as const;
 export type ModelTier = (typeof MODEL_TIERS)[number];
 
 /**
- * The vendor names the platform used before tiers existed (issue #80's
+ * The model-family names the platform used before tiers existed (issue #80's
  * `model:` directive allowlist), kept working as aliases so a ticket already
  * carrying `model: opus` does not break — and so an operator who thinks in
- * Anthropic's names is not made to translate.
+ * the first lane's names is not made to translate. Aliases into the
+ * vocabulary only: what a tier *means* as a model identifier is the execution
+ * lane's `models` map (issue #172), and since issue #226 there is no
+ * fleet-wide default map beside it — a caller with no lane in hand is handed
+ * the primary lane's.
  */
 export const MODEL_TIER_ALIASES: Readonly<Record<string, ModelTier>> = {
   opus: "heavy",
   sonnet: "standard",
   haiku: "light",
-};
-
-/**
- * What a tier means to the harness in force — today, one lane running the
- * Claude Code CLI, whose `--model` flag accepts these short aliases. Issue
- * #164's execution lanes replace this single map with a per-lane one; keeping
- * the mapping in one named place now is what makes that an additive change
- * rather than a hunt.
- */
-export const TIER_MODEL_IDS: Readonly<Record<ModelTier, string>> = {
-  heavy: "opus",
-  standard: "sonnet",
-  light: "haiku",
 };
 
 /**
@@ -67,10 +59,10 @@ export function weakerTier(a: ModelTier, b: ModelTier): ModelTier {
 
 /**
  * The tier a written value names, or null if it names none. Accepts a tier or
- * a legacy vendor alias, case-insensitively. Null is not an error at every
- * call site: an env var may legitimately pin a full model id
- * (`claude-opus-4-8`), which names no tier but is still passed through to the
- * CLI verbatim — see the settings resolver.
+ * a legacy alias, case-insensitively. Null is not an error at every call
+ * site: an env var may legitimately pin a full model id (a provider's own
+ * identifier), which names no tier but is still passed through to the
+ * harness verbatim — see the settings resolver.
  */
 export function normalizeModelTier(raw: string | null | undefined): ModelTier | null {
   if (raw == null) return null;

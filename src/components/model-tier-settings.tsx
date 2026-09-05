@@ -194,10 +194,14 @@ function effective(field: SettingFieldView): string {
 
 /** What a pass resolving through the row alone runs. Naming the model id
  * beside the tier is the bit that makes an override checkable against the
- * harness's own logs. */
+ * harness's own logs. A tier with no model beside it means the lane file is
+ * unusable (issue #226) — there is no primary lane to say what the tier means
+ * — and the row says the tier rather than a model off some other map. */
 function runsLine(field: SettingFieldView): string {
-  if (field.model === null) return "no --model — the account default";
-  return field.tier === null
-    ? `runs ${field.model}`
-    : `runs ${field.tier} (${field.model})`;
+  if (field.tier === null && field.model === null) {
+    return "no model named — the harness picks its own default";
+  }
+  if (field.tier === null) return `runs ${field.model}`;
+  if (field.model === null) return `runs ${field.tier}`;
+  return `runs ${field.tier} (${field.model})`;
 }

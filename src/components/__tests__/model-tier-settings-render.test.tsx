@@ -88,8 +88,19 @@ describe("the model-tier settings panel", () => {
   it("says plainly when nothing pins a model at all", () => {
     const html = render({ envValue: null, model: null, tier: null });
 
-    expect(html).toContain("no --model — the account default");
+    expect(html).toContain("no model named — the harness picks its own default");
     expect(html).toContain("AGENT_MODEL_REVIEW unset");
+  });
+
+  it("names the tier alone when no lane's map could say what it means (issue #226)", () => {
+    // An unusable lane file leaves no primary lane to read a model off, so the
+    // row says the tier rather than a model from some other map — and rather
+    // than reading as if nothing were pinned.
+    const html = render({ envValue: "light", model: null, tier: "light" });
+
+    expect(html).toContain("runs light");
+    expect(html).not.toContain("runs light (");
+    expect(html).not.toContain("no model named");
   });
 
   it("reads a set ceiling row as a ceiling on the derived pass, not as what it runs", () => {
@@ -124,7 +135,7 @@ describe("the model-tier settings panel", () => {
     expect(html).toContain(
       "no ceiling — review runs one rung above the implement pass"
     );
-    expect(html).toContain("no --model — the account default");
+    expect(html).toContain("no model named — the harness picks its own default");
   });
 
   it("reads a pinned raw model id on a ceiling row as the answer — a pin names no tier to bound", () => {
