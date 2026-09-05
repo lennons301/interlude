@@ -564,6 +564,23 @@ export function findLane(
   return catalog.lanes.find((lane) => lane.id === id) ?? null;
 }
 
+/**
+ * Whether two lanes run the same harness adapter (issue #217) — the condition
+ * under which a lane move can carry a pass's session, since the artefacts are
+ * one harness's format. Null when either lane is not declared: the answer is
+ * then unknowable here, and the caller decides what to say.
+ */
+export function lanesShareAdapter(
+  catalog: LaneCatalog,
+  fromId: string | null,
+  toId: string | null
+): boolean | null {
+  const from = findLane(catalog, fromId);
+  const to = findLane(catalog, toId);
+  if (from === null || to === null) return null;
+  return from.adapter === to.adapter;
+}
+
 /** Every declared lane id, in declaration order — for a rejection message that
  * tells the operator what *would* have been accepted. */
 export function laneIds(catalog: LaneCatalog): string[] {

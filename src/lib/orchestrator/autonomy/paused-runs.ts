@@ -57,7 +57,8 @@ import { eq, inArray } from "drizzle-orm";
 import { newId } from "../../ulid";
 import { getConfig } from "../../config";
 import { commentOnIssue } from "../../github/issues";
-import type { LaneBilling } from "../../lanes/lane-config";
+import { getLaneCatalog } from "../../lanes/catalog";
+import { lanesShareAdapter, type LaneBilling } from "../../lanes/lane-config";
 import { describeLaneCost } from "../../lanes/lane-rate";
 import { readMoneyGuards, type MoneyGuards } from "../../lanes/money-state";
 import {
@@ -286,15 +287,52 @@ async function queueResumedPass(
   return taskId;
 }
 
-/** How the resumed pass stands with respect to its conversation, for the
- * issue comment — both resumes say the same two things here. */
-function describeSession(paused: TaskRow, sessionId: string | null): string {
-  return sessionId
-    ? `The paused pass's session was preserved, so it continues the same ` +
-        `conversation on \`${paused.branch}\`.`
-    : `The paused pass's session could not be preserved, so it starts again ` +
-        `on \`${paused.branch}\` with the work pushed so far and no prior ` +
-        `context.`;
+/**
+ * Whether moving the paused pass onto `toLaneId` would cross onto a different
+ * harness adapter (issue #217), as far as the catalog can say now. A session is
+ * one harness's, so a move across adapters cannot carry it; a lane the file no
+ * longer declares reads as crossing, because the restore refuses what it
+ * cannot place either way.
+ */
+function moveCrossesAdapter(fromLaneId: string | null, toLaneId: string): boolean {
+  const catalog = getLaneCatalog();
+  return !catalog.ok || lanesShareAdapter(catalog.catalog, fromLaneId, toLaneId) !== true;
+}
+
+/**
+ * How the resumed pass stands with respect to its conversation, for the issue
+ * comment. Three answers: the session was not preserved; it was, and the pass
+ * continues it; it was, but the lane it is moving to runs a different harness
+ * (issue #217), so it will not — said here, at the moment the move is
+ * announced, rather than leaving the thread promising a continuation the pass's
+ * own feed then refuses. Hedged, because the target is advisory: the lane is
+ * re-chosen as the pass starts.
+ */
+function describeSession(
+  paused: TaskRow,
+  sessionId: string | null,
+  crossesAdapter = false
+): string {
+  if (sessionId === null) {
+    return (
+      `The paused pass's session could not be preserved, so it starts again ` +
+      `on \`${paused.branch}\` with the work pushed so far and no prior ` +
+      `context.`
+    );
+  }
+  if (crossesAdapter) {
+    return (
+      `The paused pass's session was preserved, but that lane runs a different ` +
+      `harness, which cannot resume it: unless the lane re-chosen as the pass ` +
+      `starts runs the same harness, it starts again on \`${paused.branch}\` ` +
+      `with the work pushed so far and no prior context — a move across ` +
+      `harnesses costs the conversation, not the attempt.`
+    );
+  }
+  return (
+    `The paused pass's session was preserved, so it continues the same ` +
+    `conversation on \`${paused.branch}\`.`
+  );
 }
 
 /**
@@ -383,7 +421,7 @@ function laneMoveWording(
       `sends it back to the cheaper one; the task records where it actually ` +
       `ran. A lane move consumes neither an attempt nor an interruption; it ` +
       `counts against the same resume bound as any other. ` +
-      describeSession(paused, sessionId),
+      describeSession(paused, sessionId, moveCrossesAdapter(paused.lane, target.toLaneId)),
   };
 }
 
