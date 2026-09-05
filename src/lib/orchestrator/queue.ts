@@ -1,6 +1,7 @@
 import { db } from "@/db";
-import { tasks, messages } from "@/db/schema";
-import { eq, and, isNull, asc, ne, sql } from "drizzle-orm";
+import { tasks, messages, type SessionSkill } from "@/db/schema";
+import { eq, and, isNull, asc, ne, or, sql } from "drizzle-orm";
+import type { CrossingRefusalReason } from "../lanes/overflow";
 import { readLaneCrossing } from "../lanes/overflow-state";
 import { startTask } from "./turn-manager";
 import {
@@ -202,24 +203,34 @@ async function reconcileSlotsAgainstDaemon(): Promise<boolean> {
 }
 
 /**
+ * What a hold at the head of the queue steps over. `interactive` is issue
+ * #173's: the money guards hold every attended pass alike, so the whole kind
+ * is stepped over. `sessions` is issue #218's: a generation session no lane can
+ * host is held for what *it* is, and the ordinary chats behind it may run.
+ */
+type PickupSkip = "interactive" | "sessions";
+
+/**
  * The head of the queue: interactive tasks the owner dispatched first (issue
  * #15), then review passes (they finish in-flight work rather than starting
  * more — issue #17), then triage (shaping the backlog is cheap and new issues
  * get met on arrival — issue #23), then implements; oldest first within a
  * kind.
  *
- * `skipInteractive` is issue #173's hold: the same ordering over everything
- * else, so the kind that cannot start is stepped over rather than starving
- * the rest.
+ * `skip` is a hold at the head: the same ordering over everything else, so
+ * what cannot start is stepped over rather than starving the rest.
  */
-function nextQueuedTask(skipInteractive: boolean) {
+function nextQueuedTask(skip: PickupSkip | null) {
+  const queued = eq(tasks.status, "queued");
   return db
     .select()
     .from(tasks)
     .where(
-      skipInteractive
-        ? and(eq(tasks.status, "queued"), ne(tasks.kind, "interactive"))
-        : eq(tasks.status, "queued")
+      skip === "interactive"
+        ? and(queued, ne(tasks.kind, "interactive"))
+        : skip === "sessions"
+          ? and(queued, or(ne(tasks.kind, "interactive"), isNull(tasks.sessionSkill)))
+          : queued
     )
     .orderBy(
       sql`case ${tasks.kind} when 'interactive' then 0 when 'review' then 1 when 'triage' then 2 else 3 end`,
@@ -229,8 +240,8 @@ function nextQueuedTask(skipInteractive: boolean) {
 }
 
 /**
- * Whether the money guards refuse to let an attended session start (issue
- * #173).
+ * Why the crossing refuses to let an attended task start, or null when it may
+ * (issues #173, #218).
  *
  * The refusal is the crossing's, read through the one function the turn
  * manager routes a pass with and the task screen offers the confirmation
@@ -240,9 +251,18 @@ function nextQueuedTask(skipInteractive: boolean) {
  * told: it is the one that would have started, and every other queued session
  * gets its line when it gets there — a note per queued task per poll would be
  * a message storm on a fleet that is walled for five hours.
+ *
+ * The task's session skill goes with the question (issue #218): a generation
+ * session is refused where no lane's harness can invoke its skill, a reason
+ * that is the task's own rather than the fleet's — which is why the reason is
+ * handed back, not just the fact of a hold.
  */
-function attendedPickupIsHeld(taskId: string): boolean {
-  return crossingHoldsPass(taskId, readLaneCrossing("interactive"));
+function attendedPickupHold(task: {
+  id: string;
+  sessionSkill: SessionSkill | null;
+}): CrossingRefusalReason | null {
+  const crossing = readLaneCrossing("interactive", null, task.sessionSkill);
+  return crossingHoldsPass(task.id, crossing) ? crossing.refusal!.reason : null;
 }
 
 export function startQueue(): void {
@@ -268,22 +288,36 @@ export function startQueue(): void {
       // in-flight work rather than starting more (issue #17); triage passes
       // outrank implements because shaping the backlog is cheap and new
       // issues get met on arrival (issue #23); within a kind, oldest first.
-      let next = nextQueuedTask(false);
+      let next = nextQueuedTask(null);
 
-      // An attended session the money guards refuse must not start — and must
+      // An attended session the crossing refuses must not start — and must
       // not sit at the head of the queue holding everything behind it either
       // (issue #173). Interactive work sorts first, so a fleet waiting on one
       // press would otherwise stop starting the review passes and resumes that
-      // finish work already paid for. The hold is fleet-wide for interactive
-      // passes, so skipping the whole kind is exactly the right width; the
-      // task stays `queued` and starts on the poll after the press.
+      // finish work already paid for. A money hold is fleet-wide for
+      // interactive passes, so skipping the whole kind is exactly the right
+      // width; the task stays `queued` and starts on the poll after the press.
+      //
+      // A generation session no lane can host (issue #218) is held for what it
+      // is, not for what the fleet is: the ordinary chat behind it runs on a
+      // lane that cannot invoke a skill perfectly well, so only the sessions
+      // are stepped over — and the chat then found at the head answers to the
+      // fleet-wide guards itself.
       //
       // Ahead of the slot and memory checks below, which is the precedence
       // #171 set for the quota gate and for the same reason: a full box empties
       // by itself in minutes, while a spent cap or an unpressed confirmation
       // does not, so the reason worth telling the owner is this one.
-      if (next?.kind === "interactive" && attendedPickupIsHeld(next.id)) {
-        next = nextQueuedTask(true);
+      if (next?.kind === "interactive") {
+        const hold = attendedPickupHold(next);
+        if (hold === "no-skill-capable-lane") {
+          next = nextQueuedTask("sessions");
+          if (next?.kind === "interactive" && attendedPickupHold(next) !== null) {
+            next = nextQueuedTask("interactive");
+          }
+        } else if (hold !== null) {
+          next = nextQueuedTask("interactive");
+        }
       }
 
       if (next && !inFlightTasks.has(next.id)) {

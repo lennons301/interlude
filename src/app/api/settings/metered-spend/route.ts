@@ -42,7 +42,10 @@ function state() {
     readMoneyGuards(now, settings);
   // The same pure decision the turn manager routes a pass with and the queue
   // loop declines to start one with — never a second opinion about it.
-  const crossing = readLaneCrossing("interactive", null, now, settings);
+  // An ordinary chat's crossing: the panel is fleet state, and a generation
+  // session's extra requirement (issue #218) is judged at its entry and on its
+  // own feed rather than here.
+  const crossing = readLaneCrossing("interactive", null, null, now, settings);
 
   return {
     lane:

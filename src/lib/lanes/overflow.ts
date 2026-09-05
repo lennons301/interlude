@@ -38,8 +38,19 @@
  * turn manager (which routes a pass), the queue loop (which declines to start
  * one) and the UI (which asks the human to confirm) evaluate the same function
  * over the same facts, and cannot describe the crossing differently.
+ *
+ * One more refusal since issue #218, and it is the only one that is not about
+ * money or a wall: a **generation session** may run only on a lane whose
+ * harness can invoke its skill. The ranking already excludes such lanes for
+ * it; what this module adds is the fall-back rule. When the ranking chooses
+ * nothing, a pass runs on the lane in force — and for a generation session
+ * whose lane in force cannot host it, that fall-back would be exactly the
+ * failure the ticket names, a skill session started as freeform chat. So that
+ * pass is refused with the lane-by-lane reason instead, and the session-entry
+ * API reads the same refusal before the task is even created.
  */
 
+import type { SessionSkill } from "../../db/schema";
 import type { AgentPassKind, AppConfig } from "../config";
 import type { ModelTier } from "../model-tiers";
 import type { QuotaObservation } from "../quota/rate-limit-event";
@@ -49,7 +60,11 @@ import {
   type LaneBilling,
   type LaneCatalog,
 } from "./lane-config";
-import { selectLane, type LaneSelection } from "./lane-selection";
+import {
+  selectLane,
+  type LaneCandidate,
+  type LaneSelection,
+} from "./lane-selection";
 import {
   effectiveBilling,
   laneIsWalled,
@@ -76,12 +91,16 @@ export {
 } from "./lane-wall";
 
 /** Why a pass may not start. Not a money hold on its own — `cap-reached` and
- * `unconfirmed` are #174's two holds arriving at an attended session, and
- * `no-metered-lane` is this ticket's own: walled, with nowhere to overflow. */
+ * `unconfirmed` are #174's two holds arriving at an attended session,
+ * `no-metered-lane` is this ticket's own (walled, with nowhere to overflow),
+ * and `no-skill-capable-lane` is issue #218's: a generation session with no
+ * lane whose harness can invoke its skill. The first three are a press or a
+ * clock away; the last is a configuration the operator has to change. */
 export type CrossingRefusalReason =
   | "no-metered-lane"
   | "unconfirmed"
-  | "cap-reached";
+  | "cap-reached"
+  | "no-skill-capable-lane";
 
 export interface CrossingRefusal {
   reason: CrossingRefusalReason;
@@ -123,6 +142,11 @@ export interface LaneCrossing {
 
 export interface LaneCrossingInput {
   kind: AgentPassKind;
+  /** The session skill an interactive task carries (issue #218), null for an
+   * ordinary chat and for every autonomous kind. With `kind`, what makes the
+   * pass a generation session — the one kind of pass that needs a harness
+   * able to invoke a skill. */
+  sessionSkill?: SessionSkill | null;
   /** The primary lane, as #172 resolved it; null when none resolves. */
   primary: CrossingLane | null;
   /** The declared lanes, or null when the file could not be read (in which
@@ -207,6 +231,13 @@ function describeUnavailableMeteredLanes(
         `this pass kind's minimum lane (${selection.minLaneId})`
     );
   }
+  // A paid lane a generation session cannot use is not one it can overflow
+  // onto (issue #218), and the operator reading "no paid lane" with one
+  // plainly declared needs to be told why it did not count.
+  const cannotHost = selection.candidates.filter(
+    (lane) => lane.billing === "metered" && lane.ineligible === "cannot-invoke-skills"
+  );
+  if (cannotHost.length > 0) clauses.push(describeCannotInvokeSkills(cannotHost));
   if (selection.pinnedLaneId !== null) {
     clauses.push(`the fleet is pinned to ${selection.pinnedLaneId}`);
   }
@@ -214,6 +245,80 @@ function describeUnavailableMeteredLanes(
     return "the only lane that bills per token is the one already in force";
   }
   return clauses.join("; ");
+}
+
+/** "codex-subscription and openai-api run codex, which cannot invoke a skill"
+ * — one clause per harness, since the fact is the harness's. */
+function describeCannotInvokeSkills(lanes: readonly LaneCandidate[]): string {
+  const byAdapter = new Map<string, string[]>();
+  for (const lane of lanes) {
+    const ids = byAdapter.get(lane.adapter) ?? [];
+    ids.push(lane.id);
+    byAdapter.set(lane.adapter, ids);
+  }
+  return [...byAdapter.entries()]
+    .map(
+      ([adapter, ids]) =>
+        `${ids.join(", ")} ${ids.length === 1 ? "runs" : "run"} ${adapter}, ` +
+        `which cannot invoke a skill`
+    )
+    .join("; ");
+}
+
+/**
+ * Why no lane can host a generation session right now, lane by lane — the
+ * refusal issue #218 puts in front of the human at entry, so it has to say
+ * what would change the answer: a lane whose harness invokes skills made
+ * primary, a credential set, a pin lifted, a floor lowered, or a window
+ * reset. Reached only when nothing is eligible and nothing is held for money
+ * alone (a press-away lane is a different sentence and is written by the
+ * caller), so every candidate here is one of those.
+ */
+function describeUnhostableSession(
+  sessionSkill: SessionSkill | null,
+  selection: LaneSelection,
+  observations: Readonly<Record<string, QuotaObservation | null>>
+): string {
+  const lead =
+    `A ${sessionSkill ?? "generation"} session needs a lane whose harness can ` +
+    `invoke skills, and no such lane can host it now`;
+  const clauses: string[] = [];
+  const cannot = selection.candidates.filter(
+    (lane) => lane.ineligible === "cannot-invoke-skills"
+  );
+  if (cannot.length > 0) clauses.push(describeCannotInvokeSkills(cannot));
+  for (const lane of selection.candidates) {
+    switch (lane.ineligible) {
+      case "unavailable":
+        clauses.push(`${lane.id} needs ${lane.missingEnvVars.join(", ")}`);
+        break;
+      case "walled": {
+        const resets = atClockTime(observations[lane.id]?.resetsAt ?? null);
+        clauses.push(
+          `${lane.id}'s window is exhausted${resets === null ? "" : ` (resets ${resets})`}`
+        );
+        break;
+      }
+      case "below-floor":
+        if (selection.minLaneId !== null) {
+          clauses.push(
+            `${lane.id} is below this pass kind's minimum lane (${selection.minLaneId})`
+          );
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  if (selection.pinnedLaneId !== null) {
+    clauses.push(
+      `the fleet is pinned to ${selection.pinnedLaneId} (Settings ▸ Execution lane)`
+    );
+  }
+  return (
+    `${lead}${clauses.length === 0 ? "" : ` — ${clauses.join("; ")}`}. ` +
+    `Pick a lane whose harness invokes skills, or start an ordinary chat task instead.`
+  );
 }
 
 /** `$12.34` — the same shape the dashboard's money reads in, written here so a
@@ -283,6 +388,7 @@ function isAttendedPass(kind: AgentPassKind): boolean {
  */
 export function decideLaneCrossing({
   kind,
+  sessionSkill = null,
   primary,
   catalog,
   env,
@@ -323,19 +429,21 @@ export function decideLaneCrossing({
   const inForce = catalog === null ? null : findLane(catalog, primary.id);
   if (inForce === null || !laneIsAvailable(inForce, env)) return base;
 
+  // One reading of the lane in force's row: whatever the caller passed for
+  // every other lane, this module's own `observation` decides for the
+  // primary, so the wall it writes a sentence about and the wall the ranking
+  // excludes it for cannot differ.
+  const judged = { ...observations, [primary.id]: observation };
   const selection = selectLane({
     catalog,
     env,
     kind,
+    sessionSkill,
     tier,
     pinnedLaneId,
     primaryLaneId: primary.id,
     minLaneId,
-    // One reading of the lane in force's row: whatever the caller passed for
-    // every other lane, this module's own `observation` decides for the
-    // primary, so the wall it writes a sentence about and the wall the ranking
-    // excludes it for cannot differ.
-    observations: { ...observations, [primary.id]: observation },
+    observations: judged,
     config,
     overrides,
     spentTodayUsd,
@@ -365,6 +473,8 @@ export function decideLaneCrossing({
           catalog,
           env,
           observation,
+          observations: judged,
+          sessionSkill,
           overage,
           walled,
         })
@@ -401,6 +511,8 @@ export function decideLaneCrossing({
         catalog,
         env,
         observation,
+        observations: judged,
+        sessionSkill,
         overage,
         walled,
       });
@@ -432,6 +544,10 @@ function refusedCrossing(
     catalog: LaneCatalog | null;
     env: LaneEnv;
     observation: QuotaObservation | null;
+    /** Every lane's row as the ranking judged it, for naming another lane's
+     * reset in a refusal. */
+    observations: Readonly<Record<string, QuotaObservation | null>>;
+    sessionSkill: SessionSkill | null;
     overage: boolean;
     walled: boolean;
   }
@@ -453,9 +569,25 @@ function refusedCrossing(
         };
 
   if (held === null) {
-    // Nothing is a press away. Only a wall is worth a refusal here: any other
-    // reason a lane could not serve the pass is #172's to report as the pass
-    // starts, and inventing a hold on top would only hide it.
+    // Nothing is a press away, so the pass would fall back onto the lane in
+    // force. A generation session may not (issue #218): its lane in force is
+    // the one lane the ranking never exempts from the skill requirement, and
+    // running there would start the skill session as freeform chat — so it is
+    // refused, lane by lane, whether or not a wall stands as well. Asked
+    // before the wall because a window's reset would change nothing here.
+    if (selection.inForce?.ineligible === "cannot-invoke-skills") {
+      return {
+        ...crossed,
+        notice: null,
+        refusal: {
+          reason: "no-skill-capable-lane",
+          message: describeUnhostableSession(at.sessionSkill, selection, at.observations),
+        },
+      };
+    }
+    // Otherwise only a wall is worth a refusal here: any other reason a lane
+    // could not serve the pass is #172's to report as the pass starts, and
+    // inventing a hold on top would only hide it.
     if (!at.walled) return crossed;
     return {
       ...crossed,

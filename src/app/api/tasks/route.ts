@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { SESSION_SKILLS, tasks, type SessionSkill } from "@/db/schema";
+import { readLaneCrossing } from "@/lib/lanes/overflow-state";
 import { newId } from "@/lib/ulid";
 import {
   TASK_CHIPS,
@@ -101,6 +102,24 @@ export async function POST(request: Request) {
       },
       { status: 400 }
     );
+  }
+
+  // A generation session is refused at entry when no lane can host it (issue
+  // #218) — before the row exists, so before a container is anywhere near
+  // being provisioned. The judgement is the crossing's, the same one the queue
+  // reads before starting a session and the turn manager routes it with, so
+  // this route can never accept a session the orchestrator would then hold.
+  // Only that one refusal is answered here: a money hold is a press away and
+  // the task screen is where the press lives, so a session held for money is
+  // still created and held there exactly as an ordinary chat is.
+  if (sessionSkill !== undefined) {
+    const crossing = readLaneCrossing("interactive", null, sessionSkill as SessionSkill);
+    if (crossing.refusal?.reason === "no-skill-capable-lane") {
+      return NextResponse.json(
+        { error: crossing.refusal.message, reason: crossing.refusal.reason },
+        { status: 409 }
+      );
+    }
   }
 
   const now = new Date();

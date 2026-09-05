@@ -51,14 +51,30 @@
  * order — the deployment's reviewed statement of who it would rather pay,
  * which is what #173 used to choose an overflow target and survives here as
  * the tie-break rather than as the rule.
+ *
+ * ## What a pass needs of a harness
+ *
+ * One requirement is the pass's rather than the fleet's (issue #218): a
+ * **generation session** — an interactive task carrying a session skill — has
+ * to be hosted by a harness that expands a user-invoked skill, because its
+ * whole first turn is that invocation, and on a harness that cannot load the
+ * skill it would silently become freeform chat with a skill it never read. So
+ * a lane whose adapter does not declare `userInvokedSkills` is ineligible for
+ * a generation session, however cheap, and for nothing else: an ordinary chat
+ * and every ticket-loop pass kind are judged exactly as before. The
+ * requirement is derived from the pass (`isGenerationSession`) rather than
+ * passed in as a flag, so an autonomous kind cannot be filtered by it even by
+ * mistake.
  */
 
+import { isGenerationSession, type SessionSkill } from "../../db/schema";
 import type { AgentPassKind, AppConfig } from "../config";
 import type { ModelTier } from "../model-tiers";
 import type { QuotaObservation } from "../quota/rate-limit-event";
 import type { SettingsOverrides } from "../settings-resolver";
 import {
   findLane,
+  type LaneAdapterId,
   type LaneBilling,
   type LaneCatalog,
   type LaneDefinition,
@@ -181,12 +197,19 @@ export type LaneIneligibility =
   /** #174's confirm-once gate has not been pressed today. */
   | "unconfirmed"
   /** The caller has already tried it — the refused lane, on a failover. */
-  | "already-tried";
+  | "already-tried"
+  /** Its harness does not expand a user-invoked skill, and this pass is a
+   * generation session — the one kind of pass that is such an invocation
+   * (issue #218). Never reported for any other kind. */
+  | "cannot-invoke-skills";
 
 /** One lane, judged for one pass. */
 export interface LaneCandidate {
   id: string;
   label: string;
+  /** The harness that runs it — for a refusal that has to say *why* a lane
+   * cannot host a generation session (issue #218). */
+  adapter: LaneAdapterId;
   /** What the lane declares. */
   billing: LaneBilling;
   /** What it costs *now* — `metered` when an active overage means its
@@ -215,6 +238,13 @@ export interface LaneSelectionInput {
   /** Read for availability only. No secret's value is read here. */
   env: LaneEnv;
   kind: AgentPassKind;
+  /**
+   * The session skill an interactive task carries, or null for an ordinary
+   * chat — and null for every autonomous kind, which carries none. With
+   * `kind` this is what makes the pass a generation session (issue #218), the
+   * one kind of pass that may only run where its skill can be invoked.
+   */
+  sessionSkill?: SessionSkill | null;
   /** The tier this pass resolved to; null when a raw model id is pinned. */
   tier: ModelTier | null;
   /**
@@ -360,6 +390,15 @@ export function rankLanes(input: LaneSelectionInput): LaneCandidate[] {
   // is where that surprise belongs.
   const floorRank =
     floor === null ? null : laneCapabilityRank(floor, input.tier);
+  // A generation session's first turn *is* a skill invocation, so it needs a
+  // harness that expands one (issue #218). Derived here from the pass — the
+  // schema's own predicate — rather than taken as a flag, so no autonomous
+  // kind can be filtered by it: the predicate is false for every kind but
+  // `interactive`.
+  const needsSkillInvocation = isGenerationSession({
+    kind: input.kind,
+    sessionSkill: input.sessionSkill ?? null,
+  });
 
   const candidates = catalog.lanes.map((lane): LaneCandidate => {
     const observation = input.observations[lane.id] ?? null;
@@ -390,6 +429,7 @@ export function rankLanes(input: LaneSelectionInput): LaneCandidate[] {
     return {
       id: lane.id,
       label: lane.label,
+      adapter: lane.adapter,
       billing: lane.billing,
       effectiveBilling: billing,
       costRank: laneCostRank(lane, input.tier, overagePaying),
@@ -403,6 +443,8 @@ export function rankLanes(input: LaneSelectionInput): LaneCandidate[] {
         // The lane in force answers to everything except the floor.
         exemptFromFloor: lane.id === input.primaryLaneId,
         excluded,
+        cannotInvokeSkills:
+          needsSkillInvocation && !lane.capabilities.userInvokedSkills,
         missingEnvVars,
         capabilityRank,
         floorRank,
@@ -423,16 +465,21 @@ export function rankLanes(input: LaneSelectionInput): LaneCandidate[] {
  * Why one lane may not serve this pass, in the order the reasons are asked.
  *
  * The order is the message, not an implementation detail: an operator's pin
- * outranks everything (it is a decision, not an observation), a missing
- * credential outranks a wall (#172's report is about configuration and a wall
- * is about capacity), and a money hold is asked *last* so a lane the floor
- * excluded anyway never asks for a confirmation nobody needs to give.
+ * outranks everything (it is a decision, not an observation), a harness that
+ * cannot host the pass outranks a missing credential (setting the variable
+ * would not help — issue #218), a missing credential outranks a wall (#172's
+ * report is about configuration and a wall is about capacity), and a money
+ * hold is asked *last* so a lane the floor excluded anyway never asks for a
+ * confirmation nobody needs to give.
  */
 function judge(args: {
   laneId: string;
   pinnedLaneId: string | null;
   exemptFromFloor: boolean;
   excluded: Set<string>;
+  /** The pass is a generation session and this lane's harness does not
+   * expand a user-invoked skill. */
+  cannotInvokeSkills: boolean;
   missingEnvVars: string[];
   capabilityRank: number;
   floorRank: number | null;
@@ -443,6 +490,7 @@ function judge(args: {
     return "not-pinned";
   }
   if (args.excluded.has(args.laneId)) return "already-tried";
+  if (args.cannotInvokeSkills) return "cannot-invoke-skills";
   if (args.missingEnvVars.length > 0) return "unavailable";
   // A *lower* capability rank is a cheaper — and so, by this proxy, a weaker —
   // lane than the floor names. Equal passes: the floor is inclusive, which is
