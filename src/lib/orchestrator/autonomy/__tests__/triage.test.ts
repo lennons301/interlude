@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
+import { turnFromClaudeStream } from "@/test/claude-stream-fixture";
+import type { PassTurn } from "../pass-output";
 import {
   chooseRunTier,
   isArmingConfirmation,
@@ -8,11 +10,15 @@ import {
   readStoredTriageResult,
 } from "../triage";
 
-// Fixtures follow the shape of __tests__/stream-fixture.ndjson: the raw
-// stream-json a triage pass emits, ending in a `result` event whose `result`
-// field is the turn's final message.
-function fixture(name: string): string {
-  return fs.readFileSync(path.join(__dirname, "fixtures", name), "utf8");
+// Fixtures are the raw stream-json a triage pass emits, ending in a `result`
+// event whose `result` field is the turn's final message. The parser under
+// test takes the adapter's normalised turn result (issue #214), so each
+// fixture goes through the Claude Code adapter's own classifier first — the
+// only code that reads the stream's exit shape.
+function fixture(name: string): PassTurn {
+  return turnFromClaudeStream(
+    fs.readFileSync(path.join(__dirname, "fixtures", name), "utf8")
+  );
 }
 
 describe("parseTriageExit", () => {
@@ -131,8 +137,10 @@ describe("parseTriageExit", () => {
       });
     });
 
-    it("rejects empty input", () => {
-      expect(parseTriageExit("")).toMatchObject({ kind: "unparseable" });
+    it("rejects a turn with no outcome and no message", () => {
+      expect(parseTriageExit(turnFromClaudeStream(""))).toMatchObject({
+        kind: "unparseable",
+      });
     });
   });
 });

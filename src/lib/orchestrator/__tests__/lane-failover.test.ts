@@ -104,30 +104,16 @@ const RESUME_AFTER = new Date(RESETS_AT_EPOCH * 1000);
 const PROMPT = "Implement issue #34 — add the frobnicator.";
 const SESSION = "sess-abcdef";
 
-/** The turn the CLI hands back at an **account-wide** wall: the exit says
- * `subtype: "success"` (#165's finding), and only the rate-limit event beside
- * it names the window. */
+/** The turn the adapter hands back at an **account-wide** wall: the exit said
+ * `subtype: "success"` (#165's finding) and only the rate-limit event beside
+ * it named the window — both already read by the adapter into the fleet's own
+ * word for it (issue #214). */
 function walledOn(rateLimitType: string, resetsAt: Date | null = RESUME_AFTER) {
   return {
     finalMessage: "You've hit your 5-hour limit · resets at 14:05",
-    terminalResult: {
-      type: "result",
-      subtype: "success",
-      is_error: true,
-      terminal_reason: "api_error",
-      api_error_status: 429,
-      total_cost_usd: 0,
-    } as Record<string, unknown>,
-    rateLimit: {
-      status: "rejected",
-      rateLimitType,
-      utilization: null,
-      resetsAt,
-      overageStatus: null,
-      overageResetsAt: null,
-      isUsingOverage: false,
-      overageInUse: null,
-      observedAt: new Date("2026-09-01T12:00:00.000Z"),
+    outcome: {
+      kind: "refused" as const,
+      refusal: { kind: "quota" as const, resumeAfter: resetsAt, limitType: rateLimitType },
     },
   };
 }

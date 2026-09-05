@@ -100,28 +100,14 @@ const SESSION_ID = "9f4c2a7e-0000-4c1a-9c39-2b2c9f3a55d1";
 const RESUME_AFTER = new Date("2026-09-02T17:00:00.000Z");
 const TRANSCRIPT = '{"type":"user"}\n{"type":"assistant","text":"halfway"}\n';
 
-/** A turn the account's quota refused — the #165 shape, `subtype: "success"`
- * and all. */
+/** A turn the account's quota refused, as the adapter reports it (issue
+ * #214): the #165 shape — `subtype: "success"` and all — already read into
+ * the fleet's own word for it. */
 const WALLED_TURN = {
   finalMessage: "You've hit your session limit · resets 6:00pm",
-  terminalResult: {
-    type: "result",
-    subtype: "success",
-    is_error: true,
-    terminal_reason: "api_error",
-    api_error_status: 429,
-    total_cost_usd: 0,
-  } as Record<string, unknown>,
-  rateLimit: {
-    status: "rejected",
-    rateLimitType: "five_hour",
-    utilization: null,
-    resetsAt: RESUME_AFTER,
-    overageStatus: null,
-    overageResetsAt: null,
-    isUsingOverage: false,
-    overageInUse: null,
-    observedAt: new Date("2026-09-02T12:00:00.000Z"),
+  outcome: {
+    kind: "refused" as const,
+    refusal: { kind: "quota" as const, resumeAfter: RESUME_AFTER, limitType: "five_hour" },
   },
 };
 

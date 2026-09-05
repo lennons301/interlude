@@ -4,10 +4,13 @@ import path from "node:path";
 import type Docker from "dockerode";
 import { pack } from "tar-fs";
 import { getDocker } from "./client";
+import { CLAUDE_CODE_IMAGE } from "../harness/claude-code/image";
 
-const IMAGE_NAME = "interlude-agent";
-const IMAGE_TAG = "latest";
-const DOCKERFILE = "Dockerfile.agent";
+// The image and the Dockerfile are the adapter's declaration (issue #214), read
+// off its leaf rather than restated here, so the container that runs a Claude
+// Code turn and the image this module builds cannot name different things.
+// One image per adapter, keyed by adapter, is issue #216's.
+const DOCKERFILE = CLAUDE_CODE_IMAGE.dockerfile;
 
 // The image is stamped with the SHA-256 of the Dockerfile.agent it was built
 // from. ensureImage rebuilds when the on-disk Dockerfile no longer matches,
@@ -17,7 +20,7 @@ const DOCKERFILE = "Dockerfile.agent";
 const DOCKERFILE_HASH_LABEL = "co.interlude.agent-dockerfile-sha256";
 
 export function getImageName(): string {
-  return `${IMAGE_NAME}:${IMAGE_TAG}`;
+  return CLAUDE_CODE_IMAGE.name;
 }
 
 /** SHA-256 of the Dockerfile.agent currently on disk (the build context). */

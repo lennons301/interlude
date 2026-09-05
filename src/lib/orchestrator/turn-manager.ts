@@ -17,11 +17,15 @@ import {
 } from "../docker/container-manager";
 import { checkMemoryAdmission } from "./capacity";
 import { runBoundedProbe } from "../timeout";
-import { type TurnResult } from "./output-parser";
+import {
+  quotaRefusalOf,
+  type TurnOutcome,
+  type TurnResult,
+} from "../harness/turn-result";
 import { getStreamRecorder } from "./stream-recorder";
 import { parseReviewVerdict } from "./autonomy/verdict";
 import { parseTriageExit } from "./autonomy/triage";
-import { passProducedResult } from "./autonomy/pass-output";
+import { passProducedResult, type PassTurn } from "./autonomy/pass-output";
 import { cancelOrphanedRunTasks } from "./autonomy/review-tasks";
 import { MAX_ATTEMPTS, TRIAGE_MAX_TURNS } from "./autonomy/budgets";
 import { resolvePassBudget, spendCarriedIntoPass } from "./pass-budget";
@@ -59,10 +63,6 @@ import { composeSeed, composeSessionTurn } from "../sessions/seed";
 import { processSingleton } from "../process-singleton";
 import { storedTaskStatus, taskIsFinished } from "../tasks/stored-status";
 import type { ParkedAdoption } from "./parked-adoption";
-import {
-  detectQuotaRejection,
-  type TurnQuotaSignals,
-} from "../quota/rate-limit-rejection";
 import { describeRateLimitType } from "../quota/rate-limit-event";
 import { normalizeModelTier } from "../model-tiers";
 import {
@@ -621,8 +621,8 @@ export async function startTask(taskId: string): Promise<void> {
 
     // Run initial turn. An autonomous pass is one whole turn, carrying the
     // allowance resolved above (net of anything a quota pause already spent on
-    // it). Review and triage keep their raw stream: the structured exit is
-    // parsed from it.
+    // it). Review and triage read their structured exit off the turn's final
+    // message, once the adapter says the turn completed (issue #214).
     const turnResult = await runTurn(taskId, running, prompt, resumeSessionId, {
       maxBudgetUsd: passBudget.remainingUsd ?? undefined,
       maxTurns: isTriagePass
@@ -630,16 +630,16 @@ export async function startTask(taskId: string): Promise<void> {
         : isReviewPass || isRepairPass
           ? undefined
           : (run?.maxTurns ?? undefined),
-      captureRaw: isReviewPass || isTriagePass,
       lane: passLane,
       effort: passEffort,
       // A generation session's exec gets a `gh` token; no autonomous pass does (#62).
       isGenerationSession: isGenerationSession(task),
     });
 
-    // A terminal `result` event arrived — the turn ran to completion, so any
-    // failure from here is the work's, not the container's (issue #97).
-    producedResult = turnResult.subtype !== null;
+    // The harness said how the turn ended — it ran to a terminal state, so any
+    // failure from here is the work's, not the container's (issue #97). Read
+    // off the adapter's normalised outcome, never a vendor field (issue #214).
+    producedResult = passProducedResult(turnResult);
 
     // Store session ID and cost
     updateTask(taskId, {
@@ -653,14 +653,14 @@ export async function startTask(taskId: string): Promise<void> {
     if (isReviewPass) {
       // Reviews never write: no commit, no push, no PR. Parse the verdict,
       // store it on the run for the sweep to act on, and tear down.
-      await finishReviewPass(taskId, running, run?.id ?? null, turnResult.raw ?? "");
+      await finishReviewPass(taskId, running, run?.id ?? null, turnResult);
       return;
     }
 
     if (isTriagePass) {
       // Triage never writes either: parse the exit, store it on the task
       // for the sweep to apply, and tear down.
-      await finishTriagePass(taskId, running, turnResult.raw ?? "");
+      await finishTriagePass(taskId, running, turnResult);
       return;
     }
 
@@ -671,7 +671,7 @@ export async function startTask(taskId: string): Promise<void> {
       // A turn that returned no terminal result event died ungracefully
       // mid-flight (the process exited before finishing rather than throwing) —
       // an interruption, not a spent attempt (issue #97). Checked before
-      // exhaustion: with no result there is no trustworthy cost or subtype to
+      // exhaustion: with no outcome there is no trustworthy cost or exit to
       // judge exhaustion from, and the branch is pushed after every turn so any
       // work survives the re-claim. Repair passes are never attempts, so this
       // only diverts a real implement pass.
@@ -693,7 +693,7 @@ export async function startTask(taskId: string): Promise<void> {
           ? attemptExhaustion(
               run,
               passBudget.carriedCostUsd + turnResult.costUsd,
-              turnResult.subtype
+              turnResult.outcome
             )
           : null;
         if (exhaustion) {
@@ -1136,13 +1136,14 @@ async function observeExecExitCode(exec: {
 }
 
 /**
- * Run a single agent turn and stream output to DB. With `captureRaw` the
- * raw stream is also returned — a review pass's verdict is parsed from it
- * after the turn ends.
+ * Run a single agent turn and stream output to DB.
  *
  * The command, the exec environment and the output handler all come from the
  * harness adapter the resolved lane names (issue #172), so this function is
- * the orchestration around a turn and knows nothing about the harness itself.
+ * the orchestration around a turn and knows nothing about the harness itself
+ * — including how its stream says the turn ended: the adapter's handler hands
+ * back a `TurnResult` whose `outcome` is the fleet's vocabulary (issue #214),
+ * and nothing here or downstream reads the stream's own.
  *
  * The returned `costUsd` is what the turn is **charged** — the lane's own
  * prices applied to the reported token counts where the lane declares them,
@@ -1162,14 +1163,12 @@ async function runTurn(
     lane: ResolvedLane;
     maxBudgetUsd?: number;
     maxTurns?: number;
-    captureRaw?: boolean;
     effort?: string | null;
     isGenerationSession?: boolean;
   }
-): Promise<TurnResult & { raw?: string }> {
+): Promise<TurnResult> {
   const adapter = getHarnessAdapter(opts.lane.adapter);
   const handler = adapter.createOutputHandler(taskId, opts.lane);
-  const rawChunks: Buffer[] = [];
 
   // One fresh, short-lived App token per exec, serving both the git credential
   // helper and — for a generation session only (#62) — `gh`.
@@ -1192,19 +1191,17 @@ async function runTurn(
     }),
   });
 
-  // Race: wait for the exec stream to close OR the "result" event from Claude.
-  // Background processes (e.g. dev servers) can keep the exec stream open
-  // long after Claude exits, so the result event is the reliable signal.
+  // Race: wait for the exec stream to close OR the handler to report the turn
+  // done. Background processes (e.g. dev servers) can keep the exec stream
+  // open long after the harness exits, so the handler's signal is the reliable
+  // one.
   const resultReceived = new Promise<void>((resolve) => handler.onDone(resolve));
 
   const startedAtMs = Date.now();
   let result: TurnResult;
   try {
     await Promise.race([
-      waitForExecStream(stream, exec, (chunk) => {
-        handler.write(chunk);
-        if (opts.captureRaw) rawChunks.push(chunk);
-      }),
+      waitForExecStream(stream, exec, (chunk) => handler.write(chunk)),
       resultReceived,
     ]);
   } finally {
@@ -1231,10 +1228,7 @@ async function runTurn(
 
   const charge = chargeForTurn(opts.lane, result);
   noteLaneCharge(taskId, opts.lane, charge);
-  const charged = { ...result, costUsd: charge.usd };
-
-  if (!opts.captureRaw) return charged;
-  return { ...charged, raw: Buffer.concat(rawChunks).toString() };
+  return { ...result, costUsd: charge.usd };
 }
 
 /**
@@ -1467,7 +1461,7 @@ export async function processQueuedMessages(
       // attempt's remaining budget or turns fails the attempt through the
       // ledger — the branch is already pushed, the work survives.
       const exhaustion = run
-        ? attemptExhaustion(run, spentUsd + turnResult.costUsd, turnResult.subtype)
+        ? attemptExhaustion(run, spentUsd + turnResult.costUsd, turnResult.outcome)
         : null;
       if (exhaustion) {
         await failImplementAttempt(taskId, run!.id, exhaustion);
@@ -1722,17 +1716,19 @@ async function finishImplementPass(taskId: string): Promise<void> {
 /**
  * Why an implement pass's turn left its attempt unable to continue, or null
  * for a healthy turn. Budget is judged from accumulated cost (robust to CLI
- * versions), turn exhaustion from the result event's subtype.
+ * versions), turn exhaustion from the adapter's normalised outcome (issue
+ * #214) — the harness's own word for "I stopped at my turn ceiling" is the
+ * adapter's to read.
  */
 function attemptExhaustion(
   run: { budgetUsd: number },
   totalCostUsd: number,
-  turnSubtype: string | null
+  outcome: TurnOutcome | null
 ): string | null {
   if (totalCostUsd >= run.budgetUsd) {
     return `budget exhausted ($${totalCostUsd.toFixed(2)} of $${run.budgetUsd.toFixed(2)})`;
   }
-  if (turnSubtype === "error_max_turns") return "turn limit reached";
+  if (outcome?.kind === "turn-limit") return "turn limit reached";
   return null;
 }
 
@@ -1834,12 +1830,12 @@ async function finishReviewPass(
   taskId: string,
   running: RunningContainer,
   runId: string | null,
-  rawStream: string
+  turn: PassTurn
 ): Promise<void> {
-  const verdict = parseReviewVerdict(rawStream);
+  const verdict = parseReviewVerdict(turn);
 
-  // An unparseable verdict with no terminal result event in the stream is an
-  // infra death (issue #97): the container exited mid-review (OOM / docker
+  // An unparseable verdict from a turn the harness never reported an end for
+  // is an infra death (issue #97): the container exited mid-review (OOM / docker
   // error / lost stream), it did not merely mis-format a real review. Storing
   // it as an unparseable verdict would burn the one bounded format-retry meant
   // for genuine format slips (issue #89). Instead mark the pass `failed` and
@@ -1847,7 +1843,7 @@ async function finishReviewPass(
   // — the same recovery the #95 reaper gives a hung review container, consuming
   // no retry. The `running`-status guard mirrors the store below: a pass the
   // sweep already reaped and replaced (#95) must not be touched again.
-  if (verdict.kind === "unparseable" && !passProducedResult(rawStream)) {
+  if (verdict.kind === "unparseable" && !passProducedResult(turn)) {
     if (storedTaskStatus(taskId) === "running") {
       updateTask(taskId, { status: "failed", containerStatus: null });
       insertSystemMessage(
@@ -1885,7 +1881,7 @@ async function finishReviewPass(
 }
 
 /**
- * End of a triage pass: parse the exit from the raw stream, store it on the
+ * End of a triage pass: parse the exit from the turn's result, store it on the
  * task for the sweep's next decision, and tear the container down. A triage
  * pass never pushes, labels, comments or posts anything itself.
  *
@@ -1908,9 +1904,9 @@ async function finishReviewPass(
 export async function finishTriagePass(
   taskId: string,
   running: RunningContainer,
-  rawStream: string
+  turn: PassTurn
 ): Promise<void> {
-  const exit = parseTriageExit(rawStream);
+  const exit = parseTriageExit(turn);
 
   updateTask(taskId, {
     triageResult: exit,
@@ -2033,10 +2029,10 @@ type PassDecision =
  * post the question. Empty (no PR, no question) — fail the attempt so the run
  * reaches a terminal status (issue #106). Otherwise the caller proceeds.
  *
- * The whole turn result is passed, not just its final message, because the
- * quota wall is only legible from the terminal event and the rate-limit event
- * together — and by design the reducer, not this function, decides which of
- * the three readings wins.
+ * The turn's normalised outcome is passed beside its final message (issue
+ * #214): whether the account refused the pass is the adapter's reading of its
+ * own stream, made once, and by design the reducer, not this function, decides
+ * which of the three readings wins.
  *
  * Exported as the seam it is: this is where a finished turn becomes a ledger
  * outcome, and it is the only honest entry point for a test that wants to
@@ -2045,7 +2041,7 @@ type PassDecision =
  */
 export async function evaluatePassOutcome(
   taskId: string,
-  turn: Pick<TurnResult, "finalMessage"> & TurnQuotaSignals
+  turn: PassTurn
 ): Promise<PassDecision> {
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
   if (!task?.runId || !task.githubIssue) return "proceed";
@@ -2059,7 +2055,10 @@ export async function evaluatePassOutcome(
     task.kind !== "implement" || task.pullRequestNumber != null;
 
   const now = new Date();
-  const rateLimited = detectQuotaRejection(turn);
+  // Whether this turn hit a wall — read through the same helper the reducer
+  // reads it through, and only to know whether a failover is worth pricing
+  // (below); the reducer decides what the wall means from the same outcome.
+  const walled = quotaRefusalOf(turn.outcome) !== null;
   const settings = getFleetSettings();
   const tier = normalizeModelTier(run?.model ?? null);
 
@@ -2072,10 +2071,11 @@ export async function evaluatePassOutcome(
         issueRef: task.githubIssue,
         finalMessage: turn.finalMessage,
         producedPr,
-        // Read from this turn's own result, at the one seam that has it: whether
-        // the account refused the pass is not recoverable from the task row
-        // afterwards (issue #168).
-        rateLimited,
+        // Read from this turn's own result, at the one seam that has it: how
+        // the harness said the turn ended is not recoverable from the task row
+        // afterwards (issue #168), and the adapter's normalised outcome is the
+        // only form of it the reducer reads (issue #214).
+        outcome: turn.outcome,
         // The ladder's starting rung (issue #170). `runs.model` is where the tier
         // a pass ran at is recorded — written when the implement pass starts —
         // and it is read back through the same normaliser every other reader of
@@ -2091,7 +2091,7 @@ export async function evaluatePassOutcome(
         // answer, since it reads the lane file, the environment, every lane's
         // quota row and the day's cash.
         laneFailover:
-          rateLimited === null
+          !walled
             ? null
             : readLaneFailover(
                 task.kind,

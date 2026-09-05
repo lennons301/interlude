@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
+import { turnFromClaudeStream } from "@/test/claude-stream-fixture";
 import { createTestDb } from "@/test/create-test-db";
 import * as schema from "@/db/schema";
 import { newId } from "@/lib/ulid";
@@ -62,8 +63,10 @@ vi.mock("../../discord/notifications", async (importOriginal) => {
 type TurnManager = typeof import("../turn-manager");
 
 const FIXTURES = path.join(__dirname, "..", "autonomy", "__tests__", "fixtures");
-function fixture(name: string): string {
-  return fs.readFileSync(path.join(FIXTURES, name), "utf8");
+/** A recorded triage stream, as the adapter would hand it to the turn
+ * manager (issue #214). */
+function fixture(name: string) {
+  return turnFromClaudeStream(fs.readFileSync(path.join(FIXTURES, name), "utf8"));
 }
 
 let taskId: string;

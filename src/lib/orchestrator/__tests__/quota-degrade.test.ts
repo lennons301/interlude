@@ -73,30 +73,16 @@ const RESETS_AT_EPOCH = 1788310954;
 const RESUME_AFTER = new Date(RESETS_AT_EPOCH * 1000);
 const PROMPT = "Implement issue #34 — add the frobnicator.";
 
-/** The turn the CLI hands back when the *heavy tier's* weekly allowance is
- * spent: the same `subtype: "success"` exit as any other wall, distinguished
- * only by the window the rate-limit event names. */
+/** The turn the adapter hands back when the *heavy tier's* weekly allowance
+ * is spent: the same refusal as any other wall, distinguished only by the
+ * window the rate-limit event named — carried verbatim on the normalised
+ * outcome (issue #214). */
 function walledOn(rateLimitType: string, resetsAt: Date | null = RESUME_AFTER) {
   return {
     finalMessage: "You've hit your weekly limit for Opus · resets Monday",
-    terminalResult: {
-      type: "result",
-      subtype: "success",
-      is_error: true,
-      terminal_reason: "api_error",
-      api_error_status: 429,
-      total_cost_usd: 0,
-    } as Record<string, unknown>,
-    rateLimit: {
-      status: "rejected",
-      rateLimitType,
-      utilization: null,
-      resetsAt,
-      overageStatus: null,
-      overageResetsAt: null,
-      isUsingOverage: false,
-      overageInUse: null,
-      observedAt: new Date("2026-09-01T12:00:00.000Z"),
+    outcome: {
+      kind: "refused" as const,
+      refusal: { kind: "quota" as const, resumeAfter: resetsAt, limitType: rateLimitType },
     },
   };
 }
@@ -375,8 +361,7 @@ describe("an implement pass refused on a tier's own allowance (issue #170)", () 
 
     const decision = await turns.evaluatePassOutcome(taskId, {
       finalMessage: "Implemented the frobnicator; tests and lint pass.",
-      terminalResult: { type: "result", subtype: "success", is_error: false },
-      rateLimit: { ...walledOn("seven_day_opus").rateLimit, status: "allowed" },
+      outcome: { kind: "completed" },
     });
 
     expect(decision).toBe("proceed");

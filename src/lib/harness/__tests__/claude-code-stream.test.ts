@@ -1,14 +1,13 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import fs from "fs";
 import path from "path";
-import { createOutputHandler } from "../output-parser";
+import { and, eq } from "drizzle-orm";
+import { createOutputHandler } from "../claude-code/stream-parser";
 
 // Use an in-memory SQLite database for tests
 // We need to mock the db module before importing the parser
 import * as schema from "@/db/schema";
 import { createTestDb } from "@/test/create-test-db";
-
-import { vi } from "vitest";
 
 // Create a fresh in-memory DB for each test
 let testDb: ReturnType<typeof createTestDb>["db"];
@@ -26,7 +25,7 @@ const fixtureLines = fs
   .split("\n")
   .filter((l) => l.trim());
 
-describe("output-parser with real Claude Code stream-json", () => {
+describe("the Claude Code stream parser with real stream-json (issue #214: under its adapter)", () => {
   const TASK_ID = "test-task-001";
   /** Any lane id: these tests are about parsing, not whose quota it is. */
   const LANE_ID = "claude-subscription";
@@ -62,18 +61,13 @@ describe("output-parser with real Claude Code stream-json", () => {
     for (const line of fixtureLines) {
       handler.write(line + "\n");
     }
-    const result = handler.flush();
+    handler.flush();
 
     // Should have created text messages from assistant events
     const msgs = testDb
       .select()
       .from(schema.messages)
-      .where(
-        require("drizzle-orm").and(
-          require("drizzle-orm").eq(schema.messages.taskId, TASK_ID),
-          require("drizzle-orm").eq(schema.messages.type, "text")
-        )
-      )
+      .where(and(eq(schema.messages.taskId, TASK_ID), eq(schema.messages.type, "text")))
       .all();
 
     expect(msgs.length).toBeGreaterThan(0);
@@ -97,12 +91,7 @@ describe("output-parser with real Claude Code stream-json", () => {
     const msgs = testDb
       .select()
       .from(schema.messages)
-      .where(
-        require("drizzle-orm").and(
-          require("drizzle-orm").eq(schema.messages.taskId, TASK_ID),
-          require("drizzle-orm").eq(schema.messages.type, "tool_use")
-        )
-      )
+      .where(and(eq(schema.messages.taskId, TASK_ID), eq(schema.messages.type, "tool_use")))
       .all();
 
     expect(msgs.length).toBeGreaterThan(0);
@@ -124,12 +113,7 @@ describe("output-parser with real Claude Code stream-json", () => {
     const msgs = testDb
       .select()
       .from(schema.messages)
-      .where(
-        require("drizzle-orm").and(
-          require("drizzle-orm").eq(schema.messages.taskId, TASK_ID),
-          require("drizzle-orm").eq(schema.messages.type, "tool_use")
-        )
-      )
+      .where(and(eq(schema.messages.taskId, TASK_ID), eq(schema.messages.type, "tool_use")))
       .all();
 
     // At least one tool_use should have output from tool_result
@@ -152,6 +136,41 @@ describe("output-parser with real Claude Code stream-json", () => {
     expect(typeof result.sessionId).toBe("string");
     expect(result.sessionId!.length).toBeGreaterThan(0);
     expect(result.costUsd).toBeGreaterThan(0);
+  });
+
+  it("classifies the recorded turn as completed, with its session, cost and final message intact", () => {
+    // The acceptance line for moving the parser under its adapter: the same
+    // fixture parses to the same messages, cost and session id — and now to a
+    // normalised outcome the orchestrator branches on instead of the subtype.
+    const handler = createOutputHandler(TASK_ID, LANE_ID);
+    for (const line of fixtureLines) {
+      handler.write(line + "\n");
+    }
+    const result = handler.flush();
+
+    expect(result.outcome).toEqual({ kind: "completed" });
+    expect(result.sessionId).toBe(
+      JSON.parse(fixtureLines[fixtureLines.length - 1]).session_id
+    );
+    expect(result.costUsd).toBe(
+      JSON.parse(fixtureLines[fixtureLines.length - 1]).total_cost_usd
+    );
+    expect(result.finalMessage).toBe("The file has **12 lines**.");
+    // The vendor's event stays on the result verbatim, for the recorder.
+    expect(result.terminalResult).toEqual(
+      JSON.parse(fixtureLines[fixtureLines.length - 1])
+    );
+  });
+
+  it("reports no outcome at all for a stream that never reached a result event", () => {
+    // Not `failed`: the absence of an outcome is the interruption bound's
+    // signal (issue #97), and dressing it as a failure would charge the
+    // attempt for a container death.
+    const handler = createOutputHandler(TASK_ID, LANE_ID);
+    for (const line of fixtureLines.slice(0, -1)) {
+      handler.write(line + "\n");
+    }
+    expect(handler.flush().outcome).toBeNull();
   });
 
   it("fires onDone callback when result event is received", () => {

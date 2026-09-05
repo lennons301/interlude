@@ -4,7 +4,7 @@ import path from "path";
 import * as schema from "@/db/schema";
 import { createTestDb } from "@/test/create-test-db";
 import { eq } from "drizzle-orm";
-import type { Observation } from "../stream-recorder";
+import type { Observation } from "@/lib/orchestrator/stream-recorder";
 import type { QuotaObservation } from "@/lib/quota/rate-limit-event";
 
 /**
@@ -34,7 +34,9 @@ import type { QuotaObservation } from "@/lib/quota/rate-limit-event";
  * They started life asserting only what the *stream* contains. #167 read the
  * event, so the same bytes pin what the orchestrator makes of it; #168 now
  * *acts* on it, so they also pin the one decision it takes — pause this run,
- * or let the turn take its ordinary path.
+ * or let the turn take its ordinary path. Since #214 that decision is made
+ * under the adapter, as the normalised `outcome` on the turn result, and this
+ * is where the captured bytes are shown to become `refused { quota }`.
  */
 
 let testDb: ReturnType<typeof createTestDb>["db"];
@@ -45,13 +47,12 @@ vi.mock("@/db", () => ({
   },
 }));
 
-const { createOutputHandler } = await import("../output-parser");
-const { createStreamRecorder } = await import("../stream-recorder");
+const { createOutputHandler } = await import("../claude-code/stream-parser");
+const { createStreamRecorder } = await import("@/lib/orchestrator/stream-recorder");
 const { getQuotaObservation } = await import("@/lib/quota/quota-store");
-const { detectQuotaRejection } = await import("@/lib/quota/rate-limit-rejection");
 
 /** The parser writes messages as it goes, so every replay needs a task row to
- * hang them off. Same seeding as `output-parser.test.ts`. */
+ * hang them off. Same seeding as `claude-code-stream.test.ts`. */
 const PROJECT_ID = "test-project";
 const TASK_IDS = ["task-allowed", "task-rejected"];
 
@@ -179,17 +180,18 @@ describe("captured stream: rate_limit_event reaches stdout", () => {
   });
 });
 
-describe("captured stream: how a quota wall looks to the orchestrator today", () => {
+describe("captured stream: how a quota wall looks on the wire", () => {
   it("reports itself as a *successful* turn", () => {
     // The finding that most changes the milestone's premise. #164 assumes a
-    // wall "fails like any other failure"; it does not. `subtype` is the only
-    // field the orchestrator reads, and on a rejection it says "success", so
-    // today an implement pass walled by quota looks like a pass that finished
-    // having done nothing.
+    // wall "fails like any other failure"; it does not. `subtype` was the only
+    // field the orchestrator read, and on a rejection it says "success", so
+    // an implement pass walled by quota looked like a pass that finished
+    // having done nothing. The verbatim event still carries the shape, for
+    // the recorder; the orchestrator no longer reads it (issue #214).
     const { result } = replay(REJECTED, "task-rejected");
 
-    expect(result.subtype).toBe("success");
     expect(result.terminalResult).toMatchObject({
+      subtype: "success",
       is_error: true,
       terminal_reason: "api_error",
       api_error_status: 429,
@@ -216,7 +218,7 @@ describe("captured stream: how a quota wall looks to the orchestrator today", ()
     const walled = replay(REJECTED, "task-rejected").result;
     const clean = replay(ALLOWED, "task-allowed").result;
 
-    expect(walled.subtype).toBe(clean.subtype);
+    expect(walled.terminalResult?.subtype).toBe(clean.terminalResult?.subtype);
     expect(clean.terminalResult).toMatchObject({
       is_error: false,
       terminal_reason: "completed",
@@ -225,20 +227,25 @@ describe("captured stream: how a quota wall looks to the orchestrator today", ()
   });
 });
 
-describe("captured stream: the pause decision (issue #168)", () => {
-  it("reads the rejection capture as a pause, with the window it waits on", () => {
-    // The end-to-end claim of this ticket, off captured bytes: the two signals
-    // the decision needs — the exit condition and the rate-limit event — both
-    // survive the parser, and together they say "refused, until 1788310954".
+describe("captured stream: the normalised outcome (issues #168, #214)", () => {
+  it("reads the rejection capture as a quota refusal, with the window it waits on", () => {
+    // The end-to-end claim, off captured bytes: the two signals the decision
+    // needs — the exit condition and the rate-limit event — both survive the
+    // parser, and together they say "refused, until 1788310954". The adapter
+    // says so in the fleet's vocabulary; the reducer reads nothing else.
     const { result } = replay(REJECTED, "task-rejected");
 
-    expect(detectQuotaRejection(result)).toEqual({
-      resumeAfter: new Date(1788310954 * 1000),
-      limitType: "five_hour",
+    expect(result.outcome).toEqual({
+      kind: "refused",
+      refusal: {
+        kind: "quota",
+        resumeAfter: new Date(1788310954 * 1000),
+        limitType: "five_hour",
+      },
     });
   });
 
-  it("reads the real-quota capture as no pause at all", () => {
+  it("reads the real-quota capture as a completed turn, not a refusal", () => {
     // The other half, and the regression that would hurt most: an ordinary
     // turn on a healthy account must never park its run on a clock. Note this
     // capture *does* carry a rate_limit_event — it is the exit condition that
@@ -246,7 +253,7 @@ describe("captured stream: the pause decision (issue #168)", () => {
     const { result } = replay(ALLOWED, "task-allowed");
 
     expect(result.rateLimit).not.toBeNull();
-    expect(detectQuotaRejection(result)).toBeNull();
+    expect(result.outcome).toEqual({ kind: "completed" });
   });
 });
 

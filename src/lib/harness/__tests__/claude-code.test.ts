@@ -13,9 +13,17 @@ import {
   buildTurnEnv,
   buildClaudeTurnCommand,
   claudeCodeAdapter,
+  composeClaudeSkillInvocation,
+  mapClaudeEffort,
   CLAUDE_CODE_BASE_URL_ENV,
 } from "../claude-code";
+import { CLAUDE_CODE_IMAGE } from "../claude-code/image";
 import { getHarnessAdapter } from "../registry";
+import { describeHarnessAdapter } from "../descriptors";
+import { ALLOWED_TICKET_EFFORTS } from "@/lib/orchestrator/autonomy/budgets";
+import { containerTranscriptPath } from "@/lib/quota/session-transcript";
+import { getImageName } from "@/lib/docker/image-builder";
+import { composeSeed } from "@/lib/sessions/seed";
 
 /**
  * The Claude Code adapter (issues #74, #81, #172): what one turn's exec
@@ -328,5 +336,71 @@ describe("the adapter registry (issue #172)", () => {
     expect(typeof claudeCodeAdapter.buildExecEnv).toBe("function");
     expect(typeof claudeCodeAdapter.buildCommand).toBe("function");
     expect(typeof claudeCodeAdapter.createOutputHandler).toBe("function");
+  });
+});
+
+// Issue #214 widened the contract; each new member answers the way the fleet
+// already behaved on the Claude lane, and these pin that.
+describe("the widened contract on the Claude Code adapter (issue #214)", () => {
+  it("declares the one image the fleet has always built, and the builder reads it", () => {
+    expect(claudeCodeAdapter.image).toEqual(CLAUDE_CODE_IMAGE);
+    expect(claudeCodeAdapter.image).toEqual({
+      name: "interlude-agent:latest",
+      dockerfile: "Dockerfile.agent",
+    });
+    expect(getImageName()).toBe(claudeCodeAdapter.image.name);
+  });
+
+  it("declares the capabilities its descriptor does — read from the table, not restated", () => {
+    expect(claudeCodeAdapter.capabilities).toEqual(
+      describeHarnessAdapter("claude-code")!.capabilities
+    );
+    expect(claudeCodeAdapter.capabilities).toEqual({
+      userInvokedSkills: true,
+      quotaTelemetry: true,
+      reportsCost: true,
+      sessionResume: true,
+    });
+  });
+
+  it("maps every fleet effort level onto itself, and nothing else onto anything", () => {
+    for (const level of ALLOWED_TICKET_EFFORTS) {
+      expect(mapClaudeEffort(level)).toBe(level);
+      expect(claudeCodeAdapter.mapEffort(level)).toBe(level);
+    }
+    expect(mapClaudeEffort("hihg")).toBeNull();
+    expect(mapClaudeEffort("")).toBeNull();
+  });
+
+  it("omits --effort for a level it cannot map rather than passing a stranger's word", () => {
+    // Unreachable from either entry point (both validate against the same
+    // list), but the contract says "omitted, never guessed at" and the command
+    // is where that is enforced.
+    const cmd = buildClaudeTurnCommand({ lane: lane(), effort: "hihg" });
+    expect(cmd).not.toContain("--effort");
+  });
+
+  it("composes a skill invocation byte-identical to the seed composer's slash line", () => {
+    // Issue #218 makes the composer ask the adapter; until then this is the
+    // guarantee that doing so changes nothing on the Claude lane.
+    expect(composeClaudeSkillInvocation("grill-me", "the auth flow")).toBe(
+      composeSeed({ sessionSkill: "grill-me", agenda: "the auth flow" }).split("\n\n")[0]
+    );
+    expect(composeClaudeSkillInvocation("wayfinder", null)).toBe(
+      composeSeed({ sessionSkill: "wayfinder" })
+    );
+    expect(composeClaudeSkillInvocation("to-spec", "   ")).toBe("/to-spec");
+    expect(claudeCodeAdapter.composeSkillInvocation("to-tickets", "batch 3")).toBe(
+      "/to-tickets batch 3"
+    );
+  });
+
+  it("names the one transcript file as the session's artefact, at the path the pause copies", () => {
+    expect(claudeCodeAdapter.sessionArtifactPaths("sess-1", "/workspace/repo")).toEqual([
+      containerTranscriptPath("sess-1", "/workspace/repo"),
+    ]);
+    expect(claudeCodeAdapter.sessionArtifactPaths("sess-1", "/workspace/repo")).toEqual([
+      "/home/node/.claude/projects/-workspace-repo/sess-1.jsonl",
+    ]);
   });
 });
