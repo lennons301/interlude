@@ -33,6 +33,7 @@ const WORKING: RunningCard = {
   spend: { usd: 7.8, budgetUsd: 20 },
   paused: null,
   degraded: null,
+  harness: "claude-code",
 };
 
 const PAUSED: RunningCard = {
