@@ -31,6 +31,7 @@ function catalog(): LaneCatalog {
     `
 primary:
   - other-sub
+  - other-api
   - claude-subscription
 lanes:
   - id: other-sub
@@ -43,6 +44,22 @@ lanes:
       heavy: other-big
       standard: other-mid
       light: other-small
+  - id: other-api
+    label: Other harness (metered)
+    adapter: ${NO_SKILLS}
+    billing: metered
+    auth:
+      OTHER_API_KEY: OTHER_API_KEY
+    models:
+      heavy: other-big
+      standard: other-mid
+      light: other-small
+    prices:
+      heavy: { input: 1.0, output: 4.0, cache_read: 0.1 }
+      standard: { input: 0.1, output: 0.4, cache_read: 0.01 }
+      light: { input: 0.05, output: 0.2, cache_read: 0.005 }
+    caps:
+      daily_budget_usd: 20
   - id: claude-subscription
     label: Claude subscription
     adapter: claude-code
@@ -125,7 +142,7 @@ describe("POST /api/tasks for a generation session (issue #218)", () => {
     const body = await res.json();
     expect(body.reason).toBe("no-skill-capable-lane");
     expect(body.error).toContain("A grill-me session needs a lane whose harness can invoke skills");
-    expect(body.error).toContain(`other-sub runs ${NO_SKILLS}, which cannot invoke a skill`);
+    expect(body.error).toContain(`other-sub, other-api run ${NO_SKILLS}, which cannot invoke a skill`);
     expect(body.error).toContain("claude-subscription needs CLAUDE_CODE_OAUTH_TOKEN");
     // Refused means refused: no row, so nothing for the queue to pick up and
     // no container to provision.
@@ -218,6 +235,40 @@ describe("POST /api/tasks for a generation session (issue #218)", () => {
 
     expect(res.status).toBe(409);
     expect((await res.json()).reason).toBe("no-skill-capable-lane");
+  });
+
+  it("refuses the session when the lane in force bills per token, is unconfirmed, and cannot host it", async () => {
+    // The metered lane on the other harness is in force and nobody has
+    // confirmed the day's real-money spend. For an ordinary chat that is
+    // #174's press-away hold; for a session it is nothing, because the press
+    // would free a lane the session can never run on — so the answer is the
+    // refusal a press would have led to anyway, given before the row exists.
+    delete process.env.OTHER_TOKEN;
+    process.env.OTHER_API_KEY = "k";
+    resetConfig();
+    const projectId = await seedProject();
+
+    const res = await postTask(
+      jsonRequest("http://test/api/tasks", {
+        title: "Grill the fleet dashboard",
+        projectId,
+        sessionSkill: "grill-me",
+      })
+    );
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.reason).toBe("no-skill-capable-lane");
+    expect(body.error).toContain(`other-api run ${NO_SKILLS}, which cannot invoke a skill`);
+    expect(body.error).not.toContain("Confirm real-money spend");
+    expect(await listed(projectId)).toEqual([]);
+
+    // The control: an ordinary chat on that same lane is created and held for
+    // the press, exactly as #174 holds it.
+    const chat = await postTask(
+      jsonRequest("http://test/api/tasks", { title: "Chat task", projectId })
+    );
+    expect(chat.status).toBe(201);
   });
 
   it("creates an ordinary chat task on the same fleet exactly as before", async () => {

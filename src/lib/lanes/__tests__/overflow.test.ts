@@ -730,6 +730,70 @@ lanes:
     expect(decision.laneId).toBe("direct-api");
   });
 
+  /** The other harness's *metered* lane in force: the pass would fall back
+   * onto a lane that both bills per token and cannot host a session. */
+  const OTHER_API_PRIMARY: CrossingLane = {
+    id: "other-api",
+    label: "Other harness (metered)",
+    billing: "metered",
+    caps: { dailyBudgetUsd: 20 },
+  };
+
+  it("does not ask for a press on a metered lane in force that cannot host it", () => {
+    // The lane in force is unconfirmed and the only lane with a credential, so
+    // it is the one lane the pass would fall back onto — but the session can
+    // never run there, so its hold is not the session's: after the press the
+    // answer would be the same refusal, so the refusal is what is said now.
+    const decision = session({
+      primary: OTHER_API_PRIMARY,
+      env: { OTHER_API_KEY: "k" },
+      confirmedAt: null,
+    });
+
+    expect(decision.refusal?.reason).toBe("no-skill-capable-lane");
+    expect(decision.refusal?.message).toContain(`other-sub, other-api run ${NO_SKILLS}`);
+    expect(decision.refusal?.message).not.toContain("Confirm real-money spend");
+    // ...while an ordinary chat on that same fleet is asked for the press
+    // exactly as #174 asks — the lane in force is where *it* would run.
+    const chat = session({
+      sessionSkill: null,
+      primary: OTHER_API_PRIMARY,
+      env: { OTHER_API_KEY: "k" },
+      confirmedAt: null,
+    });
+    expect(chat.refusal?.reason).toBe("unconfirmed");
+    expect(chat.laneId).toBe("other-api");
+  });
+
+  it("does not call a session capped by a lane it can never run on", () => {
+    // Midnight lifts the cap and changes nothing for this session either.
+    const decision = session({
+      primary: OTHER_API_PRIMARY,
+      env: { OTHER_API_KEY: "k" },
+      spentTodayUsd: 20,
+    });
+
+    expect(decision.refusal?.reason).toBe("no-skill-capable-lane");
+    expect(decision.refusal?.message).not.toContain("Capped");
+  });
+
+  it("names the capable lane a press would free, not the metered lane in force that cannot host it", () => {
+    // Both the lane in force and the Claude API lane bill per token and both
+    // are unconfirmed. The press frees only the one the session can run on,
+    // so that is the lane the refusal is about.
+    const decision = session({
+      primary: OTHER_API_PRIMARY,
+      env: { OTHER_TOKEN: "t", OTHER_API_KEY: "k", ANTHROPIC_API_KEY: "sk-ant" },
+      confirmedAt: null,
+    });
+
+    expect(decision.refusal?.reason).toBe("unconfirmed");
+    expect(decision.laneId).toBe("direct-api");
+    expect(decision.overflowedFrom).toBe("other-api");
+    expect(decision.refusal?.message).toContain("Anthropic API bills per token");
+    expect(decision.refusal?.message).not.toContain("Other harness (metered) bills");
+  });
+
   it("names a pin that holds the session on a lane that cannot host it", () => {
     const decision = session({ pinnedLaneId: "other-sub" });
 

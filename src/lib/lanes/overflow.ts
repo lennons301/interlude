@@ -567,7 +567,13 @@ export function decideLaneCrossing({
  * own money state — so the refusal is *about* that lane unless the thing a
  * press would free is a different one, which is the walled case: there the
  * lane in force cannot serve the request at all and the news is the lane the
- * session would move onto.
+ * session would move onto. A generation session whose lane in force cannot
+ * invoke its skill is that case too (issue #218): it never falls back onto
+ * that lane, so that lane's money hold — carried in `crossed` because a
+ * fall-back must never skip the guards — is not what stands between the
+ * session and running, and a press or a midnight there would change nothing
+ * for it. Its hold is the best *capable* lane a press would free, or its own
+ * refusal.
  */
 function refusedCrossing(
   crossed: LaneCrossing,
@@ -590,8 +596,12 @@ function refusedCrossing(
 
   // The lane the pass would run on, when a press or a midnight is what stands
   // between it and running — otherwise the best lane that a press *would*
-  // free, which is what a walled session needs told.
-  const onTarget = crossed.money?.hold != null;
+  // free, which is what a walled session needs told. A lane in force that
+  // cannot host a generation session is never the lane it would run on, so its
+  // hold is not this pass's: judged here, ahead of the money, because a press
+  // that changes nothing must never be asked for (issue #218).
+  const inForceCannotHost = selection.inForce?.ineligible === "cannot-invoke-skills";
+  const onTarget = !inForceCannotHost && crossed.money?.hold != null;
   const held = onTarget
     ? { id: crossed.laneId!, label: laneLabel(selection, crossed.laneId), money: crossed.money! }
     : selection.heldForMoney === null
@@ -609,7 +619,7 @@ function refusedCrossing(
     // running there would start the skill session as freeform chat — so it is
     // refused, lane by lane, whether or not a wall stands as well. Asked
     // before the wall because a window's reset would change nothing here.
-    if (selection.inForce?.ineligible === "cannot-invoke-skills") {
+    if (inForceCannotHost) {
       // A lane that *could* host it and is only walled will, when its window
       // resets — so the session is held on that clock, exactly as a walled
       // chat is, rather than sent away to be re-entered. (Every `walled`
