@@ -509,6 +509,7 @@ export function decideLaneCrossing({
           observation,
           observations: judged,
           sessionSkill,
+          inForceCannotHost,
           overage,
           walled,
         })
@@ -547,6 +548,7 @@ export function decideLaneCrossing({
         observation,
         observations: judged,
         sessionSkill,
+        inForceCannotHost,
         overage,
         walled,
       });
@@ -588,6 +590,12 @@ function refusedCrossing(
      * reset in a refusal. */
     observations: Readonly<Record<string, QuotaObservation | null>>;
     sessionSkill: SessionSkill | null;
+    /** The pass is a generation session and the lane in force's harness
+     * cannot invoke its skill (issue #218) — read off the lane's declared
+     * capabilities by the caller, the one derivation both halves of the
+     * crossing share, rather than off the ranking's label for that lane,
+     * which a pin elsewhere would have written as `not-pinned` first. */
+    inForceCannotHost: boolean;
     overage: boolean;
     walled: boolean;
   }
@@ -600,7 +608,7 @@ function refusedCrossing(
   // cannot host a generation session is never the lane it would run on, so its
   // hold is not this pass's: judged here, ahead of the money, because a press
   // that changes nothing must never be asked for (issue #218).
-  const inForceCannotHost = selection.inForce?.ineligible === "cannot-invoke-skills";
+  const { inForceCannotHost } = at;
   const onTarget = !inForceCannotHost && crossed.money?.hold != null;
   const held = onTarget
     ? { id: crossed.laneId!, label: laneLabel(selection, crossed.laneId), money: crossed.money! }
