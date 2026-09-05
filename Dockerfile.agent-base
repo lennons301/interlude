@@ -1,3 +1,16 @@
+# The agent image BASE (issue #216): everything an agent container needs that
+# is not the harness itself — git, gh, yq, jq, pnpm, the workspace user and the
+# estate's pinned skills. Each harness adapter's image is a thin layer on top
+# of this one (`Dockerfile.agent-<adapter id>`, e.g. Dockerfile.agent-claude-code)
+# that installs one harness and pre-accepts its headless mode, so a second
+# harness neither bloats this image nor forks this file.
+#
+# The image builder (src/lib/docker/image-builder.ts) builds this file as
+# `interlude-agent-base:latest` and stamps it with this file's SHA-256; an
+# adapter image is stamped with a hash over this file AND its own layer, so a
+# change here rebuilds every adapter's image and a harness bump in one layer
+# rebuilds that image alone. Nothing here may name a harness: what a harness
+# needs installed or pre-accepted belongs in its layer.
 FROM node:22-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,18 +53,18 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/*
 
 RUN corepack enable && corepack prepare pnpm@latest --activate
-RUN npm install -g @anthropic-ai/claude-code
 
 # Run as the existing node user (uid 1000), which also matches the deploy
 # user on the host — kept aligned so any future host bind mount stays
 # uid-consistent (issue #28 removed the last one: the host ~/.claude mount).
 RUN mkdir -p /workspace && chown node:node /workspace
 
-# Image-owned Claude directory. Nothing is mounted over it now (#28), so
-# anything installed here (the skill links below) survives at runtime.
-# Pre-accept the permissions bypass for headless operation.
+# Image-owned Claude directory: where the skills install below links each skill
+# for the Claude Code agent. Nothing is mounted over it now (#28), so anything
+# installed here survives at runtime. It is the skills' directory, not the
+# harness's — the Claude CLI itself, and its headless pre-acceptance, are the
+# Claude Code layer's (Dockerfile.agent-claude-code).
 RUN mkdir -p /home/node/.claude && chown -R node:node /home/node/.claude
-RUN echo '{"bypassPermissionsModeAccepted": true}' > /home/node/.claude.json && chown node:node /home/node/.claude.json
 
 USER node
 
@@ -75,10 +88,11 @@ USER node
 # bump rather than overnight.
 #
 # SKILLS_REF is the one statement of the pinned ref: this RUN installs it, the
-# LABEL stamps it on the image — the orchestrator lifts it from there into the
-# run ledger's skills-version column and the task feed's system note — and the
-# image builder's Dockerfile hash covers it, so bumping it here rebuilds the
-# image. Runs as `node`, after USER above, so global scope is /home/node.
+# LABEL stamps it on the image — every adapter image inherits the label from
+# this base, and the orchestrator lifts it from there into the run ledger's
+# skills-version column and the task feed's system note — and the image
+# builder's hash covers it, so bumping it here rebuilds every adapter image.
+# Runs as `node`, after USER above, so global scope is /home/node.
 ARG SKILLS_REF=v1.2.3
 ARG SKILLS_INSTALLER_VERSION=1.5.23
 # Every skill a pass or a session can name must resolve in the image (the
@@ -102,4 +116,6 @@ RUN npx -y "skills@${SKILLS_INSTALLER_VERSION}" add "https://github.com/mattpoco
     && rm -rf /home/node/.npm/_npx
 LABEL co.interlude.agent-skills-ref=${SKILLS_REF}
 
+# The base ends as `node` in /workspace; an adapter layer inherits both, and
+# switches to root only for as long as its harness install needs it.
 WORKDIR /workspace

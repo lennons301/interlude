@@ -1,0 +1,24 @@
+# The Claude Code layer of the agent image (issues #214, #216): one harness and
+# its headless pre-acceptance, on the shared base (Dockerfile.agent-base), which
+# carries everything else — git, gh, yq, jq, pnpm, the workspace user and the
+# pinned skills, including the `~/.claude/skills` links this harness reads.
+#
+# The image builder (src/lib/docker/image-builder.ts) builds the base first and
+# hands its tag in as BASE_IMAGE; the default below is that same tag, so a
+# manual `docker build -f Dockerfile.agent-claude-code .` after a base build
+# works too. The resulting image is stamped with a hash over BOTH files, so a
+# base change rebuilds this image and a change here rebuilds only this one.
+ARG BASE_IMAGE=interlude-agent-base:latest
+FROM ${BASE_IMAGE}
+
+# The base leaves the image running as `node`; the global install needs root.
+USER root
+RUN npm install -g @anthropic-ai/claude-code
+
+# Pre-accept the permissions bypass for headless operation. `.claude.json` is
+# the CLI's own state file, beside the image-owned `~/.claude` directory the
+# base creates for the skill links; nothing is mounted over either (#28), so
+# both survive at runtime.
+RUN echo '{"bypassPermissionsModeAccepted": true}' > /home/node/.claude.json && chown node:node /home/node/.claude.json
+
+USER node
