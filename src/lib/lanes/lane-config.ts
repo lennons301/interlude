@@ -64,9 +64,9 @@ export type LaneBilling = (typeof LANE_BILLING_KINDS)[number];
 /**
  * One credential the harness needs, as two *names*: the variable the harness
  * reads, and the orchestrator variable holding the secret. They differ more
- * often than not — Claude Code reads `ANTHROPIC_AUTH_TOKEN`, while the
- * OpenRouter key is provisioned as `OPENROUTER_API_KEY` — which is why this is
- * a mapping rather than a list of names.
+ * often than not — a harness reads its own bearer-token variable, while a
+ * third party's key is provisioned under that provider's name — which is why
+ * this is a mapping rather than a list of names.
  */
 export interface LaneAuthRef {
   /** The environment variable the harness itself reads. */
@@ -95,16 +95,16 @@ export interface LaneCaps {
  * Declared per lane because a turn's cost has to come from *somewhere the
  * orchestrator trusts*, and the harness's own figure is not that on a
  * third-party endpoint. Observed on 2026-09-02 against OpenRouter's
- * Anthropic-compatible endpoint: the Claude Code CLI reported
- * `total_cost_usd: 0.194985` for a turn run on a **free** model, computing it
- * at Anthropic list rates ($5/$25 per Mtok) for a model the endpoint had never
- * heard of — 16.7x the paid slug's real price, and infinitely over the free
- * one's. The CLI even says so itself, in the `costBasis: "unknown"` it puts on
- * `modelUsage` where a first-party model reads `"list"`.
+ * compatibility endpoint: the harness reported `total_cost_usd: 0.194985` for
+ * a turn run on a **free** model, computing it at its own provider's list
+ * rates ($5/$25 per Mtok) for a model the endpoint had never heard of — 16.7x
+ * the paid slug's real price, and infinitely over the free one's. The harness
+ * even says so itself, in the `costBasis: "unknown"` it puts on `modelUsage`
+ * where a first-party model reads `"list"`.
  *
  * So every spend guard in the milestone — the per-attempt budget, the daily
  * cap, issue #174's real-money cap — is only as good as this table on a lane
- * that is not Anthropic-direct.
+ * that is not first-party (one whose endpoint is the harness's own provider).
  */
 export interface TokenPrices {
   /** USD per million input tokens (uncached). */
@@ -143,9 +143,9 @@ export interface LaneDefinition {
    * at every reader because the readers are many and pure — the quota read,
    * the failover ranking, the fleet view, the settings screen — and a test's
    * lane on the fake adapter has to carry the fake's capabilities as naturally
-   * as a shipped lane carries Claude Code's. It describes the *harness*, never
-   * the provider: a Claude Code lane declares quota telemetry whether or not
-   * the endpoint behind it ever emits any.
+   * as a shipped lane carries its adapter's. It describes the *harness*, never
+   * the provider: a lane on a harness with quota telemetry declares it whether
+   * or not the endpoint behind it ever emits any.
    */
   capabilities: HarnessCapabilities;
   billing: LaneBilling;
@@ -162,8 +162,8 @@ export interface LaneDefinition {
    * What this lane's provider charges per tier (issue #175), or null to take
    * the harness's own reported cost.
    *
-   * Null is the right answer for an Anthropic-direct lane and only for one:
-   * there the CLI prices a model it recognises at that model's list rates,
+   * Null is the right answer for a first-party lane and only for one: there
+   * the harness prices a model it recognises at that model's list rates,
    * which is the figure the fleet wants and the one it has always used. A lane
    * pointing anywhere else declares its prices or its spend is fiction.
    */
@@ -269,7 +269,7 @@ function parseLane(
   const id = raw.id;
   if (typeof id !== "string" || !isLaneIdShaped(id)) {
     return {
-      reason: `${at} has no valid \`id\` (lowercase slug, e.g. "anthropic-api")`,
+      reason: `${at} has no valid \`id\` (lowercase slug, e.g. "plan-subscription")`,
     };
   }
   const where = `lane "${id}"`;
@@ -320,8 +320,8 @@ function parseLane(
   // (issue #219): real money on a harness that reports no cost has to be
   // priced here, or every budget the fleet holds against this lane would be
   // measured in a figure nobody produced. Keyed on the capability, never on
-  // the provider or the base URL — the shipped Anthropic-direct lanes omit
-  // prices because Claude Code *does* report cost there, and that stays legal.
+  // the provider or the base URL — the shipped first-party lanes omit prices
+  // because their harness *does* report cost there, and that stays legal.
   if (
     billing === "metered" &&
     !descriptor.capabilities.reportsCost &&

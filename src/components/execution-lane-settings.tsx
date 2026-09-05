@@ -34,7 +34,7 @@ import type { LaneSettingsView, LaneView } from "@/lib/lanes/resolve";
  * - a lane says who pays. `metered` is real money, so it reads in the same
  *   amber the rest of the control room uses for a deliberate hold;
  * - a lane says what it *charges*, per tier (issue #175). Not decoration: off
- *   an Anthropic-direct endpoint these figures — not the harness's reported
+ *   a third-party endpoint these figures — not the harness's reported
  *   cost — are what every budget in the fleet is measured against, so the
  *   number an operator is billed by is the number on this screen. A lane with
  *   no prices declared says so, because there the harness's figure stands;

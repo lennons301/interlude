@@ -65,7 +65,7 @@ export interface TierDegrade {
  *
  *  - the window is account-wide (or unreadable), so no tier is exhausted;
  *  - the pass ran at **no known tier** — the deployment pins a raw model id
- *    (`AGENT_MODEL=claude-opus-4-8`), or names no model at all and lets the
+ *    (`AGENT_MODEL=<a provider's model id>`), or names no model at all and lets the
  *    harness choose. There is no rung to step from, and inventing one would
  *    override a pin an operator set deliberately;
  *  - the pass already ran at the bottom of the ladder;

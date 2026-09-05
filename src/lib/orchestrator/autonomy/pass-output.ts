@@ -7,7 +7,7 @@
  * one extraction.
  *
  * Read off the adapter's `TurnResult`, never the raw stream: before #214 this
- * module re-parsed Claude Code's NDJSON for the `result` event and read its
+ * module re-parsed one vendor's NDJSON for the `result` event and read its
  * error flag and subtype for itself, which made the review and triage exits a
  * contract with one vendor's stream. Now the adapter says how the turn ended
  * and what its final message was, and this asks nothing else.

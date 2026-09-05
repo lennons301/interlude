@@ -4,17 +4,17 @@
  *
  * The whole milestone's spend machinery — the per-attempt budget, the daily
  * autonomous cap, issue #174's real-money cap — reads one number off a turn.
- * Before this ticket that number was whatever the Claude Code CLI put in
- * `total_cost_usd`, which is correct on an Anthropic-direct lane and *fiction*
+ * Before this ticket that number was whatever the harness put in its own
+ * `total_cost_usd`, which is correct on a first-party lane and *fiction*
  * anywhere else. Measured on 2026-09-02, one turn through OpenRouter's
- * Anthropic-compatible endpoint on a **free** model:
+ * compatibility endpoint on a **free** model:
  *
  *     total_cost_usd: 0.194985
  *     modelUsage: { inputTokens: 38387, outputTokens: 122,
  *                   costBasis: "unknown", provider: "firstParty" }
  *
- * 38387 x $5/Mtok + 122 x $25/Mtok is exactly 0.194985 — the CLI priced an
- * open-weights model it had never heard of at Anthropic list rates. The real
+ * 38387 x $5/Mtok + 122 x $25/Mtok is exactly 0.194985 — the harness priced an
+ * open-weights model it had never heard of at its own provider's list rates. The real
  * cost was $0.00 (free variant), or $0.0117 on the paid slug: an overstatement
  * of 16.7x. That is not a rounding problem; it is the difference between "this
  * lane is 40x cheaper" and "this lane blew the attempt budget", which would
@@ -25,7 +25,7 @@
  * with no provider:
  *
  *  - No declared prices -> the harness's figure stands. That is the honest
- *    answer for an Anthropic-direct lane, where the CLI prices a model it
+ *    answer for a first-party lane, where the harness prices a model it
  *    recognises at that model's list rates (it says so: `costBasis: "list"`).
  *  - Declared prices and reported tokens -> derived, and the harness's figure
  *    is kept beside it so a surprising bill is debuggable.

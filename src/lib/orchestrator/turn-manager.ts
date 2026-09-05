@@ -540,8 +540,8 @@ export async function startTask(taskId: string): Promise<void> {
       //
       // The *tier* is what goes in `model`, not the identifier it resolved to
       // (issue #172): this column is read back as the run's `model:` directive
-      // on every later pass, and a lane-specific identifier
-      // ("anthropic/claude-sonnet-4.5") names no tier, so recording it would
+      // on every later pass, and a lane-specific identifier (a third party's
+      // `provider/model` slug) names no tier, so recording it would
       // silently drop the directive the moment the fleet left an
       // alias-mapped lane. With the lane recorded beside it, tier + lane still
       // gives the identifier. A pinned raw id (no tier) is recorded verbatim,
@@ -1285,7 +1285,7 @@ const EXIT_CODE_OBSERVATION_TIMEOUT_MS = 1000;
  * honest: this is called the moment the turn settles, and `runTurn` deliberately
  * returns as soon as the terminal `result` event arrives rather than waiting for
  * the exec to close, because a background dev server can hold the stream open
- * long after Claude is done. Bounded for the usual #115/#128 reason — a hung
+ * long after the harness is done. Bounded for the usual #115/#128 reason — a hung
  * daemon connection has no timeout of its own — and nothing in the recorder's
  * path may stall a turn.
  */
@@ -1364,8 +1364,8 @@ async function runTurn(
   // Both against the wall-clock ceiling (issue #220): the orchestrator's own
   // bound on a turn, adapter-agnostic, so a harness with no turn or budget
   // flag — or a process hung on a suspended host — cannot hold its slot for
-  // as long as the box stays up. The Claude lane keeps its flags; this is a
-  // second bound, not a replacement. Env config, fixed at boot like every
+  // as long as the box stays up. A harness with flags of its own keeps them;
+  // this is a second bound, not a replacement. Env config, fixed at boot like every
   // other `getConfig()` field: a change to TURN_WALL_CLOCK_MINUTES needs a
   // restart, as the watchdog thresholds beside it do.
   const ceilingMs = getConfig().turnWallClockMs;

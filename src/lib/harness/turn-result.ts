@@ -2,8 +2,8 @@
  * What one agent turn hands back to the orchestrator (issue #214) — the
  * harness-neutral half of the adapter contract.
  *
- * Before this ticket the turn manager and the reducer read Claude Code's own
- * vocabulary off the result: turn exhaustion was one of the CLI's result
+ * Before this ticket the turn manager and the reducer read one vendor's own
+ * vocabulary off the result: turn exhaustion was one of its CLI's result
  * subtypes, a quota refusal was its error flag beside an HTTP status, and the
  * decision of what a turn *meant* was spread over three modules that each
  * knew one vendor field. A second harness could not be written against that.

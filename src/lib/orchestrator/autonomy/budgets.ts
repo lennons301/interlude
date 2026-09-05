@@ -177,8 +177,8 @@ export const DEFAULT_REFUSAL_BACKOFF_MS = 60 * 60_000;
  * the one harness has done — ran unbounded, holding its slot and its ~2 GiB
  * for as long as the box stayed up. This ceiling is adapter-agnostic and
  * enforced by the orchestrator around the exec, so every harness has it, and
- * it is a **second** bound on the Claude lane rather than a replacement for
- * its flags.
+ * it is a **second** bound on a harness with flags of its own rather than a
+ * replacement for them.
  *
  * Generous on purpose: an over-long turn ends as `turn-limit`, which exhausts
  * an implement attempt exactly as the harness's own turn ceiling does, so a

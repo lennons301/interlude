@@ -39,13 +39,13 @@
  * - **Capability** is a proxy, and the only honest one available without
  *   inventing a quality ranking this ticket explicitly excludes: what the
  *   provider charges for the models the lane runs. A lane declaring no prices
- *   ranks at the *top* — it is Anthropic-direct, running first-party Claude at
- *   list rates — which is the same fact that puts it last on cost, read the
+ *   ranks at the *top* — it is first-party, running the provider's own models
+ *   at list rates — which is the same fact that puts it last on cost, read the
  *   other way round. This axis exists only to give a pass kind's **minimum
  *   lane** a meaning: a floor admits every lane at or above the named lane's
  *   capability, so a floor of `openrouter` still allows the subscription
- *   (free *and* first-party), and a floor of `anthropic-api` means
- *   "first-party Claude only".
+ *   (free *and* first-party), and a floor of the first-party metered lane
+ *   means "first-party models only".
  *
  * Ties break on the file's own `primary` preference order, then declaration
  * order — the deployment's reviewed statement of who it would rather pay,
@@ -117,7 +117,8 @@ export const RANKING_PASS_USAGE: TurnTokenUsage = {
 
 /**
  * The tier a lane's rate is read at when the pass resolves none — a deployment
- * pinning a raw model id (`AGENT_MODEL=claude-opus-4-8`), which names no tier.
+ * pinning a raw model id (`AGENT_MODEL=<a provider's model id>`), which names
+ * no tier.
  *
  * `standard` because a lane's own middle answer is the closest thing to "what
  * does this lane cost?" asked of the lane rather than of the pass, and because
@@ -171,7 +172,7 @@ export function laneCostRank(
 /**
  * The capability proxy a minimum lane is expressed in — what the *provider*
  * charges for what this lane runs, ignoring who pays it. A lane declaring no
- * prices is Anthropic-direct and ranks at the top; see the module note.
+ * prices is first-party and ranks at the top; see the module note.
  */
 export function laneCapabilityRank(
   lane: Pick<LaneDefinition, "prices">,

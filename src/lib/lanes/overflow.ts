@@ -270,8 +270,8 @@ function pinnedClause(selection: LaneSelection): string | null {
     : `the fleet is pinned to ${selection.pinnedLaneId} (Settings ▸ Execution lane)`;
 }
 
-/** "codex-subscription and openai-api run codex, which cannot invoke a skill"
- * — one clause per harness, since the fact is the harness's. */
+/** "lane-a and lane-b run <harness>, which cannot invoke a skill" — one
+ * clause per harness, since the fact is the harness's. */
 function describeCannotInvokeSkills(lanes: readonly LaneCandidate[]): string {
   const byAdapter = new Map<string, string[]>();
   for (const lane of lanes) {
@@ -359,8 +359,8 @@ function atClockTime(at: Date | null): string | null {
   return `${pad(at.getHours())}:${pad(at.getMinutes())}`;
 }
 
-/** "The Claude subscription window is exhausted (resets 14:05)" — the sentence
- * every crossing message opens with, so the human reads the cause before the
+/** "The <lane label> window is exhausted (resets 14:05)" — the sentence every
+ * crossing message opens with, so the human reads the cause before the
  * consequence. */
 function wallSentence(
   primary: CrossingLane,
