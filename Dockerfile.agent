@@ -48,11 +48,53 @@ RUN npm install -g @anthropic-ai/claude-code
 RUN mkdir -p /workspace && chown node:node /workspace
 
 # Image-owned Claude directory. Nothing is mounted over it now (#28), so
-# anything installed here (e.g. plugins) survives at runtime. Pre-accept the
-# permissions bypass for headless operation.
+# anything installed here (the skill links below) survives at runtime.
+# Pre-accept the permissions bypass for headless operation.
 RUN mkdir -p /home/node/.claude && chown -R node:node /home/node/.claude
 RUN echo '{"bypassPermissionsModeAccepted": true}' > /home/node/.claude.json && chown node:node /home/node/.claude.json
 
 USER node
+
+# The estate's generation and workflow skills — Matt Pocock's `mattpocock/skills`
+# — installed at image build through the open Agent Skills standard (issue
+# #215). This replaces the `claude plugin install` that ran at every container
+# setup (issue #60): that was Claude-only by construction, cost ~9s of
+# wall-clock on every start, and, being unpinned, let an upstream release
+# change a pass mid-day. The installer writes the canonical skill folders to
+# `~/.agents/skills/<name>/SKILL.md` — the standard location Codex and OpenCode
+# read natively — and links `~/.claude/skills/<name>` to them for Claude Code.
+# All three agents are targeted so the canonical folders exist at all: given a
+# single target the installer copies straight into that agent's directory.
+# The `/tree/<tag>` URL is how the ref is pinned (the `add` command has no ref
+# flag; the bare `mattpocock/skills` source installs `main`), and the lock file
+# then records the ref per skill, which the assertion below checks.
+#
+# SKILLS_REF is the one statement of the pinned ref: this RUN installs it, the
+# LABEL stamps it on the image — the orchestrator lifts it from there into the
+# run ledger's skills-version column and the task feed's system note — and the
+# image builder's Dockerfile hash covers it, so bumping it here rebuilds the
+# image. Runs as `node`, after USER above, so global scope is /home/node.
+ARG SKILLS_REF=v1.2.3
+ARG SKILLS_INSTALLER_VERSION=1.5.23
+# Every skill a pass or a session can name must resolve in the image (the
+# estate's capability-contract rule): a skill installed this way is a plain
+# skill, not a namespaced plugin, so `/grill-me` and a `workflow:tdd` label
+# resolve by these exact names or not at all. The list is the schema's session
+# skills (SESSION_SKILLS, src/db/schema.ts) plus every vendored workflow under
+# docs/agents/workflows/ by file stem; image-builder.test.ts pins it to both,
+# so a skill added to either without being listed here fails the test, and a
+# listed skill missing from the installed set fails the build.
+ARG REQUIRED_SKILLS="grill-me grill-with-docs triage to-spec to-tickets wayfinder tdd"
+RUN npx -y "skills@${SKILLS_INSTALLER_VERSION}" add "https://github.com/mattpocock/skills/tree/${SKILLS_REF}" -g -y -s '*' -a claude-code -a codex -a opencode \
+    && for skill in ${REQUIRED_SKILLS}; do \
+         test -f "/home/node/.agents/skills/${skill}/SKILL.md" \
+           || { echo "ERROR: skill '${skill}' is missing from the installed set" >&2; exit 1; }; \
+         test -f "/home/node/.claude/skills/${skill}/SKILL.md" \
+           || { echo "ERROR: skill '${skill}' has no Claude Code link" >&2; exit 1; }; \
+         test "$(jq -r --arg s "${skill}" '.skills[$s].ref // empty' /home/node/.agents/.skill-lock.json)" = "${SKILLS_REF}" \
+           || { echo "ERROR: skill '${skill}' is not pinned to ${SKILLS_REF}" >&2; exit 1; }; \
+       done \
+    && rm -rf /home/node/.npm/_npx
+LABEL co.interlude.agent-skills-ref=${SKILLS_REF}
 
 WORKDIR /workspace

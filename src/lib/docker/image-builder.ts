@@ -16,6 +16,15 @@ const DOCKERFILE = "Dockerfile.agent";
 // #71) silently never reach running agents (issue #78).
 const DOCKERFILE_HASH_LABEL = "co.interlude.agent-dockerfile-sha256";
 
+// The ref of the estate's skills (`mattpocock/skills`) pinned into the image at
+// build (issue #215). Stamped by the Dockerfile's own LABEL from its SKILLS_REF
+// build arg — one statement of the ref, so a manual `docker build` stamps it
+// too — and lifted from the image by `imageSkillsRef` into the run ledger's
+// skills-version column and the task feed. The pass reports nothing: before
+// this the setup script installed the skills and echoed the resolved version
+// behind a marker, and a lost marker left the trail blank.
+export const SKILLS_REF_LABEL = "co.interlude.agent-skills-ref";
+
 export function getImageName(): string {
   return `${IMAGE_NAME}:${IMAGE_TAG}`;
 }
@@ -47,6 +56,18 @@ async function builtDockerfileHash(): Promise<string | null> {
 
 export async function imageExists(): Promise<boolean> {
   return (await inspectImage()) !== null;
+}
+
+/**
+ * The skills ref stamped on `interlude-agent:latest` (issue #215), or null when
+ * the image is absent or unstamped — built from a Dockerfile older than the
+ * label, which `ensureImage` rebuilds on its next call because the hash differs
+ * too. Read right after `ensureImage`, at container creation, so it describes
+ * the image the container is created from.
+ */
+export async function imageSkillsRef(): Promise<string | null> {
+  const info = await inspectImage();
+  return info?.Config?.Labels?.[SKILLS_REF_LABEL] ?? null;
 }
 
 export async function buildImage(
