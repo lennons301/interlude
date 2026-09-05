@@ -51,6 +51,10 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
           id: money.lane.id,
           label: money.lane.label,
           billing: money.lane.billing,
+          adapter: money.lane.adapter,
+          // The harness's declared capability (issue #219), off the parsed
+          // lane — what tells the tile "cannot report" from "not yet".
+          quotaTelemetry: money.lane.capabilities.quotaTelemetry,
         };
 
   // Slots come from the boot-time derivation; if the Docker daemon is

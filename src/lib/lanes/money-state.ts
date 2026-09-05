@@ -23,7 +23,7 @@ import { getQuotaObservation } from "../quota/quota-store";
 import type { QuotaObservation } from "../quota/rate-limit-event";
 import type { FleetSettings } from "../settings";
 import { getLaneCatalog } from "./catalog";
-import type { LaneBilling } from "./lane-config";
+import { laneReportsQuota, type LaneBilling } from "./lane-config";
 import {
   effectiveBilling,
   overageIsThePayer,
@@ -69,7 +69,10 @@ export interface MoneyGuards {
    * The last quota observation from **that lane** (issue #167, per-lane since
    * #175), or null when no pass on it has reported one — which is the
    * permanent state of a metered lane, whose provider gives no quota
-   * telemetry at all.
+   * telemetry at all — and null, whatever its row holds, on a lane whose
+   * **harness** declares no quota telemetry (issue #219): such a lane cannot
+   * have produced an observation, so one under its id is nothing the fleet
+   * may act on.
    *
    * Read here rather than by each caller because *which* row to read depends
    * on the lane this function resolves: the guards need it to tell quota from
@@ -110,7 +113,11 @@ export function readMoneyGuards(
   // Keyed by the lane resolved just above, which is why this read lives here:
   // a quota row belongs to one lane (issue #175), so the lane whose window is
   // judged and the lane whose spend is capped can never be different lanes.
-  const quota = getQuotaObservation(lane?.id ?? null);
+  // And read only where the lane's harness can have written it (issue #219):
+  // the admission gate, the overage check and the dashboard's tile all take
+  // this value, so a lane on a harness that reports no quota reads as having
+  // none here, once, rather than at each of them.
+  const quota = laneReportsQuota(lane) ? getQuotaObservation(lane!.id) : null;
   const overage = overagePaysNow(quota, now);
   const billing =
     lane === null ? null : effectiveBilling(lane.billing, overage);

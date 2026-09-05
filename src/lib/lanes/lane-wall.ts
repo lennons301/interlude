@@ -18,7 +18,12 @@
 
 import { quotaObservationIsSpent } from "../quota/quota-gate";
 import { quotaSeverity, type QuotaObservation } from "../quota/rate-limit-event";
-import type { LaneBilling, LaneCaps } from "./lane-config";
+import {
+  laneReportsQuota,
+  type LaneBilling,
+  type LaneCaps,
+  type LaneCatalog,
+} from "./lane-config";
 
 /**
  * Just what the crossing and the ranking need to know about a lane: who it
@@ -110,6 +115,33 @@ export function laneIsWalled(
   // Paying for it is not being refused it: the pass runs on this very lane and
   // the only thing that changed is who is paying.
   return !overagePaysNow(observation, now);
+}
+
+/**
+ * Every lane's observation the fleet may act on (issue #219): the stored rows,
+ * kept only under lanes whose harness declares quota telemetry.
+ *
+ * The ranking judges every lane at once from a map of rows keyed by lane id,
+ * and a row under a lane whose harness cannot have written it — left behind
+ * when a deploy moved the id onto another adapter, or written by an adapter in
+ * breach of its own descriptor — would read as that lane's wall. Dropped here,
+ * such a lane reads as having reported nothing, which is #171's rule for a
+ * lane that cannot: admitted on spend, never held on somebody else's window.
+ * The single-lane read (`readMoneyGuards`) applies the same predicate, so the
+ * lane in force and the lanes ranked against it cannot disagree about it.
+ */
+export function actionableObservations(
+  catalog: LaneCatalog,
+  observations: Readonly<Record<string, QuotaObservation>>
+): Record<string, QuotaObservation> {
+  const kept: Record<string, QuotaObservation> = {};
+  for (const lane of catalog.lanes) {
+    const observation = observations[lane.id];
+    if (observation !== undefined && laneReportsQuota(lane)) {
+      kept[lane.id] = observation;
+    }
+  }
+  return kept;
 }
 
 /**
