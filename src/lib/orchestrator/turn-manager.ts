@@ -485,6 +485,13 @@ export async function startTask(taskId: string): Promise<void> {
       // after the fact, and interactive work — the only kind that crosses onto
       // a paid lane — has no run row to record it on.
       tier: passLane.tier ?? passModel,
+      // The harness beside both (issue #223): stamped here, from the lane this
+      // pass actually resolved, and never recovered from the lane id later —
+      // the lane file changes under a deployment, and the ledger's job is to
+      // say which vendor ran the work when it ran. A continuation queued after
+      // a lane move is stamped with its *own* adapter as it starts, so a run
+      // that crossed adapters is attributed pass by pass.
+      harness: passLane.adapter,
     });
     insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
 
@@ -522,6 +529,11 @@ export async function startTask(taskId: string): Promise<void> {
           startedAt: run.startedAt ?? new Date(),
           lane: passLane.id,
           laneBilling: pass.billing,
+          // The harness follows the lane onto the run (issue #223): rewritten
+          // by every implement-shaped pass, so the row names the harness that
+          // did the attempt's work last — the one an attempt burned, a
+          // verdict judged or a merge came from is attributed to.
+          harness: passLane.adapter,
           ...(isRepairPass ? {} : { model: passLane.tier ?? passModel }),
           effort: passEffort,
           // A resumed run stops waiting on a clock the moment its pass starts
@@ -1467,6 +1479,7 @@ export async function processQueuedMessages(
       lane: passLane.id,
       laneBilling: pass.billing,
       tier: passLane.tier ?? passLane.model,
+      harness: passLane.adapter,
     });
 
     // Find oldest undelivered user message
@@ -2934,6 +2947,7 @@ function updateTask(
     lane: string | null;
     laneBilling: "subscription" | "metered" | null;
     tier: string | null;
+    harness: string | null;
   }>
 ): void {
   // The one funnel every task-cost write goes through, which is why the

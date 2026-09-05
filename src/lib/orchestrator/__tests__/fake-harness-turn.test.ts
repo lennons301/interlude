@@ -8,6 +8,7 @@ import {
   fakeExecStream,
   fakeLaneCatalog,
   scriptedTurn,
+  FAKE_HARNESS_ID,
   FAKE_LANE_AUTH_VAR,
   FAKE_LANE_ID,
   type FakeHarness,
@@ -237,6 +238,10 @@ describe("a whole turn through the turn manager on the fake adapter (issue #214)
     expect(task().tier).toBe("heavy");
     expect(run().lane).toBe(FAKE_LANE_ID);
     expect(run().model).toBe("heavy");
+    // And the harness that ran it, stamped on both rows from the resolved lane
+    // (issue #223) — never recovered from the lane id later.
+    expect(task().harness).toBe(FAKE_HARNESS_ID);
+    expect(run().harness).toBe(FAKE_HARNESS_ID);
 
     // The adapter was asked for exactly one exec, with the pass's brief as
     // the prompt and the lane it resolved.

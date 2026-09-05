@@ -207,6 +207,7 @@ function seedRun(): void {
       model: "heavy",
       lane: "fake-lane",
       laneBilling: "subscription",
+      harness: FAKE_HARNESS_ID,
       resumeCount: 1,
       claimedAt: new Date(),
       startedAt: new Date(),
@@ -232,6 +233,7 @@ function seedPredecessor(laneId: string | null): string {
       sessionId: SESSION,
       lane: laneId,
       laneBilling: laneId === null ? null : "subscription",
+      harness: laneId === null ? null : FAKE_HARNESS_ID,
       createdAt: new Date(Date.now() - 60_000),
       updatedAt: new Date(Date.now() - 60_000),
     })
@@ -388,6 +390,12 @@ describe("a session crossing lanes on different adapters (issue #217)", () => {
     expect(docker.sessionIdsAtExec.find((t) => t.id === taskId)?.sessionId).toBeNull();
     expect(task(taskId).sessionId).toBe("other-session-9");
     expect(task(taskId).lane).toBe("other-lane");
+    // Attributed pass by pass (issue #223): the refused pass keeps the harness
+    // that ran it, the continuation is stamped with its own, and the run row
+    // names the one that did the work last.
+    expect(task(predecessor).harness).toBe(FAKE_HARNESS_ID);
+    expect(task(taskId).harness).toBe(FAKE_OTHER_HARNESS_ID);
+    expect(run().harness).toBe(FAKE_OTHER_HARNESS_ID);
     expect(run().status).toBe("implementing");
     expect(run().attempt).toBe(1);
     expect(run().pullRequestNumber).toBe(41);
@@ -418,6 +426,7 @@ describe("a session crossing lanes on different adapters (issue #217)", () => {
       `Restored the paused session (${SESSION}) — continuing the same conversation.`
     );
     expect(task(taskId).sessionId).toBe(SESSION);
+    expect(task(taskId).harness).toBe(FAKE_HARNESS_ID);
   });
 
   it("starts fresh when the lane the conversation came from is no longer declared", async () => {
