@@ -3,8 +3,10 @@ import path from "path";
 import { describe, expect, it } from "vitest";
 import { parseLaneConfig, laneIds, laneReportsQuota } from "../lane-config";
 import { LANE_CONFIG_FILE } from "../catalog";
+import { choosePrimaryLane, laneMissingEnv } from "../resolve";
 import {
   HARNESS_ADAPTER_DESCRIPTORS,
+  describeHarnessAdapter,
   type HarnessAdapterDescriptor,
 } from "@/lib/harness/descriptors";
 import { DESCRIPTORS_WITH_FAKE, fakeHarnessDescriptor } from "@/test/fake-harness";
@@ -252,11 +254,101 @@ describe("the shipped lanes.yaml", () => {
     expect(subscription.label).toBe("Claude subscription (Pro)");
   });
 
-  it("runs every lane on the one adapter that ships", () => {
-    expect(catalog.lanes.map((lane) => lane.adapter)).toEqual(
-      catalog.lanes.map(() => "claude-code")
-    );
+  it("runs every lane on one of the two adapters that ship, and names both", () => {
+    // The Claude lanes all run Claude Code; the Codex lanes (issue #221) run
+    // the second adapter. Every adapter a lane names is a described one — the
+    // parser refused the file otherwise — and both that ship are in use.
+    const adapters = new Set(catalog.lanes.map((lane) => lane.adapter));
+    expect([...adapters].sort()).toEqual(["claude-code", "codex"]);
+    for (const lane of catalog.lanes) {
+      expect(lane.capabilities).toEqual(describeHarnessAdapter(lane.adapter)!.capabilities);
+    }
     expect(laneIds(catalog).length).toBeGreaterThan(1);
+  });
+
+  describe("the Codex lanes (issue #221)", () => {
+    const lane = (id: string) => catalog.lanes.find((l) => l.id === id)!;
+    const codex = describeHarnessAdapter("codex")!.capabilities;
+
+    it("declares one lane for the ChatGPT plan and one for the API, both on the codex adapter", () => {
+      const subscription = lane("codex-subscription");
+      expect(subscription.adapter).toBe("codex");
+      expect(subscription.billing).toBe("subscription");
+      // The documented CI credential is a seeded auth.json; the variable holds
+      // its contents and the adapter materialises it per exec.
+      expect(subscription.auth).toEqual([
+        { harnessVar: "CODEX_AUTH_JSON", fromEnv: "CODEX_AUTH_JSON" },
+      ]);
+      expect(subscription.baseUrl).toBeNull();
+      expect(subscription.prices).toBeNull();
+
+      const api = lane("openai-api");
+      expect(api.adapter).toBe("codex");
+      expect(api.billing).toBe("metered");
+      // The CLI reads CODEX_API_KEY (OPENAI_API_KEY alone sends no bearer);
+      // the secret is provisioned under its natural name.
+      expect(api.auth).toEqual([{ harnessVar: "CODEX_API_KEY", fromEnv: "OPENAI_API_KEY" }]);
+      expect(api.baseUrl).toBeNull();
+      expect(api.caps.dailyBudgetUsd).toBeGreaterThan(0);
+    });
+
+    it("carries the codex adapter's capabilities: no quota telemetry, no cost, resume, no skills yet", () => {
+      for (const id of ["codex-subscription", "openai-api"]) {
+        expect(lane(id).capabilities).toEqual(codex);
+      }
+      expect(codex).toEqual({
+        userInvokedSkills: false,
+        quotaTelemetry: false,
+        reportsCost: false,
+        sessionResume: true,
+      });
+      expect(laneReportsQuota(lane("codex-subscription"))).toBe(false);
+    });
+
+    it("prices every tier of the metered Codex lane, as a harness that reports no cost requires", () => {
+      const api = lane("openai-api");
+      expect(api.prices).not.toBeNull();
+      for (const tier of ["heavy", "standard", "light"] as const) {
+        expect(api.prices![tier].inputPerMTok).toBeGreaterThan(0);
+        expect(api.prices![tier].outputPerMTok).toBeGreaterThan(0);
+        expect(api.prices![tier].cacheReadPerMTok).toBeGreaterThan(0);
+        expect(api.prices![tier].cacheWritePerMTok).toBeGreaterThan(0);
+      }
+      // The rule, live on this file: strip the prices and the parser refuses it.
+      const unpriced = text.replace(/\n    prices:\n      heavy: \{ input: 4\.0[^\n]*\n[^\n]*\n[^\n]*\n/, "\n");
+      expect(unpriced).not.toBe(text);
+      const result = parseLaneConfig(unpriced);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toContain('"codex"');
+    });
+
+    it("maps both Codex lanes onto the same GPT-5 family, tier for tier", () => {
+      const subscription = lane("codex-subscription");
+      const api = lane("openai-api");
+      expect(api.models).toEqual(subscription.models);
+      for (const tier of ["heavy", "standard", "light"] as const) {
+        expect(subscription.models[tier]).toMatch(/^gpt-5/);
+      }
+    });
+
+    it("keeps both out of the default preference, so a deployment never defaults onto them", () => {
+      expect(catalog.preference).not.toContain("codex-subscription");
+      expect(catalog.preference).not.toContain("openai-api");
+    });
+
+    it("leaves both unavailable when their credentials are absent", () => {
+      expect(laneMissingEnv(lane("codex-subscription"), {})).toEqual(["CODEX_AUTH_JSON"]);
+      expect(laneMissingEnv(lane("openai-api"), {})).toEqual(["OPENAI_API_KEY"]);
+      // And the fleet's default primary is untouched by their presence in the
+      // file: the preference walk still lands on the Claude subscription.
+      const choice = choosePrimaryLane({
+        catalog,
+        override: null,
+        envLane: null,
+        env: { CLAUDE_CODE_OAUTH_TOKEN: "set" },
+      });
+      expect(choice).toMatchObject({ laneId: "claude-subscription", source: "preference" });
+    });
   });
 
   it("reproduces the pre-lane model mapping on the subscription lane", () => {
@@ -358,11 +450,12 @@ describe("parseLaneConfig — adapter capabilities (issue #219)", () => {
   it("refuses an adapter the table does not describe, naming every registered id", () => {
     // The whole vocabulary, so a typo is corrected from the reason rather than
     // from the source: with the fake described, both ids are listed.
-    const reason = refusal(VALID.replace("adapter: claude-code", "adapter: codex"));
+    const reason = refusal(VALID.replace("adapter: claude-code", "adapter: gemini"));
 
-    expect(reason).toContain('names adapter "codex"');
+    expect(reason).toContain('names adapter "gemini"');
     expect(reason).toContain("not a registered harness adapter");
     expect(reason).toContain("claude-code");
+    expect(reason).toContain("codex");
     expect(reason).toContain("silent");
     expect(reason).toContain("fake");
   });
