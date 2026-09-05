@@ -140,7 +140,9 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
   each with a link where one applies.
 - **running** — each active run's ticket, attempt (n/3), turn, spend vs budget,
   and phase (implement ▸ review ▸ merge). A run the account's quota refused sits
-  here too, labelled **paused** with when its window resets (issue #168) — it is
+  here too, labelled **paused** with when its window resets (issue #168) — or,
+  when the provider named no reset, when its one-hour default backoff elapses
+  (issue #220); the issue comment says which — it is
   deliberately *not* in **needs you**, because a quota window asks nothing of you:
   the sweep resumes it by itself once the clock runs out (issue #169), or earlier
   on another lane the moment one can serve it (issue #199) — confirming the day's
@@ -381,10 +383,15 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
     counts against the same **resume bound** as a resume, so a run walks its
     lanes and then waits rather than thrashing.
   Either way the attempt and interruption counters stay where they were. An
-  **account-wide** rejection whose event carried *no* reset time cannot pause —
-  there is no clock to wait on — so it either moves lanes or takes its ordinary
-  path and spends the attempt, as before. A tier-scoped one still steps down;
-  a degrade waits on no clock either.
+  **account-wide** rejection that carried *no* reset time — every refusal from
+  a harness with no rate-limit event, and some Claude ones — still steps down
+  or moves lanes first, and with nowhere to go parks on the **default backoff**
+  (issue #220, `DEFAULT_REFUSAL_BACKOFF_MS`, **1 hour**) rather than spending
+  the attempt as it used to. The issue comment says the provider named no
+  reset and the run is waiting the backoff; the run resumes on its own lane
+  when it elapses, a wall that still stands parks it again, and the resume
+  bound below hands the ticket to a human with its attempts intact. A
+  tier-scoped one still steps down; a degrade waits on no clock either.
   An **interactive** session on either kind of wall does not pause or step down
   — it crosses onto a paid lane instead, because you are sitting there waiting;
   see *When the subscription window walls* below.
@@ -448,6 +455,34 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
       straight to a human). Past the bound the ticket is labelled
       `ready-for-human` — and because the pauses spent no attempts, re-arming it
       once there is quota picks the work back up with the attempts it never used.
+- **A refused credential is a lane failure, not a wall** (issue #220). A pass
+  whose provider rejected the lane's credential (a 401/403 on Claude Code, the
+  equivalent on any other harness) never reached the model, so it spends no
+  attempt and is **not retried on that lane** — no step down, no pause, no lane
+  move, because routing around a misconfiguration by spending at another
+  provider is what an unavailable lane never gets. An implement pass ends the
+  way a lane missing its variables ends at pass start: the run goes
+  `interrupted` with `failureReason` naming the lane and the orchestrator
+  variables to rotate, and the sweep re-claims the ticket (bounded by
+  `MAX_INTERRUPTIONS_PER_TICKET`), resolving its lane afresh — so fixing the
+  credential is all it needs, and a credential left broken lands the ticket on
+  `ready-for-human` with its attempts intact. A repair pass simply ends; the PR
+  escalates to you on the repair bound as an unfinished repair does. The issue
+  comment and the pass's feed both name the lane and the variables.
+- **Every turn has a wall-clock ceiling** (issue #220): **3 hours** per exec by
+  default (`DEFAULT_TURN_WALL_CLOCK_MS`; `TURN_WALL_CLOCK_MINUTES` to change it),
+  enforced by the orchestrator around the exec on every harness — a second bound
+  beside Claude Code's `--max-turns`/`--max-budget-usd`, and the only in-turn
+  bound on a harness with no such flags. Past it the turn's own processes are
+  stopped (TERM, then KILL after 10s) and the turn ends as a **turn limit**: an
+  implement attempt fails with "turn limit reached" exactly as it does at the
+  CLI's turn ceiling, a review or triage pass reads as unparseable and takes its
+  usual retry-then-human path, an interactive turn just ends. The pass's feed
+  says the ceiling ended it, so a "turn limit reached" from the ceiling can be
+  told from one the harness counted itself. This is also what bounds a harness
+  process hung on a suspended host, which used to hold its slot until the next
+  deploy. Generous on purpose: an over-long turn costs an attempt, so raise it
+  before lowering it.
 - **$500/day** estate-wide autonomous cap pauses pickup (announced once, shown on
   the dashboard, resets at local midnight). Interactive work is exempt by
   construction (it has no run).
@@ -733,6 +768,7 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 | `QUOTA_PICKUP_THRESHOLD_PERCENT` | Quota utilization at or above which no new ticket is claimed (issue #171). One of 50/70/80/85/90/95/100; default 90. The fall-through for Settings → Quota when that row is left on `environment`. |
 | `UNDELIVERED_ANSWER_MINUTES` | How long an answer you gave may sit undelivered before the fleet says so (issue #136). Default 10 — delivery is one 2s poll away, so this cannot fire on a healthy resume. It catches a parked session that is not resuming (memory admission deferring it repeatedly), which from your side looks exactly like an agent still thinking. |
 | `OCCUPANCY_DIVERGED_MINUTES` | How long occupancy may go uncorroborated by real agent containers before it reads as a phantom slot (issue #152). Default 20 — far longer than the pickup debounce because a task provisioning its container is legitimately uncorroborated until the container exists, and a cold agent-image build happens inside that window. The card's remedy is a restart, so a false positive is expensive. |
+| `TURN_WALL_CLOCK_MINUTES` | The most wall-clock time one agent exec may run before the orchestrator stops it and ends the turn as a turn limit (issue #220). Default 180. Adapter-agnostic — the only in-turn bound on a harness with no turn or budget flag, and a second bound beside Claude Code's. An implement attempt that hits it fails as a turn-limited one does, so set it generously. |
 
 ### Labels
 
