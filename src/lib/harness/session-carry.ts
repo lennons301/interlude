@@ -9,9 +9,9 @@
  * harness's own artefacts back into a fresh container and asking the harness
  * to resume by id, and that is only meaningful when the harness on both ends
  * is the same one: the artefacts are one adapter's format, and the id names a
- * conversation only that harness has heard of. Every lane declared today runs
- * the one Claude Code adapter, which is why every move has been lossless so
- * far; this is what makes it *stay* true once a lane names a different one.
+ * conversation only that harness has heard of. The Claude lanes all run the
+ * one Claude Code adapter, which is why every move between them is lossless;
+ * the Codex lanes (#221) run a second, and this is what keeps that true.
  *
  * The decision is made where both ends are known — as the pass starts, with
  * the lane it is starting on resolved — rather than when the continuation was

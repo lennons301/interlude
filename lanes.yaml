@@ -267,10 +267,14 @@ lanes:
     # `codex login` writes). The orchestrator variable holds that file's
     # contents; the adapter's turn script writes them into a Codex home created
     # for the one exec and removes it when the turn ends, so the file never
-    # persists in a container. The CLI (0.153.4) also reads a ChatGPT-backed
-    # personal access token from `CODEX_ACCESS_TOKEN`; should #224 prefer that
-    # path, this mapping becomes `CODEX_ACCESS_TOKEN: CODEX_ACCESS_TOKEN` — a
-    # plain pass-through, no code change.
+    # persists in a container. Known risk for #224 to settle: the CLI refreshes
+    # a ChatGPT token and rewrites auth.json in place, and the fleet deletes
+    # that file with the exec home and re-seeds the original each turn, so a
+    # rotated refresh token may stop working after the first refresh. The CLI
+    # (0.153.4) also reads a ChatGPT-backed personal access token from
+    # `CODEX_ACCESS_TOKEN`; should #224 prefer that path, this mapping becomes
+    # `CODEX_ACCESS_TOKEN: CODEX_ACCESS_TOKEN` — a plain pass-through, no code
+    # change.
     auth:
       CODEX_AUTH_JSON: CODEX_AUTH_JSON
     # No base_url: the CLI's built-in OpenAI provider, the only one a ChatGPT

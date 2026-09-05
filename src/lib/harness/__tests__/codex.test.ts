@@ -255,6 +255,13 @@ describe("buildCodexTurnCommand", () => {
       expect(cmd).toContain("export CODEX_HOME");
     });
 
+    it("sweeps any home a killed turn left behind before making its own", () => {
+      // A turn killed outright (an OOM, a `docker kill` of the exec) ran no
+      // trap; its credential file must not outlive the next turn's start.
+      expect(cmd).toContain("rm -rf -- /home/node/.codex-exec.*");
+      expect(cmd.indexOf("rm -rf -- /home/node/.codex-exec.*")).toBeLessThan(cmd.indexOf("mktemp -d"));
+    });
+
     it("materialises the ChatGPT credential file from the environment, owner-only", () => {
       expect(cmd).toContain(
         `if [ -n "\${${CODEX_AUTH_JSON_ENV}:-}" ]; then (umask 077 && printf '%s' "$${CODEX_AUTH_JSON_ENV}" > "$CODEX_HOME/auth.json"); fi`

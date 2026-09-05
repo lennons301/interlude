@@ -96,3 +96,16 @@ export function describeHarnessAdapter(
 ): HarnessAdapterDescriptor | null {
   return descriptors.find((d) => d.id === id) ?? null;
 }
+
+/**
+ * The descriptor a shipped adapter reads its capabilities from at load, so the
+ * adapter cannot disagree with what the lane parser was told about it. Throws
+ * rather than defaulting: unreachable while the table names the adapter, and a
+ * throw at load rather than a silent default is what "cannot be registered
+ * without a descriptor" means at runtime, ahead of the test that pins it.
+ */
+export function requireHarnessDescriptor(id: string): HarnessAdapterDescriptor {
+  const descriptor = describeHarnessAdapter(id);
+  if (descriptor === null) throw new Error(`harness adapter "${id}" has no descriptor`);
+  return descriptor;
+}

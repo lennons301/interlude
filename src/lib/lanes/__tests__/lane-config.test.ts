@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { describe, expect, it } from "vitest";
 import { parseLaneConfig, laneIds, laneReportsQuota } from "../lane-config";
 import { LANE_CONFIG_FILE } from "../catalog";
@@ -315,9 +316,11 @@ describe("the shipped lanes.yaml", () => {
         expect(api.prices![tier].cacheWritePerMTok).toBeGreaterThan(0);
       }
       // The rule, live on this file: strip the prices and the parser refuses it.
-      const unpriced = text.replace(/\n    prices:\n      heavy: \{ input: 4\.0[^\n]*\n[^\n]*\n[^\n]*\n/, "\n");
-      expect(unpriced).not.toBe(text);
-      const result = parseLaneConfig(unpriced);
+      const doc = parseYaml(text) as { lanes: Array<{ id: string; prices?: unknown }> };
+      const openai = doc.lanes.find((l) => l.id === "openai-api")!;
+      expect(openai.prices).toBeDefined();
+      delete openai.prices;
+      const result = parseLaneConfig(stringifyYaml(doc));
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.reason).toContain('"codex"');
     });

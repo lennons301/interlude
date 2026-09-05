@@ -470,7 +470,14 @@ export function createOutputHandler(
       systemNote(line);
       return;
     }
-    if (isRecord(event)) handleEvent(event);
+    if (!isRecord(event)) return;
+    try {
+      handleEvent(event);
+    } catch (err) {
+      // Total on the hot path, as the Claude Code parser is: a feed write that
+      // failed loses one row, never the turn's remaining stream.
+      console.error(`[codex] Failed to handle a stream event for task ${taskId}:`, err);
+    }
   };
 
   return {

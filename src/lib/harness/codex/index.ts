@@ -20,10 +20,13 @@
  * CI path — a seeded `auth.json` in the Codex home — so the turn script points
  * `CODEX_HOME` at a directory it creates for this one exec, writes
  * `auth.json` there from the `CODEX_AUTH_JSON` variable (mode 0600), and
- * removes the whole directory when the turn ends, on every exit path (an EXIT
- * trap): nothing persists in the container between turns, and a parked or idle
- * container holds no credential file. Reading the file back out of a running
- * turn's exec is the one window, as it is for a Claude turn's environment.
+ * removes the whole directory when the turn ends, on every exit path bash sees
+ * (an EXIT trap, armed before the write). A turn killed outright — an OOM, a
+ * `docker kill` of the exec — runs no trap, so the script also sweeps any such
+ * home left by an earlier turn before it starts: nothing persists in the
+ * container past the next turn, and a parked or idle container holds no
+ * credential file. Reading the file back out of a running turn's exec is the
+ * one window, as it is for a Claude turn's environment.
  *
  * **Sessions outlive the per-exec home.** The CLI keeps a thread's replayable
  * state as one rollout file under `$CODEX_HOME/sessions/<y>/<m>/<d>/rollout-
@@ -66,7 +69,7 @@ import type {
   HarnessCommandInput,
   HarnessExecEnvInput,
 } from "../adapter";
-import { describeHarnessAdapter } from "../descriptors";
+import { requireHarnessDescriptor } from "../descriptors";
 import { CODEX_IMAGE } from "./image";
 import { createOutputHandler } from "./stream-parser";
 
@@ -106,6 +109,9 @@ export const CODEX_ROLLOUT_TIMESTAMP = "2000-01-01T00-00-00";
 /** `mktemp -d` template for the per-exec home: under the agent's home, not
  * `/tmp`, because the CLI refuses helper binaries under a temporary dir. */
 export const CODEX_EXEC_HOME_TEMPLATE = "/home/node/.codex-exec.XXXXXX";
+
+/** Every per-exec home, for the sweep of any a killed turn left behind. */
+export const CODEX_EXEC_HOME_GLOB = "/home/node/.codex-exec.*";
 
 /**
  * Fleet effort level -> Codex `model_reasoning_effort`. The fleet's five levels
@@ -203,6 +209,9 @@ export function buildCodexTurnCommand(input: HarnessCommandInput): string {
   return [
     "set -o pipefail",
     `cd ${AGENT_WORKDIR} || exit 1`,
+    // A turn killed outright ran no trap; its home — and its credential file —
+    // goes now, before this turn's is made.
+    `rm -rf -- ${CODEX_EXEC_HOME_GLOB}`,
     `mkdir -p ${CODEX_ROLLOUT_DIR}`,
     `CODEX_HOME="$(mktemp -d ${CODEX_EXEC_HOME_TEMPLATE})" || exit 1`,
     "export CODEX_HOME",
@@ -256,13 +265,7 @@ export function codexSessionArtifactPaths(sessionId: string): string[] {
   return [codexRolloutPath(sessionId)];
 }
 
-const descriptor = describeHarnessAdapter(CODEX_ADAPTER_ID);
-if (descriptor === null) {
-  // Unreachable while the table names this adapter; a throw at load rather
-  // than a silent default is what "cannot be registered without a descriptor"
-  // means at runtime, ahead of the test that pins it.
-  throw new Error(`harness adapter "${CODEX_ADAPTER_ID}" has no descriptor`);
-}
+const descriptor = requireHarnessDescriptor(CODEX_ADAPTER_ID);
 
 export const codexAdapter: HarnessAdapter = {
   id: CODEX_ADAPTER_ID,
