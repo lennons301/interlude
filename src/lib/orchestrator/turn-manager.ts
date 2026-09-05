@@ -21,11 +21,12 @@ import { checkMemoryAdmission } from "./capacity";
 import { raceWithTimeout, runBoundedProbe, TIMED_OUT } from "../timeout";
 import {
   quotaRefusalOf,
+  refusedCredential,
   type TurnOutcome,
   type TurnResult,
 } from "../harness/turn-result";
 import { getStreamRecorder } from "./stream-recorder";
-import { parseReviewVerdict } from "./autonomy/verdict";
+import { parseReviewVerdict, type ReviewVerdictResult } from "./autonomy/verdict";
 import { parseTriageExit } from "./autonomy/triage";
 import { passProducedResult, type PassTurn } from "./autonomy/pass-output";
 import { cancelOrphanedRunTasks } from "./autonomy/review-tasks";
@@ -45,7 +46,7 @@ import { getFleetSettings, getSettingsOverrides } from "../settings";
 import { resolveResumeBound } from "../settings-resolver";
 import { getLaneCatalog } from "../lanes/catalog";
 import { bookTaskCost } from "./spend";
-import { resolveLane, type ResolvedLane } from "../lanes/resolve";
+import { laneUnavailableReason, resolveLane, type ResolvedLane } from "../lanes/resolve";
 import { readLaneCrossing, readLaneFailover } from "../lanes/overflow-state";
 import { describeLaneCost } from "../lanes/lane-rate";
 import { payerChanged, type LaneCrossing } from "../lanes/overflow";
@@ -1312,8 +1313,9 @@ async function runTurn(
   // bound on a turn, adapter-agnostic, so a harness with no turn or budget
   // flag — or a process hung on a suspended host — cannot hold its slot for
   // as long as the box stays up. The Claude lane keeps its flags; this is a
-  // second bound, not a replacement. Read per turn, so the environment's
-  // override takes effect on the next exec rather than the next boot.
+  // second bound, not a replacement. Env config, fixed at boot like every
+  // other `getConfig()` field: a change to TURN_WALL_CLOCK_MINUTES needs a
+  // restart, as the watchdog thresholds beside it do.
   const ceilingMs = getConfig().turnWallClockMs;
 
   const startedAtMs = Date.now();
@@ -1969,7 +1971,12 @@ async function failImplementAttempt(
 async function interruptImplementPass(
   taskId: string,
   runId: string,
-  reason: string
+  reason: string,
+  /** Why this costs the ticket nothing and what happens next — the sentence
+   * after the reason on the issue. The container death's by default; a
+   * refused credential (issue #220) states its own. */
+  consequence: string = "Container deaths don't consume an attempt — the sweep " +
+    "re-claims this ticket (bounded)."
 ): Promise<void> {
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
   const run = db.select().from(runs).where(eq(runs.id, runId)).get();
@@ -1986,8 +1993,7 @@ async function interruptImplementPass(
     commentOnIssue(
       task.githubIssue,
       `Run interrupted (attempt ${run?.attempt ?? "?"}): ${reason}. ` +
-        `Container deaths don't consume an attempt — the sweep re-claims this ` +
-        `ticket (bounded). Work so far is pushed to \`${task.branch}\`.`
+        `${consequence} Work so far is pushed to \`${task.branch}\`.`
     ).catch(console.error);
   }
 
@@ -2005,7 +2011,23 @@ async function finishReviewPass(
   runId: string | null,
   turn: PassTurn
 ): Promise<void> {
-  const verdict = parseReviewVerdict(turn);
+  const parsed = parseReviewVerdict(turn);
+  // A review whose credential the lane's provider refused (issue #220) is a
+  // lane failure, not a format slip. The parser has already marked it
+  // non-retryable, so the sweep fails it closed to a human rather than
+  // spending the format-retry on the same lane; what is added here is the
+  // report — the lane and the variables to rotate — which only this seam,
+  // holding the task row, can name.
+  const verdict: ReviewVerdictResult =
+    parsed.kind === "unparseable" && refusedCredential(turn.outcome)
+      ? {
+          ...parsed,
+          reason: describeRefusedCredential(
+            db.select({ lane: tasks.lane }).from(tasks).where(eq(tasks.id, taskId)).get()
+              ?.lane ?? null
+          ),
+        }
+      : parsed;
 
   // An unparseable verdict from a turn the harness never reported an end for
   // is an infra death (issue #97): the container exited mid-review (OOM / docker
@@ -2701,13 +2723,13 @@ async function pauseRunOnRateLimit(
   // countdown lives.
   const resumes = pause.resumeAfter.toUTCString();
   // Which clock that is (issue #220): the window's own reset, or the fleet's
-  // default backoff because the harness named none. Said in both places a
-  // human reads, so a countdown is never mistaken for a reset time the
-  // provider never gave.
+  // default backoff because the harness named none. Said on the issue and the
+  // feed, so a countdown is never mistaken for a reset time the provider never
+  // gave; the dashboard's card and the digest read only the clock itself.
   const backoff = pause.clock === "default-backoff";
   const clockSentence = backoff
     ? `The provider named no reset time, so the run waits the default backoff ` +
-      `(${Math.round(DEFAULT_REFUSAL_BACKOFF_MS / 60_000)} minutes) and resumes at ${resumes}`
+      `(${Math.round(DEFAULT_REFUSAL_BACKOFF_MS / 60_000)} minutes), until ${resumes}`
     : `The window resets at ${resumes}`;
 
   console.log(
@@ -2753,6 +2775,32 @@ async function pauseRunOnRateLimit(
 }
 
 /**
+ * The one sentence for a refused credential (issue #220), in the resolver's
+ * own "unavailable" wording so `runs.failureReason` and a stored review
+ * verdict read as the same fact a lane missing its variables would: the lane,
+ * and the orchestrator variables its `auth` maps the harness's onto — those
+ * are what an operator rotates. A lane the file no longer declares is named
+ * by id alone.
+ */
+function describeRefusedCredential(laneId: string | null): string {
+  const catalog = getLaneCatalog();
+  const lane = catalog.ok ? findLane(catalog.catalog, laneId) : null;
+  const credentials = lane?.auth.map((ref) => `\`${ref.fromEnv}\``) ?? [];
+  const note = credentials.length > 0 ? ` (${credentials.join(", ")})` : "";
+  return laneUnavailableReason(
+    laneId ?? "its lane",
+    `the provider refused its credential${note} — not retried on that lane`
+  );
+}
+
+/** What a refused credential costs the ticket, and what happens next — the
+ * interruption comment's second sentence for this cause. */
+const REFUSED_CREDENTIAL_CONSEQUENCE =
+  "A refused credential consumes no attempt — the sweep re-claims this ticket " +
+  "(bounded by the interruption limit) and the next pass resolves its lane " +
+  "afresh, so fixing or rotating the credential is all it needs.";
+
+/**
  * End a pass whose credential the lane's provider refused (issue #220).
  *
  * Not a wall and not the work's: the pass never reached the model, so nothing
@@ -2761,90 +2809,68 @@ async function pauseRunOnRateLimit(
  * failure #172 reports before a pass starts when a lane's variables are unset,
  * and it ends the way that one does, by pass kind:
  *
- *  - an **implement** pass goes to the bounded interruption path (#97): the
- *    run is `interrupted` naming the lane, no attempt is spent, and the sweep
- *    re-claims the ticket — a fresh run that resolves its lane afresh, so a
- *    credential rotated in the meantime is picked up without anyone re-arming,
- *    and a credential still broken exhausts the interruption bound to a human
- *    rather than looping. The run itself never retries the lane: its pass is
- *    over, and the ticket's next run is the sweep's, not this run's;
+ *  - an **implement** pass takes the bounded interruption path (#97), through
+ *    `interruptImplementPass` itself: the run is `interrupted` with the lane
+ *    marked unavailable in its `failureReason`, no attempt is spent, and the
+ *    sweep re-claims the ticket — a fresh run that resolves its lane afresh,
+ *    so a credential rotated in the meantime is picked up without anyone
+ *    re-arming, and one still broken exhausts the interruption bound to a
+ *    human rather than looping. The run itself never retries the lane: its
+ *    pass is over, and the ticket's next run is the sweep's, not this run's;
  *  - a **repair** pass simply ends. It is never an attempt (#54), and its run
  *    keeps its PR: the sweep re-evaluates the run's gates on the settled pass
  *    and, finding the conflict or the red rollup still standing with the one
  *    repair spent, escalates it to a human — exactly what a repair that ran
  *    and did not clear it does.
  *
- * The lane is *marked unavailable for the run* in the only durable place a
- * finished run has for it — `runs.failureReason`, in the resolver's own
- * "unavailable" wording — and the credential is named by the orchestrator
- * variables the lane maps its harness's onto, since those are what an operator
- * rotates. The lane's own availability is not touched: the next pass to
- * resolve it re-checks the variables, which is also how a fix reaches the
- * fleet with no restart.
+ * (A **review** pass refused the same way never reaches here — it has no
+ * park-or-proceed decision — and is handled at `finishReviewPass`: its verdict
+ * is stored non-retryable, naming the lane, and fails closed to a human.)
  *
- * Ordering as `failImplementAttempt`'s: the container handle is taken before
- * the task's status goes terminal (#159), and the teardown is removal (#93).
+ * The lane's own availability is not touched: the next pass to resolve it
+ * re-checks the variables, which is also how a fix reaches the fleet with no
+ * restart. Ordering as `failImplementAttempt`'s for the repair ending: the
+ * container handle is taken before the task's status goes terminal (#159),
+ * and the teardown is removal (#93).
  */
 async function endPassOnRefusedCredential(
   end: Extract<Action, { type: "endPassOnRefusedCredential" }>,
   task: typeof tasks.$inferSelect
 ): Promise<void> {
+  const reason = describeRefusedCredential(end.laneId);
+
+  if (task.kind === "implement") {
+    console.log(
+      `[autonomy] Run ${end.runId} (${task.githubIssue ?? "?"}) — ${reason}; ` +
+        "run interrupted, no attempt consumed"
+    );
+    await interruptImplementPass(end.taskId, end.runId, reason, REFUSED_CREDENTIAL_CONSEQUENCE);
+    return;
+  }
+
   const run = db.select().from(runs).where(eq(runs.id, end.runId)).get();
-  const catalog = getLaneCatalog();
-  const lane = catalog.ok ? findLane(catalog.catalog, end.laneId) : null;
-  const laneName = end.laneId ?? "its lane";
-  const credentials = lane?.auth.map((ref) => ref.fromEnv) ?? [];
-  const credentialNote =
-    credentials.length > 0 ? ` (${credentials.map((v) => `\`${v}\``).join(", ")})` : "";
-  const reason =
-    `execution lane "${laneName}" is unavailable: the provider refused its ` +
-    `credential${credentialNote} — not retried on that lane`;
-  const isAttempt = task.kind === "implement";
-
   console.log(
-    `[autonomy] Run ${end.runId} (${run?.githubIssue ?? "?"}) — ${reason}` +
-      (isAttempt ? "; run interrupted, no attempt consumed" : "; repair pass ended")
+    `[autonomy] Run ${end.runId} (${run?.githubIssue ?? "?"}) — ${reason}; repair pass ended`
   );
-
-  // The handle before the terminal write (#159), as every ending here does.
   const container = activeTasks.get(end.taskId)?.container ?? null;
-
   insertSystemMessage(
     end.taskId,
-    `Lane unavailable — the provider refused this pass's credential on ` +
-      `${laneName}${credentialNote}. The pass is not retried on that lane` +
-      (isAttempt
-        ? "; the run is interrupted (no attempt consumed) and the sweep re-claims " +
-          "the ticket, resolving its lane afresh. Fix or rotate the credential."
-        : "; the repair ends here and the sweep escalates the PR if it still " +
-          "needs one. Fix or rotate the credential.")
+    `Repair pass ended: ${reason}. The sweep escalates the PR to a human if it ` +
+      "still needs repair."
   );
   updateTask(end.taskId, { status: "failed", containerStatus: null });
   syncRunCost(end.runId);
-  if (isAttempt) interruptRun(end.runId, reason);
-
   if (task.githubIssue) {
     // Fire-and-forget, as the interruption path's comment is: one call site
     // awaits this from inside startTask's try, and a rejected comment must not
     // throw back into the catch and re-run the whole ending.
     commentOnIssue(
       task.githubIssue,
-      (isAttempt
-        ? `Run interrupted (attempt ${run?.attempt ?? "?"}): `
-        : `Repair pass ended (attempt ${run?.attempt ?? "?"}): `) +
-        `execution lane \`${laneName}\` refused this pass's credential` +
-        `${credentialNote}. The lane is unavailable for this run and the pass ` +
-        `is not retried on it` +
-        (isAttempt
-          ? `; no attempt was consumed. The sweep re-claims this ticket (bounded ` +
-            `by the interruption limit) and the next pass resolves its lane afresh, ` +
-            `so fixing or rotating the credential is all it needs. `
-          : `. The PR's repair falls to a human unless a fresh repair is queued; ` +
-            `fix or rotate the credential first. `) +
-        `Work so far is pushed to \`${task.branch}\`.`
+      `Repair pass ended (attempt ${run?.attempt ?? "?"}): ${reason}. The PR's ` +
+        "repair falls to a human unless a fresh repair is queued; fix or rotate the " +
+        `credential first. Work so far is pushed to \`${task.branch}\`.`
     ).catch(console.error);
   }
-
   await removeTaskContainer(end.taskId, container);
 }
 

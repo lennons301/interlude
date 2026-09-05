@@ -467,8 +467,12 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   `MAX_INTERRUPTIONS_PER_TICKET`), resolving its lane afresh — so fixing the
   credential is all it needs, and a credential left broken lands the ticket on
   `ready-for-human` with its attempts intact. A repair pass simply ends; the PR
-  escalates to you on the repair bound as an unfinished repair does. The issue
-  comment and the pass's feed both name the lane and the variables.
+  escalates to you on the repair bound as an unfinished repair does. A review
+  pass fails closed at once — `human-signoff`, no format-retry spent, the
+  fail-closed comment naming the lane — rather than re-running on the lane
+  that refused it. The issue comment and the pass's feed both name the lane
+  and the variables. (A triage pass owns no run and keeps its one bounded
+  retry.)
 - **Every turn has a wall-clock ceiling** (issue #220): **3 hours** per exec by
   default (`DEFAULT_TURN_WALL_CLOCK_MS`; `TURN_WALL_CLOCK_MINUTES` to change it),
   enforced by the orchestrator around the exec on every harness — a second bound

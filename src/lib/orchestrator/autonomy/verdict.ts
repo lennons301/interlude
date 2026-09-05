@@ -13,13 +13,29 @@
  * after that line is the review body posted verbatim to GitHub.
  */
 
+import { refusedCredential } from "../../harness/turn-result";
 import { finalPassMessage, type PassTurn } from "./pass-output";
 
 export type ReviewVerdictKind = "approve" | "request-changes" | "escalate";
 
 export type ReviewVerdictResult =
   | { kind: ReviewVerdictKind; body: string }
-  | { kind: "unparseable"; reason: string };
+  | {
+      kind: "unparseable";
+      /** Why no verdict could be read. For a refused credential the executor
+       * rewrites this to name the lane and the variables to rotate — the
+       * report the fleet owes — before storing it. */
+      reason: string;
+      /**
+       * False when re-running the review could not parse any better — the
+       * lane's provider refused the pass's credential (issue #220) — so the
+       * bounded format-retry (#89) is not spent re-running the same review on
+       * the same lane, and the verdict fails closed to a human at once. Absent
+       * on every format slip, which is what the retry exists for. Mirrored in
+       * the `runs.reviewResult` column's type.
+       */
+      retryable?: false;
+    };
 
 // Anchored to line start so the marker quoted mid-sentence ("...so my
 // conclusion is VERDICT: approve") never counts; no end anchor, so a verdict
@@ -64,7 +80,13 @@ export function undeliverableFeedbackBody(findings: string): string {
 export function parseReviewVerdict(turn: PassTurn): ReviewVerdictResult {
   const final = finalPassMessage(turn);
   if (!final.ok) {
-    return { kind: "unparseable", reason: `review ${final.reason}` };
+    return {
+      kind: "unparseable",
+      reason: `review ${final.reason}`,
+      // A refused credential is the lane's failure, not the review's format
+      // (issue #220): the same review on the same lane would be refused again.
+      ...(refusedCredential(turn.outcome) ? { retryable: false as const } : {}),
+    };
   }
 
   // Scan for the first line that starts with the VERDICT: marker rather than

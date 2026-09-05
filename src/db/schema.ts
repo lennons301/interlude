@@ -218,7 +218,9 @@ export const runs = sqliteTable("runs", {
   // Stored on the run so a verdict survives an orchestrator restart.
   reviewResult: text("review_result", { mode: "json" }).$type<
     | { kind: "approve" | "request-changes" | "escalate"; body: string }
-    | { kind: "unparseable"; reason: string }
+    // `retryable: false` marks an unparseable verdict the format-retry must not
+    // be spent on (issue #220) — mirrors `ReviewVerdictResult` in verdict.ts.
+    | { kind: "unparseable"; reason: string; retryable?: false }
   >(),
   // The PR head the last posted verdict was written about (issue #131). Set
   // alongside reviewVerdict when the orchestrator posts a review, and cleared

@@ -2183,6 +2183,34 @@ describe("decideNext — verdict-to-action mapping", () => {
     ]);
   });
 
+  it("does not spend the format-retry on a review whose credential was refused (issue #220)", () => {
+    // The parser marks such a verdict non-retryable: the same review on the
+    // same lane would be refused again, so it fails closed at once — naming
+    // the lane in the reason the owner is told — with the retry unspent.
+    const reason =
+      'execution lane "fake-lane" is unavailable: the provider refused its credential';
+    const actions = decideNext(
+      makeSnapshot({
+        candidates: [],
+        pendingVerdicts: [
+          makeVerdict({
+            result: { kind: "unparseable", reason, retryable: false },
+            reviewUnparseableCount: 0,
+          }),
+        ],
+      })
+    );
+
+    expect(actions.filter((a) => a.type === "retryReview")).toEqual([]);
+    expect(actions).toEqual([
+      expect.objectContaining({
+        type: "notify",
+        event: "verdict-unparseable",
+        payload: expect.objectContaining({ runId: "run-1", reason }),
+      }),
+    ]);
+  });
+
   it("fails closed on a second unparseable verdict — notify, no further retry", () => {
     // The one retry is spent, so the verdict now falls to human oversight.
     const actions = decideNext(

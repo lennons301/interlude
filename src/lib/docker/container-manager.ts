@@ -366,7 +366,7 @@ export const STOP_TURN_GRACE_SECONDS = 10;
  * the daemon's round trips, with room. Past it the caller stops waiting — the
  * container is torn down or parked by what follows, which ends the process
  * tree either way. */
-export const STOP_TURN_TIMEOUT_MS = 30_000;
+const STOP_TURN_TIMEOUT_MS = 30_000;
 
 /**
  * The script that ends one turn's process tree inside the container (issue

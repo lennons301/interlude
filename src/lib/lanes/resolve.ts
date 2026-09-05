@@ -198,6 +198,16 @@ function primaryLaneInput({
  * One lane, resolved for one pass: everything an adapter needs to build an
  * exec, and nothing it does not.
  */
+/**
+ * The one sentence for a lane that cannot run a pass, whatever the cause:
+ * variables unset here at resolution, or a credential the provider refused at
+ * the end of a turn (issue #220, which ends the pass with this same wording so
+ * an operator reading `runs.failureReason` sees one shape for one fact).
+ */
+export function laneUnavailableReason(laneId: string, why: string): string {
+  return `execution lane "${laneId}" is unavailable: ${why}`;
+}
+
 export interface ResolvedLane {
   id: string;
   label: string;
@@ -310,9 +320,11 @@ export function resolveLane({
     return {
       ok: false,
       choice,
-      reason:
-        `execution lane "${lane.id}" is unavailable: ${missing.join(", ")} ` +
-        `${missing.length === 1 ? "is" : "are"} not set in the orchestrator's environment`,
+      reason: laneUnavailableReason(
+        lane.id,
+        `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not set in the ` +
+          "orchestrator's environment"
+      ),
     };
   }
 

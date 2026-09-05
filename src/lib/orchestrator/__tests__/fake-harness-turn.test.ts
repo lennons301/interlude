@@ -206,6 +206,56 @@ function seedImplementPass(): void {
     .run();
 }
 
+/** A review pass of a run parked with its PR, queued and awaiting its container. */
+function seedReviewPass(): void {
+  const projectId = newId();
+  testDb
+    .insert(schema.projects)
+    .values({
+      id: projectId,
+      name: "lemons",
+      gitUrl: "https://github.com/lennons301/lemons.git",
+      createdAt: new Date(),
+    })
+    .run();
+  runId = newId();
+  testDb
+    .insert(schema.runs)
+    .values({
+      id: runId,
+      projectId,
+      githubIssue: ISSUE_REF,
+      attempt: 1,
+      mode: "autonomous",
+      status: "reviewing",
+      budgetUsd: 20,
+      model: "standard",
+      pullRequestNumber: 41,
+      pullRequestUrl: "https://github.com/lennons301/lemons/pull/41",
+      claimedAt: new Date(),
+      startedAt: new Date(),
+    })
+    .run();
+  taskId = newId();
+  testDb
+    .insert(schema.tasks)
+    .values({
+      id: taskId,
+      projectId,
+      title: "Review PR #41",
+      description: "Review the PR against the ticket.",
+      status: "queued",
+      kind: "review",
+      runId,
+      githubIssue: ISSUE_REF,
+      branch: "agent/issue-34",
+      pullRequestNumber: 41,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .run();
+}
+
 function run() {
   return testDb.select().from(schema.runs).where(eq(schema.runs.id, runId)).get()!;
 }
@@ -534,11 +584,50 @@ describe("a whole turn through the turn manager on the fake adapter (issue #214)
         "push",
         "removeContainer",
       ]);
-      const comment = github.comments.find((c) => c.includes("refused this pass's credential"));
-      expect(comment).toContain(FAKE_LANE_ID);
+      const comment = github.comments.find((c) => c.includes("refused its credential"));
+      expect(comment).toContain("Run interrupted");
+      expect(comment).toContain(`execution lane "${FAKE_LANE_ID}" is unavailable`);
       expect(comment).toContain(FAKE_LANE_AUTH_VAR);
-      expect(comment).toContain("no attempt was consumed");
-      expect(feed().some((m) => m.startsWith("Lane unavailable"))).toBe(true);
+      expect(comment).toContain("consumes no attempt");
+      expect(comment).toContain("resolves its lane afresh");
+      expect(
+        feed().some((m) => m.includes(`execution lane "${FAKE_LANE_ID}" is unavailable`))
+      ).toBe(true);
+    });
+
+    it("fails a review pass refused for its credential closed, naming the lane, with no retry on it", async () => {
+      // A review has no park-or-proceed decision, so its refusal is read at
+      // the verdict: stored non-retryable — the format-retry is for format
+      // slips, and the same review on the same lane would be refused again —
+      // with the reason naming the lane and the variable to rotate, which is
+      // what the sweep's fail-closed comment then tells the owner.
+      testDb = createTestDb().db;
+      seedReviewPass();
+      fake.script(
+        scriptedTurn(
+          { kind: "refused", refusal: { kind: "auth", resumeAfter: null, limitType: null } },
+          { finalMessage: "401 Unauthorized", costUsd: 0 }
+        )
+      );
+
+      await turns.startTask(taskId);
+
+      expect(run().status).toBe("reviewing");
+      const stored = run().reviewResult;
+      expect(stored).toEqual({
+        kind: "unparseable",
+        reason: expect.stringContaining(`execution lane "${FAKE_LANE_ID}" is unavailable`),
+        retryable: false,
+      });
+      if (stored?.kind !== "unparseable") throw new Error("verdict should be unparseable");
+      expect(stored.reason).toContain(FAKE_LANE_AUTH_VAR);
+      // Neither the attempt nor the format-retry count moved; the sweep's
+      // fail-closed path owns what follows.
+      expect(run().attempt).toBe(1);
+      expect(run().reviewUnparseableCount).toBe(0);
+      expect(queuedTasks()).toEqual([]);
+      // A review never pushes; its container simply goes.
+      expect(docker.calls).toEqual(["createWorkspaceContainer", "execAgentTurn", "removeContainer"]);
     });
 
     it("ends a turn past the wall-clock ceiling as a turn limit, stopping the exec, and the attempt fails as a turn-limited turn does", async () => {

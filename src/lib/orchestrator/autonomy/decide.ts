@@ -1713,7 +1713,14 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       // pass earns one bounded re-queue with the parse failure fed back before
       // anyone is paged (issue #89). Like a first review, this reserves intent,
       // not a slot: the queue applies the capacity check when it starts.
-      if (pending.reviewUnparseableCount < snapshot.maxUnparseableRetries) {
+      // A verdict the parser marked non-retryable is not a format slip: the
+      // lane's provider refused the review's credential (issue #220), so the
+      // same review on the same lane would meet the same refusal, and the
+      // retry is not spent on it — it fails closed below, naming the lane.
+      if (
+        result.retryable !== false &&
+        pending.reviewUnparseableCount < snapshot.maxUnparseableRetries
+      ) {
         reviewsQueuedThisSweep++;
         actions.push({
           type: "retryReview",
