@@ -25,6 +25,7 @@
 
 import type { AgentPassKind, AppConfig } from "../config";
 import { resolveAgentModelChoice } from "../config";
+import type { HarnessCapabilities } from "../harness/descriptors";
 import type { ModelTier } from "../model-tiers";
 import type { SettingsOverrides } from "../settings-resolver";
 import {
@@ -201,6 +202,10 @@ export interface ResolvedLane {
   id: string;
   label: string;
   adapter: LaneAdapterId;
+  /** What that adapter can do (issue #219), off the lane definition — the
+   * turn manager reads `quotaTelemetry` to tell the reducer whether a wall's
+   * window may step the tier ladder. */
+  capabilities: HarnessCapabilities;
   billing: LaneBilling;
   /** Harness environment variable -> the secret it carries. Exec-scoped by
    * contract: this map may only ever reach one `docker exec`'s Env. */
@@ -328,6 +333,7 @@ export function resolveLane({
       id: lane.id,
       label: lane.label,
       adapter: lane.adapter,
+      capabilities: lane.capabilities,
       billing: lane.billing,
       auth,
       baseUrl: lane.baseUrl,
@@ -346,6 +352,10 @@ export interface LaneView {
   id: string;
   label: string;
   adapter: LaneAdapterId;
+  /** What the harness behind this lane can do (issue #219): shown on the
+   * settings screen, and read by the money guards to know whether the lane's
+   * quota row may be read at all. */
+  capabilities: HarnessCapabilities;
   billing: LaneBilling;
   baseUrl: string | null;
   models: Readonly<Record<ModelTier, string>>;
@@ -449,6 +459,7 @@ export function describeLanes(input: LaneSettingsInput): LaneSettingsView {
         id: lane.id,
         label: lane.label,
         adapter: lane.adapter,
+        capabilities: lane.capabilities,
         billing: lane.billing,
         baseUrl: lane.baseUrl,
         models: lane.models,

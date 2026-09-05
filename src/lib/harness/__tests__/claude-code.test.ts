@@ -39,6 +39,12 @@ function lane(overrides: Partial<ResolvedLane> = {}): ResolvedLane {
     id: "claude-subscription",
     label: "Claude subscription",
     adapter: "claude-code",
+    capabilities: {
+      userInvokedSkills: true,
+      quotaTelemetry: true,
+      reportsCost: true,
+      sessionResume: true,
+    },
     billing: "subscription",
     auth: { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test" },
     baseUrl: null,

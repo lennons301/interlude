@@ -1,9 +1,13 @@
 import fs from "fs";
 import path from "path";
 import { describe, expect, it } from "vitest";
-import { parseLaneConfig, laneIds } from "../lane-config";
+import { parseLaneConfig, laneIds, laneReportsQuota } from "../lane-config";
 import { LANE_CONFIG_FILE } from "../catalog";
-import { DESCRIPTORS_WITH_FAKE } from "@/test/fake-harness";
+import {
+  HARNESS_ADAPTER_DESCRIPTORS,
+  type HarnessAdapterDescriptor,
+} from "@/lib/harness/descriptors";
+import { DESCRIPTORS_WITH_FAKE, fakeHarnessDescriptor } from "@/test/fake-harness";
 
 /**
  * The lane-file parser (issue #172). Two jobs are tested here: that a valid
@@ -61,6 +65,14 @@ describe("parseLaneConfig", () => {
       id: "claude-subscription",
       label: "Claude subscription",
       adapter: "claude-code",
+      // The adapter's declared capabilities ride on the lane (issue #219), so
+      // no reader downstream has to look the adapter up to know them.
+      capabilities: {
+        userInvokedSkills: true,
+        quotaTelemetry: true,
+        reportsCost: true,
+        sessionResume: true,
+      },
       billing: "subscription",
       auth: [
         { harnessVar: "CLAUDE_CODE_OAUTH_TOKEN", fromEnv: "CLAUDE_CODE_OAUTH_TOKEN" },
@@ -304,6 +316,131 @@ describe("the shipped lanes.yaml", () => {
         expect(ref.fromEnv).toMatch(/^[A-Z][A-Z0-9_]*$/);
       }
     }
+  });
+});
+
+/**
+ * The rules that follow the adapter's declared capabilities (issue #219): which
+ * adapters a lane may name at all, and what a lane on a harness that reports
+ * no cost must declare before it may bill per token.
+ */
+describe("parseLaneConfig — adapter capabilities (issue #219)", () => {
+  /** A harness that reports nothing — no cost, no quota — as a second adapter
+   * would look to the parser. Described only to the tests here. */
+  const SILENT: HarnessAdapterDescriptor = {
+    id: "silent",
+    capabilities: {
+      userInvokedSkills: false,
+      quotaTelemetry: false,
+      reportsCost: false,
+      sessionResume: false,
+    },
+  };
+  const DESCRIPTORS = [...HARNESS_ADAPTER_DESCRIPTORS, SILENT, fakeHarnessDescriptor];
+
+  /** VALID's metered lane, moved onto the silent harness. */
+  const METERED_ON_SILENT = VALID.replace(
+    "  - id: anthropic-api\n    adapter: claude-code\n    billing: metered",
+    "  - id: anthropic-api\n    adapter: silent\n    billing: metered"
+  );
+  const PRICES = `    prices:
+      heavy: { input: 1, output: 4 }
+      standard: { input: 0.5, output: 2 }
+      light: { input: 0.1, output: 0.4 }
+`;
+
+  function refusal(text: string): string {
+    const result = parseLaneConfig(text, DESCRIPTORS);
+    expect(result.ok).toBe(false);
+    return result.ok ? "" : result.reason;
+  }
+
+  it("refuses an adapter the table does not describe, naming every registered id", () => {
+    // The whole vocabulary, so a typo is corrected from the reason rather than
+    // from the source: with the fake described, both ids are listed.
+    const reason = refusal(VALID.replace("adapter: claude-code", "adapter: codex"));
+
+    expect(reason).toContain('names adapter "codex"');
+    expect(reason).toContain("not a registered harness adapter");
+    expect(reason).toContain("claude-code");
+    expect(reason).toContain("silent");
+    expect(reason).toContain("fake");
+  });
+
+  it("refuses a metered lane on a harness that reports no cost unless every tier is priced", () => {
+    // Real money on a harness that produces no dollar figure: without prices
+    // the fleet would book its spend from nothing. The reason names the
+    // adapter and the rule, so the fix is readable from it.
+    const reason = refusal(METERED_ON_SILENT);
+
+    expect(reason).toContain('lane "anthropic-api"');
+    expect(reason).toContain('"silent"');
+    expect(reason).toContain("reports no cost");
+    expect(reason).toContain("prices");
+    expect(reason).toContain("heavy, standard, light");
+  });
+
+  it("accepts the same lane once it prices every tier", () => {
+    const priced = METERED_ON_SILENT.replace(
+      "    caps:\n      daily_budget_usd: 20",
+      PRICES + "    caps:\n      daily_budget_usd: 20"
+    );
+
+    const result = parseLaneConfig(priced, DESCRIPTORS);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const lane = result.catalog.lanes.find((l) => l.id === "anthropic-api")!;
+    expect(lane.adapter).toBe("silent");
+    expect(lane.prices?.light.inputPerMTok).toBe(0.1);
+    expect(lane.capabilities).toEqual(SILENT.capabilities);
+  });
+
+  it("accepts the same lane declared subscription, with no prices at all", () => {
+    // Its marginal cash cost is zero: tokens are still recorded and nothing is
+    // booked to metered spend, so there is no figure to get wrong.
+    const result = parseLaneConfig(
+      METERED_ON_SILENT.replace(
+        "adapter: silent\n    billing: metered",
+        "adapter: silent\n    billing: subscription"
+      ),
+      DESCRIPTORS
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const lane = result.catalog.lanes.find((l) => l.id === "anthropic-api")!;
+    expect(lane.billing).toBe("subscription");
+    expect(lane.prices).toBeNull();
+  });
+
+  it("leaves a metered Claude Code lane without prices exactly as before", () => {
+    // Claude Code reports cost, so the Anthropic-direct lane may keep taking the
+    // harness's own figure — the rule is keyed on the capability, never on the
+    // billing kind alone or on the endpoint.
+    const result = parseLaneConfig(VALID, DESCRIPTORS);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const api = result.catalog.lanes.find((l) => l.id === "anthropic-api")!;
+    expect(api.billing).toBe("metered");
+    expect(api.prices).toBeNull();
+    expect(api.capabilities.reportsCost).toBe(true);
+  });
+
+  it("says whether a lane's harness reports quota, and answers no lane cautiously", () => {
+    const result = parseLaneConfig(METERED_ON_SILENT.replace(
+      "adapter: silent\n    billing: metered",
+      "adapter: silent\n    billing: subscription"
+    ), DESCRIPTORS);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [claude, silent] = result.catalog.lanes;
+
+    expect(laneReportsQuota(claude)).toBe(true);
+    expect(laneReportsQuota(silent)).toBe(false);
+    // No lane is not a lane the fleet can attribute telemetry to.
+    expect(laneReportsQuota(null)).toBe(false);
   });
 });
 
