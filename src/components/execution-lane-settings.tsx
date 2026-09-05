@@ -8,6 +8,8 @@ import {
 } from "@/components/fleet/fleet-bits";
 import { FALL_THROUGH } from "@/components/settings-overrides";
 import { MODEL_TIERS } from "@/lib/model-tiers";
+import type { HarnessCapabilities } from "@/lib/harness/descriptors";
+import type { HarnessImageState } from "@/lib/harness/image-state";
 import type { LaneSettingsView, LaneView } from "@/lib/lanes/resolve";
 
 /**
@@ -24,6 +26,11 @@ import type { LaneSettingsView, LaneView } from "@/lib/lanes/resolve";
  * - a lane says whether it can run at all, and names the variables it is
  *   missing when it cannot — the failure this replaces was a live agent dying
  *   inside the harness with "Not logged in";
+ * - a lane says which **harness** runs it, whether that harness's agent image
+ *   is built, and what the harness cannot do (issue #219) — so an unavailable
+ *   lane is explained before a pass tries it, and a quota tile reading "cannot
+ *   report" has its reason on this screen. Image state is a bounded probe of
+ *   the daemon; one that did not answer reads as *unknown*, never as a verdict;
  * - a lane says who pays. `metered` is real money, so it reads in the same
  *   amber the rest of the control room uses for a deliberate hold;
  * - a lane says what it *charges*, per tier (issue #175). Not decoration: off
@@ -41,6 +48,7 @@ import type { LaneSettingsView, LaneView } from "@/lib/lanes/resolve";
 export function ExecutionLanePanel({
   lanes,
   laneError,
+  harnesses,
   busy,
   disabled,
   saveError,
@@ -48,6 +56,9 @@ export function ExecutionLanePanel({
 }: {
   lanes: LaneSettingsView | null;
   laneError: string | null;
+  /** Each harness the file names with whether its image is built (#219);
+   * joined onto the rows by adapter id. */
+  harnesses: HarnessImageState[];
   busy: boolean;
   disabled: boolean;
   saveError: string | null;
@@ -148,7 +159,11 @@ export function ExecutionLanePanel({
 
       <div className="space-y-3">
         {lanes.lanes.map((lane) => (
-          <LaneRow key={lane.id} lane={lane} />
+          <LaneRow
+            key={lane.id}
+            lane={lane}
+            harness={harnesses.find((h) => h.id === lane.adapter) ?? null}
+          />
         ))}
       </div>
 
@@ -183,9 +198,51 @@ const SOURCE_LABEL: Record<LaneSettingsView["source"], string> = {
   preference: "default order",
 };
 
-/** One lane, as a fact sheet: whether it can run, who pays, where it points,
- * and what each tier means on it. */
-function LaneRow({ lane }: { lane: LaneView }) {
+/**
+ * What a harness's image state says on the row (issue #219). Amber, not red,
+ * for a missing image: it is built on demand at the first pass, so it is a
+ * delay rather than a refusal — where a missing credential (red, below) fails
+ * the pass as it starts. Quiet for a daemon that did not answer: "not built"
+ * there would be a guess dressed as a verdict.
+ */
+function imageChip(harness: HarnessImageState | null) {
+  if (harness === null || harness.built === null) {
+    return <Chip tone="quiet">image unknown</Chip>;
+  }
+  return harness.built ? (
+    <Chip tone="quiet">image ready</Chip>
+  ) : (
+    <Chip tone="amber">image not built</Chip>
+  );
+}
+
+/** The capabilities a harness declares it lacks, in the words the rest of the
+ * screen uses for them — so the quota tile's "cannot report" and the parser's
+ * "declare prices" have their cause named beside the lane. */
+const CAPABILITY_GAPS: ReadonlyArray<[keyof HarnessCapabilities, string]> = [
+  ["quotaTelemetry", "no quota telemetry"],
+  ["reportsCost", "no cost report"],
+  ["sessionResume", "no session resume"],
+  ["userInvokedSkills", "no user-invoked skills"],
+];
+
+function capabilityGaps(capabilities: HarnessCapabilities): string[] {
+  return CAPABILITY_GAPS.filter(([key]) => !capabilities[key]).map(([, label]) => label);
+}
+
+/** One lane, as a fact sheet: whether it can run, who pays, which harness
+ * runs it and whether that harness's image is built, where it points, and
+ * what each tier means on it. */
+function LaneRow({
+  lane,
+  harness,
+}: {
+  lane: LaneView;
+  /** The lane's harness with its image state, or null when the route had no
+   * answer for this adapter. */
+  harness: HarnessImageState | null;
+}) {
+  const gaps = capabilityGaps(lane.capabilities);
   return (
     <div className="space-y-1 border-t border-fl-line pt-3 first:border-t-0 first:pt-0">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
@@ -195,6 +252,10 @@ function LaneRow({ lane }: { lane: LaneView }) {
         <Chip tone={lane.billing === "metered" ? "amber" : "quiet"}>
           {lane.billing}
         </Chip>
+        {/* Three facts a pass needs before it can run here (issue #219): the
+            harness, its image, its credentials. */}
+        <Chip tone="quiet">harness {lane.adapter}</Chip>
+        {imageChip(harness)}
         {lane.available ? (
           <Chip tone="quiet">available</Chip>
         ) : (
@@ -203,11 +264,21 @@ function LaneRow({ lane }: { lane: LaneView }) {
       </div>
 
       <p className="font-plex-mono text-[11px] text-fl-ink-3">
-        {lane.adapter} · {lane.baseUrl ?? "default endpoint"} ·{" "}
+        {harness === null ? lane.adapter : `${lane.adapter} (${harness.image})`} ·{" "}
+        {lane.baseUrl ?? "default endpoint"} ·{" "}
         {MODEL_TIERS.map((tier) => `${tier}=${lane.models[tier]}`).join(" ")}
         {lane.caps.dailyBudgetUsd !== null &&
           ` · cap $${lane.caps.dailyBudgetUsd}/day`}
       </p>
+
+      {gaps.length > 0 && (
+        <p className="font-plex-mono text-[11px] text-fl-ink-3">
+          {/* What this harness declares it cannot do — the reason the quota
+              tile may read "cannot report", or the parser may insist on
+              prices, for a lane on it. */}
+          harness limits · {gaps.join(" · ")}
+        </p>
+      )}
 
       <p className="font-plex-mono text-[11px] text-fl-ink-3">
         {/* What the fleet charges a pass on this lane (issue #175). Spelled out

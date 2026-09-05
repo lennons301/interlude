@@ -193,6 +193,31 @@ describe("execution lanes on /api/settings/overrides", () => {
     });
   });
 
+  it("reports each harness the file names with its image and whether it is built (issue #219)", async () => {
+    // One entry per adapter, not per lane: every shipped lane runs Claude
+    // Code, so there is one image to ask about. Under test there is no daemon
+    // to answer, and a probe with no answer is *unknown* — never "not built".
+    const state = await (await GET()).json();
+
+    expect(state.harnesses).toEqual([
+      {
+        id: "claude-code",
+        image: "interlude-agent:latest",
+        built: expect.toSatisfy((v: unknown) => v === null || typeof v === "boolean"),
+      },
+    ]);
+    // Every lane row carries the capabilities the panel shows beside the
+    // harness, and none of them is a secret.
+    for (const lane of state.lanes.lanes) {
+      expect(lane.capabilities).toEqual({
+        userInvokedSkills: true,
+        quotaTelemetry: true,
+        reportsCost: true,
+        sessionResume: true,
+      });
+    }
+  });
+
   it("never serves a lane secret, only the names of the variables", async () => {
     // A project API route has previously leaked a stored token in cleartext.
     process.env.OPENROUTER_API_KEY = "sk-or-v1-should-never-appear";

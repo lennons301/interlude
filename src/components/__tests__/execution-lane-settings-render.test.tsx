@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import type { HarnessImageState } from "@/lib/harness/image-state";
 import type { LaneSettingsView, LaneView } from "@/lib/lanes/resolve";
 import { ExecutionLanePanel } from "../execution-lane-settings";
 import { errorFor } from "../settings-overrides";
@@ -23,6 +24,12 @@ function lane(over: Partial<LaneView> = {}): LaneView {
     id: "claude-subscription",
     label: "Claude subscription",
     adapter: "claude-code",
+    capabilities: {
+      userInvokedSkills: true,
+      quotaTelemetry: true,
+      reportsCost: true,
+      sessionResume: true,
+    },
     billing: "subscription",
     baseUrl: null,
     models: { heavy: "opus", standard: "sonnet", light: "haiku" },
@@ -53,7 +60,17 @@ const OPENROUTER = lane({
   primary: false,
 });
 
-function render(over: Partial<LaneSettingsView> = {}): string {
+/** The Claude Code image, built — the shipped state. */
+const CLAUDE_IMAGE: HarnessImageState = {
+  id: "claude-code",
+  image: "interlude-agent:latest",
+  built: true,
+};
+
+function render(
+  over: Partial<LaneSettingsView> = {},
+  harnesses: HarnessImageState[] = [CLAUDE_IMAGE]
+): string {
   return renderToStaticMarkup(
     <ExecutionLanePanel
       lanes={{
@@ -67,6 +84,7 @@ function render(over: Partial<LaneSettingsView> = {}): string {
         ...over,
       }}
       laneError={null}
+      harnesses={harnesses}
       busy={false}
       disabled={false}
       saveError={null}
@@ -135,6 +153,7 @@ describe("the execution-lane settings panel", () => {
       <ExecutionLanePanel
         lanes={null}
         laneError={'duplicate lane id "openrouter"'}
+        harnesses={[]}
         busy={false}
         disabled={false}
         saveError={null}
@@ -152,6 +171,74 @@ describe("the execution-lane settings panel", () => {
 
     expect(html).toContain("CLAUDE_CODE_OAUTH_TOKEN");
     expect(html).not.toContain("sk-");
+  });
+});
+
+/**
+ * Per lane: the harness, whether its image is built, and whether its
+ * credentials are present (issue #219) — the three facts that decide whether
+ * a pass can start there, so an unavailable lane is explained before one tries.
+ */
+describe("harness, image and credentials per lane (issue #219)", () => {
+  it("names the harness and its image, and says the image is ready", () => {
+    const html = render();
+
+    expect(html).toContain("harness claude-code");
+    expect(html).toContain("interlude-agent:latest");
+    expect(html).toContain("image ready");
+    expect(html).not.toContain("image not built");
+  });
+
+  it("says when the harness image is not built, in amber rather than red", () => {
+    // A missing image is built on demand at the first pass — a delay, where a
+    // missing credential fails the pass as it starts.
+    const html = render({}, [{ ...CLAUDE_IMAGE, built: false }]);
+
+    expect(html).toContain("image not built");
+    expect(html).toMatch(/fl-amber[^>]*>image not built/);
+  });
+
+  it("reads a daemon that did not answer as unknown, never as a verdict", () => {
+    expect(render({}, [{ ...CLAUDE_IMAGE, built: null }])).toContain("image unknown");
+    // No answer for this adapter at all reads the same way.
+    expect(render({}, [])).toContain("image unknown");
+  });
+
+  it("keeps the credential report beside the harness facts", () => {
+    const html = render();
+
+    expect(html).toContain("available");
+    expect(html).toContain("unavailable");
+    expect(html).toContain("needs OPENROUTER_API_KEY");
+  });
+
+  it("names what a harness declares it cannot do, and nothing for one that can do it all", () => {
+    // The reason a quota tile reads "cannot report", or the parser insists on
+    // prices, for a lane on this harness — named where the lane is.
+    const html = render({
+      lanes: [
+        lane(),
+        lane({
+          id: "codex-subscription",
+          label: "Codex subscription",
+          adapter: "codex",
+          capabilities: {
+            userInvokedSkills: true,
+            quotaTelemetry: false,
+            reportsCost: false,
+            sessionResume: true,
+          },
+          primary: false,
+        }),
+      ],
+    });
+
+    expect(html).toContain("harness codex");
+    expect(html).toContain("no quota telemetry");
+    expect(html).toContain("no cost report");
+    expect(html).not.toContain("no session resume");
+    // The Claude Code row declares no gap, so it carries no such line.
+    expect(html.split("harness limits").length - 1).toBe(1);
   });
 });
 

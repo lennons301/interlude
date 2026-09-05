@@ -61,6 +61,25 @@ export async function imageExists(): Promise<boolean> {
   return (await inspectImage()) !== null;
 }
 
+/**
+ * Whether the image an adapter names is built, as a *probe* (issue #219):
+ * true when the daemon holds it, false on a positive 404, and a throw on
+ * anything else — so a caller racing it against a bound can tell "not built"
+ * from "the daemon did not answer". `imageExists` above folds every failure
+ * into false, which is right for the builder (it rebuilds either way) and
+ * wrong for the settings screen, where an unreachable daemon must read as
+ * unknown rather than as a verdict.
+ */
+export async function probeImageBuilt(name: string): Promise<boolean> {
+  try {
+    await getDocker().getImage(name).inspect();
+    return true;
+  } catch (err) {
+    if ((err as { statusCode?: number })?.statusCode === 404) return false;
+    throw err;
+  }
+}
+
 /** What `ensureImage` reports about the image it leaves in place. */
 export interface EnsuredImage {
   /**
