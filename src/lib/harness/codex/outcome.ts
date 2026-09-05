@@ -34,9 +34,11 @@
  * The reset time is the one inference made here. The wall sentence states a
  * wall-clock time and no date, formatted in the CLI's local zone. The fleet
  * reads it as the next occurrence of that time in *its own* local zone — right
- * whenever the agent image and the orchestrator share a zone, which they do on
- * the VPS (both containers run UTC) and in local development (one machine) —
- * so a wall becomes a pause rather than a spent attempt. A wrong zone costs no
+ * whenever the agent container and the orchestrator share a zone, which they
+ * do on the VPS (both containers run UTC) but not in local development, where
+ * the orchestrator runs on the host in the host's zone and the agent container
+ * in the image's (UTC: a BST host reads the wall an hour off) — so on the VPS
+ * a wall becomes a pause rather than a spent attempt. A wrong zone costs no
  * attempt in either direction: too early, the resumed pass meets the wall again
  * and pauses again (bounded by the resume count); too late, it waits out the
  * offset. A sentence stating no time yields null, which the reducer already
