@@ -183,8 +183,9 @@ export interface HarnessAdapter {
   sessionArtifactPaths(sessionId: string, cwd: string): string[];
   /**
    * This harness's own name for a fleet effort level, or null when it has no
-   * equivalent — in which case the level is omitted from the command (and,
-   * from issue #220, noted on the task), never approximated silently.
+   * equivalent — in which case the level is omitted from the command (and
+   * noted on the task, which the first adapter with a partial map brings:
+   * issues #221, #222), never approximated silently.
    */
   mapEffort(level: string): string | null;
 }

@@ -96,6 +96,11 @@ export interface PassExit {
   execExitCode: number | null;
   /** Wall time from exec start to the stream settling. */
   durationMs: number;
+  /** Set when the orchestrator ended the turn at its wall-clock ceiling (issue
+   * #220) — the one exit shape this process creates rather than observes, so
+   * a forensic read can tell a hung harness the fleet stopped from one that
+   * stopped itself. Absent, not false, on every other exit. */
+  exceededWallClock?: true;
 }
 
 /** How a pass exit lands in the log. Identical to {@link PassExit} except that

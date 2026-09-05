@@ -11,13 +11,14 @@ import {
   execFallbackCommitAndPush,
   readContainerFile,
   removeContainer,
+  stopAgentTurn,
   stopContainer,
   startContainer,
   writeContainerFile,
   type RunningContainer,
 } from "../docker/container-manager";
 import { checkMemoryAdmission } from "./capacity";
-import { runBoundedProbe } from "../timeout";
+import { raceWithTimeout, runBoundedProbe, TIMED_OUT } from "../timeout";
 import {
   quotaRefusalOf,
   type TurnOutcome,
@@ -28,7 +29,11 @@ import { parseReviewVerdict } from "./autonomy/verdict";
 import { parseTriageExit } from "./autonomy/triage";
 import { passProducedResult, type PassTurn } from "./autonomy/pass-output";
 import { cancelOrphanedRunTasks } from "./autonomy/review-tasks";
-import { MAX_ATTEMPTS, TRIAGE_MAX_TURNS } from "./autonomy/budgets";
+import {
+  DEFAULT_REFUSAL_BACKOFF_MS,
+  MAX_ATTEMPTS,
+  TRIAGE_MAX_TURNS,
+} from "./autonomy/budgets";
 import { resolvePassBudget, spendCarriedIntoPass } from "./pass-budget";
 import { scanPorts } from "./port-scanner";
 import {
@@ -1280,7 +1285,7 @@ async function runTurn(
   // helper and — for a generation session only (#62) — `gh`.
   const gitAuthToken = await getInstallationToken();
 
-  const { stream, exec } = await execAgentTurn({
+  const { stream, exec, turnId } = await execAgentTurn({
     container: running.container,
     command: adapter.buildCommand({
       sessionId,
@@ -1303,13 +1308,29 @@ async function runTurn(
   // one.
   const resultReceived = new Promise<void>((resolve) => handler.onDone(resolve));
 
+  // Both against the wall-clock ceiling (issue #220): the orchestrator's own
+  // bound on a turn, adapter-agnostic, so a harness with no turn or budget
+  // flag — or a process hung on a suspended host — cannot hold its slot for
+  // as long as the box stays up. The Claude lane keeps its flags; this is a
+  // second bound, not a replacement. Read per turn, so the environment's
+  // override takes effect on the next exec rather than the next boot.
+  const ceilingMs = getConfig().turnWallClockMs;
+
   const startedAtMs = Date.now();
   let result: TurnResult;
+  let exceededCeiling = false;
   try {
-    await Promise.race([
-      waitForExecStream(stream, exec, (chunk) => handler.write(chunk)),
-      resultReceived,
-    ]);
+    const settled = await raceWithTimeout(
+      Promise.race([
+        waitForExecStream(stream, exec, (chunk) => handler.write(chunk)),
+        resultReceived,
+      ]),
+      ceilingMs
+    );
+    if (settled === TIMED_OUT) {
+      exceededCeiling = true;
+      await endOverlongTurn(taskId, running, turnId, ceilingMs);
+    }
   } finally {
     // How this pass ended, written down whether or not anyone is watching
     // (issue #165). In a `finally` because the exits worth the trouble are
@@ -1320,6 +1341,15 @@ async function runTurn(
     // nothing else notices: a quota wall, which arrives looking like a
     // *successful* result and so leaves no trace in the task feed at all.
     result = handler.flush();
+    // A turn the ceiling ended is a turn limit, whatever the harness said on
+    // its way out (issue #220). The race is what judged it: the timer wins only
+    // when neither the stream nor the handler had settled at the ceiling, so a
+    // terminal event flushed now arrived after the stop and is the stop's
+    // echo, not the turn's. Load-bearing in one direction — a stopped turn
+    // whose harness said nothing would otherwise read as a null outcome,
+    // which is the interruption bound's case (#97): re-claimed without an
+    // attempt spent, forever, for a turn that hangs deterministically.
+    if (exceededCeiling) result = { ...result, outcome: { kind: "turn-limit" } };
     // Read the clock before the probe below, not after: the probe may wait up
     // to its bound, and this duration is the measurement the "a rejected pass
     // exits in seconds rather than waiting" finding rests on.
@@ -1329,12 +1359,49 @@ async function runTurn(
       terminalResult: result.terminalResult,
       execExitCode: await observeExecExitCode(exec),
       durationMs,
+      ...(exceededCeiling ? { exceededWallClock: true } : {}),
     });
   }
 
   const charge = chargeForTurn(opts.lane, result);
   noteLaneCharge(taskId, opts.lane, charge);
   return { ...result, costUsd: charge.usd };
+}
+
+/**
+ * End a turn that has run past the wall-clock ceiling (issue #220): stop the
+ * harness's process tree — the turn's own, found by the marker `execAgentTurn`
+ * set, not the whole container — and say so on the feed, so the "turn limit
+ * reached" the attempt is then failed with can be traced to the ceiling rather
+ * than to the harness's own turn count. The stop is bounded and its outcome
+ * reported, never awaited past its bound: a daemon that will not answer has
+ * already cost the turn its ceiling, and whatever follows this turn — the
+ * attempt failing, the pass parking — tears the container down or stops it,
+ * which ends the tree either way.
+ */
+async function endOverlongTurn(
+  taskId: string,
+  running: RunningContainer,
+  turnId: string,
+  ceilingMs: number
+): Promise<void> {
+  const minutes = Math.round(ceilingMs / 60_000);
+  console.warn(
+    `[orchestrator] Turn for task ${taskId} exceeded the wall-clock ceiling ` +
+      `(${minutes} min) — stopping the exec`
+  );
+  const stopped = await stopAgentTurn(running.container, turnId);
+  const stopNote =
+    stopped === "stopped"
+      ? "its process was stopped"
+      : stopped === "timeout"
+        ? "the stop did not complete in time; the container teardown that follows ends it"
+        : "the stop failed; the container teardown that follows ends it";
+  insertSystemMessage(
+    taskId,
+    `Turn exceeded the wall-clock ceiling of ${minutes} minutes ` +
+      `(TURN_WALL_CLOCK_MINUTES) — ${stopNote}. The turn ends as a turn limit.`
+  );
 }
 
 /**
@@ -2109,6 +2176,8 @@ function lastAgentTextMessage(taskId: string): string | null {
  * - `paused`    — the account's quota refused the pass, so the run waits on the
  *                 window's reset; container torn down (issue #168)
  * - `blocked`   — parked on a question (issue #19); container preserved (#93)
+ * - `lane-unavailable` — the lane refused the pass's credential (issue #220):
+ *                 the pass ended naming the lane, nothing is retried on it
  * - `finalized` — no PR and no question, so the run was failed to a terminal
  *                 status rather than left dangling (issue #106)
  * - `proceed`   — healthy; the caller finishes the pass (park awaiting review,
@@ -2123,6 +2192,9 @@ type PassDecision =
   /** Moved to another lane and retried there (issue #176) */
   | "failed-over"
   | "finalized"
+  /** Ended because the lane refused the pass's credential (issue #220):
+   *  reported, and not retried on that lane */
+  | "lane-unavailable"
   | "paused"
   | "proceed";
 
@@ -2226,6 +2298,10 @@ export async function evaluatePassOutcome(
     if (action.type === "pauseRunOnRateLimit") {
       await pauseRunOnRateLimit(action);
       return "paused";
+    }
+    if (action.type === "endPassOnRefusedCredential") {
+      await endPassOnRefusedCredential(action, task);
+      return "lane-unavailable";
     }
     if (action.type === "escalate" && action.reason === "blocked") {
       await parkBlockedRun(taskId, action.runId, action.question);
@@ -2624,10 +2700,19 @@ async function pauseRunOnRateLimit(
   // read by a human on an issue thread, and the dashboard is where the live
   // countdown lives.
   const resumes = pause.resumeAfter.toUTCString();
+  // Which clock that is (issue #220): the window's own reset, or the fleet's
+  // default backoff because the harness named none. Said in both places a
+  // human reads, so a countdown is never mistaken for a reset time the
+  // provider never gave.
+  const backoff = pause.clock === "default-backoff";
+  const clockSentence = backoff
+    ? `The provider named no reset time, so the run waits the default backoff ` +
+      `(${Math.round(DEFAULT_REFUSAL_BACKOFF_MS / 60_000)} minutes) and resumes at ${resumes}`
+    : `The window resets at ${resumes}`;
 
   console.log(
     `[autonomy] Run ${pause.runId} (${run?.githubIssue ?? "?"}) paused on ` +
-      `${window} until ${resumes} — no attempt consumed`
+      `${window} until ${resumes}${backoff ? " (default backoff)" : ""} — no attempt consumed`
   );
 
   // The paused pass's conversation is copied out on the way through: nothing
@@ -2640,7 +2725,7 @@ async function pauseRunOnRateLimit(
     laneId: task?.lane ?? null,
     note: (kept) =>
       `Paused on ${window} — the account's quota refused this pass. ` +
-      `The window resets at ${resumes}; no attempt or interruption was consumed.` +
+      `${clockSentence}; no attempt or interruption was consumed.` +
       (kept
         ? " The session was copied out, so the resume continues this conversation."
         : " The session could not be copied out, so the resume will start again" +
@@ -2659,12 +2744,108 @@ async function pauseRunOnRateLimit(
     commentOnIssue(
       task.githubIssue,
       `Run paused (attempt ${run?.attempt ?? "?"}): the account's quota ` +
-        `refused this pass on ${window}. The window resets at ${resumes}, when ` +
+        `refused this pass on ${window}. ${clockSentence}, when ` +
         `the run resumes by itself. A quota pause consumes neither an attempt ` +
         `nor an interruption — work so far is pushed to \`${task.branch}\`` +
         `${preserved ? ", and the pass resumes the same conversation" : ""}.`
     ).catch(console.error);
   }
+}
+
+/**
+ * End a pass whose credential the lane's provider refused (issue #220).
+ *
+ * Not a wall and not the work's: the pass never reached the model, so nothing
+ * here spends an attempt, and nothing is retried on the lane — no degrade, no
+ * pause, no move. It is the runtime discovery of an **unavailable lane**, the
+ * failure #172 reports before a pass starts when a lane's variables are unset,
+ * and it ends the way that one does, by pass kind:
+ *
+ *  - an **implement** pass goes to the bounded interruption path (#97): the
+ *    run is `interrupted` naming the lane, no attempt is spent, and the sweep
+ *    re-claims the ticket — a fresh run that resolves its lane afresh, so a
+ *    credential rotated in the meantime is picked up without anyone re-arming,
+ *    and a credential still broken exhausts the interruption bound to a human
+ *    rather than looping. The run itself never retries the lane: its pass is
+ *    over, and the ticket's next run is the sweep's, not this run's;
+ *  - a **repair** pass simply ends. It is never an attempt (#54), and its run
+ *    keeps its PR: the sweep re-evaluates the run's gates on the settled pass
+ *    and, finding the conflict or the red rollup still standing with the one
+ *    repair spent, escalates it to a human — exactly what a repair that ran
+ *    and did not clear it does.
+ *
+ * The lane is *marked unavailable for the run* in the only durable place a
+ * finished run has for it — `runs.failureReason`, in the resolver's own
+ * "unavailable" wording — and the credential is named by the orchestrator
+ * variables the lane maps its harness's onto, since those are what an operator
+ * rotates. The lane's own availability is not touched: the next pass to
+ * resolve it re-checks the variables, which is also how a fix reaches the
+ * fleet with no restart.
+ *
+ * Ordering as `failImplementAttempt`'s: the container handle is taken before
+ * the task's status goes terminal (#159), and the teardown is removal (#93).
+ */
+async function endPassOnRefusedCredential(
+  end: Extract<Action, { type: "endPassOnRefusedCredential" }>,
+  task: typeof tasks.$inferSelect
+): Promise<void> {
+  const run = db.select().from(runs).where(eq(runs.id, end.runId)).get();
+  const catalog = getLaneCatalog();
+  const lane = catalog.ok ? findLane(catalog.catalog, end.laneId) : null;
+  const laneName = end.laneId ?? "its lane";
+  const credentials = lane?.auth.map((ref) => ref.fromEnv) ?? [];
+  const credentialNote =
+    credentials.length > 0 ? ` (${credentials.map((v) => `\`${v}\``).join(", ")})` : "";
+  const reason =
+    `execution lane "${laneName}" is unavailable: the provider refused its ` +
+    `credential${credentialNote} — not retried on that lane`;
+  const isAttempt = task.kind === "implement";
+
+  console.log(
+    `[autonomy] Run ${end.runId} (${run?.githubIssue ?? "?"}) — ${reason}` +
+      (isAttempt ? "; run interrupted, no attempt consumed" : "; repair pass ended")
+  );
+
+  // The handle before the terminal write (#159), as every ending here does.
+  const container = activeTasks.get(end.taskId)?.container ?? null;
+
+  insertSystemMessage(
+    end.taskId,
+    `Lane unavailable — the provider refused this pass's credential on ` +
+      `${laneName}${credentialNote}. The pass is not retried on that lane` +
+      (isAttempt
+        ? "; the run is interrupted (no attempt consumed) and the sweep re-claims " +
+          "the ticket, resolving its lane afresh. Fix or rotate the credential."
+        : "; the repair ends here and the sweep escalates the PR if it still " +
+          "needs one. Fix or rotate the credential.")
+  );
+  updateTask(end.taskId, { status: "failed", containerStatus: null });
+  syncRunCost(end.runId);
+  if (isAttempt) interruptRun(end.runId, reason);
+
+  if (task.githubIssue) {
+    // Fire-and-forget, as the interruption path's comment is: one call site
+    // awaits this from inside startTask's try, and a rejected comment must not
+    // throw back into the catch and re-run the whole ending.
+    commentOnIssue(
+      task.githubIssue,
+      (isAttempt
+        ? `Run interrupted (attempt ${run?.attempt ?? "?"}): `
+        : `Repair pass ended (attempt ${run?.attempt ?? "?"}): `) +
+        `execution lane \`${laneName}\` refused this pass's credential` +
+        `${credentialNote}. The lane is unavailable for this run and the pass ` +
+        `is not retried on it` +
+        (isAttempt
+          ? `; no attempt was consumed. The sweep re-claims this ticket (bounded ` +
+            `by the interruption limit) and the next pass resolves its lane afresh, ` +
+            `so fixing or rotating the credential is all it needs. `
+          : `. The PR's repair falls to a human unless a fresh repair is queued; ` +
+            `fix or rotate the credential first. `) +
+        `Work so far is pushed to \`${task.branch}\`.`
+    ).catch(console.error);
+  }
+
+  await removeTaskContainer(end.taskId, container);
 }
 
 /**
