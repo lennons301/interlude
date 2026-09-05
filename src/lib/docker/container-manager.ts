@@ -1,5 +1,6 @@
 import Docker from "dockerode";
 import { getDocker } from "./client";
+import { AGENT_WORKDIR } from "./workdir";
 import { getImageName, ensureImage } from "./image-builder";
 import { getConfig, PLATFORM_REPO_URL } from "../config";
 import { getInstallationToken } from "../github/client";
@@ -62,9 +63,9 @@ export function buildSetupScript(
     'git config --global user.name "$GIT_USER_NAME"',
     'git config --global user.email "$GIT_USER_EMAIL"',
     `git config --global credential.helper '!f() { test "$1" = get && echo username=x-access-token && echo "password=$GIT_AUTH_TOKEN"; }; f'`,
-    'git clone "$GIT_URL" /workspace/repo',
+    `git clone "$GIT_URL" ${AGENT_WORKDIR}`,
     `git clone --depth 1 ${platformRepoUrl} /workspace/platform 2>/dev/null || echo "WARN: platform repo clone failed, continuing without platform context"`,
-    "cd /workspace/repo",
+    `cd ${AGENT_WORKDIR}`,
     checkoutCommand(checkout),
     'if [ -n "$DOPPLER_TOKEN" ]; then curl -sf --request GET "https://api.doppler.com/v3/configs/config/secrets/download?format=env" --header "Authorization: Bearer $DOPPLER_TOKEN" > .env.local && echo "Doppler: wrote .env.local ($(wc -l < .env.local) vars)" || echo "Doppler: API request failed"; fi',
   ].join(" && ");
@@ -100,7 +101,7 @@ export const COMMITS_AHEAD_MARKER = "INTERLUDE_COMMITS_AHEAD:";
  */
 export function buildPushScript(): string {
   return [
-    "cd /workspace/repo",
+    `cd ${AGENT_WORKDIR}`,
     'git add -A && git diff --cached --quiet || git commit -m "agent: uncommitted changes"',
     "git push origin HEAD",
     `echo "${COMMITS_AHEAD_MARKER}$(git rev-list --count origin/HEAD..HEAD 2>/dev/null || echo unknown)"`,

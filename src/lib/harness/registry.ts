@@ -18,12 +18,14 @@
  * an entry in `PRODUCTION_ADAPTERS` — and the pin test holds the registry to
  * the table before any test registration.
  *
- * Before registering one, read the stated limit at the foot of `adapter.ts`'s
- * module note (issue #199): a lane move — a failover or an early resume of a
- * paused run — carries the pass's session transcript across lanes, and it can
- * only do so between lanes on the *same* adapter. A second adapter makes
- * cross-adapter moves possible, and those must fall back to restarting on the
- * branch; `restoreSessionTranscript` is where that fallback belongs (#217).
+ * Before registering one, read the limit at the foot of `adapter.ts`'s module
+ * note (issues #199, #217): a lane move — a failover or an early resume of a
+ * paused run — carries the pass's session across lanes only between lanes on
+ * the *same* adapter. A second adapter makes cross-adapter moves possible, and
+ * those start again on the branch: enforced at `restoreSessionTranscript` in
+ * the turn manager through `decideSessionCarry`, with a system note telling
+ * the owner. Nothing here changes for it — declare `sessionResume` honestly
+ * and return the harness's own paths from `sessionArtifactPaths`.
  */
 
 import type { HarnessAdapter } from "./adapter";

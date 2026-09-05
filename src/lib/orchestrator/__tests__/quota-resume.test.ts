@@ -6,11 +6,10 @@ import { eq } from "drizzle-orm";
 import { createTestDb } from "@/test/create-test-db";
 import * as schema from "@/db/schema";
 import { newId } from "@/lib/ulid";
-import {
-  containerTranscriptPath,
-  readTranscript,
-  saveTranscript,
-} from "@/lib/quota/session-transcript";
+import { readTranscript, saveTranscript } from "@/lib/quota/session-transcript";
+import { claudeTranscriptPath } from "@/lib/harness/claude-code";
+import { AGENT_WORKDIR } from "@/lib/docker/workdir";
+import type { ResolvedLane } from "@/lib/lanes/resolve";
 
 /**
  * The lossless half of a quota pause (issue #169): the conversation is copied
@@ -23,6 +22,11 @@ import {
  * Docker and GitHub are stubbed, which is what makes the interesting
  * assertions possible: that a transcript that cannot be copied costs the pause
  * nothing, and that a missing one is never resumed against.
+ *
+ * What is copied, and where it goes back, is the adapter's to say (issue
+ * #217): the pass ran on the subscription lane, so the artefact is Claude
+ * Code's one transcript file, at the path the adapter derives. The cross-
+ * adapter case is `session-carry.test.ts`'s.
  */
 
 let testDb: ReturnType<typeof createTestDb>["db"];
@@ -150,12 +154,82 @@ function seedImplementPass(): void {
       githubIssue: ISSUE_REF,
       branch: "agent/issue-34",
       sessionId: SESSION_ID,
+      // The lane the pass ran on names the adapter whose artefacts are copied
+      // out (issue #217).
+      lane: "claude-subscription",
+      laneBilling: "subscription",
       containerStatus: "running",
       containerId: "abc123",
       containerName: "interlude-task-frob",
       createdAt: new Date(),
       updatedAt: new Date(),
     })
+    .run();
+}
+
+/** The Claude Code artefact the pause copies: one file, at the adapter's path. */
+const TRANSCRIPT_PATH = claudeTranscriptPath(SESSION_ID, AGENT_WORKDIR);
+
+/** The subscription lane, as the resolver hands it to a resumed pass. */
+const SUBSCRIPTION_LANE: ResolvedLane = {
+  id: "claude-subscription",
+  label: "Claude subscription (Pro)",
+  adapter: "claude-code",
+  capabilities: {
+    userInvokedSkills: true,
+    quotaTelemetry: true,
+    reportsCost: true,
+    sessionResume: true,
+  },
+  billing: "subscription",
+  auth: { CLAUDE_CODE_OAUTH_TOKEN: "oauth" },
+  baseUrl: null,
+  tier: "standard",
+  model: "sonnet",
+  prices: null,
+  declaresPrices: false,
+  caps: { dailyBudgetUsd: null },
+};
+
+/** The stored transcript as the pause writes it for a Claude Code session. */
+function storedTranscript(contents: string = TRANSCRIPT) {
+  return {
+    adapter: "claude-code",
+    sessionId: SESSION_ID,
+    artefacts: [{ path: TRANSCRIPT_PATH, contents: Buffer.from(contents, "utf8") }],
+  };
+}
+
+/**
+ * Turn the seeded pass into the *resumed* one (issue #169's executor's shape):
+ * the pass it continues is a failed row on the subscription lane, and this row
+ * carries its session id and the lineage that names it.
+ */
+function seedResumedPass(): void {
+  const pausedId = newId();
+  testDb
+    .insert(schema.tasks)
+    .values({
+      id: pausedId,
+      projectId,
+      title: "Add the frobnicator",
+      description: "the implement brief",
+      status: "failed",
+      kind: "implement",
+      runId,
+      githubIssue: ISSUE_REF,
+      branch: "agent/issue-34",
+      sessionId: SESSION_ID,
+      lane: "claude-subscription",
+      laneBilling: "subscription",
+      createdAt: new Date(Date.now() - 60_000),
+      updatedAt: new Date(Date.now() - 60_000),
+    })
+    .run();
+  testDb
+    .update(schema.tasks)
+    .set({ status: "queued", lane: null, laneBilling: null, resumedFromTaskId: pausedId })
+    .where(eq(schema.tasks.id, taskId))
     .run();
 }
 
@@ -210,7 +284,13 @@ describe("a quota pause keeps the pass's conversation (issue #169)", () => {
     // The ordering is the whole trick: the conversation only exists inside the
     // container the pause is about to remove.
     expect(docker.calls).toEqual(["readContainerFile", "removeContainer"]);
-    expect(readTranscript(runId)?.toString("utf8")).toBe(TRANSCRIPT);
+    const stored = readTranscript(runId);
+    // Exactly the adapter's artefacts, kept with the path they came from and
+    // whose they are (issue #217).
+    expect(stored?.adapter).toBe("claude-code");
+    expect(stored?.sessionId).toBe(SESSION_ID);
+    expect(stored?.artefacts.map((a) => a.path)).toEqual([TRANSCRIPT_PATH]);
+    expect(stored?.artefacts[0].contents.toString("utf8")).toBe(TRANSCRIPT);
   });
 
   it("says on the issue that the resume will continue the conversation", async () => {
@@ -270,6 +350,7 @@ describe("a resumed pass opening in a fresh container (issue #169)", () => {
     vi.resetModules();
     turns = await import("../turn-manager");
     seedImplementPass();
+    seedResumedPass();
   });
 
   afterEach(() => {
@@ -286,42 +367,65 @@ describe("a resumed pass opening in a fresh container (issue #169)", () => {
   };
 
   it("restores the transcript and continues the same session", async () => {
-    saveTranscript(runId, TRANSCRIPT);
+    saveTranscript(runId, storedTranscript());
 
-    const sessionId = await turns.restoreSessionTranscript(task(), container);
+    const sessionId = await turns.restoreSessionTranscript(task(), container, SUBSCRIPTION_LANE);
 
     expect(sessionId).toBe(SESSION_ID);
     // Where the harness keeps it: one file, named for the session, under the
-    // mangled working directory (the #165 spike's finding).
-    expect(docker.written.get(containerTranscriptPath(SESSION_ID))).toBe(TRANSCRIPT);
+    // mangled working directory (the #165 spike's finding) — the path the
+    // store recorded, which is the adapter's.
+    expect(docker.written.get(TRANSCRIPT_PATH)).toBe(TRANSCRIPT);
+    expect(task().sessionId).toBe(SESSION_ID);
   });
 
   it("falls back to a fresh pass when nothing was stored", async () => {
-    const sessionId = await turns.restoreSessionTranscript(task(), container);
+    const sessionId = await turns.restoreSessionTranscript(task(), container, SUBSCRIPTION_LANE);
 
     // Never `--resume` against a session the container has never heard of:
     // that fails the pass, where the fallback merely costs it its context.
     expect(sessionId).toBeUndefined();
     expect(docker.written.size).toBe(0);
+    expect(task().sessionId).toBeNull();
   });
 
   it("falls back when the restore itself fails", async () => {
-    saveTranscript(runId, TRANSCRIPT);
+    saveTranscript(runId, storedTranscript());
     docker.writeFails = true;
 
-    expect(await turns.restoreSessionTranscript(task(), container)).toBeUndefined();
+    expect(
+      await turns.restoreSessionTranscript(task(), container, SUBSCRIPTION_LANE)
+    ).toBeUndefined();
   });
 
   it("leaves an ordinary first pass alone", async () => {
-    // Only the resume executor sets a session id at task creation, so a task
-    // without one must not go looking for a transcript at all.
+    // Only the resume, move and degrade executors record a predecessor, so a
+    // task without one must not go looking for a transcript at all.
+    testDb
+      .update(schema.tasks)
+      .set({ sessionId: null, resumedFromTaskId: null })
+      .where(eq(schema.tasks.id, taskId))
+      .run();
+
+    expect(
+      await turns.restoreSessionTranscript(task(), container, SUBSCRIPTION_LANE)
+    ).toBeUndefined();
+    expect(docker.calls).toEqual([]);
+  });
+
+  it("says nothing for a continuation queued without a session", async () => {
+    // A degrade (#170) carries none by design, and a pause whose transcript did
+    // not survive already said so on the refused pass's feed and on the issue.
     testDb
       .update(schema.tasks)
       .set({ sessionId: null })
       .where(eq(schema.tasks.id, taskId))
       .run();
+    const before = testDb.select().from(schema.messages).all().length;
 
-    expect(await turns.restoreSessionTranscript(task(), container)).toBeUndefined();
-    expect(docker.calls).toEqual([]);
+    expect(
+      await turns.restoreSessionTranscript(task(), container, SUBSCRIPTION_LANE)
+    ).toBeUndefined();
+    expect(testDb.select().from(schema.messages).all().length).toBe(before);
   });
 });
