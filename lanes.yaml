@@ -126,6 +126,12 @@ lanes:
     # (`costBasis: "list"` on the result event's modelUsage). Its figure is the
     # one the fleet has always charged against, and re-declaring those prices
     # here would only create a second copy to fall out of date.
+    #
+    # Omitting them is legal here only because Claude Code reports cost (issue
+    # #219): a metered lane on a harness whose descriptor declares no
+    # `reportsCost` is refused at parse without prices for every tier, since
+    # the fleet would otherwise book its spend from a figure the harness never
+    # produced. A subscription lane on such a harness may still omit them.
     caps:
       # Real money, and enforced (issue #174). This is a *ceiling on the
       # ceiling*: the operator's own real-money cap (METERED_DAILY_CAP_USD, or

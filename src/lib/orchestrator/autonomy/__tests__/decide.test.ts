@@ -3308,6 +3308,42 @@ describe("decideNext — the tier degrade ladder (issue #170)", () => {
     }
   );
 
+  it("steps only on the refusal's own window, never on the lane's stored quota row (issue #219)", () => {
+    // The stored observation is quota telemetry a lane's harness may not even
+    // be able to produce, so the ladder reads none of it: a tier-scoped
+    // rejection sitting in the row does not step a pass whose own refusal
+    // named no window. That pass pauses on its clock as any reset-less-of-tier
+    // wall does — and a refusal that *does* name a tier degrades whether or not
+    // a row exists, which is what lets a harness without telemetry still take
+    // the ordering when its refusal names one.
+    const storedTierWall = {
+      status: "rejected",
+      rateLimitType: "seven_day_opus",
+      utilization: 100,
+      resetsAt: RESUME_AFTER,
+      overageStatus: null,
+      overageResetsAt: null,
+      isUsingOverage: false,
+      overageInUse: null,
+      observedAt: NOW,
+    };
+    const snapshot = {
+      ...passOutcomeSnapshot(
+        NOW,
+        makePass({
+          tier: "heavy",
+          outcome: refusedByQuota({ resumeAfter: RESUME_AFTER, limitType: null }),
+        })
+      ),
+      quota: storedTierWall,
+    };
+
+    const actions = decideNext(snapshot);
+
+    expect(degrades(actions)).toEqual([]);
+    expect(pauses(actions)).toHaveLength(1);
+  });
+
   it("degrades a rejection that named no reset time, where a pause could not", () => {
     // The asymmetry #170 introduces: a pause needs a clock and a degrade does
     // not, so a reset-less tier wall steps down where a reset-less account-wide

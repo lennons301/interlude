@@ -1270,6 +1270,12 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
       // spend, one rung down, so the run steps down and retries. Only an
       // account-wide window — or the bottom of the ladder, where there is
       // nowhere left to step — actually stops the run.
+      //
+      // The window is the *refusal's own* — the adapter's normalised reading of
+      // the turn that was refused — and never the lane's stored quota row
+      // (issue #219): a harness that reports no quota telemetry has no row the
+      // ladder could step on, and its refusals still take this ordering when
+      // they name a tier, exactly as the milestone's spec has them.
       const { limitType, resumeAfter } = wall;
       if (limitType !== null) {
         const degrade = planTierDegrade(pass.tier, limitType);

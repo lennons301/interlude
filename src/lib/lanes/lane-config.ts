@@ -20,14 +20,28 @@
  * visible and the near-miss silently runs the fleet somewhere unintended. So a
  * document with an unknown adapter, a missing tier, a duplicate id, or a
  * primary naming no declared lane is rejected whole, with a reason.
+ *
+ * The rules follow the adapter's **declared capabilities** (issue #219). The
+ * parser is handed the descriptor table — every adapter that ships, with what
+ * each can do — and a lane carries its adapter's capabilities out of the parse
+ * (`LaneDefinition.capabilities`), so nothing downstream looks an adapter up
+ * to learn whether its lane can report quota or price a turn. One rule is
+ * enforced here because it is a fact about the *file*: a lane that bills per
+ * token on a harness that reports no cost must declare `prices` for every
+ * tier, or the fleet would book its spend from a figure the harness never
+ * produced (the rule issue #175 argued for by convention). A subscription
+ * lane on the same harness may omit them — its marginal cash cost is zero,
+ * tokens are still recorded, and nothing is booked to metered spend.
  */
 
 import { parse as parseYaml } from "yaml";
 import { MODEL_TIERS, type ModelTier } from "../model-tiers";
 import {
   HARNESS_ADAPTER_DESCRIPTORS,
+  describeHarnessAdapter,
   harnessAdapterIds,
   type HarnessAdapterDescriptor,
+  type HarnessCapabilities,
 } from "../harness/descriptors";
 import { isLaneIdShaped } from "./lane-id";
 
@@ -123,6 +137,17 @@ export interface LaneDefinition {
   /** Human-facing name for the settings screen. */
   label: string;
   adapter: LaneAdapterId;
+  /**
+   * What the lane's harness can do (issue #219), copied off the adapter's
+   * descriptor as the lane is parsed. A field on the lane rather than a lookup
+   * at every reader because the readers are many and pure — the quota read,
+   * the failover ranking, the fleet view, the settings screen — and a test's
+   * lane on the fake adapter has to carry the fake's capabilities as naturally
+   * as a shipped lane carries Claude Code's. It describes the *harness*, never
+   * the provider: a Claude Code lane declares quota telemetry whether or not
+   * the endpoint behind it ever emits any.
+   */
+  capabilities: HarnessCapabilities;
   billing: LaneBilling;
   /** Every credential the lane needs, in declaration order. A lane is
    * unavailable unless all of them are set. */
@@ -210,10 +235,9 @@ export function parseLaneConfig(
     return fail("`lanes` is not a non-empty list of lane definitions");
   }
 
-  const adapterIds = harnessAdapterIds(descriptors);
   const lanes: LaneDefinition[] = [];
   for (const [index, raw] of rawLanes.entries()) {
-    const parsed = parseLane(raw, index, adapterIds);
+    const parsed = parseLane(raw, index, descriptors);
     if ("reason" in parsed) return fail(parsed.reason);
     if (lanes.some((lane) => lane.id === parsed.lane.id)) {
       return fail(`duplicate lane id "${parsed.lane.id}"`);
@@ -237,7 +261,7 @@ type LaneParse = { lane: LaneDefinition } | { reason: string };
 function parseLane(
   raw: unknown,
   index: number,
-  adapterIds: readonly string[]
+  descriptors: readonly HarnessAdapterDescriptor[]
 ): LaneParse {
   const at = `lane #${index + 1}`;
   if (!isMapping(raw)) return { reason: `${at} is not a mapping` };
@@ -256,11 +280,15 @@ function parseLane(
   }
 
   const adapter = raw.adapter;
-  if (typeof adapter !== "string" || !adapterIds.includes(adapter)) {
+  const descriptor =
+    typeof adapter === "string" ? describeHarnessAdapter(adapter, descriptors) : null;
+  if (typeof adapter !== "string" || descriptor === null) {
+    // Named so a typo cannot run the fleet on a harness nobody chose: the
+    // registered ids are the whole vocabulary, and the reason lists them.
     return {
       reason:
-        `${where} names adapter "${String(adapter)}" — expected one of ` +
-        `${adapterIds.join(", ")}.`,
+        `${where} names adapter "${String(adapter)}", which is not a registered ` +
+        `harness adapter — registered adapters: ${harnessAdapterIds(descriptors).join(", ")}.`,
     };
   }
 
@@ -288,6 +316,26 @@ function parseLane(
   const prices = parsePrices(raw.prices, where);
   if ("reason" in prices) return prices;
 
+  // The one rule that follows the harness rather than the file's own shape
+  // (issue #219): real money on a harness that reports no cost has to be
+  // priced here, or every budget the fleet holds against this lane would be
+  // measured in a figure nobody produced. Keyed on the capability, never on
+  // the provider or the base URL — the shipped Anthropic-direct lanes omit
+  // prices because Claude Code *does* report cost there, and that stays legal.
+  if (
+    billing === "metered" &&
+    !descriptor.capabilities.reportsCost &&
+    prices.prices === null
+  ) {
+    return {
+      reason:
+        `${where} bills per token on "${adapter}", a harness that reports no ` +
+        `cost, but declares no \`prices\` — declare a price for every tier ` +
+        `(${MODEL_TIERS.join(", ")}), or the fleet would book this lane's spend ` +
+        "from a figure the harness never produced",
+    };
+  }
+
   const caps = parseCaps(raw.caps, where);
   if ("reason" in caps) return caps;
 
@@ -296,6 +344,7 @@ function parseLane(
       id,
       label,
       adapter,
+      capabilities: descriptor.capabilities,
       billing: billing as LaneBilling,
       auth: auth.auth,
       baseUrl: baseUrl.baseUrl,
@@ -519,4 +568,23 @@ export function findLane(
  * tells the operator what *would* have been accepted. */
 export function laneIds(catalog: LaneCatalog): string[] {
   return catalog.lanes.map((lane) => lane.id);
+}
+
+/**
+ * Whether a lane's harness reports quota telemetry at all (issue #219) — the
+ * one capability the fleet acts on outside a pass: the admission gate, the
+ * tier ladder, the wall check and the quota tile all read a lane's quota
+ * observation, and none of them may read one against a lane whose harness
+ * cannot have produced it. A row under such a lane — left by a lane id moved
+ * onto another adapter in a deploy, or written by an adapter in breach of its
+ * own descriptor — describes nothing the fleet can act on.
+ *
+ * Null is **false**: no lane, or an id the file no longer declares, is a lane
+ * the fleet cannot attribute telemetry to, and the cautious answer is the same
+ * one the gate gives silence — decide nothing on it.
+ */
+export function laneReportsQuota<T extends Pick<LaneDefinition, "capabilities">>(
+  lane: T | null
+): lane is T {
+  return lane !== null && lane.capabilities.quotaTelemetry;
 }

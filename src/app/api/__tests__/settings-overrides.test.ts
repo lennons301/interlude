@@ -15,6 +15,21 @@ vi.mock("@/db", () => ({
   },
 }));
 
+// The one outbound call the route makes (issue #219) is the harness image
+// probe. Stubbed: a unit test must not reach the host's Docker socket, and a
+// definite answer is what lets the assertion below be a real one.
+const imageProbe = vi.hoisted(() => ({ asked: [] as string[] }));
+vi.mock("@/lib/docker/image-builder", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/docker/image-builder")>();
+  return {
+    ...actual,
+    probeImageBuilt: async (name: string) => {
+      imageProbe.asked.push(name);
+      return true;
+    },
+  };
+});
+
 import { GET, PATCH } from "@/app/api/settings/overrides/route";
 import { getConfig, resetConfig, resolveAgentModelChoice } from "@/lib/config";
 import { getSettingsOverrides } from "@/lib/settings";
@@ -191,6 +206,28 @@ describe("execution lanes on /api/settings/overrides", () => {
       available: false,
       missingEnvVars: ["OPENROUTER_API_KEY"],
     });
+  });
+
+  it("reports each harness the file names with its image and whether it is built (issue #219)", async () => {
+    // One entry per adapter, not per lane: every shipped lane runs Claude
+    // Code, so there is one image to ask about, and the daemon is asked once.
+    imageProbe.asked.length = 0;
+    const state = await (await GET()).json();
+
+    expect(state.harnesses).toEqual([
+      { id: "claude-code", image: "interlude-agent:latest", built: true },
+    ]);
+    expect(imageProbe.asked).toEqual(["interlude-agent:latest"]);
+    // Every lane row carries the capabilities the panel shows beside the
+    // harness, and none of them is a secret.
+    for (const lane of state.lanes.lanes) {
+      expect(lane.capabilities).toEqual({
+        userInvokedSkills: true,
+        quotaTelemetry: true,
+        reportsCost: true,
+        sessionResume: true,
+      });
+    }
   });
 
   it("never serves a lane secret, only the names of the variables", async () => {

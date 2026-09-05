@@ -2417,23 +2417,26 @@ describe("quota (issue #167)", () => {
 });
 
 /**
- * Whose quota it is (issue #175). The observation is per-lane in the database;
- * the view's job is to carry the lane beside it so a null reading can be told
- * apart from a lane that will never produce one.
+ * Whose quota it is (issues #175, #219). The observation is per-lane in the
+ * database; the view's job is to carry the lane beside it so a null reading
+ * can be told apart from a lane that will never produce one — and, since
+ * #219, "will never" is the harness's declared capability, not the billing.
  */
-describe("the quota's lane (issue #175)", () => {
+describe("the quota's lane (issues #175, #219)", () => {
   it("says nothing about a lane when none resolves", () => {
     // An unusable lanes.yaml. The tile may not claim the fleet is metered.
     expect(buildFleetView(baseRows()).quotaLane).toBeNull();
   });
 
-  it("marks a subscription lane as one that can report a window", () => {
+  it("marks a lane on a telemetry-reporting harness as one that can report a window", () => {
     const view = buildFleetView(
       baseRows({
         quotaLane: {
           id: "claude-subscription",
           label: "Claude subscription",
           billing: "subscription",
+          adapter: "claude-code",
+          quotaTelemetry: true,
         },
       })
     );
@@ -2442,20 +2445,43 @@ describe("the quota's lane (issue #175)", () => {
       id: "claude-subscription",
       label: "Claude subscription",
       billing: "subscription",
+      adapter: "claude-code",
       reportsQuota: true,
     });
   });
 
-  it("marks every metered lane as one that never will", () => {
-    // The unified-window machinery is subscription-only (#165's finding 6),
-    // confirmed against OpenRouter on 2026-09-02 — no rate-limit headers and no
-    // `rate_limit_event` on a full harness turn. Anthropic's own API lane is
-    // metered too, and is equally silent.
+  it("keys 'can report' on the harness's capability, whatever the lane bills (issue #219)", () => {
+    // A subscription lane on a harness with no quota telemetry can never
+    // report; a metered lane on Claude Code could (the provider behind it
+    // merely does not). Billing decided this under #175 and is wrong the moment
+    // a second harness exists.
+    const silent = buildFleetView(
+      baseRows({
+        quotaLane: {
+          id: "codex-subscription",
+          label: "Codex subscription",
+          billing: "subscription",
+          adapter: "codex",
+          quotaTelemetry: false,
+        },
+      })
+    );
+    expect(silent.quotaLane?.reportsQuota).toBe(false);
+    expect(silent.quotaLane?.adapter).toBe("codex");
+
     for (const id of ["openrouter-glm", "anthropic-api"]) {
       const view = buildFleetView(
-        baseRows({ quotaLane: { id, label: id, billing: "metered" } })
+        baseRows({
+          quotaLane: {
+            id,
+            label: id,
+            billing: "metered",
+            adapter: "claude-code",
+            quotaTelemetry: true,
+          },
+        })
       );
-      expect(view.quotaLane?.reportsQuota).toBe(false);
+      expect(view.quotaLane?.reportsQuota).toBe(true);
     }
   });
 
@@ -2470,6 +2496,8 @@ describe("the quota's lane (issue #175)", () => {
           id: "openrouter-glm",
           label: "OpenRouter (GLM open weights)",
           billing: "metered",
+          adapter: "claude-code",
+          quotaTelemetry: true,
         },
       })
     );

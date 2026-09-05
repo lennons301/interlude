@@ -497,4 +497,26 @@ describe("describeLanes — what the settings screen is handed", () => {
     }
     expect(serialised).not.toContain("sk-");
   });
+
+  it("carries each lane's harness capabilities, as the parser attached them (issue #219)", () => {
+    // What the settings screen shows beside the harness, and what the money
+    // guards read to know whether the lane's quota row may be read at all.
+    for (const lane of view.lanes) {
+      expect(lane.capabilities).toEqual({
+        userInvokedSkills: true,
+        quotaTelemetry: true,
+        reportsCost: true,
+        sessionResume: true,
+      });
+    }
+    const resolved = resolveLane({
+      catalog,
+      kind: "implement",
+      config: cfg(),
+      ticketModel: null,
+      overrides: {},
+      env: SUBSCRIBED,
+    });
+    expect(resolved.ok && resolved.lane.capabilities.quotaTelemetry).toBe(true);
+  });
 });
