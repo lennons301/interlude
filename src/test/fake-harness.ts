@@ -35,6 +35,17 @@ import type { TurnOutcome, TurnResult } from "@/lib/harness/turn-result";
 
 export const FAKE_HARNESS_ID = "fake";
 
+/**
+ * A *second* fake adapter (issue #217): the same double under another id, so a
+ * test can declare two lanes on two different harnesses and drive a lane move
+ * across them. Never described in the production table either.
+ */
+export const FAKE_OTHER_HARNESS_ID = "fake-other";
+
+/** A fake adapter declaring it cannot resume a session (issue #217): what a
+ * run on such a lane does at a pause and a resume is what a test asks it. */
+export const FAKE_NO_RESUME_HARNESS_ID = "fake-no-resume";
+
 /** The fake's capabilities: everything a Claude lane has, except quota
  * telemetry — the one thing a second harness most plausibly lacks. */
 export const FAKE_HARNESS_CAPABILITIES: HarnessCapabilities = {
@@ -44,17 +55,30 @@ export const FAKE_HARNESS_CAPABILITIES: HarnessCapabilities = {
   sessionResume: true,
 };
 
-/** The descriptor a test hands the lane parser so a lane may name the fake. */
-export const fakeHarnessDescriptor: HarnessAdapterDescriptor = {
-  id: FAKE_HARNESS_ID,
-  capabilities: FAKE_HARNESS_CAPABILITIES,
-};
+/** The descriptor a test hands the lane parser so a lane may name a fake. */
+export function fakeHarnessDescriptor(
+  id: string = FAKE_HARNESS_ID,
+  capabilities: HarnessCapabilities = FAKE_HARNESS_CAPABILITIES
+): HarnessAdapterDescriptor {
+  return { id, capabilities };
+}
 
 /** The production table plus the fake — what a test's lane file is parsed
  * against. */
 export const DESCRIPTORS_WITH_FAKE: readonly HarnessAdapterDescriptor[] = [
   ...HARNESS_ADAPTER_DESCRIPTORS,
-  fakeHarnessDescriptor,
+  fakeHarnessDescriptor(),
+];
+
+/** The production table plus every fake a multi-adapter test declares: the
+ * second fake, and one that cannot resume a session. */
+export const DESCRIPTORS_WITH_ALL_FAKES: readonly HarnessAdapterDescriptor[] = [
+  ...DESCRIPTORS_WITH_FAKE,
+  fakeHarnessDescriptor(FAKE_OTHER_HARNESS_ID),
+  fakeHarnessDescriptor(FAKE_NO_RESUME_HARNESS_ID, {
+    ...FAKE_HARNESS_CAPABILITIES,
+    sessionResume: false,
+  }),
 ];
 
 /** The variable a fake lane reads its (fake) credential from. */
@@ -79,6 +103,45 @@ lanes:
 
 export function fakeLaneCatalog(): LaneCatalog {
   const parsed = parseLaneConfig(FAKE_LANE_YAML, DESCRIPTORS_WITH_FAKE);
+  if (!parsed.ok) throw new Error(`fake lane file did not parse: ${parsed.reason}`);
+  return parsed.catalog;
+}
+
+/** One lane of a multi-lane fake catalog: which adapter it runs, under what
+ * label. Every such lane bills as a subscription and reads the one fake
+ * credential, so what differs between them is only the harness. */
+export interface FakeLaneSpec {
+  id: string;
+  adapter: string;
+  label: string;
+}
+
+/** A lane file declaring the given lanes, in preference order as listed. */
+export function fakeLaneYaml(lanes: readonly FakeLaneSpec[]): string {
+  return [
+    "primary:",
+    ...lanes.map((lane) => `  - ${lane.id}`),
+    "lanes:",
+    ...lanes.flatMap((lane) => [
+      `  - id: ${lane.id}`,
+      `    label: ${lane.label}`,
+      `    adapter: ${lane.adapter}`,
+      "    billing: subscription",
+      "    auth:",
+      `      ${FAKE_LANE_AUTH_VAR}: ${FAKE_LANE_AUTH_VAR}`,
+      "    models:",
+      "      heavy: fake-heavy",
+      "      standard: fake-standard",
+      "      light: fake-light",
+    ]),
+    "",
+  ].join("\n");
+}
+
+/** A catalog of the given lanes, parsed against every fake adapter's
+ * descriptor (issue #217). */
+export function fakeLaneCatalogOf(lanes: readonly FakeLaneSpec[]): LaneCatalog {
+  const parsed = parseLaneConfig(fakeLaneYaml(lanes), DESCRIPTORS_WITH_ALL_FAKES);
   if (!parsed.ok) throw new Error(`fake lane file did not parse: ${parsed.reason}`);
   return parsed.catalog;
 }
@@ -118,6 +181,12 @@ export interface FakeHarness {
   script(...results: TurnResult[]): void;
   /** Results scripted but not yet consumed. */
   pending(): number;
+}
+
+/** The one artefact a fake session has, where a fake adapter of `id` keeps it:
+ * under the pass's working directory, so it is visibly not a vendor's path. */
+export function fakeSessionArtifactPath(id: string, sessionId: string, cwd: string): string {
+  return `${cwd}/.${id}/sessions/${sessionId}.json`;
 }
 
 /** A stream stub for a suite's `execAgentTurn` mock: never emits, never ends,
@@ -191,7 +260,7 @@ export function createFakeHarness(
       return trimmed ? `[fake: load skill ${skill}] ${trimmed}` : `[fake: load skill ${skill}]`;
     },
     sessionArtifactPaths(sessionId, cwd) {
-      return [`${cwd}/.fake-harness/sessions/${sessionId}.json`];
+      return [fakeSessionArtifactPath(id, sessionId, cwd)];
     },
     mapEffort(level) {
       // Deliberately a partial map: the fake knows "low" and "high" only, so a
