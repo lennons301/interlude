@@ -260,21 +260,57 @@ describe("usage is the thread's running total on the wire, and the turn's in the
     expect(result.usage).toEqual({ inputTokens: 700, outputTokens: 135, cacheReadTokens: 3500, cacheWriteTokens: 0 });
   });
 
-  it("floors each difference at zero and keeps cached tokens apart from input", () => {
-    const before = { input_tokens: 500, cached_input_tokens: 400, cache_write_input_tokens: 10, output_tokens: 50, reasoning_output_tokens: 5 };
+  const BEFORE = { input_tokens: 500, cached_input_tokens: 400, cache_write_input_tokens: 10, output_tokens: 50, reasoning_output_tokens: 5 };
+
+  it("charges each count's difference and keeps cached tokens apart from input", () => {
     expect(
       turnUsageFromThread(
         { input_tokens: 800, cached_input_tokens: 600, cache_write_input_tokens: 10, output_tokens: 70, reasoning_output_tokens: 9 },
-        before
+        BEFORE
       )
     ).toEqual({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 200, cacheWriteTokens: 0 });
-    // A total that went down is a thread the CLI restarted counting for.
+  });
+
+  it("charges the whole total when a count went down — a counter that restarted, never a turn that cost nothing", () => {
+    // Every count below the prior total: the counter restarted, and the total
+    // is this turn's. Floored differences would book zero against the metered
+    // cap — the under-reporting direction, on the lane where it is real money.
     expect(
       turnUsageFromThread(
         { input_tokens: 100, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 10, reasoning_output_tokens: 0 },
-        before
+        BEFORE
       )
-    ).toEqual({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    ).toEqual({ inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    // One count below it is enough: a cumulative total never goes down on any
+    // count, so the prior total is not this thread's and the other counts'
+    // differences would be differences from nothing.
+    expect(
+      turnUsageFromThread(
+        { input_tokens: 900, cached_input_tokens: 300, cache_write_input_tokens: 10, output_tokens: 70, reasoning_output_tokens: 9 },
+        BEFORE
+      )
+    ).toEqual({ inputTokens: 600, outputTokens: 70, cacheReadTokens: 300, cacheWriteTokens: 10 });
+  });
+
+  it("charges the whole total off the feed too when the recorded total is the larger — the ledger cannot zero a turn", () => {
+    // A note recording more than the wire now reports: a restarted counter
+    // (or a CLI release reporting per-turn usage). Through the real read-back,
+    // the resumed turn is charged exactly as a thread never seen would be.
+    testDb.update(schema.tasks).set({ sessionId: THREAD_ID }).where(eq(schema.tasks.id, TASK_ID)).run();
+    testDb.insert(schema.messages).values({
+      id: "codex-task-001-larger",
+      taskId: TASK_ID,
+      role: "system",
+      type: "system",
+      content: JSON.stringify({
+        text: "Turn complete",
+        [THREAD_USAGE_KEY]: { input_tokens: 999_999, cached_input_tokens: 900_000, cache_write_input_tokens: 0, output_tokens: 99_999, reasoning_output_tokens: 0 },
+      }),
+      createdAt: new Date(2026, 8, 5, 12, 0, 0),
+    }).run();
+
+    const result = play(handlerFor().handler, RESUME);
+    expect(result.usage).toEqual({ inputTokens: 700, outputTokens: 135, cacheReadTokens: 3500, cacheWriteTokens: 0 });
   });
 });
 

@@ -67,7 +67,12 @@ import {
  * feed has never seen charges its total, which for a fresh thread *is* the
  * turn. A failed turn writes no note, so its tokens fall into the next turn's
  * difference — the direction that over-states, which is the safe half of that
- * trade.
+ * trade. A total *below* the prior one on any count is charged whole for the
+ * same reason: a cumulative total never goes down, so a smaller one is a
+ * counter that restarted and the prior total says nothing about this turn —
+ * where a difference floored at zero would book nothing against the metered
+ * cap, the under-reporting #175 refuses, and would do so on every follow-up
+ * were an unpinned CLI release ever to report per-turn usage instead.
  *
  * **What reaches the recorder (issue #165).** The recorder's allowlist is the
  * Claude Code parser's vocabulary, and it caps each event type at a handful of
@@ -157,18 +162,22 @@ export function readThreadUsage(value: unknown): CodexThreadUsage | null {
 /**
  * The turn's own usage, in the fleet's shape, from the thread's total at the
  * end of the turn and the total it had reached before it (null for a thread
- * never seen). Each count is the difference, floored at zero — a total that
- * went *down* is a thread the CLI restarted counting for, and charging the new
- * total is the over-stating side. `inputTokens` is the *uncached* input: the
- * wire's `input_tokens` includes the cached tokens, and the fleet's shape
- * counts them apart. Output tokens include reasoning tokens, as the wire's do.
+ * never seen). Each count is the difference — unless any count went *down*,
+ * which a cumulative total never does: that is a counter the CLI restarted,
+ * the prior total says nothing about this turn, and the new total is charged
+ * whole. Charging the whole total is the over-stating side; a difference
+ * floored at zero would be the under-reporting one (see the module note).
+ * `inputTokens` is the *uncached* input: the wire's `input_tokens` includes
+ * the cached tokens, and the fleet's shape counts them apart. Output tokens
+ * include reasoning tokens, as the wire's do.
  */
 export function turnUsageFromThread(
   after: CodexThreadUsage,
   before: CodexThreadUsage | null
 ): TurnTokenUsage {
-  const delta = (key: keyof CodexThreadUsage) =>
-    Math.max(0, after[key] - (before?.[key] ?? 0));
+  const prior =
+    before !== null && USAGE_KEYS.every((key) => after[key] >= before[key]) ? before : null;
+  const delta = (key: keyof CodexThreadUsage) => after[key] - (prior?.[key] ?? 0);
   const input = delta("input_tokens");
   const cached = delta("cached_input_tokens");
   return {
