@@ -8,10 +8,16 @@ import {
   fakeExecStream,
   fakeLaneCatalog,
   scriptedTurn,
+  DESCRIPTORS_WITH_FAKE,
+  FAKE_HARNESS_CAPABILITIES,
+  FAKE_HARNESS_ID,
   FAKE_LANE_AUTH_VAR,
   FAKE_LANE_ID,
+  FAKE_LANE_YAML,
   type FakeHarness,
 } from "@/test/fake-harness";
+import { parseLaneConfig, type LaneCatalog } from "@/lib/lanes/lane-config";
+import { ARMING_CONVENTION, ISSUE_ANCHOR_HINT } from "@/lib/sessions/seed";
 
 /**
  * A whole turn through the turn manager on the fake adapter (issue #214): lane
@@ -102,6 +108,12 @@ vi.mock("../../github/pull-requests", async (importOriginal) => {
   };
 });
 
+// A generation session's first turn ends with a dev-server scan; a port found
+// at once skips the scan's three-second retry, which is not what is under test.
+vi.mock("../port-scanner", () => ({
+  scanPorts: async () => [3000],
+}));
+
 vi.mock("../../discord/notifications", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../discord/notifications")>();
   return {
@@ -115,12 +127,17 @@ vi.mock("../../discord/notifications", async (importOriginal) => {
 
 // The one-lane catalog on the fake adapter, in place of `lanes.yaml`. Every
 // reader of the catalog — lane resolution, the crossing, the failover ranking
-// — sees the same file, exactly as they would in production.
+// — sees the same file, exactly as they would in production. A test may swap
+// the file for one whose fake adapter is described differently.
+const laneFile = vi.hoisted(() => ({
+  catalog: null as import("@/lib/lanes/lane-config").LaneCatalog | null,
+}));
+
 vi.mock("../../lanes/catalog", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lanes/catalog")>();
   return {
     ...actual,
-    getLaneCatalog: () => ({ ok: true, catalog: fakeLaneCatalog() }),
+    getLaneCatalog: () => ({ ok: true, catalog: laneFile.catalog ?? fakeLaneCatalog() }),
   };
 });
 
@@ -367,5 +384,175 @@ describe("a whole turn through the turn manager on the fake adapter (issue #214)
       "push",
       "stopContainer",
     ]);
+  });
+});
+
+/** The fake lane file again, with the fake adapter described as a harness
+ * that does *not* expand a user-invoked skill — the shape a Codex or OpenCode
+ * lane has, and what a generation session must never be started on. */
+function noSkillsCatalog(): LaneCatalog {
+  const parsed = parseLaneConfig(FAKE_LANE_YAML, [
+    ...DESCRIPTORS_WITH_FAKE.filter((d) => d.id !== FAKE_HARNESS_ID),
+    {
+      id: FAKE_HARNESS_ID,
+      capabilities: { ...FAKE_HARNESS_CAPABILITIES, userInvokedSkills: false },
+    },
+  ]);
+  if (!parsed.ok) throw new Error(`fake lane file did not parse: ${parsed.reason}`);
+  return parsed.catalog;
+}
+
+const SESSION_ISSUE = "lennons301/lemons#34";
+
+/** A queued generation session — or, with no skill, an ordinary chat — on a
+ * project with a repository to push to. */
+function seedInteractive(sessionSkill: "grill-me" | null): string {
+  const projectId = newId();
+  testDb
+    .insert(schema.projects)
+    .values({
+      id: projectId,
+      name: "lemons",
+      gitUrl: "https://github.com/lennons301/lemons.git",
+      createdAt: new Date(),
+    })
+    .run();
+  const id = newId();
+  testDb
+    .insert(schema.tasks)
+    .values({
+      id,
+      projectId,
+      title: "Grill the fleet dashboard",
+      description: "",
+      status: "queued",
+      kind: "interactive",
+      sessionSkill,
+      sessionIssue: sessionSkill === null ? null : SESSION_ISSUE,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .run();
+  return id;
+}
+
+function taskRow(id: string) {
+  return testDb.select().from(schema.tasks).where(eq(schema.tasks.id, id)).get()!;
+}
+
+function notes(id: string): string[] {
+  return testDb
+    .select()
+    .from(schema.messages)
+    .all()
+    .filter((m) => m.taskId === id && m.role === "system")
+    .map((m) => {
+      try {
+        return String(JSON.parse(m.content).text ?? "");
+      } catch {
+        return m.content;
+      }
+    });
+}
+
+describe("a generation session on the fake adapter (issue #218)", () => {
+  let turns: TurnManager;
+  let fake: FakeHarness;
+  let unregister: () => void;
+  const env = { ...process.env };
+
+  /** Register the fake — described as the catalog in `laneFile` describes it
+   * — on the registry the freshly imported turn manager resolves through. */
+  async function boot(capabilities = FAKE_HARNESS_CAPABILITIES) {
+    process.env[FAKE_LANE_AUTH_VAR] = "fake-token";
+    delete process.env.AGENT_LANE;
+    delete process.env.AGENT_MODEL;
+    vi.resetModules();
+    const config = await import("@/lib/config");
+    config.resetConfig();
+    const registry = await import("@/lib/harness/registry");
+    fake = createFakeHarness([], { capabilities });
+    unregister = registry.registerHarnessAdapter(fake.adapter);
+    turns = await import("../turn-manager");
+    turns.getActiveTasks().clear();
+  }
+
+  beforeEach(() => {
+    testDb = createTestDb().db;
+    docker.calls.length = 0;
+    github.comments.length = 0;
+    laneFile.catalog = null;
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    unregister?.();
+    laneFile.catalog = null;
+    process.env = { ...env };
+    vi.restoreAllMocks();
+  });
+
+  it("seeds the session in the lane's adapter's own vocabulary, framing intact", async () => {
+    await boot();
+    const id = seedInteractive("grill-me");
+    fake.script(scriptedTurn({ kind: "completed" }, { finalMessage: "What is the goal?" }));
+
+    await turns.startTask(id);
+
+    // The first turn's prompt is the seed composed *for this lane*: the fake's
+    // invocation line where the slash would have gone, then the issue anchor,
+    // then the arming convention — none of it Claude's.
+    expect(fake.execs).toHaveLength(1);
+    expect(fake.execs[0].env.prompt).toBe(
+      [
+        "[fake: load skill grill-me] Grill the fleet dashboard",
+        ISSUE_ANCHOR_HINT(SESSION_ISSUE),
+        ARMING_CONVENTION,
+      ].join("\n\n")
+    );
+    expect(fake.execs[0].env.prompt.startsWith("/")).toBe(false);
+    // Still a generation session: the exec carries a `gh` token (#62) and the
+    // session ran on the fake lane like any other pass.
+    expect(fake.execs[0].env.ghToken).toBe("ghs_fake_installation");
+    expect(fake.execs[0].laneId).toBe(FAKE_LANE_ID);
+    expect(taskRow(id).lane).toBe(FAKE_LANE_ID);
+    expect(taskRow(id).containerStatus).toBe("idle");
+    expect(docker.calls.slice(0, 2)).toEqual(["createWorkspaceContainer", "execAgentTurn"]);
+  });
+
+  it("holds the session with the reason before any container exists when no lane can invoke its skill", async () => {
+    laneFile.catalog = noSkillsCatalog();
+    await boot({ ...FAKE_HARNESS_CAPABILITIES, userInvokedSkills: false });
+    const id = seedInteractive("grill-me");
+
+    await turns.startTask(id);
+
+    // Nothing was provisioned and nothing ran: the crossing refused the
+    // session at the door, and it is held — queued, told why — rather than
+    // started as freeform chat on a harness that cannot load the skill.
+    expect(docker.calls).toEqual([]);
+    expect(fake.execs).toHaveLength(0);
+    expect(taskRow(id).status).toBe("queued");
+    expect(taskRow(id).lane).toBeNull();
+    const [note] = notes(id);
+    expect(note).toContain("A grill-me session needs a lane whose harness can invoke skills");
+    expect(note).toContain(`${FAKE_LANE_ID} runs ${FAKE_HARNESS_ID}, which cannot invoke a skill`);
+  });
+
+  it("starts an ordinary chat on that same lane exactly as before", async () => {
+    laneFile.catalog = noSkillsCatalog();
+    await boot({ ...FAKE_HARNESS_CAPABILITIES, userInvokedSkills: false });
+    const id = seedInteractive(null);
+    fake.script(scriptedTurn({ kind: "completed" }));
+
+    await turns.startTask(id);
+
+    // A chat needs no skill, so the requirement never applies to it: the
+    // container is built, the turn runs, and its prompt is the plain one.
+    expect(fake.execs).toHaveLength(1);
+    expect(fake.execs[0].env.prompt.startsWith("Grill the fleet dashboard\n\n")).toBe(true);
+    expect(fake.execs[0].env.ghToken).toBeNull();
+    expect(taskRow(id).lane).toBe(FAKE_LANE_ID);
+    expect(notes(id).some((n) => n.includes("needs a lane whose harness"))).toBe(false);
   });
 });
