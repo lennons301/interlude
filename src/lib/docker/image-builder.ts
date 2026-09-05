@@ -15,9 +15,11 @@ import type { HarnessImage } from "../harness/adapter";
  * (`Dockerfile.agent-<adapter id>`) that installs one harness and pre-accepts
  * its headless mode. Which image an adapter's containers run is the adapter's
  * declaration (`HarnessAdapter.image`, issue #214); this module is handed that
- * declaration and knows nothing about which adapters exist, so it can be read
- * on the app-router graph (the settings screen's image probe) without pulling
- * the adapter registry — and the stream parser and database behind it — along.
+ * declaration and knows nothing about which adapters exist — it builds and
+ * inspects whatever image it is given, and the one place that holds the
+ * resolved lane (the turn manager) is the one place that asks an adapter for
+ * its image. That keeps "which harness" a fact stated once, on the lane's
+ * adapter, rather than re-derived here from an id.
  *
  * Staleness is a hash stamped on the image (issue #78 — an existence-only check
  * let merged Dockerfile changes silently never reach running agents). The base

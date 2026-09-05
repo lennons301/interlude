@@ -107,6 +107,14 @@ describe("the base and the layers", () => {
     }
   });
 
+  it("is the label the deploy prunes by, so a rename cannot turn that prune into a no-op", () => {
+    // The deploy forces a rebuild at the first pass after it lands by pruning
+    // every unused image carrying the stamp — the only statement of the label
+    // outside this module, and one that fails silently behind `|| true`.
+    const deploy = readFileSync(path.join(process.cwd(), ".github", "workflows", "deploy.yml"), "utf8");
+    expect(deploy).toContain(`docker image prune -a -f --filter label=${DOCKERFILE_HASH_LABEL}`);
+  });
+
   it("stamps an adapter image with a hash that changes when either file does", () => {
     expect(imageStamp("a", "b")).toBe(imageStamp("a", "b"));
     expect(imageStamp("a", "b")).not.toBe(imageStamp("a2", "b"));
