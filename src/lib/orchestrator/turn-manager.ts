@@ -1,5 +1,12 @@
 import { db } from "@/db";
-import { tasks, messages, projects, runs, isGenerationSession } from "@/db/schema";
+import {
+  tasks,
+  messages,
+  projects,
+  runs,
+  isGenerationSession,
+  type SessionSkill,
+} from "@/db/schema";
 import { eq, and, isNull, asc, desc } from "drizzle-orm";
 import { newId } from "../ulid";
 import { AGENT_WORKDIR } from "../docker/workdir";
@@ -349,20 +356,15 @@ export async function startTask(taskId: string): Promise<void> {
   const userPrompt = task.description
     ? `${task.title}\n\n${task.description}`
     : task.title;
-  // A generation session's first turn is the composed seed (issue #63): the
-  // deterministic slash-passthrough prompt for its session skill, with the
-  // user's title/description as the skill's agenda and any issue anchor passed
-  // as a reference the agent fetches itself. Sessions are always interactive
-  // (no run row), so this never collides with the autonomous-pass branch.
-  const prompt = task.sessionSkill
-    ? composeSeed({
-        sessionSkill: task.sessionSkill,
-        sessionIssue: task.sessionIssue,
-        agenda: userPrompt,
-      })
-    : isAutonomousPass
-      ? task.description
-      : `${userPrompt}\n\nWhen you are done with each request, commit all your changes with a descriptive commit message. Stay ready for follow-up instructions.`;
+  // The first turn of every pass but a generation session: an autonomous pass
+  // carries its fully framed brief; a plain chat gets the owner's prompt with
+  // the standing instruction. A generation session's first turn is composed
+  // below, once its lane is known (issue #218): the seed's first line is the
+  // lane's harness's own way of invoking the session skill, so it cannot be
+  // written before the adapter is.
+  const plainPrompt = isAutonomousPass
+    ? task.description
+    : `${userPrompt}\n\nWhen you are done with each request, commit all your changes with a descriptive commit message. Stay ready for follow-up instructions.`;
 
   const run = task.runId
     ? db.select().from(runs).where(eq(runs.id, task.runId)).get()
@@ -389,7 +391,11 @@ export async function startTask(taskId: string): Promise<void> {
   // onto is ranked at the *tier* that pass would run (issue #176): a heavy
   // implement pass and a light triage pass read different rows of the same
   // lane's price table.
-  const crossing = readLaneCrossing(task.kind, run?.model ?? null);
+  // The task's session skill rides along too (issue #218): a generation
+  // session may only be routed to a lane whose harness can invoke its skill,
+  // and with none the crossing refuses it here — held with the reason on its
+  // feed, exactly as a money hold is, and never started as freeform chat.
+  const crossing = readLaneCrossing(task.kind, run?.model ?? null, task.sessionSkill);
   if (crossingHoldsPass(taskId, crossing)) return;
 
   // Everything from here is inside the failure path. Lane resolution
@@ -416,6 +422,25 @@ export async function startTask(taskId: string): Promise<void> {
     const pass = requirePassLane(task.kind, run?.model ?? null, crossing);
     const passLane = pass.lane;
     const passModel = passLane.model;
+
+    // A generation session's first turn is the composed seed (issues #63,
+    // #218): the lane's adapter's invocation of its session skill, with the
+    // user's title/description as the skill's agenda and any issue anchor
+    // passed as a reference the agent fetches itself. Asked of the adapter the
+    // pass actually runs on, so a session routed onto another harness is
+    // seeded in that harness's own vocabulary while the framing around the
+    // line stays the fleet's. Sessions are always interactive (no run row), so
+    // this never collides with the autonomous-pass branch.
+    const prompt = task.sessionSkill
+      ? composeSeed(
+          {
+            sessionSkill: task.sessionSkill,
+            sessionIssue: task.sessionIssue,
+            agenda: userPrompt,
+          },
+          getHarnessAdapter(passLane.adapter)
+        )
+      : plainPrompt;
 
     // Say so on the feed when this pass costs real money (issue #173).
     // Written before the container, so it is on the screen while the workspace
@@ -1210,13 +1235,17 @@ export function crossingHoldsPass(
 function laneForFollowUp(
   taskId: string,
   kind: AgentPassKind,
-  ticketModel: string | null
+  ticketModel: string | null,
+  /** The task's session skill (issue #218), so a generation session's next
+   * turn is routed only onto a lane that can invoke it — and held, never run
+   * as chat, when none can. */
+  sessionSkill: SessionSkill | null
 ): PassLane | null {
   // A crossing the money guards refuse leaves the turn for a later poll with
   // the reason on the feed, exactly as a misconfigured lane does — the queued
   // message is still undelivered, so the owner's turn is not burnt and it runs
   // on the poll after the press (issue #173).
-  const crossing = readLaneCrossing(kind, ticketModel);
+  const crossing = readLaneCrossing(kind, ticketModel, sessionSkill);
   if (crossingHoldsPass(taskId, crossing)) return null;
   try {
     return requirePassLane(kind, ticketModel, crossing);
@@ -1466,7 +1495,12 @@ export async function processQueuedMessages(
     // ticket removes, re-created one layer up. Leaving the turn for a later
     // poll is right (the fix is an env var away, and the session is otherwise
     // healthy); saying so on the feed once is what was missing.
-    const pass = laneForFollowUp(taskId, task.kind, run?.model ?? null);
+    const pass = laneForFollowUp(
+      taskId,
+      task.kind,
+      run?.model ?? null,
+      task.sessionSkill
+    );
     if (pass === null) break;
     const passLane = pass.lane;
     // A session walled mid-conversation crosses onto a paid lane at its next
@@ -1546,10 +1580,13 @@ export async function processQueuedMessages(
     // message that leads with a known skill slash (the /to-spec → /to-tickets →
     // arm progression) is re-framed through the same seed-composition path, so
     // a typed slash carries the same framing (arming convention included) as the
-    // seed turn and never degrades into the agent improvising the skill. A
-    // non-slash message, or any message on a plain chat task, is untouched.
+    // seed turn and never degrades into the agent improvising the skill. The
+    // invocation line is the adapter's for the lane this turn runs on (issue
+    // #218) — the owner types the slash whatever the lane, and what the agent
+    // reads is how its own harness loads the skill. A non-slash message, or any
+    // message on a plain chat task, is untouched.
     if (task.sessionSkill) {
-      promptText = composeSessionTurn(promptText);
+      promptText = composeSessionTurn(promptText, getHarnessAdapter(passLane.adapter));
     }
 
     // A follow-up turn on a run-owned task is capped at what remains of the
