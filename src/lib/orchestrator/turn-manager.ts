@@ -552,6 +552,11 @@ export async function startTask(taskId: string): Promise<void> {
       taskId,
       gitUrl: proj.gitUrl,
       branch,
+      // The image is the lane's adapter's (issue #216): one agent image per
+      // harness, so a container runs the harness the resolved lane names and
+      // no other. Asked of the adapter here, where the resolved lane is in
+      // hand, so the container manager stays harness-agnostic.
+      image: getHarnessAdapter(passLane.adapter).image,
       dopplerToken:
         isReviewPass || isTriagePass ? undefined : (proj.dopplerToken ?? undefined),
       // Review/repair check out the PR branch (it must exist); an implement
