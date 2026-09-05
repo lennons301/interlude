@@ -17,6 +17,7 @@
  * that nothing else did: every lane's window, and this pass kind's floor.
  */
 
+import type { SessionSkill } from "../../db/schema";
 import {
   getConfig,
   resolveAgentModelChoice,
@@ -56,7 +57,11 @@ function laneSelectionInput(
    * on the lane in force — makes exactly one read: two would each count the
    * day's cash separately, and a booking landing between them would leave the
    * ranking and the sentence describing it disagreeing by a few cents. */
-  guards: MoneyGuards
+  guards: MoneyGuards,
+  /** The session skill an interactive task carries (issue #218); null for an
+   * ordinary chat and for every autonomous kind, which is what the failover
+   * and paused-run readers below always pass. */
+  sessionSkill: SessionSkill | null = null
 ): LaneSelectionInput {
   const config = getConfig();
   const catalog = getLaneCatalog();
@@ -67,6 +72,7 @@ function laneSelectionInput(
     // which lane, and `resolveLane` is still the only reader of a credential.
     env: process.env,
     kind,
+    sessionSkill,
     tier: resolveAgentModelChoice(kind, config, ticketModel, settings.overrides)
       .tier,
     // An operator's explicit choice pins the fleet and turns the ranking off
@@ -172,17 +178,23 @@ export function readLaneFailover(
 }
 
 /**
- * The crossing for one pass kind, as the fleet stands right now.
+ * The crossing for one pass, as the fleet stands right now.
  *
  * Everything is read fresh — the settings row (which carries the cap, the
  * confirmation and the floors), every lane's quota row (which carries the
  * walls) and the day's cash — so a confirmation pressed on the screen reaches
  * the next poll rather than the next restart. The lane *file* is the one cached
  * read, because it cannot change without a deploy.
+ *
+ * `sessionSkill` is the task's (issue #218): with `kind` it says whether this
+ * pass is a generation session, which may only be routed to a lane whose
+ * harness can invoke its skill and is refused rather than started as chat when
+ * none can. Null — an ordinary chat, or any autonomous kind — changes nothing.
  */
 export function readLaneCrossing(
   kind: AgentPassKind,
   ticketModel: string | null = null,
+  sessionSkill: SessionSkill | null = null,
   now: Date = new Date(),
   settings: FleetSettings = getFleetSettings()
 ): LaneCrossing {
@@ -192,10 +204,18 @@ export function readLaneCrossing(
   // writes a sentence about and the wall the ranking excludes a lane for could
   // be two different readings.
   const guards = readMoneyGuards(now, settings);
-  const selection = laneSelectionInput(kind, ticketModel, now, settings, guards);
+  const selection = laneSelectionInput(
+    kind,
+    ticketModel,
+    now,
+    settings,
+    guards,
+    sessionSkill
+  );
 
   return decideLaneCrossing({
     kind,
+    sessionSkill,
     // The lane in force, from the same read the dashboard and the sweep make,
     // so this can never describe a wall on a lane other than the one the
     // settings screen reports as primary.

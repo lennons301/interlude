@@ -129,8 +129,14 @@ export function QuotaTile({
         </span>
         <span className="truncate">
           {/* Whose quota: with more than one lane declared, a reading with no
-              owner is a reading an operator cannot act on (issue #175). */}
-          {lane && <span className="mr-1.5">{lane.label}</span>}
+              owner is a reading an operator cannot act on (issue #175) — and
+              which harness runs it (issue #223), since telemetry is the
+              harness's capability. */}
+          {lane && (
+            <span className="mr-1.5">
+              {lane.label} · {lane.adapter}
+            </span>
+          )}
           seen {formatElapsed(quota.observedAt, now)} ago
         </span>
       </div>

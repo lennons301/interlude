@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { AppConfig } from "../../config";
 import type { QuotaObservation } from "../../quota/rate-limit-event";
 import type { SettingsOverrides } from "../../settings-resolver";
+import { HARNESS_ADAPTER_DESCRIPTORS } from "../../harness/descriptors";
+import { FAKE_NO_SKILLS_HARNESS_ID, fakeNoSkillsDescriptor } from "@/test/fake-harness";
 import { parseLaneConfig, type LaneCatalog } from "../lane-config";
 import {
   failoverOption,
@@ -560,5 +562,167 @@ describe("the failover ranking, kept whole (issue #202)", () => {
 
     expect(selection.pinnedLaneId).toBeNull();
     expect(selection.chosen?.id).toBe("open-weights");
+  });
+});
+
+describe("a generation session runs only where its skill can be invoked (issue #218)", () => {
+  // A second catalog with a lane on a harness that does not expand a
+  // user-invoked skill — the shape a Codex or OpenCode lane will have — beside
+  // the Claude lanes, so the requirement has something to bite on. The adapter
+  // is the shared no-skills fake, described to the parser beside the
+  // production table as a test's double is.
+  const NO_SKILLS = FAKE_NO_SKILLS_HARNESS_ID;
+  const skillsCatalog: LaneCatalog = (() => {
+    const parsed = parseLaneConfig(
+      `
+primary:
+  - no-skills-sub
+  - subscription
+lanes:
+  - id: no-skills-sub
+    label: Other harness (subscription)
+    adapter: ${NO_SKILLS}
+    billing: subscription
+    auth:
+      OTHER_TOKEN: OTHER_TOKEN
+    models:
+      heavy: other-big
+      standard: other-mid
+      light: other-small
+  - id: subscription
+    label: Claude subscription
+    adapter: claude-code
+    billing: subscription
+    auth:
+      CLAUDE_CODE_OAUTH_TOKEN: CLAUDE_CODE_OAUTH_TOKEN
+    models:
+      heavy: opus
+      standard: sonnet
+      light: haiku
+  - id: no-skills-api
+    label: Other harness (metered)
+    adapter: ${NO_SKILLS}
+    billing: metered
+    auth:
+      OTHER_API_KEY: OTHER_API_KEY
+    models:
+      heavy: other-big
+      standard: other-mid
+      light: other-small
+    prices:
+      heavy: { input: 1.0, output: 4.0, cache_read: 0.1 }
+      standard: { input: 0.1, output: 0.4, cache_read: 0.01 }
+      light: { input: 0.05, output: 0.2, cache_read: 0.005 }
+    caps:
+      daily_budget_usd: 20
+`,
+      [...HARNESS_ADAPTER_DESCRIPTORS, fakeNoSkillsDescriptor]
+    );
+    if (!parsed.ok) throw new Error(parsed.reason);
+    return parsed.catalog;
+  })();
+
+  const skillsEnv = {
+    OTHER_TOKEN: "t",
+    OTHER_API_KEY: "k",
+    CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+  };
+
+  /** An ordinary chat on the other harness's subscription lane. */
+  const chat: Partial<LaneSelectionInput> = {
+    catalog: skillsCatalog,
+    env: skillsEnv,
+    kind: "interactive",
+    sessionSkill: null,
+    primaryLaneId: "no-skills-sub",
+  };
+  /** The same task, carrying a session skill. */
+  const session: Partial<LaneSelectionInput> = { ...chat, sessionSkill: "grill-me" };
+
+  it("passes over a lane whose harness cannot invoke skills, naming the reason", () => {
+    expect(reason("no-skills-sub", session)).toBe("cannot-invoke-skills");
+    expect(reason("no-skills-api", session)).toBe("cannot-invoke-skills");
+    expect(reason("subscription", session)).toBeNull();
+  });
+
+  it("chooses the lane that can host it, off a lane in force that cannot", () => {
+    // Both subscription lanes are free; the tie-break prefers the lane in
+    // force — and it loses anyway, because it cannot host the session.
+    expect(chosen(session)).toBe("subscription");
+    expect(selectLane(input(session)).inForce?.ineligible).toBe("cannot-invoke-skills");
+  });
+
+  it("does not exempt the lane in force: a floor is a routing bound, a skill is what the pass is", () => {
+    // The lane in force is exempt from the floor because it is where the pass
+    // already is, not a place routing sends it. It is not exempt from this:
+    // running a skill session where the skill cannot load is the failure, and
+    // the fall-back onto the lane in force is exactly where it would happen.
+    expect(reason("no-skills-sub", { ...session, minLaneId: "subscription" })).toBe(
+      "cannot-invoke-skills"
+    );
+  });
+
+  it("leaves an ordinary chat's choice exactly as it was", () => {
+    expect(reason("no-skills-sub", chat)).toBeNull();
+    expect(chosen(chat)).toBe("no-skills-sub");
+    expect(order(chat)).toEqual(order({ ...chat, sessionSkill: undefined }));
+  });
+
+  it.each(["implement", "review", "triage", "repair"] as const)(
+    "never filters a %s pass by it, even handed a session skill",
+    (kind) => {
+      // The requirement is derived from the pass — the schema's own predicate
+      // for a generation session — so a ticket-loop kind cannot meet it. A
+      // session skill on such a pass is nonsense the ranking must not act on.
+      const ticketLoop = { ...session, kind };
+      expect(reason("no-skills-sub", ticketLoop)).toBeNull();
+      expect(reason("no-skills-api", ticketLoop)).toBeNull();
+      expect(chosen(ticketLoop)).toBe("no-skills-sub");
+    }
+  );
+
+  it("reports the harness before a missing credential — setting the variable would not help", () => {
+    expect(
+      reason("no-skills-sub", { ...session, env: { CLAUDE_CODE_OAUTH_TOKEN: "oauth" } })
+    ).toBe("cannot-invoke-skills");
+  });
+
+  it("still honours a pin: a fleet pinned to a lane that cannot host it chooses nothing", () => {
+    // A pin is an operator's decision and only a wall releases it. Refusing
+    // with the pin named is the honest answer; routing around it is what #172
+    // exists to refuse.
+    const selection = selectLane(input({ ...session, pinnedLaneId: "no-skills-sub" }));
+
+    expect(selection.chosen).toBeNull();
+    expect(selection.inForce?.ineligible).toBe("cannot-invoke-skills");
+    expect(
+      selection.candidates.find((lane) => lane.id === "subscription")?.ineligible
+    ).toBe("not-pinned");
+  });
+
+  it("never reports a lane that cannot host it as held for money", () => {
+    // The metered other-harness lane is unconfirmed too, but "confirm
+    // real-money spend" would send the human to a press that changes nothing.
+    const selection = selectLane(
+      input({
+        ...session,
+        confirmedAt: null,
+        env: { OTHER_TOKEN: "t", OTHER_API_KEY: "k" },
+      })
+    );
+
+    expect(selection.chosen).toBeNull();
+    expect(selection.heldForMoney).toBeNull();
+  });
+
+  it("carries each candidate's harness, so a refusal can say whose fact it is", () => {
+    const byId = Object.fromEntries(
+      rankLanes(input(session)).map((lane) => [lane.id, lane.adapter])
+    );
+    expect(byId).toEqual({
+      "no-skills-sub": NO_SKILLS,
+      "no-skills-api": NO_SKILLS,
+      subscription: "claude-code",
+    });
   });
 });

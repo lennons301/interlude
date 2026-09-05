@@ -1,4 +1,5 @@
 import type { FleetView } from "@/lib/fleet/fleet-view";
+import { harnessLabel } from "@/lib/fleet/tier-prose";
 import { Eyebrow, Money, formatDay } from "./fleet-bits";
 
 /** Quiet 7-day ledger with the week total in the section header. */
@@ -46,7 +47,9 @@ export function RecentLedger({ view, now }: { view: FleetView; now: Date }) {
                     {item.title}
                   </span>
                   <span className="block truncate font-plex-mono text-[11px] text-fl-ink-3">
-                    {item.projectName}
+                    {/* The harness that did the work (issue #223), as the
+                        digest's completion line names it. */}
+                    {item.projectName} · {harnessLabel(item.harness)}
                   </span>
                 </td>
                 <td className="w-16 py-2 pr-2 text-right align-top font-plex-mono text-[12px] tabular-nums text-fl-ink-2">

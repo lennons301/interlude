@@ -43,6 +43,9 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
     expect(run.pullRequestUrl).toBeNull();
     expect(run.model).toBeNull();
     expect(run.lane).toBeNull();
+    // Stamped at pass start (issue #223), so a claim records no harness yet —
+    // and a row from before the column existed reads the same way.
+    expect(run.harness).toBeNull();
     expect(run.startedAt).toBeNull();
     expect(run.finishedAt).toBeNull();
   });
@@ -75,6 +78,10 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
         // not the identifier it resolved to — is what `model` holds, so the
         // run's `model:` directive survives a lane whose ids name no tier.
         lane: "openrouter",
+        // The harness the lane ran on (issue #223), stored beside the lane id
+        // rather than looked up from it: a lane re-pointed at another harness
+        // must not rewrite which vendor ran a past attempt.
+        harness: "claude-code",
         model: "heavy",
         claimedAt,
         startedAt,
@@ -91,6 +98,7 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
     expect(run.reviewVerdict).toBe("request-changes");
     expect(run.reviewedHeadSha).toBe("d9d06fc1a2b3c4d5e6f708192a3b4c5d6e7f8091");
     expect(run.lane).toBe("openrouter");
+    expect(run.harness).toBe("claude-code");
     expect(run.model).toBe("heavy");
     expect(run.claimedAt).toEqual(claimedAt);
     expect(run.startedAt).toEqual(startedAt);
@@ -135,6 +143,51 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
     expect(task.sessionIssue).toBe("owner/repo#61");
   });
 
+  it("stamps a pass with the harness that ran it, per task (issue #223)", () => {
+    db.insert(schema.runs)
+      .values({
+        id: "r-moved",
+        projectId: "p1",
+        githubIssue: "owner/repo#223",
+        attempt: 1,
+        mode: "autonomous",
+        budgetUsd: 20,
+        lane: "other-lane",
+        harness: "fake-other",
+        claimedAt: new Date(),
+      })
+      .run();
+    // A run that moved lanes across adapters owns a pass on each; the ledger
+    // keeps both, so the attempt is attributed pass by pass rather than to
+    // whichever harness the run row ended on.
+    for (const [id, lane, harness] of [
+      ["t-first", "fake-lane", "fake"],
+      ["t-moved", "other-lane", "fake-other"],
+    ] as const) {
+      db.insert(schema.tasks)
+        .values({
+          id,
+          projectId: "p1",
+          title: "Implement pass",
+          kind: "implement",
+          runId: "r-moved",
+          lane,
+          laneBilling: "subscription",
+          harness,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .run();
+    }
+
+    const passes = db.select().from(schema.tasks).all();
+    expect(passes.map((t) => [t.id, t.harness])).toEqual([
+      ["t-first", "fake"],
+      ["t-moved", "fake-other"],
+    ]);
+    expect(db.select().from(schema.runs).get()!.harness).toBe("fake-other");
+  });
+
   it("links a task to its run and enforces the foreign key", () => {
     db.insert(schema.runs)
       .values({
@@ -162,6 +215,9 @@ describe("runs ledger schema (fresh from-migrations DB)", () => {
     const task = db.select().from(schema.tasks).get()!;
     expect(task.kind).toBe("implement");
     expect(task.runId).toBe("r3");
+    // A queued pass has no harness yet: it is stamped as the pass starts, from
+    // the lane it resolves to (issue #223).
+    expect(task.harness).toBeNull();
 
     expect(() =>
       db
@@ -265,8 +321,12 @@ describe("latest migration on a populated previous-head DB (production path)", (
     const task = db.select().from(schema.tasks).get()!;
     expect(task.kind).toBe("interactive");
     expect(task.runId).toBeNull();
+    // A pass from before the harness column existed carries none (issue
+    // #223) — the surfaces read that as "unknown harness", never as a guess
+    // from the lane file.
+    expect(task.harness).toBeNull();
 
-    // And the new table is usable
+    // And the new table is usable, harness stamp included
     db.insert(schema.runs)
       .values({
         id: "r1",
@@ -275,9 +335,11 @@ describe("latest migration on a populated previous-head DB (production path)", (
         attempt: 1,
         mode: "autonomous",
         budgetUsd: 20,
+        harness: "claude-code",
         claimedAt: new Date(),
       })
       .run();
     expect(db.select().from(schema.runs).all()).toHaveLength(1);
+    expect(db.select().from(schema.runs).get()!.harness).toBe("claude-code");
   });
 });

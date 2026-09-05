@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { FleetView, RunningCard } from "@/lib/fleet/fleet-view";
+import { harnessLabel } from "@/lib/fleet/tier-prose";
 import {
   AttemptPips,
   Chip,
@@ -67,6 +68,11 @@ function RunCard({ card, now }: { card: RunningCard; now: number }) {
         <span className="truncate font-plex-mono text-[12px] text-fl-ink-2">
           {card.projectName}
           {card.ticket && <span className="text-fl-ink"> {card.ticket}</span>}
+          {/* Who is doing the work (issue #223): the harness stamped on the
+              current pass, quiet because it is a name and not a state. A row
+              from before the stamp says "unknown harness" rather than reading
+              one off the lane file. */}
+          <span className="text-fl-ink-3"> · {harnessLabel(card.harness)}</span>
         </span>
         {/* A paused run says so where it sits, in place of its mode (issue
             #168): "afk" over a run waiting on a quota window would claim the

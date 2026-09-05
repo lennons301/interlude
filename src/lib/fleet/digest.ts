@@ -8,6 +8,8 @@
 import {
   startOfLocalDay,
   type FleetView,
+  type HarnessOutcome,
+  type HarnessView,
   type NeedsYouItem,
   type PickupPause,
   type ProjectPickupHold,
@@ -16,7 +18,7 @@ import {
   type TierOutcome,
   type TierView,
 } from "./fleet-view";
-import { counted, describeVerdicts, tierLabel } from "./tier-prose";
+import { counted, describeVerdicts, harnessLabel, tierLabel } from "./tier-prose";
 
 /** Half-open interval [start, end) — one local calendar day */
 export interface DigestWindow {
@@ -271,6 +273,10 @@ function pickupLines(view: FleetView, appBaseUrl: string): string[] {
 function completedLine(item: RecentItem): string {
   const parts = [
     `${OUTCOME_ICON[item.outcome]} ${item.title} — ${item.projectName}`,
+    // Who did the work (issue #223), off the row's own stamp: a completion
+    // is the one line an operator reads to judge a vendor, and a row from
+    // before the stamp says "unknown harness" rather than guessing.
+    harnessLabel(item.harness),
     usd(item.costUsd),
   ];
   if (item.prUrl) {
@@ -292,6 +298,31 @@ function tierLine(row: TierOutcome): string {
     `${row.declared} declared` +
       (row.degraded > 0 ? `, ${row.degraded} stepped down` : ""),
   ].join(" · ");
+}
+
+/** One harness's outcome row as a line (issue #223): the tier line's shape
+ * one axis over, with the passes the spend is attributed over in place of the
+ * routing figures a harness has none of. */
+function harnessLine(row: HarnessOutcome): string {
+  return [
+    harnessLabel(row.harness),
+    `${counted(row.attempts, "attempt")} on ${counted(row.tickets, "ticket")}`,
+    `${row.failed} failed`,
+    describeVerdicts(row.verdicts) ?? "no verdicts",
+    `${usd(row.spendUsd)} over ${counted(row.passes, "pass", "passes")}`,
+  ].join(" · ");
+}
+
+/**
+ * Outcome by harness (issue #223), beside outcome by tier and off the same
+ * read model, so the digest and the dashboard's Harnesses panel cannot
+ * describe the vendors differently. Nothing claimed is said as such.
+ */
+function harnessLines(harnesses: HarnessView): string[] {
+  if (harnesses.byHarness.length === 0) {
+    return [`No tickets claimed in the last ${harnesses.windowDays} days.`];
+  }
+  return harnesses.byHarness.map(harnessLine);
 }
 
 /**
@@ -399,6 +430,12 @@ export function renderDailyDigest(
         // costing, over the same window the dashboard's Tiers panel shows.
         heading: `Tiers (last ${view.tiers.windowDays} days)`,
         lines: tierLines(view.tiers),
+      },
+      {
+        // The same window read by harness (issue #223): which vendor's
+        // attempts burned, what its verdicts were, what its passes cost.
+        heading: `Harnesses (last ${view.harnesses.windowDays} days)`,
+        lines: harnessLines(view.harnesses),
       },
     ],
   };

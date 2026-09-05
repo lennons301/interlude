@@ -198,8 +198,10 @@ export function buildClaudeTurnCommand(input: HarnessCommandInput): string {
 /**
  * How Claude Code is asked to run a skill: the slash the CLI expands natively
  * at every turn position (the #59 spike), with the agenda as the skill's
- * argument. Byte-identical to the head the seed composer has always emitted —
- * issue #218 makes the composer ask here rather than write it itself.
+ * argument. Byte-identical to the head the seed composer wrote itself before
+ * issue #218 made it ask the lane's adapter — so a seed composed for a Claude
+ * lane is the same string it always was, and only a lane on another harness
+ * gets a different first line.
  */
 export function composeClaudeSkillInvocation(
   skill: string,

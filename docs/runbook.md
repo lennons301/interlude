@@ -139,7 +139,9 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
   corroborates; issue #136: an answer you gave that never reached the agent),
   each with a link where one applies.
 - **running** — each active run's ticket, attempt (n/3), turn, spend vs budget,
-  and phase (implement ▸ review ▸ merge). A run the account's quota refused sits
+  and phase (implement ▸ review ▸ merge), and beside the ticket the **harness**
+  running its current pass (issue #223) — a run from before the stamp existed
+  reads *unknown harness*. A run the account's quota refused sits
   here too, labelled **paused** with when its window resets (issue #168) — or,
   when the provider named no reset, when its one-hour default backoff elapses
   (issue #220); the issue comment says which — it is
@@ -153,7 +155,8 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
   normally, with a line saying which tier it is running at and which it was
   asked for — the result came from a cheaper model than you chose, and that is
   worth knowing when you read it.
-- **recent** — the last 7 days of completions.
+- **recent** — the last 7 days of completions, each naming the harness that
+  did the work.
 - **tiers** — the last 7 days' tier routing (issue #198): coverage (how many
   attempts carried a declared tier, and how many ran on the default), then one
   row per tier the work ran at — attempts on how many tickets, attempts burned,
@@ -162,6 +165,16 @@ The **dashboard is the home page** (`/`). It streams live over SSE and shows:
   shows here as attempts per ticket and failures beside the dollar figure. A run
   the ladder stepped down counts once, under the tier it ended on, and is noted
   as *stepped down*. The daily digest prints the same figures.
+- **harnesses** — the same 7 days read by harness (issue #223): one row per
+  adapter that ran a pass — attempts on how many tickets, attempts burned,
+  review verdicts, and the spend over the passes that ran there. An attempt sits
+  under the harness that did its work last; spend follows each pass to the
+  harness that spent it, so a run that moved across adapters charges each vendor
+  for its own work, and a row with passes but no attempts is a harness that
+  worked on attempts that ended elsewhere. Rows from before the stamp read
+  *unknown harness* rather than being handed to an adapter. This is where "is the
+  cheaper vendor costing me attempts?" is answered. The digest prints the same
+  figures, and names the harness on each completion and each needs-you item.
 - **spend** — today's autonomous spend vs the $500/day cap.
 
 Discord is **push-only**: it tells you *when to look* (claimed, blocked question,

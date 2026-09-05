@@ -388,12 +388,18 @@ describe("the widened contract on the Claude Code adapter (issue #214)", () => {
   it("composes a skill invocation byte-identical to the seed composer's slash line", () => {
     // Issue #218 makes the composer ask the adapter; until then this is the
     // guarantee that doing so changes nothing on the Claude lane.
+    // Byte-identical to the slash the seed composer wrote itself before #218
+    // made it ask the adapter: a seed composed for a Claude lane is the same
+    // string it always was.
     expect(composeClaudeSkillInvocation("grill-me", "the auth flow")).toBe(
-      composeSeed({ sessionSkill: "grill-me", agenda: "the auth flow" }).split("\n\n")[0]
+      "/grill-me the auth flow"
     );
-    expect(composeClaudeSkillInvocation("wayfinder", null)).toBe(
-      composeSeed({ sessionSkill: "wayfinder" })
-    );
+    expect(
+      composeSeed({ sessionSkill: "grill-me", agenda: "the auth flow" }, claudeCodeAdapter)
+        .split("\n\n")[0]
+    ).toBe("/grill-me the auth flow");
+    expect(composeClaudeSkillInvocation("wayfinder", null)).toBe("/wayfinder");
+    expect(composeSeed({ sessionSkill: "wayfinder" }, claudeCodeAdapter)).toBe("/wayfinder");
     expect(composeClaudeSkillInvocation("to-spec", "   ")).toBe("/to-spec");
     expect(claudeCodeAdapter.composeSkillInvocation("to-tickets", "batch 3")).toBe(
       "/to-tickets batch 3"

@@ -33,6 +33,7 @@ const WORKING: RunningCard = {
   spend: { usd: 7.8, budgetUsd: 20 },
   paused: null,
   degraded: null,
+  harness: "claude-code",
 };
 
 const PAUSED: RunningCard = {
@@ -107,6 +108,19 @@ describe("running list", () => {
     expect(html).toContain(">afk<");
     expect(html).toContain("text-fl-green");
     expect(html).not.toContain("paused");
+  });
+});
+
+describe("the card names its harness (issue #223)", () => {
+  it("says which harness is doing the work, beside the ticket", () => {
+    expect(render([WORKING])).toContain("· claude-code");
+  });
+
+  it("calls a run from before the stamp unknown rather than naming an adapter", () => {
+    const html = render([{ ...WORKING, harness: null }]);
+
+    expect(html).toContain("unknown harness");
+    expect(html).not.toContain("claude-code");
   });
 });
 
