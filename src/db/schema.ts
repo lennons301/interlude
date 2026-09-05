@@ -154,9 +154,12 @@ export const runs = sqliteTable("runs", {
   laneBilling: text("lane_billing", { enum: ["subscription", "metered"] }),
   // The harness adapter the implement pass ran on (issue #223) — the id the
   // resolved lane named (`claude-code`, ...), stamped when the pass starts and
-  // rewritten by each later implement-shaped pass of the attempt exactly as
-  // `lane` is, so a run that moved lanes across adapters reads as the harness
-  // that did the work last. Its own column beside `lane`, and never inferred
+  // rewritten by each later implement pass of the attempt (a continuation
+  // after a lane move is one), so a run that moved lanes across adapters
+  // reads as the harness that did the work last. A repair pass leaves it
+  // alone exactly as it leaves `model`: it consumes no attempt and its
+  // changes are not what the verdict judged, and the harness it ran on is on
+  // its own task row. Its own column beside `lane`, and never inferred
   // from the lane id later: `lanes.yaml` is version-controlled configuration
   // that changes under a deployment, and a lane re-pointed at another harness
   // would silently rewrite which vendor ran every past attempt — the one

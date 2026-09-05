@@ -480,6 +480,14 @@ export interface TierCoverage {
  * One row per run, grouped by the tier the work ran at (`runs.model`). A run
  * whose tier changed mid-attempt is counted once, under the tier it ended on.
  */
+/** The last verdict posted for each attempt in a group, by kind — the tally
+ * both outcome panels carry and `describeVerdicts` words. */
+export interface VerdictTally {
+  approve: number;
+  requestChanges: number;
+  escalate: number;
+}
+
 export interface TierOutcome {
   /** `heavy` / `standard` / `light`; a pinned raw model id verbatim when the
    * environment names one; null for attempts that recorded no tier — a claim
@@ -501,7 +509,7 @@ export interface TierOutcome {
   degraded: number;
   /** The last verdict posted for each attempt, by kind. The remainder have
    * none yet, or never reached review. */
-  verdicts: { approve: number; requestChanges: number; escalate: number };
+  verdicts: VerdictTally;
   /** Every dollar those runs spent — implement, review and repair passes
    * alike, because the cost of running work at a tier includes gating it. */
   spendUsd: number;
@@ -544,10 +552,11 @@ export interface HarnessOutcome {
   /** Attempts that ended `failed` or `exhausted`: the attempts burned. */
   failed: number;
   /** The last verdict posted for each attempt, by kind. */
-  verdicts: { approve: number; requestChanges: number; escalate: number };
+  verdicts: VerdictTally;
   /** Task rows of the window's attempts that ran on this harness — every
    * kind, since a review pass on a second harness is that harness's work. A
-   * queued pass ran on none and is not counted. */
+   * pass that never started (queued, or cancelled before it ran) is not
+   * counted. */
   passes: number;
   /** Every dollar those passes spent, attributed to the harness that spent it. */
   spendUsd: number;
@@ -830,6 +839,19 @@ const TERMINAL_TASK_STATUSES = new Set<FleetTaskRow["status"]>([
 const isLiveTask = (t: FleetTaskRow): boolean =>
   t.containerStatus !== null && !TERMINAL_TASK_STATUSES.has(t.status);
 
+/** Group items by a key, in first-seen order — the one grouping idiom the
+ * outcome panels use, so each does not restate the get-or-push. */
+function groupBy<K, V>(items: Iterable<V>, keyOf: (item: V) => K): Map<K, V[]> {
+  const groups = new Map<K, V[]>();
+  for (const item of items) {
+    const key = keyOf(item);
+    const group = groups.get(key);
+    if (group) group.push(item);
+    else groups.set(key, [item]);
+  }
+  return groups;
+}
+
 /** One attempt at one ticket, folded across the run rows a restart split it
  * into: read through the row that carried it on, charged every row's spend. */
 interface WindowAttempt {
@@ -852,13 +874,7 @@ function attemptsClaimedIn(
   const claimedRows = runs.filter(
     (r) => r.claimedAt.getTime() >= windowStart && r.claimedAt.getTime() <= now
   );
-  const rowsByAttempt = new Map<string, FleetRunRow[]>();
-  for (const run of claimedRows) {
-    const key = `${run.githubIssue}#${run.attempt}`;
-    const rows = rowsByAttempt.get(key);
-    if (rows) rows.push(run);
-    else rowsByAttempt.set(key, [run]);
-  }
+  const rowsByAttempt = groupBy(claimedRows, (run) => `${run.githubIssue}#${run.attempt}`);
   return [...rowsByAttempt.values()].map((rows) => ({
     latest: rows.reduce((a, b) =>
       b.claimedAt.getTime() > a.claimedAt.getTime() ? b : a
@@ -869,7 +885,7 @@ function attemptsClaimedIn(
 }
 
 /** A group's verdict tally — the same reading on both outcome panels. */
-function verdictTally(group: WindowAttempt[]): HarnessOutcome["verdicts"] {
+function verdictTally(group: WindowAttempt[]): VerdictTally {
   const count = (verdict: FleetRunRow["reviewVerdict"]) =>
     group.filter((a) => a.latest.reviewVerdict === verdict).length;
   return {
@@ -934,13 +950,7 @@ function tierView(runs: FleetRunRow[], windowStart: number, now: number): TierVi
   const tierOf = (r: FleetRunRow): string | null =>
     r.model === null ? null : (normalizeModelTier(r.model) ?? r.model);
 
-  const groups = new Map<string | null, WindowAttempt[]>();
-  for (const attempt of attempts) {
-    const tier = tierOf(attempt.latest);
-    const group = groups.get(tier);
-    if (group) group.push(attempt);
-    else groups.set(tier, [attempt]);
-  }
+  const groups = groupBy(attempts, (attempt) => tierOf(attempt.latest));
 
   // The vocabulary's own order (most to least capable), then any pinned ids
   // by name, then the attempts that recorded no tier.
@@ -987,16 +997,19 @@ function tierView(runs: FleetRunRow[], windowStart: number, now: number): TierVi
  * — one definition of "claimed in the window", so the two panels' attempts
  * always sum to the same figure.
  *
- * An attempt is grouped under its run row's `harness`: rewritten by each
- * implement-shaped pass as it starts, so it is the harness that did the
- * attempt's work last — the pass that burned it, produced the PR its verdict
- * judged, or merged. Spend is *not* read off the run: it is summed over the
- * attempt's task rows, each under its own stamp, because a run that moved
- * lanes across adapters (issue #217) did real work on both and the ledger
- * has both. A queued pass ran on nothing and is left out. A row that recorded
- * no harness — before the column existed, or a pass not yet started — groups
- * under null and is *said* so, rather than being attributed to whatever the
- * lane file says its lane runs today.
+ * An attempt is grouped under its run row's `harness`: written by each
+ * implement pass as it starts (a repair leaves it alone, as it does `model`),
+ * so it is the harness that did the attempt's work last — the pass that
+ * burned it, produced the PR its verdict judged, or merged. Spend is *not*
+ * read off the run: it is summed over the attempt's task rows, each under its
+ * own stamp, because a run that moved lanes across adapters (issue #217) did
+ * real work on both and the ledger has both. A pass that never started is
+ * left out — a queued one, or one cancelled before it ran (boot recovery and
+ * the review queue both cancel queued passes): unstamped and unspent, it ran
+ * on nothing. Before the stamp existed only spend says a pass ran, so an
+ * unstamped pass that spent something is counted, under the unknown row. A
+ * row that recorded no harness groups under null and is *said* so, rather
+ * than being attributed to whatever the lane file says its lane runs today.
  */
 function harnessView(
   runs: FleetRunRow[],
@@ -1005,26 +1018,17 @@ function harnessView(
   now: number
 ): HarnessView {
   const attempts = attemptsClaimedIn(runs, windowStart, now);
-
-  const attemptGroups = new Map<string | null, WindowAttempt[]>();
-  for (const attempt of attempts) {
-    const harness = attempt.latest.harness;
-    const group = attemptGroups.get(harness);
-    if (group) group.push(attempt);
-    else attemptGroups.set(harness, [attempt]);
-  }
+  const attemptGroups = groupBy(attempts, (attempt) => attempt.latest.harness);
 
   // Every row of every folded attempt: a restart's interrupted row (issue
   // #24) owns passes too, and what they spent is still the attempt's cost.
   const runIds = new Set(attempts.flatMap((a) => a.rows.map((r) => r.id)));
-  const passGroups = new Map<string | null, FleetTaskRow[]>();
-  for (const task of tasks) {
-    if (task.runId === null || !runIds.has(task.runId)) continue;
-    if (task.status === "queued") continue;
-    const group = passGroups.get(task.harness);
-    if (group) group.push(task);
-    else passGroups.set(task.harness, [task]);
-  }
+  // Started, which the stamp says — or, before the stamp existed, spent.
+  const ran = (t: FleetTaskRow): boolean => t.harness !== null || t.totalCostUsd > 0;
+  const passGroups = groupBy(
+    tasks.filter((t) => t.runId !== null && runIds.has(t.runId) && ran(t)),
+    (t) => t.harness
+  );
 
   // By id, with the row that recorded nothing last.
   const rank = (harness: string | null): number => (harness === null ? 1 : 0);

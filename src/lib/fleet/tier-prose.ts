@@ -12,7 +12,7 @@
  * components, and a value import from the read model would pull its whole
  * graph — budgets, the money guards, the quota gate — into the browser bundle.
  */
-import type { HarnessOutcome, TierOutcome } from "./fleet-view";
+import type { VerdictTally } from "./fleet-view";
 
 /** "1 attempt" / "3 attempts" — and "2 passes", given its plural. */
 export function counted(count: number, noun: string, plural = `${noun}s`): string {
@@ -21,9 +21,7 @@ export function counted(count: number, noun: string, plural = `${noun}s`): strin
 
 /** How a row's posted verdicts read — "2 approve / 1 changes" — or null when
  * it has none, so both surfaces fall back to the same "no verdicts". */
-export function describeVerdicts(
-  verdicts: TierOutcome["verdicts"] | HarnessOutcome["verdicts"]
-): string | null {
+export function describeVerdicts(verdicts: VerdictTally): string | null {
   const parts = [
     verdicts.approve > 0 ? `${verdicts.approve} approve` : null,
     verdicts.requestChanges > 0 ? `${verdicts.requestChanges} changes` : null,

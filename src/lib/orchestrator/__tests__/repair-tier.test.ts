@@ -91,6 +91,10 @@ function seedRepairPass(model: string | null, kind: "repair" | "implement" = "re
       budgetUsd: 20,
       model,
       lane: "claude-subscription",
+      // A harness the implement pass is *not* about to resolve on the real
+      // lane file, so "left alone" is distinguishable from "rewritten to the
+      // same value" (issue #223).
+      harness: "codex",
       claimedAt: new Date(),
       startedAt: new Date(),
     })
@@ -176,6 +180,20 @@ describe("a repair pass and the run's implement tier (issues #201, #211)", () =>
     expect(run().model).toBe("standard");
   });
 
+  it("leaves the run's harness where it found it, and records its own on its row (issue #223)", async () => {
+    // The run's harness is the implement pass's fact, like its tier: a repair
+    // consumes no attempt and its changes are not what the verdict judged, so
+    // a repair on another harness must not file the attempt under that vendor.
+    // The harness it *did* run on is on its own task row, where its spend is
+    // attributed.
+    await boot("standard");
+
+    await turns.startTask(taskId);
+
+    expect(task().harness).toBe("claude-code");
+    expect(run().harness).toBe("codex");
+  });
+
   it("lets the run's tier outrank the fleet's implement tier, as it did for the implement pass", async () => {
     // The ticket declared light and the fleet's default is standard: the
     // repair runs light — the run's tier is the directive the implement pass
@@ -211,5 +229,8 @@ describe("a repair pass and the run's implement tier (issues #201, #211)", () =>
 
     expect(run().model).toBe("standard");
     expect(task().tier).toBe("standard");
+    // And the harness with it — the implement pass's to write (issue #223).
+    expect(run().harness).toBe("claude-code");
+    expect(task().harness).toBe("claude-code");
   });
 });

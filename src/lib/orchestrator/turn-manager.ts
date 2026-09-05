@@ -529,12 +529,18 @@ export async function startTask(taskId: string): Promise<void> {
           startedAt: run.startedAt ?? new Date(),
           lane: passLane.id,
           laneBilling: pass.billing,
-          // The harness follows the lane onto the run (issue #223): rewritten
-          // by every implement-shaped pass, so the row names the harness that
-          // did the attempt's work last — the one an attempt burned, a
-          // verdict judged or a merge came from is attributed to.
-          harness: passLane.adapter,
-          ...(isRepairPass ? {} : { model: passLane.tier ?? passModel }),
+          // The harness is the *implement* pass's to write, as `model` is
+          // (issue #223): the row names the harness that did the attempt's
+          // work — the one an attempt burned, a verdict judged or a merge
+          // came from is attributed to — and a continuation after a lane move
+          // is an implement pass, so a run that crossed adapters names the
+          // one it ended on. A repair pass never consumes an attempt and its
+          // changes are not what the verdict judged, so it leaves this alone;
+          // the harness it ran on is on its own task row, where its spend is
+          // attributed.
+          ...(isRepairPass
+            ? {}
+            : { model: passLane.tier ?? passModel, harness: passLane.adapter }),
           effort: passEffort,
           // A resumed run stops waiting on a clock the moment its pass starts
           // (issue #169). Cleared here rather than when the resume was decided,

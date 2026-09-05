@@ -3053,19 +3053,26 @@ describe("buildFleetView — outcome by harness (issue #223)", () => {
     ]);
   });
 
-  it("counts a pass the moment it has started, never a queued one — a queued pass ran on nothing", () => {
+  it("counts a pass the moment it has started, never one that never ran — queued, or cancelled before start", () => {
     const view = buildFleetView(
       baseRows({
         runs: [makeRun({ id: "r1", githubIssue: "o/r#1", harness: "claude-code" })],
         tasks: [
-          makeTask({ id: "t1", runId: "r1", kind: "implement", status: "failed", containerStatus: null, harness: "claude-code", totalCostUsd: 0.5 }),
+          // Refused in seconds at a wall: stamped, ~nothing spent, but it ran.
+          makeTask({ id: "t1", runId: "r1", kind: "implement", status: "failed", containerStatus: null, harness: "claude-code", totalCostUsd: 0 }),
           makeTask({ id: "t2", runId: "r1", kind: "implement", status: "queued", containerStatus: null, harness: null }),
+          // Boot recovery and the review queue cancel queued passes: unstamped
+          // and unspent, so it ran on nothing and is not an "unknown" pass.
+          makeTask({ id: "t3", runId: "r1", kind: "review", status: "cancelled", containerStatus: null, harness: null }),
+          // From before the stamp existed: only its spend says it ran.
+          makeTask({ id: "t4", runId: "r1", kind: "review", status: "completed", containerStatus: null, harness: null, totalCostUsd: 1.5 }),
         ],
       })
     );
 
     expect(view.harnesses.byHarness).toEqual([
-      expect.objectContaining({ harness: "claude-code", attempts: 1, passes: 1, spendUsd: 0.5 }),
+      expect.objectContaining({ harness: "claude-code", attempts: 1, passes: 1, spendUsd: 0 }),
+      expect.objectContaining({ harness: null, attempts: 0, passes: 1, spendUsd: 1.5 }),
     ]);
   });
 
