@@ -1,10 +1,25 @@
 import { SESSION_SKILLS, type SessionSkill } from "@/db/schema";
+import type { HarnessAdapter } from "@/lib/harness/adapter";
 
 export interface SeedInput {
   sessionSkill: SessionSkill;
   sessionIssue?: string | null;
   agenda?: string | null;
 }
+
+/**
+ * The one thing the composer needs of a harness (issue #218): how *this*
+ * harness is asked to load a skill. Claude Code expands a slash natively (the
+ * #59 spike); Codex mentions a `$skill`; a harness that loads skills through a
+ * tool is told to. The composer used to write the slash itself, which made
+ * every generation session Claude-only by construction — so it asks the lane's
+ * adapter now, and the framing around the line (issue anchor, arming
+ * convention) is the same on every harness while the line itself differs.
+ *
+ * A structural pick rather than the whole adapter, so a test can hand in a
+ * two-line double and the turn manager can hand in the real thing.
+ */
+export type SkillInvoker = Pick<HarnessAdapter, "composeSkillInvocation">;
 
 /**
  * Session skills whose pipeline publishes and arms tickets, so their seed
@@ -53,11 +68,24 @@ export function ISSUE_ANCHOR_HINT(ref: string): string {
   );
 }
 
-export function composeSeed({ sessionSkill, sessionIssue, agenda }: SeedInput): string {
+/**
+ * The first turn of a generation session: the harness's own invocation of the
+ * session skill (with the agenda as its argument), then the issue anchor if
+ * the session has one, then the arming convention if the skill publishes.
+ *
+ * The invocation line is the adapter's (issue #218) and the framing is the
+ * fleet's: the same seed carries the same anchor and the same convention on
+ * every harness, and only the first line says how that harness loads a skill.
+ * On Claude Code the line is the slash the composer always emitted, so a seed
+ * composed for a Claude lane is byte-identical to what it was before the
+ * adapter was asked.
+ */
+export function composeSeed(
+  { sessionSkill, sessionIssue, agenda }: SeedInput,
+  adapter: SkillInvoker
+): string {
   const trimmedAgenda = agenda?.trim();
-  const head = trimmedAgenda
-    ? `/${sessionSkill} ${trimmedAgenda}`
-    : `/${sessionSkill}`;
+  const head = adapter.composeSkillInvocation(sessionSkill, trimmedAgenda || null);
 
   const parts = [head];
   const ref = sessionIssue?.trim();
@@ -74,21 +102,29 @@ export function composeSeed({ sessionSkill, sessionIssue, agenda }: SeedInput): 
  * so a typed slash carries the same framing (notably the arming convention for
  * publishing skills) and never silently degrades into the agent improvising the
  * skill from memory. Any other message (plain prose, or a non-session slash the
- * CLI handles itself) passes through unchanged.
+ * harness handles itself) passes through unchanged.
  *
- * The #59 spike found the leading slash already expands natively at every turn
- * position, so this adds framing rather than rescuing expansion. A follow-on
- * turn has no separate issue anchor — the session's anchor was set at the seed.
+ * The slash is the *composer's* vocabulary — what the owner types, and what
+ * the live composer's menu offers (issue #122) — on every harness. What
+ * reaches the agent is the adapter's invocation (issue #218): on Claude Code
+ * the same slash, which the #59 spike found expands natively at every turn
+ * position, so there this adds framing rather than rescuing expansion; on a
+ * harness that does not expand a slash, the text that makes it load the skill.
+ * A follow-on turn has no separate issue anchor — the session's anchor was set
+ * at the seed.
  */
-export function composeSessionTurn(rawText: string): string {
+export function composeSessionTurn(rawText: string, adapter: SkillInvoker): string {
   const match = /^\s*\/(\S+)([\s\S]*)$/.exec(rawText);
   if (!match) return rawText;
 
   const skill = match[1];
   if (!(SESSION_SKILLS as readonly string[]).includes(skill)) return rawText;
 
-  return composeSeed({
-    sessionSkill: skill as SessionSkill,
-    agenda: match[2].trim() || null,
-  });
+  return composeSeed(
+    {
+      sessionSkill: skill as SessionSkill,
+      agenda: match[2].trim() || null,
+    },
+    adapter
+  );
 }

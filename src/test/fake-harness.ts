@@ -46,6 +46,11 @@ export const FAKE_OTHER_HARNESS_ID = "fake-other";
  * run on such a lane does at a pause and a resume is what a test asks it. */
 export const FAKE_NO_RESUME_HARNESS_ID = "fake-no-resume";
 
+/** A fake adapter declaring it cannot expand a user-invoked skill (issue
+ * #218) — the shape a Codex or OpenCode lane has, and what a generation
+ * session must never be started on. */
+export const FAKE_NO_SKILLS_HARNESS_ID = "fake-no-skills";
+
 /** The fake's capabilities: everything a Claude lane has, except quota
  * telemetry — the one thing a second harness most plausibly lacks. */
 export const FAKE_HARNESS_CAPABILITIES: HarnessCapabilities = {
@@ -75,8 +80,24 @@ export const DESCRIPTORS_WITH_FAKE: readonly HarnessAdapterDescriptor[] = [
   fakeHarnessDescriptor,
 ];
 
+/** The no-skills fake's capabilities: the fake's, minus the one thing a
+ * generation session needs. */
+export const FAKE_NO_SKILLS_CAPABILITIES: HarnessCapabilities = {
+  ...FAKE_HARNESS_CAPABILITIES,
+  userInvokedSkills: false,
+};
+
+/** The no-skills fake's descriptor — what a lane-layer test hands the parser
+ * beside the production table so a lane may name a harness that cannot invoke
+ * a skill (issue #218). */
+export const fakeNoSkillsDescriptor: HarnessAdapterDescriptor = describeFakeHarness(
+  FAKE_NO_SKILLS_HARNESS_ID,
+  FAKE_NO_SKILLS_CAPABILITIES
+);
+
 /** The production table plus every fake a multi-adapter test declares: the
- * second fake, and one that cannot resume a session. */
+ * second fake, one that cannot resume a session, and one that cannot invoke a
+ * skill. */
 export const DESCRIPTORS_WITH_ALL_FAKES: readonly HarnessAdapterDescriptor[] = [
   ...DESCRIPTORS_WITH_FAKE,
   describeFakeHarness(FAKE_OTHER_HARNESS_ID),
@@ -84,6 +105,7 @@ export const DESCRIPTORS_WITH_ALL_FAKES: readonly HarnessAdapterDescriptor[] = [
     ...FAKE_HARNESS_CAPABILITIES,
     sessionResume: false,
   }),
+  fakeNoSkillsDescriptor,
 ];
 
 /** The variable a fake lane reads its (fake) credential from. */
