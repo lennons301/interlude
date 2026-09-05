@@ -362,7 +362,9 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
     at the bottom of the ladder, gets one more chance before the clock: the run
     **moves to another lane** if one is available and permitted (issue #176) —
     a fresh pass under the same run, on the same branch, continuing the same
-    conversation where the transcript survived. The issue gets a comment naming
+    conversation where the transcript survived and the new lane runs the same
+    harness adapter (a move across two adapters starts again on the branch and
+    says so on the pass's feed, issue #217). The issue gets a comment naming
     the lane it moved to. Only with nowhere to go does it pause: the run goes
     `rate_limited` with a `resumeAfter` taken from the limit event's own reset
     time, and its container is torn down. The issue gets a comment saying so,
@@ -404,6 +406,12 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   transcript was copied out before its container went, the resumed pass continues
   the *same conversation*; where it could not be, the pass starts again on the same
   branch with the work already pushed, and the issue comment says which happened.
+  A move onto a lane running a *different harness adapter* never carries it
+  (issue #217): the pass starts again on the branch, and its own feed says which
+  two lanes and why — the cost is the conversation, never the attempt. One-off:
+  a run that was parked when #217 deployed had its transcript in the store's
+  earlier one-file shape, which nothing reads now, so it resumes without its
+  context exactly as a failed copy always has.
 - **Move a parked run yourself** (issue #202). When the sweep would *not* move a
   parked run — the day's spend unconfirmed, most often — and that run is gating
   everything behind it, press **move to paid lane…** on its card under

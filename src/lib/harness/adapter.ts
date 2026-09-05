@@ -54,26 +54,27 @@
  *   stdin. The env builder and the command builder are handed the same inputs
  *   and agree between themselves.
  *
- * **A stated limit for whoever adds the second adapter (issue #199): a lane
- * move cannot carry the session across adapters.** Every lane declared today
- * runs this one adapter, differing only in endpoint, credential variable and
- * model identifiers — which is *why* a pass refused on one lane can continue
- * the same conversation on another (#176's failover, #199's early resume of a
- * paused run): the session transcript `session-transcript.ts` copies out of
- * the refused container is a Claude Code artefact (one JSONL file the CLI
- * finds by session id and replays under `--resume`), and it is only meaningful
- * to a container running Claude Code again. A move from a `claude-code` lane
- * to a lane on a different adapter could not carry it: the target harness has
- * its own session format, or none, and the `sessionId` on the queued task
- * would name a conversation the new harness has never heard of. Such a move
- * has to fall back to the same declared fallback a failed restore takes —
- * start again on the branch, with the work already pushed and no prior
- * context. `sessionArtifactPaths` is the member that makes the artefacts the
- * adapter's rather than a fixed path; enforcing the fallback is issue #217's,
- * at `restoreSessionTranscript` in the turn manager — the one seam that knows
- * both the lane the pass is starting on and the pass it continues
- * (`tasks.resumedFromTaskId` -> its `lane` -> its adapter), and which already
- * owns "resume without the transcript" as an outcome.
+ * **A limit, now enforced (issues #199, #217): a lane move carries the
+ * session only between lanes on the same adapter.** Every lane declared today
+ * runs the one Claude Code adapter, differing only in endpoint, credential
+ * variable and model identifiers — which is *why* a pass refused on one lane
+ * can continue the same conversation on another (#176's failover, #199's
+ * early resume of a paused run): the artefacts `session-transcript.ts` copies
+ * out of the refused container are one harness's format, replayed under a
+ * session id only that harness has heard of. Two members make that stay true
+ * once a lane names a different adapter. `sessionArtifactPaths` makes the
+ * artefacts the adapter's rather than a fixed path — the store copies exactly
+ * what the adapter names, and nothing at all for an adapter whose
+ * `sessionResume` is false. And `restoreSessionTranscript` in the turn manager
+ * — the one seam that knows both the lane the pass is starting on and the pass
+ * it continues (`tasks.resumedFromTaskId` -> its `lane` -> its adapter) —
+ * decides through the pure `decideSessionCarry` (`session-carry.ts`) whether
+ * the conversation crosses: the same adapter on both ends puts the artefacts
+ * back and resumes by id; a different adapter, or a harness that cannot
+ * resume, starts the pass again on the branch with the work already pushed,
+ * clears its session id and tells the owner on the feed which two lanes and
+ * why. The lane ranking is unchanged — a cross-adapter lane is a legal
+ * failover target; it costs the conversation, not the attempt.
  */
 
 import type { ResolvedLane } from "../lanes/resolve";

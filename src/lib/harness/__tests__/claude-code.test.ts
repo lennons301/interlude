@@ -13,6 +13,8 @@ import {
   buildTurnEnv,
   buildClaudeTurnCommand,
   claudeCodeAdapter,
+  claudeTranscriptDir,
+  claudeTranscriptPath,
   composeClaudeSkillInvocation,
   mapClaudeEffort,
   CLAUDE_CODE_BASE_URL_ENV,
@@ -21,7 +23,6 @@ import { CLAUDE_CODE_IMAGE } from "../claude-code/image";
 import { getHarnessAdapter } from "../registry";
 import { describeHarnessAdapter } from "../descriptors";
 import { ALLOWED_TICKET_EFFORTS } from "@/lib/orchestrator/autonomy/budgets";
-import { containerTranscriptPath } from "@/lib/quota/session-transcript";
 import { getImageName } from "@/lib/docker/image-builder";
 import { composeSeed } from "@/lib/sessions/seed";
 
@@ -407,9 +408,19 @@ describe("the widened contract on the Claude Code adapter (issue #214)", () => {
     );
   });
 
-  it("names the one transcript file as the session's artefact, at the path the pause copies", () => {
+  it("mangles the working directory the way the CLI does", () => {
+    // Measured on the #165 spike: Claude Code replaces each separator with a
+    // dash, so /workspace/repo becomes -workspace-repo.
+    expect(claudeTranscriptDir("/workspace/repo")).toBe(
+      "/home/node/.claude/projects/-workspace-repo"
+    );
+  });
+
+  it("names the one transcript file as the session's artefact, under the agent's own home", () => {
+    // The path is this adapter's fact (issue #217): the store copies whatever
+    // an adapter names and names nothing itself.
     expect(claudeCodeAdapter.sessionArtifactPaths("sess-1", "/workspace/repo")).toEqual([
-      containerTranscriptPath("sess-1", "/workspace/repo"),
+      claudeTranscriptPath("sess-1", "/workspace/repo"),
     ]);
     expect(claudeCodeAdapter.sessionArtifactPaths("sess-1", "/workspace/repo")).toEqual([
       "/home/node/.claude/projects/-workspace-repo/sess-1.jsonl",
