@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AppConfig } from "../../config";
 import type { QuotaObservation } from "../../quota/rate-limit-event";
 import type { SettingsOverrides } from "../../settings-resolver";
+import { HARNESS_ADAPTER_DESCRIPTORS } from "../../harness/descriptors";
 import { parseLaneConfig, type LaneCatalog } from "../lane-config";
 import {
   decideLaneCrossing,
@@ -550,5 +551,205 @@ describe("the pieces the callers share", () => {
         { laneId: "subscription", billing: "metered" }
       )
     ).toBe(true);
+  });
+});
+
+describe("a generation session is refused, never started as chat, where no lane can invoke its skill (issue #218)", () => {
+  // The shipped Claude lanes beside a lane on a harness that does not expand a
+  // user-invoked skill, made primary — the configuration in which a skill
+  // session used to fall back onto the lane in force and become freeform chat.
+  const NO_SKILLS = "no-skills";
+  const skillsCatalog: LaneCatalog = (() => {
+    const parsed = parseLaneConfig(
+      `
+primary:
+  - other-sub
+  - subscription
+lanes:
+  - id: other-sub
+    label: Other harness
+    adapter: ${NO_SKILLS}
+    billing: subscription
+    auth:
+      OTHER_TOKEN: OTHER_TOKEN
+    models:
+      heavy: other-big
+      standard: other-mid
+      light: other-small
+  - id: subscription
+    label: Claude subscription
+    adapter: claude-code
+    billing: subscription
+    auth:
+      CLAUDE_CODE_OAUTH_TOKEN: CLAUDE_CODE_OAUTH_TOKEN
+    models:
+      heavy: opus
+      standard: sonnet
+      light: haiku
+  - id: direct-api
+    label: Anthropic API
+    adapter: claude-code
+    billing: metered
+    auth:
+      ANTHROPIC_API_KEY: ANTHROPIC_API_KEY
+    models:
+      heavy: opus
+      standard: sonnet
+      light: haiku
+    caps:
+      daily_budget_usd: 20
+  - id: other-api
+    label: Other harness (metered)
+    adapter: ${NO_SKILLS}
+    billing: metered
+    auth:
+      OTHER_API_KEY: OTHER_API_KEY
+    models:
+      heavy: other-big
+      standard: other-mid
+      light: other-small
+    prices:
+      heavy: { input: 1.0, output: 4.0, cache_read: 0.1 }
+      standard: { input: 0.1, output: 0.4, cache_read: 0.01 }
+      light: { input: 0.05, output: 0.2, cache_read: 0.005 }
+    caps:
+      daily_budget_usd: 20
+`,
+      [
+        ...HARNESS_ADAPTER_DESCRIPTORS,
+        {
+          id: NO_SKILLS,
+          capabilities: {
+            userInvokedSkills: false,
+            quotaTelemetry: false,
+            reportsCost: true,
+            sessionResume: true,
+          },
+        },
+      ]
+    );
+    if (!parsed.ok) throw new Error(parsed.reason);
+    return parsed.catalog;
+  })();
+
+  const OTHER_PRIMARY: CrossingLane = {
+    id: "other-sub",
+    label: "Other harness",
+    billing: "subscription",
+    caps: { dailyBudgetUsd: null },
+  };
+
+  const skillsEnv = {
+    OTHER_TOKEN: "t",
+    OTHER_API_KEY: "k",
+    CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+    ANTHROPIC_API_KEY: "sk-ant",
+  };
+
+  /** A grill-me session with the other harness's lane in force. The lane
+   * reports no quota, so `observation` is null and nothing is walled. */
+  function session(over: Partial<LaneCrossingInput> = {}) {
+    return crossing({
+      sessionSkill: "grill-me",
+      primary: OTHER_PRIMARY,
+      catalog: skillsCatalog,
+      env: skillsEnv,
+      observation: null,
+      ...over,
+    });
+  }
+
+  it("routes the session onto the lane that can host it", () => {
+    const decision = session();
+
+    expect(decision.laneId).toBe("subscription");
+    expect(decision.overflowedFrom).toBe("other-sub");
+    expect(decision.billing).toBe("subscription");
+    expect(decision.refusal).toBeNull();
+    // Nothing costs money and no wall stands, so there is nothing to announce.
+    expect(decision.notice).toBeNull();
+  });
+
+  it("refuses with the lane-by-lane reason when nothing can host it, rather than falling back", () => {
+    // The Claude lanes' credentials are gone. Before this ticket the session
+    // would have fallen back onto the lane in force and started as chat.
+    const decision = session({ env: { OTHER_TOKEN: "t", OTHER_API_KEY: "k" } });
+
+    expect(decision.refusal?.reason).toBe("no-skill-capable-lane");
+    expect(decision.refusal?.message).toContain("grill-me session");
+    expect(decision.refusal?.message).toContain(`other-sub, other-api run ${NO_SKILLS}`);
+    expect(decision.refusal?.message).toContain("cannot invoke a skill");
+    expect(decision.refusal?.message).toContain("subscription needs CLAUDE_CODE_OAUTH_TOKEN");
+    expect(decision.refusal?.message).toContain("direct-api needs ANTHROPIC_API_KEY");
+    expect(decision.notice).toBeNull();
+  });
+
+  it("names the wall on the one lane that could host it, with its reset", () => {
+    const decision = session({
+      env: { OTHER_TOKEN: "t", OTHER_API_KEY: "k", CLAUDE_CODE_OAUTH_TOKEN: "oauth" },
+      observations: { subscription: WALL },
+    });
+
+    expect(decision.refusal?.reason).toBe("no-skill-capable-lane");
+    expect(decision.refusal?.message).toContain(
+      "subscription's window is exhausted (resets 14:05)"
+    );
+    // Not the wall refusal: the lane in force is not walled, it cannot host
+    // the session at all, and a reset would change nothing about that.
+    expect(decision.walled).toBe(false);
+  });
+
+  it("asks for the press when the only lane that can host it is a paid one", () => {
+    // Money is a press away, so this is #174's hold with its own sentence —
+    // not a refusal that sends the human to reconfigure the fleet.
+    const decision = session({
+      env: { OTHER_TOKEN: "t", OTHER_API_KEY: "k", ANTHROPIC_API_KEY: "sk-ant" },
+      confirmedAt: null,
+    });
+
+    expect(decision.refusal?.reason).toBe("unconfirmed");
+    expect(decision.refusal?.message).toContain("Anthropic API");
+    expect(decision.laneId).toBe("direct-api");
+  });
+
+  it("names a pin that holds the session on a lane that cannot host it", () => {
+    const decision = session({ pinnedLaneId: "other-sub" });
+
+    expect(decision.refusal?.reason).toBe("no-skill-capable-lane");
+    expect(decision.refusal?.message).toContain("pinned to other-sub");
+    expect(decision.laneId).toBe("other-sub");
+  });
+
+  it("leaves an ordinary chat on the same lane in force exactly as before", () => {
+    const decision = session({ sessionSkill: null });
+
+    expect(decision.laneId).toBe("other-sub");
+    expect(decision.overflowedFrom).toBeNull();
+    expect(decision.refusal).toBeNull();
+  });
+
+  it.each(["implement", "review", "triage", "repair"] as const)(
+    "never refuses a %s pass by it, even handed a session skill",
+    (kind) => {
+      const decision = session({ kind, env: { OTHER_TOKEN: "t", OTHER_API_KEY: "k" } });
+
+      expect(decision.laneId).toBe("other-sub");
+      expect(decision.refusal).toBeNull();
+    }
+  );
+
+  it("tells a walled Claude session why the paid lane on another harness did not count", () => {
+    // The Claude subscription is walled and the only other lane bills per token
+    // on a harness that cannot invoke a skill. The wall refusal has to say so,
+    // or "no paid lane to overflow onto" reads as a lie beside a declared one.
+    const decision = crossing({
+      sessionSkill: "to-tickets",
+      catalog: skillsCatalog,
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "oauth", OTHER_API_KEY: "k" },
+    });
+
+    expect(decision.refusal?.reason).toBe("no-metered-lane");
+    expect(decision.refusal?.message).toContain("direct-api needs ANTHROPIC_API_KEY");
+    expect(decision.refusal?.message).toContain(`other-api runs ${NO_SKILLS}, which cannot invoke a skill`);
   });
 });
