@@ -9,7 +9,7 @@ import type { QuotaObservation } from "@/lib/quota/rate-limit-event";
 
 /**
  * Fixture-driven tests over two streams captured from the real Claude Code CLI
- * (2.1.257 — the version `Dockerfile.agent` installs), each carrying a
+ * (2.1.257 — the version `Dockerfile.agent-claude-code` installed), each carrying a
  * `rate_limit_event` (issue #165).
  *
  * Provenance, which matters because the milestone's later tickets will reason

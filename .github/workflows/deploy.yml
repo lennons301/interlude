@@ -66,8 +66,16 @@ jobs:
             # Stop app before rebuild to free RAM for the Next.js build (4GB VPS)
             docker compose down
             docker image prune -f
-            # Force rebuild agent image so Dockerfile.agent changes take effect
-            docker rmi interlude-agent:latest 2>/dev/null || true
+            # Force a rebuild of the agent images at the first pass after the
+            # deploy: every image the builder stamps (the shared base and one per
+            # harness adapter, issue #216) is selected by its stamp label rather
+            # than by name, so a new adapter's image is covered without an edit
+            # here and the pre-#216 single image is cleaned up by the same line.
+            # Unused images only, as before: an image a parked agent container
+            # still references is left for it. A Dockerfile change would rebuild
+            # by itself (the stamp covers both files); this also picks up the
+            # unpinned installs — the harness CLI, gh, pnpm — on each deploy.
+            docker image prune -a -f --filter label=co.interlude.agent-dockerfile-sha256 2>/dev/null || true
             docker compose build app
 
             # The agent network is `external` in compose (issue #190), so `down`

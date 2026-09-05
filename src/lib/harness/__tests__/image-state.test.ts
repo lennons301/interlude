@@ -35,9 +35,9 @@ describe("readHarnessImageStates", () => {
     const states = await readHarnessImageStates(["claude-code", "claude-code"]);
 
     expect(states).toEqual([
-      { id: "claude-code", image: "interlude-agent:latest", built: true },
+      { id: "claude-code", image: "interlude-agent-claude-code:latest", built: true },
     ]);
-    expect(probe.asked).toEqual(["interlude-agent:latest"]);
+    expect(probe.asked).toEqual(["interlude-agent-claude-code:latest"]);
   });
 
   it("reports a positive 'not built'", async () => {

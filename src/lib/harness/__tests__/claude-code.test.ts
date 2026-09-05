@@ -23,7 +23,6 @@ import { CLAUDE_CODE_IMAGE } from "../claude-code/image";
 import { getHarnessAdapter } from "../registry";
 import { describeHarnessAdapter } from "../descriptors";
 import { ALLOWED_TICKET_EFFORTS } from "@/lib/orchestrator/autonomy/budgets";
-import { getImageName } from "@/lib/docker/image-builder";
 import { composeSeed } from "@/lib/sessions/seed";
 
 /**
@@ -349,13 +348,12 @@ describe("the adapter registry (issue #172)", () => {
 // Issue #214 widened the contract; each new member answers the way the fleet
 // already behaved on the Claude lane, and these pin that.
 describe("the widened contract on the Claude Code adapter (issue #214)", () => {
-  it("declares the one image the fleet has always built, and the builder reads it", () => {
+  it("declares its own image: a layer on the shared agent base (issue #216)", () => {
     expect(claudeCodeAdapter.image).toEqual(CLAUDE_CODE_IMAGE);
     expect(claudeCodeAdapter.image).toEqual({
-      name: "interlude-agent:latest",
-      dockerfile: "Dockerfile.agent",
+      name: "interlude-agent-claude-code:latest",
+      dockerfile: "Dockerfile.agent-claude-code",
     });
-    expect(getImageName()).toBe(claudeCodeAdapter.image.name);
   });
 
   it("declares the capabilities its descriptor does — read from the table, not restated", () => {
