@@ -570,30 +570,35 @@ export async function startTask(taskId: string): Promise<void> {
 
     // Start container and run setup
     await running.container.start();
-    const { skillsVersion } = await execSetup(running);
+    await execSetup(running);
 
-    // Log the resolved mattpocock-skills version at session start (issue #60):
-    // visibly in the feed, and on the run ledger where a run exists — the
-    // forensic trail for "what skill version ran?". A failed install never
-    // reaches here — execSetup throws before any agent turn.
-    if (skillsVersion) {
-      insertSystemMessage(taskId, `mattpocock-skills plugin installed (v${skillsVersion})`);
+    // Record the skills version at session start (issue #60): visibly in the
+    // feed, and on the run ledger where a run exists — the forensic trail for
+    // "what skill version ran?". Since issue #215 the version is the
+    // `mattpocock/skills` ref pinned into the agent image at build, read off
+    // the image's label when the container was created: the pass reports
+    // nothing, so nothing a pass does can leave the trail blank.
+    const { skillsRef } = running;
+    if (skillsRef) {
+      insertSystemMessage(taskId, `Skills ${skillsRef} (mattpocock/skills, pinned at image build)`);
       // First-write-wins on the ledger: a run's later review/repair pass runs
-      // its own setup, but the forensic value is the implement pass's version
-      // (the run's first pass) — mirroring how model/effort pin to the
-      // implement pass. The `isNull` guard stops a later pass clobbering it,
-      // since the plugin is unpinned and its version may drift between passes.
+      // in its own container, but the forensic value is the implement pass's
+      // version (the run's first pass) — mirroring how model/effort pin to the
+      // implement pass. The `isNull` guard stops a later pass clobbering it: a
+      // deploy that bumps the pinned ref between two passes of one run must
+      // not rewrite what the implement pass ran with.
       if (task.runId) {
         db.update(runs)
-          .set({ skillsVersion })
+          .set({ skillsVersion: skillsRef })
           .where(and(eq(runs.id, task.runId), isNull(runs.skillsVersion)))
           .run();
       }
     } else {
-      // A successful setup always echoes the version marker, so a null here
-      // means it was lost/mangled in the exec stream — surface it rather than
+      // The Dockerfile stamps the label on every image it builds and a stale
+      // image was rebuilt as this container was created, so this is reachable
+      // only if the Dockerfile stopped stamping it — surface that rather than
       // silently dropping the forensic trail.
-      console.warn(`[orchestrator] Task ${taskId} setup produced no skills version marker`);
+      console.warn(`[orchestrator] Task ${taskId} runs from an agent image carrying no skills ref label`);
     }
 
     insertSystemMessage(taskId, "Agent started.");

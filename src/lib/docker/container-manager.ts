@@ -42,80 +42,17 @@ function checkoutCommand(mode: BranchCheckoutMode): string {
 }
 
 /**
- * The generation/ticket-loop skills every agent container installs at start
- * (issue #60). Marketplace and plugin both come from Matt Pocock's public
- * `mattpocock/skills` repo — the same source the laptop tracks at user scope,
- * so the VPS session is an extension of the laptop rather than a fork. The
- * plugin id is `<name>@<marketplace>`, where the marketplace name is `mattpocock`
- * (declared in that repo's marketplace.json), not the `owner/repo` add source.
- * Deliberately unpinned: always the latest, with the resolved version logged.
- */
-export const SKILLS_MARKETPLACE_SOURCE = "mattpocock/skills";
-export const SKILLS_PLUGIN_ID = "mattpocock-skills@mattpocock";
-
-/**
- * Marker the setup script prints its resolved skills version behind, so the
- * orchestrator can lift the version out of the captured setup output and into
- * the task feed + run ledger. One constant shared by the emitter
- * (`buildSkillsInstallScript`) and the reader (`parseSkillsVersion`) so they
- * cannot drift. Contains no regex metacharacters, so it doubles as a literal
- * pattern fragment.
- */
-export const SKILLS_VERSION_MARKER = "INTERLUDE_SKILLS_VERSION=";
-
-/**
- * Bash (an `&&`-joined fragment of `buildSetupScript`) that installs the latest
- * mattpocock-skills plugin into the container's user-scoped Claude config and
- * prints its resolved version behind `SKILLS_VERSION_MARKER` (issue #60).
- *
- * Fail-fast by construction: every step is part of the setup script's single
- * `&&` chain, so a marketplace-add, clone, or install error aborts setup with a
- * non-zero exit — which `execSetup` turns into a thrown error before any agent
- * turn runs, rather than letting a generation session silently degrade to
- * freeform chat with a plugin it doesn't have. The explicit `test -n` guard
- * catches the one failure a non-zero exit would miss: an install that reports
- * success but leaves no resolvable version to log.
- */
-export function buildSkillsInstallScript(): string {
-  return [
-    'echo "Installing mattpocock-skills plugin (latest)..."',
-    `claude plugin marketplace add ${SKILLS_MARKETPLACE_SOURCE}`,
-    `claude plugin install ${SKILLS_PLUGIN_ID} --scope user`,
-    // No `2>/dev/null`: only stdout is piped to jq, so any CLI status on
-    // stderr can't corrupt the JSON — but it stays visible in the captured
-    // setup output for debugging a failed resolve.
-    `SKILLS_VERSION="$(claude plugin list --json | jq -r '.[] | select(.id == "${SKILLS_PLUGIN_ID}") | .version // empty')"`,
-    // A self-contained `if` (not `... || { exit 1; }`): as an `&&` operand it
-    // can only fire for an empty version after the install ran, so it never
-    // contaminates an earlier setup failure with a misleading skills error.
-    `if [ -z "$SKILLS_VERSION" ]; then echo "ERROR: mattpocock-skills install resolved no version" >&2; exit 1; fi`,
-    `echo "${SKILLS_VERSION_MARKER}$SKILLS_VERSION"`,
-  ].join(" && ");
-}
-
-/**
- * Lift the mattpocock-skills version out of captured setup output (issue #60),
- * or null when the marker is absent. Takes the last marker so a version echoed
- * amid other setup chatter still resolves. The capture is restricted to
- * version characters (word chars, dot, plus, hyphen) rather than `\S+`, so a
- * stray Docker exec-frame header byte adjacent to the marker can't bleed into
- * the parsed version.
- */
-export function parseSkillsVersion(setupOutput: string): string | null {
-  const matches = [
-    ...setupOutput.matchAll(new RegExp(`${SKILLS_VERSION_MARKER}([\\w.+-]+)`, "g")),
-  ];
-  return matches.length ? matches[matches.length - 1][1] : null;
-}
-
-/**
  * Bash run at container setup: install an env-based git credential helper
  * (token supplied at exec time via GIT_AUTH_TOKEN), clone the repo with a
  * secret-free URL, clone the platform repo (best-effort), get onto the task
- * branch (see `BranchCheckoutMode`), pull Doppler secrets if present, and
- * install the mattpocock-skills plugin (issue #60) — one mechanism for every
- * container kind, so a `workflow:<skill>` label always names a skill the
- * container actually has.
+ * branch (see `BranchCheckoutMode`), and pull Doppler secrets if present.
+ *
+ * Nothing here installs skills any more (issue #215): the estate's skills are
+ * baked into the agent image at build, pinned, so a `workflow:<skill>` label
+ * or a `/grill-me` session names a skill the image asserted it has — and
+ * setup no longer spends ~9s per container (8.7s measured on the pre-#215
+ * image, warm, live network) on `claude plugin` commands that only Claude
+ * Code could run (issue #60's mechanism).
  */
 export function buildSetupScript(
   platformRepoUrl: string,
@@ -130,7 +67,6 @@ export function buildSetupScript(
     "cd /workspace/repo",
     checkoutCommand(checkout),
     'if [ -n "$DOPPLER_TOKEN" ]; then curl -sf --request GET "https://api.doppler.com/v3/configs/config/secrets/download?format=env" --header "Authorization: Bearer $DOPPLER_TOKEN" > .env.local && echo "Doppler: wrote .env.local ($(wc -l < .env.local) vars)" || echo "Doppler: API request failed"; fi',
-    buildSkillsInstallScript(),
   ].join(" && ");
 }
 
@@ -175,8 +111,7 @@ export function buildPushScript(): string {
  * Lift the commits-ahead count out of captured push output, or null when it is
  * unknown (git could not count, or the marker never arrived). Takes the last
  * marker, and captures digits only, so neither earlier chatter nor a stray
- * Docker exec-frame byte can bleed into the number — the same discipline as
- * `parseSkillsVersion`.
+ * Docker exec-frame byte can bleed into the number.
  */
 export function parseCommitsAhead(pushOutput: string): number | null {
   const matches = [
@@ -202,6 +137,16 @@ export interface RunningContainer {
   previewSubdomain: string;
   /** How setup gets onto the branch (default `create`) — see `BranchCheckoutMode` */
   checkout?: BranchCheckoutMode;
+  /**
+   * The `mattpocock/skills` ref stamped on the image this container was
+   * created from (issue #215) — what the turn manager writes to the run
+   * ledger's skills-version column and the task feed as the pass starts. Set
+   * by `createWorkspaceContainer` from what `ensureImage` reports; a handle
+   * rebuilt for a container that already started — boot re-adoption, a
+   * follow-up turn's reconnect — carries none, because the ref was recorded
+   * when that container started.
+   */
+  skillsRef?: string | null;
 }
 
 export async function createWorkspaceContainer(
@@ -210,7 +155,11 @@ export async function createWorkspaceContainer(
   const docker = getDocker();
   const config = getConfig();
 
-  await ensureImage();
+  // The skills ref comes off the image the container is about to be created
+  // from, not from anything the container reports: the skills are pinned into
+  // the image at build (issue #215), so the image is the authority on which
+  // ref a pass runs with.
+  const { skillsRef } = await ensureImage();
 
   const env = [
     `GIT_URL=${options.gitUrl}`,
@@ -241,7 +190,7 @@ export async function createWorkspaceContainer(
   // bind mount: the container never sees the host's `~/.claude`, so it cannot
   // read or write the host user's Claude config, history, project state or
   // credentials, and whatever the image installs under /home/node/.claude
-  // (e.g. plugins) is no longer shadowed at runtime. Before adding any Bind
+  // (the skill links, #215) is no longer shadowed at runtime. Before adding any Bind
   // here, weigh it against that: a mount is host reach that outlives the run.
   const containerName = `${AGENT_CONTAINER_NAME_PREFIX}${options.taskId}-${Date.now()}`;
   // DNS-safe subdomain derived from task ID (last 8 chars of ULID, lowercased)
@@ -278,12 +227,11 @@ export async function createWorkspaceContainer(
     name: containerName,
     previewSubdomain,
     checkout: options.checkout,
+    skillsRef,
   };
 }
 
-export async function execSetup(
-  running: RunningContainer
-): Promise<{ skillsVersion: string | null }> {
+export async function execSetup(running: RunningContainer): Promise<void> {
   const token = await getInstallationToken();
   const exec = await running.container.exec({
     Cmd: ["bash", "-c", buildSetupScript(PLATFORM_REPO_URL, running.checkout ?? "create")],
@@ -335,10 +283,6 @@ export async function execSetup(
   if (inspectResult.ExitCode !== 0) {
     throw new Error(`Workspace setup failed with exit code ${inspectResult.ExitCode}: ${output.slice(-500)}`);
   }
-
-  // Non-zero exit already threw above, so a successful setup always carries the
-  // version marker (issue #60); parse it for the feed + run ledger.
-  return { skillsVersion: parseSkillsVersion(output) };
 }
 
 /**

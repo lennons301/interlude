@@ -19,6 +19,15 @@ const DOCKERFILE = CLAUDE_CODE_IMAGE.dockerfile;
 // #71) silently never reach running agents (issue #78).
 const DOCKERFILE_HASH_LABEL = "co.interlude.agent-dockerfile-sha256";
 
+// The ref of the estate's skills (`mattpocock/skills`) pinned into the image at
+// build (issue #215). Stamped by the Dockerfile's own LABEL from its SKILLS_REF
+// build arg — one statement of the ref, so a manual `docker build` stamps it
+// too — and reported by `ensureImage` off the inspect it already makes, for the
+// run ledger's skills-version column and the task feed. The pass reports
+// nothing: before this the setup script installed the skills and echoed the
+// resolved version behind a marker, and a lost marker left the trail blank.
+export const SKILLS_REF_LABEL = "co.interlude.agent-skills-ref";
+
 export function getImageName(): string {
   return CLAUDE_CODE_IMAGE.name;
 }
@@ -39,17 +48,28 @@ async function inspectImage(): Promise<Docker.ImageInspectInfo | null> {
 }
 
 /**
- * The Dockerfile hash `interlude-agent:latest` was built from, or null if the
- * image is absent or unstamped (built before this label existed, or by a manual
- * `docker build`). A null means "not known to be current" → rebuild.
+ * One label off an inspected image, or null when the image is absent or does
+ * not carry it. For the hash label, null means "not known to be current" —
+ * built before the label existed, or by a manual `docker build` — and so a
+ * rebuild.
  */
-async function builtDockerfileHash(): Promise<string | null> {
-  const info = await inspectImage();
-  return info?.Config?.Labels?.[DOCKERFILE_HASH_LABEL] ?? null;
+function imageLabel(info: Docker.ImageInspectInfo | null, label: string): string | null {
+  return info?.Config?.Labels?.[label] ?? null;
 }
 
 export async function imageExists(): Promise<boolean> {
   return (await inspectImage()) !== null;
+}
+
+/** What `ensureImage` reports about the image it leaves in place. */
+export interface EnsuredImage {
+  /**
+   * The skills ref stamped on the image (issue #215), read off the same inspect
+   * the staleness check made rather than a second daemon round trip. Null only
+   * if the Dockerfile stopped stamping the label: an image the hash calls
+   * current was built from this Dockerfile, and this Dockerfile stamps it.
+   */
+  skillsRef: string | null;
 }
 
 export async function buildImage(
@@ -83,18 +103,23 @@ export async function buildImage(
 }
 
 /**
- * Build the agent image if it is missing or stale. Stale = the running
- * `interlude-agent:latest` was built from a different Dockerfile.agent than the
- * one on disk (issue #78). Docker's layer cache makes an unchanged rebuild
- * cheap; a genuine Dockerfile change rebuilds so agents pick it up.
+ * Build the agent image if it is missing or stale, and report what is stamped
+ * on the image that results. Stale = the running `interlude-agent:latest` was
+ * built from a different Dockerfile.agent than the one on disk (issue #78).
+ * Docker's layer cache makes an unchanged rebuild cheap; a genuine Dockerfile
+ * change — a bumped `SKILLS_REF` included, since the hash covers the whole
+ * file — rebuilds so agents pick it up.
+ *
+ * A current image is inspected once, for both the hash and the skills ref
+ * (issue #215); only a rebuild inspects again, for the image it just built.
  */
 export async function ensureImage(
   onProgress?: (message: string) => void
-): Promise<void> {
-  const [current, built] = await Promise.all([
-    dockerfileHash(),
-    builtDockerfileHash(),
-  ]);
-  if (built === current) return;
+): Promise<EnsuredImage> {
+  const [current, info] = await Promise.all([dockerfileHash(), inspectImage()]);
+  if (imageLabel(info, DOCKERFILE_HASH_LABEL) === current) {
+    return { skillsRef: imageLabel(info, SKILLS_REF_LABEL) };
+  }
   await buildImage(onProgress);
+  return { skillsRef: imageLabel(await inspectImage(), SKILLS_REF_LABEL) };
 }

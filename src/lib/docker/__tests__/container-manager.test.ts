@@ -1,14 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   buildSetupScript,
-  buildSkillsInstallScript,
-  parseSkillsVersion,
   buildPushScript,
   COMMITS_AHEAD_MARKER,
   parseCommitsAhead,
   createWorkspaceContainer,
-  SKILLS_PLUGIN_ID,
-  SKILLS_VERSION_MARKER,
 } from "../container-manager";
 
 // Capture the options passed to docker.createContainer so we can assert on the
@@ -25,7 +21,7 @@ vi.mock("@/lib/docker/client", () => ({
   getDocker: () => ({ createContainer: createContainerSpy }),
 }));
 vi.mock("@/lib/docker/image-builder", () => ({
-  ensureImage: vi.fn(async () => {}),
+  ensureImage: vi.fn(async () => ({ skillsRef: "v1.2.3" })),
   getImageName: () => "interlude-agent:test",
 }));
 vi.mock("@/lib/orchestrator/capacity", () => ({
@@ -74,19 +70,14 @@ describe("buildSetupScript", () => {
     expect(script).toContain('if [ -n "$DOPPLER_TOKEN" ]');
   });
 
-  it("installs the mattpocock-skills plugin as part of setup (issue #60)", () => {
-    // The install runs for every container kind — one mechanism — so it lives
-    // in the shared setup script rather than a per-kind branch.
-    expect(script).toContain(buildSkillsInstallScript());
-    expect(script).toContain("claude plugin install mattpocock-skills@mattpocock");
-  });
-
-  it("chains the skills install so a failed install aborts setup (issue #60)", () => {
-    // The install fragment is joined into the single `&&` chain, and any of its
-    // own steps failing (non-zero exit / empty version) aborts the chain — so a
-    // failed install fails the whole setup, before any agent turn runs.
-    const install = buildSkillsInstallScript();
-    expect(script).toContain(` && ${install}`);
+  it("runs no `claude plugin` command — skills are pinned into the image (issue #215)", () => {
+    // Issue #60 installed the skills here, at every container start, with the
+    // Claude CLI. They now arrive with the image (Dockerfile.agent), so setup
+    // is harness-neutral and no longer spends wall-clock on a plugin install.
+    // Every container kind shares this one script, so one assertion covers all.
+    expect(script).not.toContain("claude plugin");
+    expect(script).not.toContain("mattpocock");
+    expect(script).not.toContain("SKILLS_VERSION");
   });
 
   it("creates a fresh branch by default", () => {
@@ -115,63 +106,6 @@ describe("buildSetupScript", () => {
     expect(adoptScript).toContain('git checkout "$GIT_BRANCH"');
     // ...otherwise branch fresh (first attempt).
     expect(adoptScript).toContain('git checkout -b "$GIT_BRANCH"');
-  });
-});
-
-describe("buildSkillsInstallScript (issue #60)", () => {
-  const script = buildSkillsInstallScript();
-
-  it("adds the mattpocock marketplace and installs the plugin at user scope", () => {
-    expect(script).toContain("claude plugin marketplace add mattpocock/skills");
-    expect(script).toContain(`claude plugin install ${SKILLS_PLUGIN_ID} --scope user`);
-  });
-
-  it("installs the latest — no version is pinned", () => {
-    // Deliberately unpinned (issue #60): the plugin id carries a marketplace,
-    // never an @version, and the install passes no version flag.
-    expect(script).not.toMatch(/mattpocock-skills@\d/);
-  });
-
-  it("resolves and echoes the version behind the shared marker", () => {
-    expect(script).toContain("claude plugin list --json");
-    expect(script).toContain(`echo "${SKILLS_VERSION_MARKER}$SKILLS_VERSION"`);
-  });
-
-  it("fails fast when the install resolves no version", () => {
-    // The guard turns a silent no-op install into a hard, visible failure —
-    // the exit propagates up the setup chain before any agent turn runs. A
-    // self-contained `if` (not `|| { exit 1; }`) keeps its failure path scoped
-    // to the skills steps, never an earlier clone/checkout failure.
-    expect(script).toContain('if [ -z "$SKILLS_VERSION" ]; then');
-    expect(script).toContain("exit 1");
-    expect(script).not.toContain("||");
-  });
-});
-
-describe("parseSkillsVersion (issue #60)", () => {
-  it("lifts the version out of setup output", () => {
-    const output = [
-      "Cloning into '/workspace/repo'...",
-      "Installing mattpocock-skills plugin (latest)...",
-      `${SKILLS_VERSION_MARKER}1.2.0`,
-    ].join("\n");
-    expect(parseSkillsVersion(output)).toBe("1.2.0");
-  });
-
-  it("takes the last marker when several are present", () => {
-    const output = `${SKILLS_VERSION_MARKER}1.0.0\nnoise\n${SKILLS_VERSION_MARKER}1.2.0`;
-    expect(parseSkillsVersion(output)).toBe("1.2.0");
-  });
-
-  it("returns null when the marker is absent", () => {
-    expect(parseSkillsVersion("no marker here")).toBeNull();
-  });
-
-  it("stops at a trailing exec-frame header byte", () => {
-    // A demux frame header (non-version bytes) can abut the line; the capture
-    // must not swallow it into the version.
-    const output = `${SKILLS_VERSION_MARKER}1.2.3\x01\x00\x00\x00`;
-    expect(parseSkillsVersion(output)).toBe("1.2.3");
   });
 });
 
@@ -247,6 +181,21 @@ describe("createWorkspaceContainer", () => {
   it("grants no host bind mount", async () => {
     const opts = await created();
     expect(opts.HostConfig?.Binds).toBeUndefined();
+  });
+
+  /**
+   * Issue #215: the skills version a pass runs with is the ref pinned into the
+   * image at build, reported by `ensureImage` off the image the container is
+   * created from — the container reports nothing. The turn manager writes it
+   * to the feed and the run ledger, so it has to arrive on the handle.
+   */
+  it("carries the skills ref stamped on the image it was created from", async () => {
+    const running = await createWorkspaceContainer({
+      taskId: "01J000000000000000000TASK",
+      gitUrl: "https://github.com/lennons301/interlude.git",
+      branch: "agent/issue-215",
+    });
+    expect(running.skillsRef).toBe("v1.2.3");
   });
 
   /**

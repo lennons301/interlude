@@ -192,10 +192,14 @@ export const runs = sqliteTable("runs", {
   // claims that carried a declared tier — is read from this column alone;
   // which tier actually ran stays `model`'s to say.
   declaredTier: text("declared_tier"),
-  // Resolved version of the mattpocock-skills plugin the container installed at
-  // start (issue #60) — the forensic trail for "what skill version ran?".
-  // Recorded when the run's first pass sets up; null for a run whose container
-  // predates this, or an interactive task (which has no run row at all).
+  // The version of the estate's skills (`mattpocock/skills`) the run's first
+  // pass ran with (issue #60) — the forensic trail for "what skill version
+  // ran?". Since issue #215 it is the git ref pinned into the agent image at
+  // build (e.g. `v1.2.3`), lifted off the image's label as the container is
+  // created; before that it was the plugin version the container's own setup
+  // resolved (e.g. `1.2.0`). Recorded when the run's first pass starts; null
+  // for a run whose container predates this, or an interactive task (which has
+  // no run row at all).
   skillsVersion: text("skills_version"),
   totalCostUsd: real("total_cost_usd").notNull().default(0),
   pullRequestNumber: int("pull_request_number"),
