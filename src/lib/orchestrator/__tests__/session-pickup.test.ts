@@ -4,6 +4,7 @@ import * as schema from "@/db/schema";
 import { newId } from "@/lib/ulid";
 import { HARNESS_ADAPTER_DESCRIPTORS } from "@/lib/harness/descriptors";
 import { parseLaneConfig, type LaneCatalog } from "@/lib/lanes/lane-config";
+import { FAKE_NO_SKILLS_HARNESS_ID, fakeNoSkillsDescriptor } from "@/test/fake-harness";
 
 /**
  * The pickup half of issue #218, through the queue's own loop: a generation
@@ -58,7 +59,7 @@ vi.mock("../capacity", async (importOriginal) => {
   };
 });
 
-const NO_SKILLS = "no-skills";
+const NO_SKILLS = FAKE_NO_SKILLS_HARNESS_ID;
 
 function catalog(): LaneCatalog {
   const parsed = parseLaneConfig(
@@ -88,18 +89,7 @@ lanes:
       standard: sonnet
       light: haiku
 `,
-    [
-      ...HARNESS_ADAPTER_DESCRIPTORS,
-      {
-        id: NO_SKILLS,
-        capabilities: {
-          userInvokedSkills: false,
-          quotaTelemetry: false,
-          reportsCost: true,
-          sessionResume: true,
-        },
-      },
-    ]
+    [...HARNESS_ADAPTER_DESCRIPTORS, fakeNoSkillsDescriptor]
   );
   if (!parsed.ok) throw new Error(parsed.reason);
   return parsed.catalog;
@@ -114,6 +104,7 @@ vi.mock("../../lanes/catalog", async (importOriginal) => {
 });
 
 import { resetConfig } from "@/lib/config";
+import { recordQuotaObservation } from "@/lib/quota/quota-store";
 
 type Queue = typeof import("../queue");
 
@@ -249,6 +240,36 @@ describe("picking up a generation session no lane can host (issue #218)", () => 
 
     expect(turns.dispatched).toEqual([review]);
     expect(status(session)).toBe("queued");
+  });
+
+  it("holds the session on the clock when the one lane that can host it is walled — and only the sessions", async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth";
+    resetConfig();
+    recordQuotaObservation("claude-subscription", {
+      status: "rejected",
+      rateLimitType: "five_hour",
+      utilization: null,
+      resetsAt: new Date(Date.now() + 4 * 60 * 60 * 1000),
+      overageStatus: null,
+      overageResetsAt: null,
+      isUsingOverage: false,
+      overageInUse: null,
+      observedAt: new Date(),
+    });
+    const projectId = seedProject();
+    const session = seedTask(projectId, { sessionSkill: "grill-me" });
+    const chat = seedTask(projectId, { title: "An ordinary chat" });
+
+    queue.startQueue();
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+
+    // The wall is the Claude lane's, not the lane in force's, so the chat is
+    // not held by it — it runs on the lane in force — while the session waits
+    // for the window it needs.
+    expect(turns.dispatched).toEqual([chat]);
+    expect(status(session)).toBe("queued");
+    expect(notes(session)[0]).toContain("claude-subscription's window is exhausted");
+    expect(notes(session)[0]).toContain("starts when a window that can host it resets");
   });
 
   it("dispatches the session once a lane that can host it is available", async () => {

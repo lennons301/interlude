@@ -3,6 +3,7 @@ import type { AppConfig } from "../../config";
 import type { QuotaObservation } from "../../quota/rate-limit-event";
 import type { SettingsOverrides } from "../../settings-resolver";
 import { HARNESS_ADAPTER_DESCRIPTORS } from "../../harness/descriptors";
+import { FAKE_NO_SKILLS_HARNESS_ID, fakeNoSkillsDescriptor } from "@/test/fake-harness";
 import { parseLaneConfig, type LaneCatalog } from "../lane-config";
 import {
   failoverOption,
@@ -568,8 +569,9 @@ describe("a generation session runs only where its skill can be invoked (issue #
   // A second catalog with a lane on a harness that does not expand a
   // user-invoked skill — the shape a Codex or OpenCode lane will have — beside
   // the Claude lanes, so the requirement has something to bite on. The adapter
-  // is described to the parser only here, as a test's double is.
-  const NO_SKILLS = "no-skills";
+  // is the shared no-skills fake, described to the parser beside the
+  // production table as a test's double is.
+  const NO_SKILLS = FAKE_NO_SKILLS_HARNESS_ID;
   const skillsCatalog: LaneCatalog = (() => {
     const parsed = parseLaneConfig(
       `
@@ -614,18 +616,7 @@ lanes:
     caps:
       daily_budget_usd: 20
 `,
-      [
-        ...HARNESS_ADAPTER_DESCRIPTORS,
-        {
-          id: NO_SKILLS,
-          capabilities: {
-            userInvokedSkills: false,
-            quotaTelemetry: false,
-            reportsCost: true,
-            sessionResume: true,
-          },
-        },
-      ]
+      [...HARNESS_ADAPTER_DESCRIPTORS, fakeNoSkillsDescriptor]
     );
     if (!parsed.ok) throw new Error(parsed.reason);
     return parsed.catalog;

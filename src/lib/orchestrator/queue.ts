@@ -1,7 +1,10 @@
 import { db } from "@/db";
 import { tasks, messages, type SessionSkill } from "@/db/schema";
 import { eq, and, isNull, asc, ne, or, sql } from "drizzle-orm";
-import type { CrossingRefusalReason } from "../lanes/overflow";
+import {
+  refusalIsSessionsOwn,
+  type CrossingRefusalReason,
+} from "../lanes/overflow";
 import { readLaneCrossing } from "../lanes/overflow-state";
 import { startTask } from "./turn-manager";
 import {
@@ -262,7 +265,8 @@ function attendedPickupHold(task: {
   sessionSkill: SessionSkill | null;
 }): CrossingRefusalReason | null {
   const crossing = readLaneCrossing("interactive", null, task.sessionSkill);
-  return crossingHoldsPass(task.id, crossing) ? crossing.refusal!.reason : null;
+  if (!crossingHoldsPass(task.id, crossing)) return null;
+  return crossing.refusal?.reason ?? null;
 }
 
 export function startQueue(): void {
@@ -310,7 +314,7 @@ export function startQueue(): void {
       // does not, so the reason worth telling the owner is this one.
       if (next?.kind === "interactive") {
         const hold = attendedPickupHold(next);
-        if (hold === "no-skill-capable-lane") {
+        if (hold !== null && refusalIsSessionsOwn(hold)) {
           next = nextQueuedTask("sessions");
           if (next?.kind === "interactive" && attendedPickupHold(next) !== null) {
             next = nextQueuedTask("interactive");

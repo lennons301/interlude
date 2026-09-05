@@ -3,6 +3,7 @@ import type { AppConfig } from "../../config";
 import type { QuotaObservation } from "../../quota/rate-limit-event";
 import type { SettingsOverrides } from "../../settings-resolver";
 import { HARNESS_ADAPTER_DESCRIPTORS } from "../../harness/descriptors";
+import { FAKE_NO_SKILLS_HARNESS_ID, fakeNoSkillsDescriptor } from "@/test/fake-harness";
 import { parseLaneConfig, type LaneCatalog } from "../lane-config";
 import {
   decideLaneCrossing,
@@ -556,9 +557,10 @@ describe("the pieces the callers share", () => {
 
 describe("a generation session is refused, never started as chat, where no lane can invoke its skill (issue #218)", () => {
   // The shipped Claude lanes beside a lane on a harness that does not expand a
-  // user-invoked skill, made primary — the configuration in which a skill
-  // session used to fall back onto the lane in force and become freeform chat.
-  const NO_SKILLS = "no-skills";
+  // user-invoked skill (the shared no-skills fake), made primary — the
+  // configuration in which a skill session used to fall back onto the lane in
+  // force and become freeform chat.
+  const NO_SKILLS = FAKE_NO_SKILLS_HARNESS_ID;
   const skillsCatalog: LaneCatalog = (() => {
     const parsed = parseLaneConfig(
       `
@@ -615,18 +617,7 @@ lanes:
     caps:
       daily_budget_usd: 20
 `,
-      [
-        ...HARNESS_ADAPTER_DESCRIPTORS,
-        {
-          id: NO_SKILLS,
-          capabilities: {
-            userInvokedSkills: false,
-            quotaTelemetry: false,
-            reportsCost: true,
-            sessionResume: true,
-          },
-        },
-      ]
+      [...HARNESS_ADAPTER_DESCRIPTORS, fakeNoSkillsDescriptor]
     );
     if (!parsed.ok) throw new Error(parsed.reason);
     return parsed.catalog;
@@ -684,19 +675,46 @@ lanes:
     expect(decision.notice).toBeNull();
   });
 
-  it("names the wall on the one lane that could host it, with its reset", () => {
+  it("holds the session on the clock when the one lane that could host it is only walled", () => {
     const decision = session({
       env: { OTHER_TOKEN: "t", OTHER_API_KEY: "k", CLAUDE_CODE_OAUTH_TOKEN: "oauth" },
       observations: { subscription: WALL },
     });
 
-    expect(decision.refusal?.reason).toBe("no-skill-capable-lane");
+    // A wall lifts itself, so this is a hold like a walled chat's — not the
+    // entry refusal, which is for a fleet only the operator can change. The
+    // message still names the wall and its reset.
+    expect(decision.refusal?.reason).toBe("skill-lane-walled");
     expect(decision.refusal?.message).toContain(
       "subscription's window is exhausted (resets 14:05)"
     );
-    // Not the wall refusal: the lane in force is not walled, it cannot host
-    // the session at all, and a reset would change nothing about that.
+    expect(decision.refusal?.message).toContain("starts when a window that can host it resets");
+    // Not #173's wall refusal either: the lane in force is not walled, it
+    // cannot host the session at all, and a reset would change nothing there.
     expect(decision.walled).toBe(false);
+  });
+
+  it("routes the session off an unavailable lane in force that could not have hosted it anyway", () => {
+    // #172's rule leaves a pass on an unavailable lane to die naming the
+    // variable rather than routing around a misconfiguration. A session was
+    // never going to run on this lane — setting its credential would change
+    // nothing — so the ranking judges it as if the credential were present.
+    const decision = session({
+      env: { OTHER_API_KEY: "k", CLAUDE_CODE_OAUTH_TOKEN: "oauth", ANTHROPIC_API_KEY: "sk-ant" },
+    });
+
+    expect(decision.laneId).toBe("subscription");
+    expect(decision.refusal).toBeNull();
+    // ...while an ordinary chat on that lane is still #172's report, unchanged.
+    expect(session({ sessionSkill: null, env: { OTHER_API_KEY: "k" } }).laneId).toBe("other-sub");
+  });
+
+  it("refuses at entry when the lane in force is unavailable and nothing else can host it", () => {
+    const decision = session({ env: { OTHER_API_KEY: "k" } });
+
+    expect(decision.refusal?.reason).toBe("no-skill-capable-lane");
+    expect(decision.refusal?.message).toContain(`other-sub, other-api run ${NO_SKILLS}`);
+    expect(decision.refusal?.message).toContain("subscription needs CLAUDE_CODE_OAUTH_TOKEN");
   });
 
   it("asks for the press when the only lane that can host it is a paid one", () => {

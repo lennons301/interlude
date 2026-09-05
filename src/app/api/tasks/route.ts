@@ -103,17 +103,21 @@ export async function POST(request: Request) {
       { status: 400 }
     );
   }
+  // Validated above, so the one narrowing every read below shares.
+  const skill = (sessionSkill as SessionSkill | undefined) ?? null;
 
   // A generation session is refused at entry when no lane can host it (issue
   // #218) — before the row exists, so before a container is anywhere near
   // being provisioned. The judgement is the crossing's, the same one the queue
   // reads before starting a session and the turn manager routes it with, so
-  // this route can never accept a session the orchestrator would then hold.
-  // Only that one refusal is answered here: a money hold is a press away and
-  // the task screen is where the press lives, so a session held for money is
-  // still created and held there exactly as an ordinary chat is.
-  if (sessionSkill !== undefined) {
-    const crossing = readLaneCrossing("interactive", null, sessionSkill as SessionSkill);
+  // this route can never accept a session the orchestrator would then hold for
+  // that reason. Only that one refusal is answered here, because it is the one
+  // that waits on a human changing the fleet: a money hold is a press away and
+  // the task screen is where the press lives, and a capable lane that is only
+  // walled frees itself at its reset — so a session held for either is still
+  // created and held on its feed, exactly as an ordinary chat is.
+  if (skill !== null) {
+    const crossing = readLaneCrossing("interactive", null, skill);
     if (crossing.refusal?.reason === "no-skill-capable-lane") {
       return NextResponse.json(
         { error: crossing.refusal.message, reason: crossing.refusal.reason },
@@ -131,7 +135,7 @@ export async function POST(request: Request) {
     description: description?.trim() ?? "",
     status: "queued" as const,
     githubIssue: null,
-    sessionSkill: (sessionSkill as SessionSkill | undefined) ?? null,
+    sessionSkill: skill,
     sessionIssue: sessionIssue?.trim() || null,
     createdAt: now,
     updatedAt: now,

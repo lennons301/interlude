@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createTestDb } from "@/test/create-test-db";
 import { HARNESS_ADAPTER_DESCRIPTORS } from "@/lib/harness/descriptors";
 import { parseLaneConfig, type LaneCatalog } from "@/lib/lanes/lane-config";
+import { FAKE_NO_SKILLS_HARNESS_ID, fakeNoSkillsDescriptor } from "@/test/fake-harness";
 
 /**
  * The session-entry half of issue #218: `POST /api/tasks` refuses a generation
@@ -23,7 +24,7 @@ vi.mock("@/db", () => ({
   },
 }));
 
-const NO_SKILLS = "no-skills";
+const NO_SKILLS = FAKE_NO_SKILLS_HARNESS_ID;
 
 function catalog(): LaneCatalog {
   const parsed = parseLaneConfig(
@@ -53,18 +54,7 @@ lanes:
       standard: sonnet
       light: haiku
 `,
-    [
-      ...HARNESS_ADAPTER_DESCRIPTORS,
-      {
-        id: NO_SKILLS,
-        capabilities: {
-          userInvokedSkills: false,
-          quotaTelemetry: false,
-          reportsCost: true,
-          sessionResume: true,
-        },
-      },
-    ]
+    [...HARNESS_ADAPTER_DESCRIPTORS, fakeNoSkillsDescriptor]
   );
   if (!parsed.ok) throw new Error(parsed.reason);
   return parsed.catalog;
@@ -79,6 +69,7 @@ vi.mock("@/lib/lanes/catalog", async (importOriginal) => {
 });
 
 import { resetConfig } from "@/lib/config";
+import { recordQuotaObservation } from "@/lib/quota/quota-store";
 import { POST as postProject } from "@/app/api/projects/route";
 import { GET as getTasks, POST as postTask } from "@/app/api/tasks/route";
 
@@ -158,6 +149,75 @@ describe("POST /api/tasks for a generation session (issue #218)", () => {
     const [row] = await listed(projectId);
     expect(row.sessionSkill).toBe("grill-me");
     expect(row.status).toBe("queued");
+  });
+
+  it("creates the session, to be held on its clock, when the only lane that can host it is walled", async () => {
+    // A wall lifts itself, so this is not the operator's to fix: the session
+    // is created and held on its feed exactly as a walled chat is, and the
+    // queue starts it when the window resets.
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth";
+    resetConfig();
+    recordQuotaObservation("claude-subscription", {
+      status: "rejected",
+      rateLimitType: "five_hour",
+      utilization: null,
+      resetsAt: new Date(Date.now() + 4 * 60 * 60 * 1000),
+      overageStatus: null,
+      overageResetsAt: null,
+      isUsingOverage: false,
+      overageInUse: null,
+      observedAt: new Date(),
+    });
+    const projectId = await seedProject();
+
+    const res = await postTask(
+      jsonRequest("http://test/api/tasks", {
+        title: "Grill the fleet dashboard",
+        projectId,
+        sessionSkill: "grill-me",
+      })
+    );
+
+    expect(res.status).toBe(201);
+    expect((await listed(projectId))[0].sessionSkill).toBe("grill-me");
+  });
+
+  it("creates the session when the lane in force is unavailable but another lane can host it", async () => {
+    // The lane in force could never have hosted the session, so its missing
+    // credential is beside the point (issue #218): the session routes to the
+    // lane that can, rather than being created only to die naming a variable
+    // that would not have helped.
+    delete process.env.OTHER_TOKEN;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth";
+    resetConfig();
+    const projectId = await seedProject();
+
+    const res = await postTask(
+      jsonRequest("http://test/api/tasks", {
+        title: "Grill the fleet dashboard",
+        projectId,
+        sessionSkill: "grill-me",
+      })
+    );
+
+    expect(res.status).toBe(201);
+  });
+
+  it("refuses the session when the lane in force is unavailable and nothing else can host it", async () => {
+    delete process.env.OTHER_TOKEN;
+    resetConfig();
+    const projectId = await seedProject();
+
+    const res = await postTask(
+      jsonRequest("http://test/api/tasks", {
+        title: "Grill the fleet dashboard",
+        projectId,
+        sessionSkill: "grill-me",
+      })
+    );
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).reason).toBe("no-skill-capable-lane");
   });
 
   it("creates an ordinary chat task on the same fleet exactly as before", async () => {

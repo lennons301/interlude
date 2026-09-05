@@ -7,16 +7,16 @@ import {
   createFakeHarness,
   fakeExecStream,
   fakeLaneCatalog,
+  fakeLaneCatalogOf,
   scriptedTurn,
-  DESCRIPTORS_WITH_FAKE,
   FAKE_HARNESS_CAPABILITIES,
-  FAKE_HARNESS_ID,
   FAKE_LANE_AUTH_VAR,
   FAKE_LANE_ID,
-  FAKE_LANE_YAML,
+  FAKE_NO_SKILLS_CAPABILITIES,
+  FAKE_NO_SKILLS_HARNESS_ID,
   type FakeHarness,
 } from "@/test/fake-harness";
-import { parseLaneConfig, type LaneCatalog } from "@/lib/lanes/lane-config";
+import type { LaneCatalog } from "@/lib/lanes/lane-config";
 import { ARMING_CONVENTION, ISSUE_ANCHOR_HINT } from "@/lib/sessions/seed";
 
 /**
@@ -387,19 +387,13 @@ describe("a whole turn through the turn manager on the fake adapter (issue #214)
   });
 });
 
-/** The fake lane file again, with the fake adapter described as a harness
- * that does *not* expand a user-invoked skill — the shape a Codex or OpenCode
- * lane has, and what a generation session must never be started on. */
+/** The one-lane file again, its lane on the fake that does *not* expand a
+ * user-invoked skill — the shape a Codex or OpenCode lane has, and what a
+ * generation session must never be started on. */
 function noSkillsCatalog(): LaneCatalog {
-  const parsed = parseLaneConfig(FAKE_LANE_YAML, [
-    ...DESCRIPTORS_WITH_FAKE.filter((d) => d.id !== FAKE_HARNESS_ID),
-    {
-      id: FAKE_HARNESS_ID,
-      capabilities: { ...FAKE_HARNESS_CAPABILITIES, userInvokedSkills: false },
-    },
+  return fakeLaneCatalogOf([
+    { id: FAKE_LANE_ID, adapter: FAKE_NO_SKILLS_HARNESS_ID, label: "Fake harness" },
   ]);
-  if (!parsed.ok) throw new Error(`fake lane file did not parse: ${parsed.reason}`);
-  return parsed.catalog;
 }
 
 const SESSION_ISSUE = "lennons301/lemons#34";
@@ -461,9 +455,13 @@ describe("a generation session on the fake adapter (issue #218)", () => {
   let unregister: () => void;
   const env = { ...process.env };
 
-  /** Register the fake — described as the catalog in `laneFile` describes it
-   * — on the registry the freshly imported turn manager resolves through. */
-  async function boot(capabilities = FAKE_HARNESS_CAPABILITIES) {
+  /** Register the fake the catalog in `laneFile` names, on the registry the
+   * freshly imported turn manager resolves through. */
+  async function boot(
+    adapter: { id?: string; capabilities: typeof FAKE_HARNESS_CAPABILITIES } = {
+      capabilities: FAKE_HARNESS_CAPABILITIES,
+    }
+  ) {
     process.env[FAKE_LANE_AUTH_VAR] = "fake-token";
     delete process.env.AGENT_LANE;
     delete process.env.AGENT_MODEL;
@@ -471,7 +469,7 @@ describe("a generation session on the fake adapter (issue #218)", () => {
     const config = await import("@/lib/config");
     config.resetConfig();
     const registry = await import("@/lib/harness/registry");
-    fake = createFakeHarness([], { capabilities });
+    fake = createFakeHarness([], adapter);
     unregister = registry.registerHarnessAdapter(fake.adapter);
     turns = await import("../turn-manager");
     turns.getActiveTasks().clear();
@@ -522,7 +520,7 @@ describe("a generation session on the fake adapter (issue #218)", () => {
 
   it("holds the session with the reason before any container exists when no lane can invoke its skill", async () => {
     laneFile.catalog = noSkillsCatalog();
-    await boot({ ...FAKE_HARNESS_CAPABILITIES, userInvokedSkills: false });
+    await boot({ id: FAKE_NO_SKILLS_HARNESS_ID, capabilities: FAKE_NO_SKILLS_CAPABILITIES });
     const id = seedInteractive("grill-me");
 
     await turns.startTask(id);
@@ -536,12 +534,14 @@ describe("a generation session on the fake adapter (issue #218)", () => {
     expect(taskRow(id).lane).toBeNull();
     const [note] = notes(id);
     expect(note).toContain("A grill-me session needs a lane whose harness can invoke skills");
-    expect(note).toContain(`${FAKE_LANE_ID} runs ${FAKE_HARNESS_ID}, which cannot invoke a skill`);
+    expect(note).toContain(
+      `${FAKE_LANE_ID} runs ${FAKE_NO_SKILLS_HARNESS_ID}, which cannot invoke a skill`
+    );
   });
 
   it("starts an ordinary chat on that same lane exactly as before", async () => {
     laneFile.catalog = noSkillsCatalog();
-    await boot({ ...FAKE_HARNESS_CAPABILITIES, userInvokedSkills: false });
+    await boot({ id: FAKE_NO_SKILLS_HARNESS_ID, capabilities: FAKE_NO_SKILLS_CAPABILITIES });
     const id = seedInteractive(null);
     fake.script(scriptedTurn({ kind: "completed" }));
 
