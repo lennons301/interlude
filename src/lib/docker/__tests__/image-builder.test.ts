@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { SESSION_SKILLS } from "@/db/schema";
 import { CLAUDE_CODE_IMAGE } from "@/lib/harness/claude-code/image";
+import { OPENCODE_IMAGE } from "@/lib/harness/opencode/image";
 import type { HarnessImage } from "@/lib/harness/adapter";
 
 const HASH_LABEL = "co.interlude.agent-dockerfile-sha256";
@@ -100,7 +101,7 @@ describe("the base and the layers", () => {
     expect(DOCKERFILE_HASH_LABEL).toBe(HASH_LABEL);
     // Each layer's `ARG BASE_IMAGE=` default is the tag the builder passes, so
     // a manual `docker build` after a base build lands on the same base.
-    for (const layer of [CLAUDE_CODE_IMAGE.dockerfile, FIXTURE_IMAGE.dockerfile]) {
+    for (const layer of [CLAUDE_CODE_IMAGE.dockerfile, OPENCODE_IMAGE.dockerfile, FIXTURE_IMAGE.dockerfile]) {
       const text = readFileSync(path.join(process.cwd(), layer), "utf8");
       expect(text).toContain(`ARG ${BASE_IMAGE_BUILD_ARG}=${BASE_IMAGE_NAME}`);
       expect(text).toContain(`FROM \${${BASE_IMAGE_BUILD_ARG}}`);
@@ -374,6 +375,62 @@ describe("the base and the Claude Code layer (issue #216)", () => {
     expect(layerInstructions).not.toContain("apt-get");
     expect(layerInstructions).not.toContain("skills");
     expect(layerInstructions).not.toContain("WORKDIR");
+  });
+});
+
+/**
+ * Issue #222: the OpenCode layer installs one harness — the OpenCode CLI — and
+ * creates the directory its session database lives in. Nothing else, and
+ * nothing of Claude Code's.
+ */
+describe("the OpenCode layer (issue #222)", () => {
+  const opencodeLayer = readFileSync(path.join(process.cwd(), OPENCODE_IMAGE.dockerfile), "utf8");
+  const layerInstructions = instructionsOf(opencodeLayer);
+
+  it("builds on the base image the builder names, as the Claude Code layer does", () => {
+    expect(OPENCODE_IMAGE.dockerfile).toBe("Dockerfile.agent-opencode");
+    expect(layerInstructions).toContain(`ARG ${BASE_IMAGE_BUILD_ARG}=${AGENT_BASE_IMAGE.name}`);
+    expect(layerInstructions).toContain(`FROM \${${BASE_IMAGE_BUILD_ARG}}`);
+    // Nothing the base already did is repeated in the layer.
+    expect(layerInstructions).not.toContain("apt-get");
+    expect(layerInstructions).not.toContain("skills");
+    expect(layerInstructions).not.toContain("WORKDIR");
+  });
+
+  it("installs the OpenCode CLI and creates its data directory, and nothing of Claude Code", () => {
+    expect(layerInstructions).toContain("RUN npm install -g opencode-ai");
+    expect(layerInstructions).toContain(
+      "RUN mkdir -p /home/node/.local/share/opencode && chown -R node:node /home/node/.local"
+    );
+    expect(layerInstructions).not.toContain("@anthropic-ai");
+    expect(layerInstructions).not.toContain(".claude");
+    expect(layerInstructions).not.toContain("bypassPermissionsModeAccepted");
+    expect(opencodeLayer).not.toContain(SKILLS_REF_LABEL);
+  });
+
+  it("takes root only for the install and ends as the workspace user", () => {
+    const root = layerInstructions.indexOf("USER root");
+    const install = layerInstructions.indexOf("npm install -g");
+    const node = layerInstructions.lastIndexOf("USER node");
+    expect(root).toBeGreaterThan(-1);
+    expect(install).toBeGreaterThan(root);
+    expect(node).toBeGreaterThan(install);
+    expect(layerInstructions.trim().endsWith("USER node")).toBe(true);
+  });
+
+  it("is stamped and rebuilt by the same mechanism as every other layer", async () => {
+    const opencodeStamp = imageStamp(baseHash, hashOf(OPENCODE_IMAGE.dockerfile));
+    expect(opencodeStamp).not.toBe(claudeStamp);
+    state.inspect = imagesOnDaemon({
+      [BASE_IMAGE_NAME]: { [HASH_LABEL]: baseHash },
+      [CLAUDE_CODE_IMAGE.name]: { [HASH_LABEL]: claudeStamp },
+    });
+    await ensureImage(OPENCODE_IMAGE);
+    // The base is current and the Claude image is left alone: one build.
+    expect(builds().map((b) => b.t)).toEqual([OPENCODE_IMAGE.name]);
+    expect(builds()[0].dockerfile).toBe(OPENCODE_IMAGE.dockerfile);
+    expect(builds()[0].labels[HASH_LABEL]).toBe(opencodeStamp);
+    expect(builds()[0].buildargs).toEqual({ [BASE_IMAGE_BUILD_ARG]: BASE_IMAGE_NAME });
   });
 });
 
