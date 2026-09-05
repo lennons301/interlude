@@ -141,6 +141,53 @@ export const DEFAULT_MAX_RESUMES_PER_ATTEMPT = 3;
 export const MAX_RESUMES_CEILING = 5;
 
 /**
+ * The clock a run parks on when a provider's quota refused its pass **without
+ * naming a reset time** (issue #220).
+ *
+ * Before this, such a refusal could not pause — a pause needs a clock, and the
+ * fleet would not invent one — so, past the tier ladder and the lane ranking,
+ * it took the ordinary path and spent one of the ticket's three attempts on a
+ * wall. That was tolerable while the one harness usually said when its window
+ * reset; a harness with no rate-limit event at all never does. So the park now
+ * waits this long instead, and answers to the same resume bound as every
+ * other pause: the run resumes on its own lane when the backoff elapses, and
+ * a wall that still stands parks it again, until `MAX_RESUMES_PER_ATTEMPT`
+ * hands the ticket to a human with its attempts intact.
+ *
+ * One hour: long enough that the bound's three resumes span most of a
+ * five-hour window rather than being spent inside it, short enough that a
+ * limit which lifted in minutes costs the ticket an hour and not a shift. It
+ * is deliberately a backoff and not a guess at the window — the announcement
+ * says the provider named no reset, so nobody reads the countdown as one.
+ * While it stands, the #199 early resume onto another lane and the #202
+ * manual move both apply exactly as they do to a stated reset.
+ */
+export const DEFAULT_REFUSAL_BACKOFF_MS = 60 * 60_000;
+
+/**
+ * The most wall-clock time one agent exec may run before the orchestrator
+ * ends it as a turn limit (issue #220) — the default the
+ * `TURN_WALL_CLOCK_MINUTES` environment variable overrides.
+ *
+ * A turn's other bounds all live in the harness (`--max-turns`,
+ * `--max-budget-usd`) or between turns (the attempt budget, the daily cap), so
+ * a harness with no such flags — or a process hung on a suspended host, which
+ * the one harness has done — ran unbounded, holding its slot and its ~2 GiB
+ * for as long as the box stayed up. This ceiling is adapter-agnostic and
+ * enforced by the orchestrator around the exec, so every harness has it, and
+ * it is a **second** bound on the Claude lane rather than a replacement for
+ * its flags.
+ *
+ * Generous on purpose: an over-long turn ends as `turn-limit`, which exhausts
+ * an implement attempt exactly as the harness's own turn ceiling does, so a
+ * ceiling set tight would spend attempts on legitimately long work. Three
+ * hours clears a heavy implement pass at the default fifty turns on a 2-vCPU
+ * box with room to spare, and still turns "hung until the next deploy" into
+ * "failed with a reason before the shift is out".
+ */
+export const DEFAULT_TURN_WALL_CLOCK_MS = 3 * 60 * 60_000;
+
+/**
  * How far past its window's reset a paused run's own offset may fall (issue
  * #169) — see resume-jitter.ts for why the offset is derived from the run id.
  *

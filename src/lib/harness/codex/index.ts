@@ -53,9 +53,9 @@
  * **Bounds.** Codex has no `--max-turns` or `--max-budget-usd`; `maxTurns`
  * and `maxBudgetUsd` on the command input are accepted and ignored here. What
  * bounds a pass is the fleet's own between-turn accounting (#175) — which on
- * the subscription lane books $0, so nothing in-turn bounds a pass there — and,
- * once it lands, the per-exec wall clock issue #220 adds; provisioning either
- * lane's credential waits on #220 as well as #224. `features.plugins=false` is passed
+ * the subscription lane books $0 — and the orchestrator's per-exec wall clock
+ * (issue #220, `turnWallClockMs`), the one in-turn bound on either lane and
+ * the only bound at all on the subscription one. `features.plugins=false` is passed
  * because a fresh Codex home otherwise clones the plugin marketplace from
  * GitHub at every turn start — a network dependency and seconds of wall clock
  * the per-exec home would pay on every exec (measured; the flag stops it).

@@ -28,8 +28,8 @@
  * lost stream, a sandbox error, a session it could not find), carried through
  * by its message so the feed can say what happened; nothing decides on the
  * word. Codex has no turn ceiling — there is no `--max-turns` — so nothing here
- * yields `turn-limit`; a ceiling on a Codex pass is the orchestrator's to hold
- * (the per-exec wall clock issue #220 adds, once it lands), not the adapter's.
+ * yields `turn-limit`; the ceiling on a Codex pass is the orchestrator's
+ * per-exec wall clock (issue #220), which forces `turn-limit` itself.
  *
  * The reset time is the one inference made here. The wall sentence states a
  * wall-clock time and no date, formatted in the CLI's local zone. The fleet
@@ -42,7 +42,8 @@
  * attempt in either direction: too early, the resumed pass meets the wall again
  * and pauses again (bounded by the resume count); too late, it waits out the
  * offset. A sentence stating no time yields null, which the reducer already
- * handles (#170: a pause needs a clock; a degrade or a failover does not).
+ * handles (#170: a degrade or a failover needs no clock; a pause without one
+ * parks on #220's default backoff rather than spending the attempt).
  *
  * Pure and total by construction — every field is read defensively, the clock
  * is a parameter, and an unreadable event yields `failed` rather than throwing:

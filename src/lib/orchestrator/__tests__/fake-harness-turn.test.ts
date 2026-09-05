@@ -8,6 +8,7 @@ import {
   fakeExecStream,
   fakeLaneCatalog,
   fakeLaneCatalogOf,
+  hangingTurn,
   scriptedTurn,
   FAKE_HARNESS_CAPABILITIES,
   FAKE_HARNESS_ID,
@@ -17,6 +18,7 @@ import {
   FAKE_NO_SKILLS_HARNESS_ID,
   type FakeHarness,
 } from "@/test/fake-harness";
+import { DEFAULT_REFUSAL_BACKOFF_MS } from "../autonomy/budgets";
 import type { LaneCatalog } from "@/lib/lanes/lane-config";
 import { ARMING_CONVENTION, ISSUE_ANCHOR_HINT } from "@/lib/sessions/seed";
 
@@ -28,10 +30,17 @@ import { ARMING_CONVENTION, ISSUE_ANCHOR_HINT } from "@/lib/sessions/seed";
  * multi-harness milestone tests the orchestrator in.
  *
  * Driven through the real `startTask` over a real (in-memory, migrated)
- * database and a one-lane catalog on the fake adapter. Only outbound I/O is
- * stubbed (Docker, GitHub, Discord), exactly as the quota-pause and
- * repair-tier suites stub it; the DB writes, the reducer and the container
- * teardown ordering are the real thing.
+ * database and a one-lane catalog on the fake adapter — two lanes where a
+ * case needs somewhere to move to. Only outbound I/O is stubbed (Docker,
+ * GitHub, Discord), exactly as the quota-pause and repair-tier suites stub
+ * it; the DB writes, the reducer and the container teardown ordering are the
+ * real thing.
+ *
+ * Issue #220 adds the cases a harness with no rate-limit event and no CLI
+ * ceiling needs: the full wall ordering on a `refused { quota }` (degrade,
+ * failover, park), a park on the default backoff when the refusal named no
+ * reset, a `refused { auth }` ending the pass without a retry on its lane, and
+ * a turn the orchestrator's wall-clock ceiling ends as a turn limit.
  */
 
 let testDb: ReturnType<typeof createTestDb>["db"];
@@ -76,6 +85,10 @@ vi.mock("../../docker/container-manager", async (importOriginal) => {
     startContainer: async () => docker.calls.push("startContainer"),
     stopContainer: async () => docker.calls.push("stopContainer"),
     removeContainer: async () => docker.calls.push("removeContainer"),
+    stopAgentTurn: async () => {
+      docker.calls.push("stopAgentTurn");
+      return "stopped";
+    },
   };
 });
 
@@ -132,10 +145,13 @@ vi.mock("../../discord/notifications", async (importOriginal) => {
 // The one-lane catalog on the fake adapter, in place of `lanes.yaml`. Every
 // reader of the catalog — lane resolution, the crossing, the failover ranking
 // — sees the same file, exactly as they would in production. A test may swap
-// the file for one whose fake adapter is described differently.
+// the file for one whose fake adapter is described differently, or for one
+// declaring a second lane to move to (issue #220's failover) on the same fake
+// adapter, so the move is the wall ordering's and not #217's.
 const laneFile = vi.hoisted(() => ({
   catalog: null as import("@/lib/lanes/lane-config").LaneCatalog | null,
 }));
+const SECOND_LANE_ID = "fake-lane-b";
 
 vi.mock("../../lanes/catalog", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lanes/catalog")>();
@@ -199,6 +215,56 @@ function seedImplementPass(): void {
     .run();
 }
 
+/** A review pass of a run parked with its PR, queued and awaiting its container. */
+function seedReviewPass(): void {
+  const projectId = newId();
+  testDb
+    .insert(schema.projects)
+    .values({
+      id: projectId,
+      name: "lemons",
+      gitUrl: "https://github.com/lennons301/lemons.git",
+      createdAt: new Date(),
+    })
+    .run();
+  runId = newId();
+  testDb
+    .insert(schema.runs)
+    .values({
+      id: runId,
+      projectId,
+      githubIssue: ISSUE_REF,
+      attempt: 1,
+      mode: "autonomous",
+      status: "reviewing",
+      budgetUsd: 20,
+      model: "standard",
+      pullRequestNumber: 41,
+      pullRequestUrl: "https://github.com/lennons301/lemons/pull/41",
+      claimedAt: new Date(),
+      startedAt: new Date(),
+    })
+    .run();
+  taskId = newId();
+  testDb
+    .insert(schema.tasks)
+    .values({
+      id: taskId,
+      projectId,
+      title: "Review PR #41",
+      description: "Review the PR against the ticket.",
+      status: "queued",
+      kind: "review",
+      runId,
+      githubIssue: ISSUE_REF,
+      branch: "agent/issue-34",
+      pullRequestNumber: 41,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .run();
+}
+
 function run() {
   return testDb.select().from(schema.runs).where(eq(schema.runs.id, runId)).get()!;
 }
@@ -207,10 +273,35 @@ function task() {
   return testDb.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)).get()!;
 }
 
+function queuedTasks() {
+  return testDb
+    .select()
+    .from(schema.tasks)
+    .where(eq(schema.tasks.runId, runId))
+    .all()
+    .filter((t) => t.status === "queued");
+}
+
+function feed(): string[] {
+  return testDb
+    .select()
+    .from(schema.messages)
+    .where(eq(schema.messages.taskId, taskId))
+    .all()
+    .map((m) => {
+      try {
+        return JSON.parse(m.content).text as string;
+      } catch {
+        return m.content;
+      }
+    });
+}
+
 describe("a whole turn through the turn manager on the fake adapter (issue #214)", () => {
   let turns: TurnManager;
   let fake: FakeHarness;
   let unregister: () => void;
+  let config: typeof import("@/lib/config");
   const env = { ...process.env };
 
   beforeEach(async () => {
@@ -218,14 +309,16 @@ describe("a whole turn through the turn manager on the fake adapter (issue #214)
     docker.calls.length = 0;
     github.comments.length = 0;
     github.prReady.length = 0;
+    laneFile.catalog = null;
     // The fake lane's credential, so it resolves as available. A value, never
     // a real token. No explicit lane choice, so the catalog's preference — the
     // fake lane — is the primary.
     process.env[FAKE_LANE_AUTH_VAR] = "fake-token";
     delete process.env.AGENT_LANE;
     delete process.env.AGENT_MODEL;
+    delete process.env.TURN_WALL_CLOCK_MINUTES;
     vi.resetModules();
-    const config = await import("@/lib/config");
+    config = await import("@/lib/config");
     config.resetConfig();
     // Register on the registry instance the freshly imported turn manager
     // will resolve through: modules were just reset, so it must be imported
@@ -240,6 +333,7 @@ describe("a whole turn through the turn manager on the fake adapter (issue #214)
 
   afterEach(() => {
     unregister();
+    laneFile.catalog = null;
     process.env = { ...env };
     vi.restoreAllMocks();
   });
@@ -375,13 +469,14 @@ describe("a whole turn through the turn manager on the fake adapter (issue #214)
     expect(task().status).toBe("failed");
   });
 
-  it("takes the ordinary path on a non-quota refusal, exactly as before the vocabulary existed", async () => {
-    // A refused credential is not a wall (its consequence is issue #220's): the
-    // pass had left a PR behind, so it finishes like any other implement pass.
+  it("takes the ordinary path on a refused { other }, exactly as before the vocabulary existed", async () => {
+    // A provider that said no for a reason the fleet does not model is neither
+    // a wall nor a lane failure: the pass had left a PR behind, so it finishes
+    // like any other implement pass.
     fake.script(
       scriptedTurn(
-        { kind: "refused", refusal: { kind: "auth", resumeAfter: null, limitType: null } },
-        { finalMessage: "401 Unauthorized" }
+        { kind: "refused", refusal: { kind: "other", resumeAfter: null, limitType: null } },
+        { finalMessage: "529 Overloaded" }
       )
     );
 
@@ -396,6 +491,192 @@ describe("a whole turn through the turn manager on the fake adapter (issue #214)
       "push",
       "stopContainer",
     ]);
+  });
+
+  describe("refusals and turn bounds on a harness with no rate-limit event and no CLI ceiling (issue #220)", () => {
+    /** The shape such a harness produces at a wall: it knows the account
+     * refused it for quota, and names neither a window nor a reset. */
+    const WALL_WITHOUT_CLOCK = {
+      kind: "refused" as const,
+      refusal: { kind: "quota" as const, resumeAfter: null, limitType: null },
+    };
+
+    it("moves the run to another lane that can serve it, ahead of parking", async () => {
+      // The wall ordering's middle step, through the fake adapter: an
+      // account-wide wall on lane A, with lane B declared on the same fake
+      // adapter and available, moves the run rather than parking it.
+      laneFile.catalog = fakeLaneCatalogOf([
+        { id: FAKE_LANE_ID, adapter: FAKE_HARNESS_ID, label: "Fake harness" },
+        { id: SECOND_LANE_ID, adapter: FAKE_HARNESS_ID, label: "Fake harness (B)" },
+      ]);
+      fake.script(
+        scriptedTurn({
+          kind: "refused",
+          refusal: { kind: "quota", resumeAfter: RESUME_AFTER, limitType: "five_hour" },
+        })
+      );
+
+      await turns.startTask(taskId);
+
+      expect(task().lane).toBe(FAKE_LANE_ID);
+      expect(run().status).toBe("implementing");
+      expect(run().resumeAfter).toBeNull();
+      // A move is a continuation of the attempt, counted where a resume is
+      // (issue #169) and spending neither an attempt nor an interruption.
+      expect(run().resumeCount).toBe(1);
+      expect(run().attempt).toBe(1);
+      expect(run().interruptionCount).toBe(0);
+      const queued = queuedTasks();
+      expect(queued).toHaveLength(1);
+      expect(queued[0].resumedFromTaskId).toBe(taskId);
+      expect(queued[0].kind).toBe("implement");
+      expect(docker.calls).toEqual([
+        "createWorkspaceContainer",
+        "execAgentTurn",
+        "push",
+        "removeContainer",
+      ]);
+      expect(github.comments.some((c) => c.includes("Moved execution lane"))).toBe(true);
+      expect(github.comments.some((c) => c.includes("Fake harness (B)"))).toBe(true);
+    });
+
+    it("parks a refusal that named no reset time on the default backoff, with nowhere to move", async () => {
+      // Before #220 this refusal — no tier to step down, no lane to move to,
+      // no clock to wait on — took the ordinary path and spent an attempt.
+      fake.script(scriptedTurn(WALL_WITHOUT_CLOCK, { finalMessage: null, costUsd: 0 }));
+
+      const before = Date.now();
+      await turns.startTask(taskId);
+      const after = Date.now();
+
+      expect(run().status).toBe("rate_limited");
+      expect(run().attempt).toBe(1);
+      expect(run().interruptionCount).toBe(0);
+      expect(run().finishedAt).toBeNull();
+      // The clock is the backoff named in the budgets module, from the moment
+      // the pass was decided — not a reset the provider never stated.
+      const resumeAfter = run().resumeAfter!.getTime();
+      expect(resumeAfter).toBeGreaterThanOrEqual(before + DEFAULT_REFUSAL_BACKOFF_MS);
+      expect(resumeAfter).toBeLessThanOrEqual(after + DEFAULT_REFUSAL_BACKOFF_MS);
+      expect(task().status).toBe("failed");
+      expect(docker.calls).toEqual([
+        "createWorkspaceContainer",
+        "execAgentTurn",
+        "push",
+        "removeContainer",
+      ]);
+      // Said as a wait, not a reset, in both places a human reads it.
+      const comment = github.comments.find((c) => c.includes("Run paused"));
+      expect(comment).toContain("named no reset time");
+      expect(comment).toContain("default backoff");
+      expect(feed().some((m) => m.includes("default backoff"))).toBe(true);
+    });
+
+    it("ends a pass whose credential was refused: the lane is unavailable for the run and nothing retries on it", async () => {
+      // Not a wall. The pass never reached the model, so the run does not
+      // spend an attempt on it — it takes the bounded interruption path an
+      // unavailable lane at pass start takes — and no retry, resume or move is
+      // queued under the run.
+      fake.script(
+        scriptedTurn(
+          { kind: "refused", refusal: { kind: "auth", resumeAfter: null, limitType: null } },
+          { finalMessage: "401 Unauthorized" }
+        )
+      );
+
+      await turns.startTask(taskId);
+
+      expect(run().status).toBe("interrupted");
+      expect(run().interruptionCount).toBe(1);
+      expect(run().attempt).toBe(1);
+      expect(run().resumeAfter).toBeNull();
+      expect(run().resumeCount).toBe(0);
+      // Marked unavailable for the run in the resolver's own words, naming the
+      // orchestrator variable an operator would rotate.
+      expect(run().failureReason).toContain(`execution lane "${FAKE_LANE_ID}" is unavailable`);
+      expect(run().failureReason).toContain("refused its credential");
+      expect(run().failureReason).toContain(FAKE_LANE_AUTH_VAR);
+      expect(task().status).toBe("failed");
+      expect(queuedTasks()).toEqual([]);
+      expect(fake.execs).toHaveLength(1);
+      expect(docker.calls).toEqual([
+        "createWorkspaceContainer",
+        "execAgentTurn",
+        "push",
+        "removeContainer",
+      ]);
+      const comment = github.comments.find((c) => c.includes("refused its credential"));
+      expect(comment).toContain("Run interrupted");
+      expect(comment).toContain(`execution lane "${FAKE_LANE_ID}" is unavailable`);
+      expect(comment).toContain(FAKE_LANE_AUTH_VAR);
+      expect(comment).toContain("consumes no attempt");
+      expect(comment).toContain("resolves its lane afresh");
+      expect(
+        feed().some((m) => m.includes(`execution lane "${FAKE_LANE_ID}" is unavailable`))
+      ).toBe(true);
+    });
+
+    it("fails a review pass refused for its credential closed, naming the lane, with no retry on it", async () => {
+      // A review has no park-or-proceed decision, so its refusal is read at
+      // the verdict: stored non-retryable — the format-retry is for format
+      // slips, and the same review on the same lane would be refused again —
+      // with the reason naming the lane and the variable to rotate, which is
+      // what the sweep's fail-closed comment then tells the owner.
+      testDb = createTestDb().db;
+      seedReviewPass();
+      fake.script(
+        scriptedTurn(
+          { kind: "refused", refusal: { kind: "auth", resumeAfter: null, limitType: null } },
+          { finalMessage: "401 Unauthorized", costUsd: 0 }
+        )
+      );
+
+      await turns.startTask(taskId);
+
+      expect(run().status).toBe("reviewing");
+      const stored = run().reviewResult;
+      expect(stored).toEqual({
+        kind: "unparseable",
+        reason: expect.stringContaining(`execution lane "${FAKE_LANE_ID}" is unavailable`),
+        retryable: false,
+      });
+      if (stored?.kind !== "unparseable") throw new Error("verdict should be unparseable");
+      expect(stored.reason).toContain(FAKE_LANE_AUTH_VAR);
+      // Neither the attempt nor the format-retry count moved; the sweep's
+      // fail-closed path owns what follows.
+      expect(run().attempt).toBe(1);
+      expect(run().reviewUnparseableCount).toBe(0);
+      expect(queuedTasks()).toEqual([]);
+      // A review never pushes; its container simply goes.
+      expect(docker.calls).toEqual(["createWorkspaceContainer", "execAgentTurn", "removeContainer"]);
+    });
+
+    it("ends a turn past the wall-clock ceiling as a turn limit, stopping the exec, and the attempt fails as a turn-limited turn does", async () => {
+      // The harness never reports done and its stream never closes — the shape
+      // of a hung process. Only the orchestrator's own ceiling can end it, and
+      // it must end it as a turn limit: a null outcome after the stop would
+      // read as an interruption and re-claim the ticket forever.
+      process.env.TURN_WALL_CLOCK_MINUTES = "0.002"; // 120 ms
+      config.resetConfig();
+      fake.script(hangingTurn(scriptedTurn(null, { finalMessage: null, costUsd: 0 })));
+
+      await turns.startTask(taskId);
+
+      expect(run().status).toBe("failed");
+      expect(run().failureReason).toContain("turn limit reached");
+      expect(run().interruptionCount).toBe(0);
+      expect(task().status).toBe("failed");
+      // The exec was stopped, before the container went.
+      expect(docker.calls).toEqual([
+        "createWorkspaceContainer",
+        "execAgentTurn",
+        "stopAgentTurn",
+        "push",
+        "removeContainer",
+      ]);
+      expect(feed().some((m) => m.includes("wall-clock ceiling"))).toBe(true);
+      expect(fake.pending()).toBe(0);
+    });
   });
 });
 

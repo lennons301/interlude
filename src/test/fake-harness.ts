@@ -200,12 +200,30 @@ export interface FakeExec {
   command: HarnessCommandInput;
 }
 
+/**
+ * A scripted turn that **never ends** (issue #220): the handler records the
+ * exec but never reports done, and the exec stream never closes, so the only
+ * thing that can end the turn is the orchestrator's own wall-clock ceiling.
+ * What the fake then hands back from `flush` is `result` — scripted with a
+ * null outcome, as a harness stopped mid-turn has said nothing about how it
+ * ended, which is exactly what the ceiling must not let read as an
+ * interruption.
+ */
+export interface HangingTurn {
+  hangs: true;
+  result: TurnResult;
+}
+
+export function hangingTurn(result: TurnResult): HangingTurn {
+  return { hangs: true, result };
+}
+
 export interface FakeHarness {
   adapter: HarnessAdapter;
   /** Every turn asked for, in order. */
   execs: FakeExec[];
-  /** Append results for the turns to come. */
-  script(...results: TurnResult[]): void;
+  /** Append results for the turns to come. A `HangingTurn` never reports done. */
+  script(...results: Array<TurnResult | HangingTurn>): void;
   /** Results scripted but not yet consumed. */
   pending(): number;
 }
@@ -217,19 +235,32 @@ export function fakeSessionArtifactPath(id: string, sessionId: string, cwd: stri
 }
 
 /** A stream stub for a suite's `execAgentTurn` mock: never emits, never ends,
- * and inspects as finished — the handler's done signal wins the race. */
+ * and inspects as finished — the handler's done signal wins the race (for a
+ * `HangingTurn` the exec-status poll would, seconds later, so a ceiling test
+ * sets its ceiling well under that). Carries the turn marker the real exec
+ * would, which the ceiling's stop is handed back (issue #220). */
 export function fakeExecStream() {
   return {
     stream: new PassThrough(),
     exec: { inspect: async () => ({ Running: false, ExitCode: 0 }) },
+    turnId: "fake-turn-1",
   };
 }
 
+/** What the fake's queue holds: a turn, and whether it ever reports done. */
+type ScriptedTurn = { hangs: boolean; result: TurnResult };
+
+function asScripted(entry: TurnResult | HangingTurn): ScriptedTurn {
+  return "hangs" in entry && entry.hangs === true
+    ? { hangs: true, result: entry.result }
+    : { hangs: false, result: entry as TurnResult };
+}
+
 export function createFakeHarness(
-  script: TurnResult[] = [],
+  script: Array<TurnResult | HangingTurn> = [],
   options: { id?: string; capabilities?: HarnessCapabilities } = {}
 ): FakeHarness {
-  const queue = [...script];
+  const queue: ScriptedTurn[] = script.map(asScripted);
   const execs: FakeExec[] = [];
   const id = options.id ?? FAKE_HARNESS_ID;
   let pendingCommand: HarnessCommandInput | null = null;
@@ -269,9 +300,11 @@ export function createFakeHarness(
         onDone(callback) {
           // Report done on the next microtask, so the turn manager has both
           // promises of its race in hand — as a real stream's result event
-          // would arrive after the exec is started.
+          // would arrive after the exec is started. A hanging turn records the
+          // exec and then says nothing, ever (issue #220).
           queueMicrotask(() => {
             record();
+            if (queue[0]?.hangs) return;
             callback();
           });
         },
@@ -283,7 +316,7 @@ export function createFakeHarness(
               `the fake harness was asked for a turn it has no script for (task ${taskId})`
             );
           }
-          return next;
+          return next.result;
         },
       };
     },
@@ -305,7 +338,7 @@ export function createFakeHarness(
     adapter,
     execs,
     script(...results) {
-      queue.push(...results);
+      queue.push(...results.map(asScripted));
     },
     pending() {
       return queue.length;
