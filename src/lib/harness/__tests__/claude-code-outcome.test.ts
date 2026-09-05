@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import fs from "fs";
+import path from "path";
 import {
   parseRateLimitEvent,
   type QuotaObservation,
 } from "@/lib/quota/rate-limit-event";
-import { classifyClaudeExit } from "../claude-code/outcome";
+import { classifyClaudeExit, readFinalMessage } from "../claude-code/outcome";
 
 /**
  * The one place the Claude Code CLI's exit vocabulary is read (issue #214):
@@ -192,6 +194,19 @@ describe("classifyClaudeExit — everything that is not the wall", () => {
     }
   });
 
+  it("reads an error the CLI does not attribute to the API as failed, not refused", () => {
+    // The one predicate for "the API refused the turn" is the pre-#214 one:
+    // `is_error` beside a 429 or an `api_error` reason. An error carrying
+    // neither — whatever status it echoes — is the harness's own, and takes
+    // the path it always took.
+    expect(
+      classifyClaudeExit(
+        { ...REFUSED_EXIT, terminal_reason: "unknown", api_error_status: 401 },
+        REJECTED
+      )
+    ).toEqual({ kind: "failed", reason: "success" });
+  });
+
   it("reads the CLI's turn ceiling as the turn limit, whatever else the exit says", () => {
     // Judged ahead of the wall, as the turn manager always judged exhaustion
     // ahead of the pause: a pass at both bounds at once fails its attempt.
@@ -224,5 +239,52 @@ describe("classifyClaudeExit — everything that is not the wall", () => {
     expect(
       classifyClaudeExit({ type: "result", subtype: "error_max_budget_usd" }, null)
     ).toEqual({ kind: "failed", reason: "error_max_budget_usd" });
+  });
+});
+
+describe("readFinalMessage — the one rule for a turn's final message", () => {
+  it("prefers the result event's own statement, falling back to the last text block", () => {
+    expect(readFinalMessage({ result: "VERDICT: approve" }, "earlier text")).toBe(
+      "VERDICT: approve"
+    );
+    expect(readFinalMessage({ result: "   " }, "earlier text")).toBe("earlier text");
+    expect(readFinalMessage({ result: 42 }, "earlier text")).toBe("earlier text");
+    expect(readFinalMessage({}, null)).toBeNull();
+    expect(readFinalMessage(null, "earlier text")).toBe("earlier text");
+  });
+
+  it("changes nothing observed: on every captured stream the two readings were one", () => {
+    // Before #214 the exit readers read the result event's `result` string
+    // and the blocked-marker detector read the last assistant text block. The
+    // unified rule rests on their being the same bytes on every real stream
+    // the fleet has captured — which this pins, so a capture that breaks it
+    // fails here rather than moving a decision silently.
+    const captures = [
+      "stream-fixture.ndjson",
+      "rate-limit-allowed-fixture.ndjson",
+      "rate-limit-rejected-fixture.ndjson",
+    ];
+    for (const name of captures) {
+      const lines = fs
+        .readFileSync(path.join(__dirname, name), "utf-8")
+        .split("\n")
+        .filter((l) => l.trim());
+      let terminal: Record<string, unknown> | null = null;
+      let lastText: string | null = null;
+      for (const line of lines) {
+        const event = JSON.parse(line) as Record<string, unknown>;
+        if (event.type === "result") terminal = event;
+        if (event.type === "assistant") {
+          const message = event.message as { content?: Array<{ type?: string; text?: string }> };
+          for (const block of message.content ?? []) {
+            if (block.type === "text" && block.text) lastText = block.text;
+          }
+        }
+      }
+      expect(terminal, name).not.toBeNull();
+      expect(lastText, name).not.toBeNull();
+      expect(terminal!.result, name).toBe(lastText);
+      expect(readFinalMessage(terminal, lastText), name).toBe(lastText);
+    }
   });
 });

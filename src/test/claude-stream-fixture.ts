@@ -6,12 +6,16 @@
  * as the NDJSON a real pass emits, because that is the evidence — but the
  * readers they test no longer take a stream, they take the adapter's
  * normalised `TurnResult`. This is the bridge: it finds the stream's terminal
- * `result` event and asks the adapter's own classifier what it means, so the
- * only code reading the vendor's exit shape is still the adapter's. Nothing
- * outside `src/test` should need it.
+ * `result` event and asks the adapter's own classifier what it means, and the
+ * adapter's own rule what the final message was, so the only code reading the
+ * vendor's exit shape is still the adapter's. Nothing outside `src/test`
+ * should need it.
  */
 
-import { classifyClaudeExit } from "@/lib/harness/claude-code/outcome";
+import {
+  classifyClaudeExit,
+  readFinalMessage,
+} from "@/lib/harness/claude-code/outcome";
 import type { PassTurn } from "@/lib/orchestrator/autonomy/pass-output";
 
 export function turnFromClaudeStream(ndjson: string): PassTurn {
@@ -37,9 +41,8 @@ export function turnFromClaudeStream(ndjson: string): PassTurn {
     }
   }
 
-  const stated = terminal?.result;
-  const finalMessage =
-    typeof stated === "string" && stated.trim() !== "" ? stated : lastText;
-
-  return { outcome: classifyClaudeExit(terminal, null), finalMessage };
+  return {
+    outcome: classifyClaudeExit(terminal, null),
+    finalMessage: readFinalMessage(terminal, lastText),
+  };
 }

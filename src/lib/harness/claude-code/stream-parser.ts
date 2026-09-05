@@ -13,7 +13,7 @@ import {
 import { recordQuotaObservation } from "../../quota/quota-store";
 import type { TurnTokenUsage } from "../../lanes/lane-cost";
 import type { TurnResult } from "../turn-result";
-import { classifyClaudeExit } from "./outcome";
+import { classifyClaudeExit, readFinalMessage } from "./outcome";
 
 /**
  * Parse Claude Code stream-json output and insert messages into DB.
@@ -329,17 +329,9 @@ export function createOutputHandler(
       if (type === "result") {
         sessionId = (event.session_id as string) ?? null;
         terminalResult = event;
-        // The CLI's own statement of the turn's final message, when it makes
-        // one. It is what the review-verdict and triage-exit readers read
-        // before this ticket (off the raw stream), and on every captured
-        // stream it is byte-identical to the last assistant text block above —
-        // so preferring it changes nothing observed while making the final
-        // message one notion rather than two. The text block stays the
-        // fallback for a result event that carries none.
-        const stated = event.result;
-        if (typeof stated === "string" && stated.trim() !== "") {
-          finalMessage = stated;
-        }
+        // The one rule for the final message (`./outcome.ts`): the CLI's own
+        // `result` string when it states one, else the last text block above.
+        finalMessage = readFinalMessage(event, finalMessage);
         costUsd =
           (event.total_cost_usd as number) ??
           (event.cost_usd as number) ??

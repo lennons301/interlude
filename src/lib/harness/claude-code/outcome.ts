@@ -28,6 +28,23 @@
  * pause) and an outcome that reordered them would change what a pass at both
  * bounds at once does to its attempt.
  *
+ * "The exit says the API refused the turn" is **one** predicate, and it is the
+ * one `detectQuotaRejection` used: `is_error` beside a 429 *or* an `api_error`
+ * reason (either is enough, so a CLI that stops echoing the status or renames
+ * the reason does not take the fleet back to spending attempts on walls). The
+ * refusal's kind is then read off the fields that remain — the account's word
+ * for the quota, the status for the credential — rather than by a second
+ * predicate that could disagree with the first.
+ *
+ * This leaf also owns `readFinalMessage`, the one rule for what a turn's final
+ * message is, because two readers used to read two things: the exit readers
+ * took the result event's own `result` string off the raw stream, and the
+ * blocked-marker detector took the last assistant text block off the parser.
+ * They are byte-identical on every captured stream (pinned by
+ * `claude-code-outcome.test.ts`), so the unified rule changes nothing observed
+ * — and it is written here, a leaf, so the stream parser and the test bridge
+ * (`src/test/claude-stream-fixture.ts`) read the same rule rather than two.
+ *
  * Pure and total by construction — every field is read defensively, nothing
  * reads a clock, and an unreadable event yields `failed` rather than throwing:
  * this sits on the completion path of every pass the fleet runs.
@@ -58,16 +75,13 @@ const MAX_TURNS_SUBTYPE = "error_max_turns";
 const SUCCESS_SUBTYPE = "success";
 
 /**
- * Whether the pass's exit condition says the API refused it.
- *
- * Either field is enough alongside `is_error`, so that a CLI which stops
- * echoing the HTTP status (or renames the reason) does not silently take the
- * fleet back to burning attempts on quota walls.
+ * Whether the pass's exit condition says the API refused it — the predicate
+ * the quota pause has read since issue #168, unchanged (see the module note).
  */
 function exitedOnApiError(terminal: Record<string, unknown>): boolean {
   if (terminal.is_error !== true) return false;
   return (
-    typeof terminal.api_error_status === "number" ||
+    terminal.api_error_status === RATE_LIMIT_HTTP_STATUS ||
     terminal.terminal_reason === API_ERROR_REASON
   );
 }
@@ -113,20 +127,16 @@ export function classifyClaudeExit(
 }
 
 /**
- * Which refusal an API error was. A quota wall needs the account's own word
- * for it (see the module note); a 401/403 is the credential; anything else
- * the provider said no to is `other`.
+ * Which refusal an API error was. The caller has already established that the
+ * exit says the API refused the turn; what remains is whose word explains it.
+ * A quota wall needs the account's own (see the module note); a 401/403 is the
+ * credential; anything else the provider said no to is `other`.
  */
 function classifyRefusal(
   terminal: Record<string, unknown>,
   rateLimit: QuotaObservation | null
 ): TurnRefusal {
-  const status = terminal.api_error_status;
-  const walled =
-    rateLimit !== null &&
-    rateLimit.status === REJECTED_STATUS &&
-    (status === RATE_LIMIT_HTTP_STATUS || terminal.terminal_reason === API_ERROR_REASON);
-  if (walled) {
+  if (rateLimit !== null && rateLimit.status === REJECTED_STATUS) {
     return {
       kind: "quota",
       // Verbatim from the event, never computed from a window length: this
@@ -139,8 +149,24 @@ function classifyRefusal(
       limitType: rateLimit.rateLimitType,
     };
   }
+  const status = terminal.api_error_status;
   if (typeof status === "number" && AUTH_HTTP_STATUSES.includes(status)) {
     return { kind: "auth", resumeAfter: null, limitType: null };
   }
   return { kind: "other", resumeAfter: null, limitType: null };
+}
+
+/**
+ * The turn's final message: the terminal event's own `result` string when it
+ * states a non-empty one, else the last assistant text block the stream
+ * carried (`lastText`), else null. See the module note for why this is one
+ * rule and where it is read.
+ */
+export function readFinalMessage(
+  terminal: Record<string, unknown> | null,
+  lastText: string | null
+): string | null {
+  const stated = terminal?.result;
+  if (typeof stated === "string" && stated.trim() !== "") return stated;
+  return lastText;
 }
