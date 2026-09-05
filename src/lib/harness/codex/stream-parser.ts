@@ -72,7 +72,9 @@ import {
  * counter that restarted and the prior total says nothing about this turn —
  * where a difference floored at zero would book nothing against the metered
  * cap, the under-reporting #175 refuses, and would do so on every follow-up
- * were an unpinned CLI release ever to report per-turn usage instead.
+ * were an unpinned CLI release ever to report per-turn usage instead. After a
+ * restart the largest-note rule keeps charging whole until the new counter
+ * passes the old high-water mark — bounded over-reporting, the accepted side.
  *
  * **What reaches the recorder (issue #165).** The recorder's allowlist is the
  * Claude Code parser's vocabulary, and it caps each event type at a handful of

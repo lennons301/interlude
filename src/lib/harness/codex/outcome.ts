@@ -28,8 +28,8 @@
  * lost stream, a sandbox error, a session it could not find), carried through
  * by its message so the feed can say what happened; nothing decides on the
  * word. Codex has no turn ceiling — there is no `--max-turns` — so nothing here
- * yields `turn-limit`; the per-exec wall clock issue #220 adds is the
- * orchestrator's bound, not the adapter's.
+ * yields `turn-limit`; a ceiling on a Codex pass is the orchestrator's to hold
+ * (the per-exec wall clock issue #220 adds, once it lands), not the adapter's.
  *
  * The reset time is the one inference made here. The wall sentence states a
  * wall-clock time and no date, formatted in the CLI's local zone. The fleet
@@ -77,7 +77,7 @@ const TRY_AGAIN_AT = /try again at (\d{1,2}):(\d{2})\s*([AP]M)\b/i;
 /** How much of a failure sentence rides on the outcome as its reason. */
 const MAX_REASON_CHARS = 200;
 
-function readString(value: unknown): string | null {
+function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
 }
 
@@ -87,8 +87,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** The one string a `turn.failed` event carries, or null when it carries none. */
 export function readFailureMessage(terminal: Record<string, unknown>): string | null {
-  if (isRecord(terminal.error)) return readString(terminal.error.message);
-  return readString(terminal.message);
+  if (isRecord(terminal.error)) return readNonEmptyString(terminal.error.message);
+  return readNonEmptyString(terminal.message);
 }
 
 /**
@@ -104,7 +104,7 @@ export function classifyCodexExit(
   now: Date
 ): TurnOutcome | null {
   if (terminal === null) return null;
-  const type = readString(terminal.type);
+  const type = readNonEmptyString(terminal.type);
 
   if (type === CODEX_TURN_COMPLETED) return { kind: "completed" };
 
