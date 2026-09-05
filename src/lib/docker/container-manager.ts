@@ -1,7 +1,8 @@
 import Docker from "dockerode";
 import { getDocker } from "./client";
 import { AGENT_WORKDIR } from "./workdir";
-import { getImageName, ensureImage } from "./image-builder";
+import { ensureImage } from "./image-builder";
+import type { HarnessImage } from "../harness/adapter";
 import { getConfig, PLATFORM_REPO_URL } from "../config";
 import { getInstallationToken } from "../github/client";
 import { getCapacity } from "../orchestrator/capacity";
@@ -126,6 +127,14 @@ export interface WorkspaceOptions {
   taskId: string;
   gitUrl: string;
   branch: string;
+  /**
+   * The agent image this container runs — the one the resolved lane's harness
+   * adapter declares (issue #216). Handed in rather than looked up here, so
+   * this module stays harness-agnostic: it builds and runs whatever image it
+   * is given, and the turn manager, which already holds the resolved lane, is
+   * the one place that asks an adapter for its image.
+   */
+  image: HarnessImage;
   dopplerToken?: string;
   /** How setup gets onto the branch (default `create`) — see `BranchCheckoutMode` */
   checkout?: BranchCheckoutMode;
@@ -159,8 +168,9 @@ export async function createWorkspaceContainer(
   // The skills ref comes off the image the container is about to be created
   // from, not from anything the container reports: the skills are pinned into
   // the image at build (issue #215), so the image is the authority on which
-  // ref a pass runs with.
-  const { skillsRef } = await ensureImage();
+  // ref a pass runs with. The image is the adapter's (issue #216): built here
+  // if missing or stale, on the shared base, as the container is created.
+  const { skillsRef } = await ensureImage(options.image);
 
   const env = [
     `GIT_URL=${options.gitUrl}`,
@@ -200,7 +210,7 @@ export async function createWorkspaceContainer(
   const capacity = await getCapacity();
 
   const container = await docker.createContainer({
-    Image: getImageName(),
+    Image: options.image.name,
     name: containerName,
     Env: env,
     Cmd: ["sleep", "infinity"],

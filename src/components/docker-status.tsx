@@ -1,13 +1,15 @@
 "use client";
 
 import { Chip, LoadFailure, PANEL_PLAIN } from "@/components/fleet/fleet-bits";
+import type { HarnessImageState } from "@/lib/harness/image-state";
 import { useLoad } from "@/lib/use-load";
 
 /**
  * The environment readout on the settings screen (issue #119): whether the
- * Docker daemon is reachable and whether the agent image has been built. Both
- * are preconditions for any task running at all, so this is the first thing to
- * look at when nothing starts.
+ * Docker daemon is reachable and whether each harness's agent image has been
+ * built — one image per adapter since issue #216, so one row each. Both are
+ * preconditions for a task running on that harness at all, so this is the
+ * first thing to look at when nothing starts.
  *
  * A probe that fails now says so and offers a retry — it used to sit on
  * "Checking…" forever, which reads exactly like a hung daemon and is the one
@@ -16,8 +18,7 @@ import { useLoad } from "@/lib/use-load";
 
 type DockerInfo = {
   docker: boolean;
-  image: boolean;
-  imageName: string;
+  images: HarnessImageState[];
 };
 
 export function DockerStatus() {
@@ -42,18 +43,22 @@ export function DockerStatus() {
           {info.docker ? "connected" : "unreachable"}
         </Chip>
       </Row>
-      <Row label="agent image">
-        {/* Amber, not red: with the daemon down the image can't be probed at
-            all, so "not built" would be a guess dressed as a verdict. */}
-        <Chip tone={info.docker ? (info.image ? "green" : "amber") : "quiet"}>
-          {!info.docker ? "unknown" : info.image ? "ready" : "not built"}
-        </Chip>
-      </Row>
-      <Row label="image">
-        <span className="truncate font-plex-mono text-[11px] text-fl-ink-2">
-          {info.imageName}
-        </span>
-      </Row>
+      {info.images.map((image) => (
+        <Row key={image.id} label={`${image.id} image`}>
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="truncate font-plex-mono text-[11px] text-fl-ink-2">
+              {image.image}
+            </span>
+            {/* Amber, not red: an image is built on demand at the first pass on
+                its harness, so "not built" is a wait rather than a fault. Quiet
+                when the daemon did not answer: "not built" would then be a guess
+                dressed as a verdict. */}
+            <Chip tone={image.built === null ? "quiet" : image.built ? "green" : "amber"}>
+              {image.built === null ? "unknown" : image.built ? "ready" : "not built"}
+            </Chip>
+          </span>
+        </Row>
+      ))}
     </div>
   );
 }

@@ -39,7 +39,10 @@ COPY --from=build /native-deps/node_modules/file-uri-to-path ./node_modules/file
 
 # Copy files needed at runtime beyond Next.js standalone
 COPY --from=build /app/drizzle ./drizzle
-COPY --from=build /app/Dockerfile.agent ./Dockerfile.agent
+# The agent image sources the orchestrator builds at runtime (issue #216): the
+# shared base and one layer per harness adapter, all `Dockerfile.agent-*` at
+# the root — a glob so a new adapter's layer ships without an edit here.
+COPY --from=build /app/Dockerfile.agent-* ./
 COPY --from=build /app/custom-server.js ./custom-server.js
 # Vendored workflow skills, injected into autonomous pass prompts (issue #15)
 COPY --from=build /app/docs/agents/workflows ./docs/agents/workflows

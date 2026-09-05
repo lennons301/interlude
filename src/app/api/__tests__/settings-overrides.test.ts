@@ -215,9 +215,9 @@ describe("execution lanes on /api/settings/overrides", () => {
     const state = await (await GET()).json();
 
     expect(state.harnesses).toEqual([
-      { id: "claude-code", image: "interlude-agent:latest", built: true },
+      { id: "claude-code", image: "interlude-agent-claude-code:latest", built: true },
     ]);
-    expect(imageProbe.asked).toEqual(["interlude-agent:latest"]);
+    expect(imageProbe.asked).toEqual(["interlude-agent-claude-code:latest"]);
     // Every lane row carries the capabilities the panel shows beside the
     // harness, and none of them is a secret.
     for (const lane of state.lanes.lanes) {

@@ -1,0 +1,7 @@
+# A second adapter's layer, for the image builder's tests (issue #216): the
+# smallest thing that is a layer on the shared base. Never built — the tests
+# hash it beside Dockerfile.agent-claude-code to prove that a base change
+# rebuilds every adapter image while a layer change rebuilds only its own.
+ARG BASE_IMAGE=interlude-agent-base:latest
+FROM ${BASE_IMAGE}
+RUN echo "fixture harness" > /home/node/.fixture-harness
