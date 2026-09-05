@@ -510,6 +510,13 @@ export async function startTask(taskId: string): Promise<void> {
       // after the fact, and interactive work — the only kind that crosses onto
       // a paid lane — has no run row to record it on.
       tier: passLane.tier ?? passModel,
+      // The harness beside both (issue #223): stamped here, from the lane this
+      // pass actually resolved, and never recovered from the lane id later —
+      // the lane file changes under a deployment, and the ledger's job is to
+      // say which vendor ran the work when it ran. A continuation queued after
+      // a lane move is stamped with its *own* adapter as it starts, so a run
+      // that crossed adapters is attributed pass by pass.
+      harness: passLane.adapter,
     });
     insertSystemMessage(taskId, `Provisioning agent container...${proj.dopplerToken ? " (Doppler configured)" : ""}`);
 
@@ -547,7 +554,18 @@ export async function startTask(taskId: string): Promise<void> {
           startedAt: run.startedAt ?? new Date(),
           lane: passLane.id,
           laneBilling: pass.billing,
-          ...(isRepairPass ? {} : { model: passLane.tier ?? passModel }),
+          // The harness is the *implement* pass's to write, as `model` is
+          // (issue #223): the row names the harness that did the attempt's
+          // work — the one an attempt burned, a verdict judged or a merge
+          // came from is attributed to — and a continuation after a lane move
+          // is an implement pass, so a run that crossed adapters names the
+          // one it ended on. A repair pass never consumes an attempt and its
+          // changes are not what the verdict judged, so it leaves this alone;
+          // the harness it ran on is on its own task row, where its spend is
+          // attributed.
+          ...(isRepairPass
+            ? {}
+            : { model: passLane.tier ?? passModel, harness: passLane.adapter }),
           effort: passEffort,
           // A resumed run stops waiting on a clock the moment its pass starts
           // (issue #169). Cleared here rather than when the resume was decided,
@@ -1501,6 +1519,7 @@ export async function processQueuedMessages(
       lane: passLane.id,
       laneBilling: pass.billing,
       tier: passLane.tier ?? passLane.model,
+      harness: passLane.adapter,
     });
 
     // Find oldest undelivered user message
@@ -2971,6 +2990,7 @@ function updateTask(
     lane: string | null;
     laneBilling: "subscription" | "metered" | null;
     tier: string | null;
+    harness: string | null;
   }>
 ): void {
   // The one funnel every task-cost write goes through, which is why the

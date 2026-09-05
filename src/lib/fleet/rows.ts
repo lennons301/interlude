@@ -164,6 +164,7 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
       githubIssue: t.githubIssue,
       pullRequestNumber: t.pullRequestNumber,
       pullRequestUrl: t.pullRequestUrl,
+      harness: t.harness,
       createdAt: t.createdAt,
       updatedAt: t.updatedAt,
     })),

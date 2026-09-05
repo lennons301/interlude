@@ -89,6 +89,7 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     model: null,
     degradedFrom: null,
     declaredTier: null,
+    harness: null,
     claimedAt: aug(1, 9),
     startedAt: aug(1, 9),
     finishedAt: null,
@@ -112,6 +113,7 @@ function makeTask(overrides: Partial<FleetTaskRow> = {}): FleetTaskRow {
     githubIssue: null,
     pullRequestNumber: null,
     pullRequestUrl: null,
+    harness: null,
     createdAt: aug(1, 9),
     updatedAt: aug(1, 9),
     ...overrides,
@@ -387,7 +389,7 @@ describe("renderDailyDigest — completed yesterday", () => {
     });
 
     expect(section(content, "Completed yesterday")).toEqual([
-      "✅ o/r#2 — lemons · $11.50 · [PR #41](https://github.com/o/r/pull/41)",
+      "✅ o/r#2 — lemons · unknown harness · $11.50 · [PR #41](https://github.com/o/r/pull/41)",
     ]);
   });
 
@@ -418,8 +420,47 @@ describe("renderDailyDigest — completed yesterday", () => {
     });
 
     expect(section(content, "Completed yesterday")).toEqual([
-      "✅ Sofa session — interlude · $2.50",
-      "❌ o/r#7 — interlude · $4.25",
+      "✅ Sofa session — interlude · unknown harness · $2.50",
+      "❌ o/r#7 — interlude · unknown harness · $4.25",
+    ]);
+  });
+
+  it("names the harness that did the work, off the row's own stamp (issue #223)", () => {
+    // The run's stamp is the implement-shaped pass that finished it; a session
+    // carries its own. A row from before the stamp existed says so (above)
+    // rather than being attributed to whatever its lane runs today.
+    const content = render({
+      projects: [makeProject({ id: "p1", name: "lemons" })],
+      runs: [
+        makeRun({
+          id: "r-codex",
+          projectId: "p1",
+          githubIssue: "o/r#2",
+          status: "merged",
+          harness: "codex",
+          totalCostUsd: 3,
+          finishedAt: aug(1, 14),
+          pullRequestNumber: 41,
+          pullRequestUrl: "https://github.com/o/r/pull/41",
+        }),
+      ],
+      tasks: [
+        makeTask({
+          id: "t-chat",
+          projectId: "p1",
+          title: "Sofa session",
+          status: "completed",
+          containerStatus: null,
+          harness: "claude-code",
+          totalCostUsd: 2.5,
+          updatedAt: aug(1, 16),
+        }),
+      ],
+    });
+
+    expect(section(content, "Completed yesterday")).toEqual([
+      "✅ Sofa session — lemons · claude-code · $2.50",
+      "✅ o/r#2 — lemons · codex · $3.00 · [PR #41](https://github.com/o/r/pull/41)",
     ]);
   });
 
@@ -628,8 +669,32 @@ describe("renderDailyDigest — blocked on you", () => {
     });
 
     expect(section(content, "Blocked on you")).toEqual([
-      "lemons #34 · attempt 2/3 — Which auth provider should I use? · [Open task](https://interludes.co.uk/tasks/t-blocked)",
-      "lemons #35 · attempt 1/3 — PR #55 waits for your sign-off · [Review PR #55](https://github.com/lennons301/lemons/pull/55)",
+      "lemons #34 · attempt 2/3 · unknown harness — Which auth provider should I use? · [Open task](https://interludes.co.uk/tasks/t-blocked)",
+      "lemons #35 · attempt 1/3 · unknown harness — PR #55 waits for your sign-off · [Review PR #55](https://github.com/lennons301/lemons/pull/55)",
+    ]);
+  });
+
+  it("names the harness on an item about a run, and nothing on one about the fleet (issue #223)", () => {
+    // An exhausted ticket saying which vendor burned its attempts is the
+    // question outcome-by-harness exists for, asked one item at a time. A
+    // fleet-level card — the cap, a wedged pickup — has no harness to name.
+    const content = render({
+      projects: [makeProject({ id: "p1", name: "lemons", autonomyEnabled: true, preflightStatus: "failing", preflightReason: "no token" })],
+      runs: [
+        makeRun({
+          id: "r-exhausted",
+          projectId: "p1",
+          attempt: 3,
+          status: "exhausted",
+          harness: "codex",
+          finishedAt: aug(1, 15),
+        }),
+      ],
+    });
+
+    expect(section(content, "Blocked on you")).toEqual([
+      "lemons #34 · attempt 3/3 · codex — Attempts exhausted — ticket is ready-for-human · [Open issue #34](https://github.com/lennons301/lemons/issues/34)",
+      "lemons — Preflight failing, so none of its tickets are picked up: no token · [Open settings](https://interludes.co.uk/settings)",
     ]);
   });
 
@@ -860,6 +925,68 @@ describe("renderDailyDigest — tiers (issue #198)", () => {
     expect(tiers(content)).toEqual([
       "Coverage: 0 of 1 attempt carried a declared tier (0%) — 1 ran on the default.",
       "no tier · 1 attempt on 1 ticket · 0 failed · no verdicts · $0.00 · 0 declared",
+    ]);
+  });
+});
+
+describe("renderDailyDigest — harnesses (issue #223)", () => {
+  const harnesses = (content: DigestContent) =>
+    section(content, "Harnesses (last 7 days)");
+
+  it("reads the same figures the dashboard does: one line per harness, spend over the passes it ran", () => {
+    const content = render({
+      runs: [
+        makeRun({
+          id: "c1",
+          githubIssue: "o/r#1",
+          harness: "claude-code",
+          status: "merged",
+          reviewVerdict: "approve",
+          totalCostUsd: 12.5,
+          finishedAt: aug(1, 10),
+        }),
+        // Started on Claude Code, moved across adapters to Codex (#217) and
+        // burned there: the attempt is Codex's, the first pass's spend is
+        // Claude Code's — each harness charged for the work it did.
+        makeRun({
+          id: "x1",
+          githubIssue: "o/r#2",
+          harness: "codex",
+          status: "failed",
+          reviewVerdict: "request-changes",
+          totalCostUsd: 7,
+          finishedAt: aug(1, 12),
+        }),
+      ],
+      tasks: [
+        makeTask({ id: "t1", runId: "c1", kind: "implement", status: "completed", containerStatus: null, harness: "claude-code", totalCostUsd: 10 }),
+        makeTask({ id: "t2", runId: "c1", kind: "review", status: "completed", containerStatus: null, harness: "claude-code", totalCostUsd: 2.5 }),
+        makeTask({ id: "t3", runId: "x1", kind: "implement", status: "failed", containerStatus: null, harness: "claude-code", totalCostUsd: 3 }),
+        makeTask({ id: "t4", runId: "x1", kind: "implement", status: "failed", containerStatus: null, harness: "codex", totalCostUsd: 4 }),
+      ],
+    });
+
+    expect(harnesses(content)).toEqual([
+      "claude-code · 1 attempt on 1 ticket · 0 failed · 1 approve · $15.50 over 3 passes",
+      "codex · 1 attempt on 1 ticket · 1 failed · 1 changes · $4.00 over 1 pass",
+    ]);
+  });
+
+  it("says so when nothing was claimed", () => {
+    expect(harnesses(render())).toEqual(["No tickets claimed in the last 7 days."]);
+  });
+
+  it("shows rows from before the stamp as unknown, last, rather than attributing them", () => {
+    const content = render({
+      runs: [
+        makeRun({ id: "r1", githubIssue: "o/r#1", harness: null }),
+        makeRun({ id: "r2", githubIssue: "o/r#2", harness: "claude-code" }),
+      ],
+    });
+
+    expect(harnesses(content)).toEqual([
+      "claude-code · 1 attempt on 1 ticket · 0 failed · no verdicts · $0.00 over 0 passes",
+      "unknown harness · 1 attempt on 1 ticket · 0 failed · no verdicts · $0.00 over 0 passes",
     ]);
   });
 });

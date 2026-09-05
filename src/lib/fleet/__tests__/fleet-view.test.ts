@@ -78,6 +78,7 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     model: null,
     degradedFrom: null,
     declaredTier: null,
+    harness: null,
     claimedAt: TODAY_9AM,
     startedAt: TODAY_9AM,
     finishedAt: null,
@@ -101,6 +102,7 @@ function makeTask(overrides: Partial<FleetTaskRow> = {}): FleetTaskRow {
     githubIssue: null,
     pullRequestNumber: null,
     pullRequestUrl: null,
+    harness: null,
     createdAt: TODAY_9AM,
     updatedAt: TODAY_9AM,
     ...overrides,
@@ -663,7 +665,7 @@ describe("buildFleetView — needs you", () => {
     expect(view.needsYou[0]).toEqual({
       cause: "blocked",
       severity: "amber",
-      context: "lemons #34 · attempt 2/3",
+      context: "lemons #34 · attempt 2/3 · unknown harness",
       body: "Which auth provider should I use?",
       action: {
         label: "Answer in Discord",
@@ -724,7 +726,7 @@ describe("buildFleetView — needs you", () => {
       {
         cause: "signoff",
         severity: "amber",
-        context: "lemons #34 · attempt 1/3",
+        context: "lemons #34 · attempt 1/3 · unknown harness",
         body: "PR #55 waits for your sign-off",
         action: {
           label: "Review PR #55",
@@ -792,7 +794,7 @@ describe("buildFleetView — needs you", () => {
       {
         cause: "signoff",
         severity: "amber",
-        context: "lemons #34 · attempt 1/3",
+        context: "lemons #34 · attempt 1/3 · unknown harness",
         body: "PR #55 — the reviewer escalated for your sign-off",
         action: {
           label: "Review PR #55",
@@ -830,7 +832,7 @@ describe("buildFleetView — needs you", () => {
       {
         cause: "unparseable",
         severity: "red",
-        context: "lemons #34 · attempt 1/3",
+        context: "lemons #34 · attempt 1/3 · unknown harness",
         body: "Review verdict couldn't be read on PR #55 — parked, nothing merges until you look",
         action: {
           label: "Open PR #55",
@@ -865,7 +867,7 @@ describe("buildFleetView — needs you", () => {
       {
         cause: "conflict",
         severity: "red",
-        context: "lemons #34 · attempt 1/3",
+        context: "lemons #34 · attempt 1/3 · unknown harness",
         body: "PR #55 still conflicts with the default branch — resolve and merge",
         action: {
           label: "Resolve PR #55",
@@ -899,7 +901,7 @@ describe("buildFleetView — needs you", () => {
       {
         cause: "checks-failing",
         severity: "red",
-        context: "lemons #34 · attempt 1/3",
+        context: "lemons #34 · attempt 1/3 · unknown harness",
         body: "PR #55 checks still failing after an automated repair: Type Check, vercel",
         action: {
           label: "Open PR #55",
@@ -1021,7 +1023,7 @@ describe("buildFleetView — needs you", () => {
       {
         cause: "exhausted",
         severity: "red",
-        context: "lemons #34 · attempt 3/3",
+        context: "lemons #34 · attempt 3/3 · unknown harness",
         body: "Attempts exhausted — ticket is ready-for-human",
         action: {
           label: "Open issue #34",
@@ -1505,6 +1507,7 @@ describe("buildFleetView — running", () => {
         spend: { usd: 7.8, budgetUsd: 20 },
         paused: null,
         degraded: null,
+        harness: null,
       },
     ]);
   });
@@ -1734,6 +1737,7 @@ describe("buildFleetView — running", () => {
         spend: { usd: 1.23, budgetUsd: null },
         paused: null,
         degraded: null,
+        harness: null,
       },
     ]);
   });
@@ -2066,6 +2070,7 @@ describe("buildFleetView — running", () => {
         spend: { usd: 0.8, budgetUsd: 2 },
         paused: null,
         degraded: null,
+        harness: null,
       },
     ]);
   });
@@ -2821,5 +2826,352 @@ describe("buildFleetView — tier coverage and outcome by tier (issue #198)", ()
       null,
     ]);
     expect(view.tiers.coverage).toMatchObject({ claimed: 4, declared: 0, undeclared: 4, percent: 0 });
+  });
+});
+
+describe("buildFleetView — harness on run cards, ledger items and needs-you (issue #223)", () => {
+  it("names the current pass's harness on a run card — a review on a second harness is that harness's work", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", status: "reviewing", harness: "claude-code" })],
+        tasks: [
+          makeTask({ id: "t-impl", runId: "r1", kind: "implement", status: "completed", containerStatus: "idle", harness: "claude-code" }),
+          makeTask({ id: "t-rev", runId: "r1", kind: "review", status: "running", containerStatus: "running", harness: "codex" }),
+        ],
+      })
+    );
+
+    expect(view.running[0]).toMatchObject({ taskId: "t-rev", harness: "codex" });
+  });
+
+  it("falls back to the run's stamp while a continuation is still queued, and reads unknown when neither is stamped", () => {
+    // A lane move queues a new pass (issue #176); its harness is resolved as it
+    // starts, so until then the card names the harness the run last ran on.
+    const moved = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [makeRun({ id: "r1", projectId: "p1", status: "rate_limited", resumeAfter: new Date(NOW.getTime() + 3_600_000), harness: "claude-code" })],
+        tasks: [
+          makeTask({ id: "t-refused", runId: "r1", kind: "implement", status: "failed", containerStatus: null, harness: "claude-code", createdAt: new Date(TODAY_9AM.getTime() - 1000) }),
+          makeTask({ id: "t-next", runId: "r1", kind: "implement", status: "queued", containerStatus: null, harness: null }),
+        ],
+      })
+    );
+    expect(moved.running[0]).toMatchObject({ taskId: "t-next", harness: "claude-code" });
+
+    // A fresh claim whose pass has not started, or a run from before the
+    // column existed: nothing is stamped, and the card says so rather than
+    // reading a harness off the lane file.
+    const fresh = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [makeRun({ id: "r2", projectId: "p1", status: "claimed", harness: null })],
+      })
+    );
+    expect(fresh.running[0].harness).toBeNull();
+  });
+
+  it("reads a session's and a triage pass's harness off the task row", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        tasks: [
+          makeTask({ id: "t-chat", kind: "interactive", containerStatus: "idle", harness: "codex" }),
+          makeTask({ id: "t-triage", kind: "triage", containerStatus: "running", githubIssue: "o/r#90", harness: "claude-code" }),
+        ],
+      })
+    );
+
+    expect(view.running.map((c) => [c.taskId, c.harness])).toEqual([
+      ["t-chat", "codex"],
+      ["t-triage", "claude-code"],
+    ]);
+  });
+
+  it("carries the harness onto the recent ledger: the run's stamp for a run, the task's for a session", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [
+          makeRun({ id: "r1", projectId: "p1", githubIssue: "o/r#1", status: "merged", harness: "codex", finishedAt: TODAY_9AM }),
+          makeRun({ id: "r2", projectId: "p1", githubIssue: "o/r#2", status: "failed", harness: null, finishedAt: TODAY_9AM }),
+        ],
+        tasks: [
+          makeTask({ id: "t-chat", projectId: "p1", status: "completed", containerStatus: null, harness: "claude-code" }),
+        ],
+      })
+    );
+
+    expect(view.recent.items.map((i) => [i.title, i.harness])).toEqual(
+      expect.arrayContaining([
+        ["o/r#1", "codex"],
+        ["o/r#2", null],
+        ["Polish the header", "claude-code"],
+      ])
+    );
+  });
+
+  it("names the harness in a run's needs-you context, and says unknown for a row from before the stamp", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1" })],
+        runs: [
+          makeRun({ id: "r1", projectId: "p1", githubIssue: "lennons301/lemons#34", status: "blocked", attempt: 2, harness: "codex", blockedQuestion: "Which auth?" }),
+          makeRun({ id: "r2", projectId: "p1", githubIssue: "lennons301/lemons#35", status: "exhausted", attempt: 3, harness: null, finishedAt: TODAY_9AM }),
+        ],
+      })
+    );
+
+    expect(view.needsYou.map((i) => i.context)).toEqual([
+      "lemons #34 · attempt 2/3 · codex",
+      "lemons #35 · attempt 3/3 · unknown harness",
+    ]);
+  });
+});
+
+describe("buildFleetView — outcome by harness (issue #223)", () => {
+  const daysAgo = (days: number) =>
+    new Date(NOW.getTime() - days * 24 * 60 * 60 * 1000);
+
+  it("reports nothing claimed as nothing", () => {
+    expect(buildFleetView(baseRows()).harnesses).toEqual({ windowDays: 7, byHarness: [] });
+  });
+
+  it("groups attempts, tickets, burned attempts and verdicts by the harness the run row names, and spend by the pass that spent it", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          makeRun({
+            id: "c1",
+            githubIssue: "o/r#1",
+            harness: "claude-code",
+            status: "merged",
+            reviewVerdict: "approve",
+            totalCostUsd: 12.5,
+            finishedAt: TODAY_9AM,
+          }),
+          makeRun({
+            id: "x1",
+            githubIssue: "o/r#2",
+            attempt: 1,
+            harness: "codex",
+            status: "failed",
+            reviewVerdict: "request-changes",
+            totalCostUsd: 4,
+            finishedAt: TODAY_9AM,
+          }),
+          // The last failed attempt, relabelled when the ticket went to a human.
+          makeRun({
+            id: "x2",
+            githubIssue: "o/r#2",
+            attempt: 2,
+            harness: "codex",
+            status: "exhausted",
+            reviewVerdict: "escalate",
+            totalCostUsd: 6,
+            finishedAt: TODAY_9AM,
+          }),
+          // In flight, no verdict yet.
+          makeRun({ id: "x3", githubIssue: "o/r#3", harness: "codex", status: "implementing", totalCostUsd: 1.25 }),
+        ],
+        tasks: [
+          makeTask({ id: "t1", runId: "c1", kind: "implement", status: "completed", containerStatus: null, harness: "claude-code", totalCostUsd: 10 }),
+          makeTask({ id: "t2", runId: "c1", kind: "review", status: "completed", containerStatus: null, harness: "claude-code", totalCostUsd: 2.5 }),
+          makeTask({ id: "t3", runId: "x1", kind: "implement", status: "failed", containerStatus: null, harness: "codex", totalCostUsd: 4 }),
+          makeTask({ id: "t4", runId: "x2", kind: "implement", status: "failed", containerStatus: null, harness: "codex", totalCostUsd: 6 }),
+          makeTask({ id: "t5", runId: "x3", kind: "implement", status: "running", containerStatus: "running", harness: "codex", totalCostUsd: 1.25 }),
+        ],
+      })
+    );
+
+    expect(view.harnesses.byHarness).toEqual([
+      {
+        harness: "claude-code",
+        attempts: 1,
+        tickets: 1,
+        failed: 0,
+        verdicts: { approve: 1, requestChanges: 0, escalate: 0 },
+        passes: 2,
+        spendUsd: 12.5,
+      },
+      {
+        harness: "codex",
+        attempts: 3,
+        tickets: 2,
+        failed: 2,
+        verdicts: { approve: 0, requestChanges: 1, escalate: 1 },
+        passes: 3,
+        spendUsd: 11.25,
+      },
+    ]);
+  });
+
+  it("attributes a run that moved lanes across adapters pass by pass: the attempt to the harness it ended on, each pass's spend to the harness that ran it", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          // Refused on Claude Code, moved to Codex (issues #176, #217), burned there.
+          makeRun({
+            id: "r1",
+            githubIssue: "o/r#1",
+            harness: "codex",
+            status: "failed",
+            reviewVerdict: "request-changes",
+            totalCostUsd: 7,
+            finishedAt: TODAY_9AM,
+          }),
+        ],
+        tasks: [
+          makeTask({ id: "t1", runId: "r1", kind: "implement", status: "failed", containerStatus: null, harness: "claude-code", totalCostUsd: 3 }),
+          makeTask({ id: "t2", runId: "r1", kind: "implement", status: "failed", containerStatus: null, harness: "codex", totalCostUsd: 4 }),
+        ],
+      })
+    );
+
+    expect(view.harnesses.byHarness).toEqual([
+      // Passes but no attempt: this harness did work on an attempt that ended
+      // elsewhere — which is exactly what the passes count is for.
+      {
+        harness: "claude-code",
+        attempts: 0,
+        tickets: 0,
+        failed: 0,
+        verdicts: { approve: 0, requestChanges: 0, escalate: 0 },
+        passes: 1,
+        spendUsd: 3,
+      },
+      {
+        harness: "codex",
+        attempts: 1,
+        tickets: 1,
+        failed: 1,
+        verdicts: { approve: 0, requestChanges: 1, escalate: 0 },
+        passes: 1,
+        spendUsd: 4,
+      },
+    ]);
+  });
+
+  it("counts a pass the moment it has started, never one that never ran — queued, or cancelled before start", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [makeRun({ id: "r1", githubIssue: "o/r#1", harness: "claude-code" })],
+        tasks: [
+          // Refused in seconds at a wall: stamped, ~nothing spent, but it ran.
+          makeTask({ id: "t1", runId: "r1", kind: "implement", status: "failed", containerStatus: null, harness: "claude-code", totalCostUsd: 0 }),
+          makeTask({ id: "t2", runId: "r1", kind: "implement", status: "queued", containerStatus: null, harness: null }),
+          // Boot recovery and the review queue cancel queued passes: unstamped
+          // and unspent, so it ran on nothing and is not an "unknown" pass.
+          makeTask({ id: "t3", runId: "r1", kind: "review", status: "cancelled", containerStatus: null, harness: null }),
+          // From before the stamp existed: only its spend says it ran.
+          makeTask({ id: "t4", runId: "r1", kind: "review", status: "completed", containerStatus: null, harness: null, totalCostUsd: 1.5 }),
+        ],
+      })
+    );
+
+    expect(view.harnesses.byHarness).toEqual([
+      expect.objectContaining({ harness: "claude-code", attempts: 1, passes: 1, spendUsd: 0 }),
+      expect.objectContaining({ harness: null, attempts: 0, passes: 1, spendUsd: 1.5 }),
+    ]);
+  });
+
+  it("shares one denominator with the tier panel, and windows by claim date", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          makeRun({ id: "r1", githubIssue: "o/r#1", harness: "claude-code", model: "light" }),
+          makeRun({ id: "r2", githubIssue: "o/r#2", harness: "codex", model: "standard" }),
+          // Claimed 8 days ago: outside the window, however recently it finished.
+          makeRun({ id: "r3", githubIssue: "o/r#3", harness: "codex", status: "merged", claimedAt: daysAgo(8), finishedAt: daysAgo(1) }),
+          // Claimed after `now`: the digest must know nothing after it.
+          makeRun({ id: "r4", githubIssue: "o/r#4", harness: "codex", claimedAt: new Date(NOW.getTime() + 60_000) }),
+        ],
+        tasks: [
+          // A pass of the out-of-window attempt is out with it.
+          makeTask({ id: "t3", runId: "r3", kind: "implement", status: "completed", containerStatus: null, harness: "codex", totalCostUsd: 9 }),
+        ],
+      })
+    );
+
+    const attempts = view.harnesses.byHarness.reduce((sum, row) => sum + row.attempts, 0);
+    expect(attempts).toBe(view.tiers.coverage.claimed);
+    expect(attempts).toBe(2);
+    expect(view.harnesses.byHarness.map((row) => [row.harness, row.passes, row.spendUsd])).toEqual([
+      ["claude-code", 0, 0],
+      ["codex", 0, 0],
+    ]);
+  });
+
+  it("folds a restart's re-claim into the attempt it continues, passes and all (issue #24)", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          // Attempt 1, interrupted by a restart yesterday…
+          makeRun({
+            id: "r1",
+            githubIssue: "o/r#1",
+            attempt: 1,
+            harness: "claude-code",
+            status: "interrupted",
+            totalCostUsd: 2,
+            claimedAt: daysAgo(1),
+            finishedAt: daysAgo(1),
+          }),
+          // …re-claimed today under the same attempt number, and failed.
+          makeRun({
+            id: "r2",
+            githubIssue: "o/r#1",
+            attempt: 1,
+            harness: "claude-code",
+            status: "failed",
+            reviewVerdict: "request-changes",
+            totalCostUsd: 3,
+            finishedAt: TODAY_9AM,
+          }),
+        ],
+        tasks: [
+          makeTask({ id: "t1", runId: "r1", kind: "implement", status: "failed", containerStatus: null, harness: "claude-code", totalCostUsd: 2 }),
+          makeTask({ id: "t2", runId: "r2", kind: "implement", status: "failed", containerStatus: null, harness: "claude-code", totalCostUsd: 3 }),
+        ],
+      })
+    );
+
+    // One attempt, not two rows — and the interrupted row's pass still
+    // belongs to the attempt it was part of.
+    expect(view.harnesses.byHarness).toEqual([
+      {
+        harness: "claude-code",
+        attempts: 1,
+        tickets: 1,
+        failed: 1,
+        verdicts: { approve: 0, requestChanges: 1, escalate: 0 },
+        passes: 2,
+        spendUsd: 5,
+      },
+    ]);
+  });
+
+  it("shows rows that recorded no harness as their own row, last, never attributed to an adapter", () => {
+    const view = buildFleetView(
+      baseRows({
+        runs: [
+          // Predates the column, or failed before its pass started.
+          makeRun({ id: "r1", githubIssue: "o/r#1", harness: null, totalCostUsd: 1 }),
+          makeRun({ id: "r2", githubIssue: "o/r#2", harness: "codex" }),
+          makeRun({ id: "r3", githubIssue: "o/r#3", harness: "claude-code" }),
+        ],
+        tasks: [
+          makeTask({ id: "t1", runId: "r1", kind: "implement", status: "completed", containerStatus: null, harness: null, totalCostUsd: 1 }),
+        ],
+      })
+    );
+
+    expect(view.harnesses.byHarness.map((row) => row.harness)).toEqual([
+      "claude-code",
+      "codex",
+      null,
+    ]);
+    expect(view.harnesses.byHarness[2]).toMatchObject({ attempts: 1, passes: 1, spendUsd: 1 });
   });
 });
