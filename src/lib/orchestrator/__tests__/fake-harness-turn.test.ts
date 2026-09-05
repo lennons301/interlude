@@ -49,14 +49,17 @@ vi.mock("@/db", () => ({
 const docker = vi.hoisted(() => ({
   /** Container-manager calls in order. */
   calls: [] as string[],
+  /** The agent image each container was asked to run (issue #216). */
+  images: [] as { name: string; dockerfile: string }[],
 }));
 
 vi.mock("../../docker/container-manager", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../docker/container-manager")>();
   return {
     ...actual,
-    createWorkspaceContainer: async () => {
+    createWorkspaceContainer: async (options: { image: { name: string; dockerfile: string } }) => {
       docker.calls.push("createWorkspaceContainer");
+      docker.images.push(options.image);
       return {
         container: { start: async () => undefined },
         id: "ctr-fake",
@@ -360,6 +363,10 @@ describe("a whole turn through the turn manager on the fake adapter (issue #214)
       "push",
       "stopContainer",
     ]);
+    // The container runs the image the lane's adapter declares (issue #216) —
+    // the fake's, not the Claude Code image the fleet has always built.
+    expect(docker.images).toEqual([fake.adapter.image]);
+    expect(docker.images[0].name).not.toBe("interlude-agent-claude-code:latest");
     expect(github.prReady).toEqual([41]);
     expect(run().status).toBe("implementing");
     expect(run().pullRequestNumber).toBe(41);

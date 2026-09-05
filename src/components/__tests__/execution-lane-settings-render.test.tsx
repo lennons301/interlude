@@ -63,7 +63,7 @@ const OPENROUTER = lane({
 /** The Claude Code image, built — the shipped state. */
 const CLAUDE_IMAGE: HarnessImageState = {
   id: "claude-code",
-  image: "interlude-agent:latest",
+  image: "interlude-agent-claude-code:latest",
   built: true,
 };
 
@@ -184,7 +184,7 @@ describe("harness, image and credentials per lane (issue #219)", () => {
     const html = render();
 
     expect(html).toContain("harness claude-code");
-    expect(html).toContain("interlude-agent:latest");
+    expect(html).toContain("interlude-agent-claude-code:latest");
     expect(html).toContain("image ready");
     expect(html).not.toContain("image not built");
   });

@@ -223,7 +223,7 @@ export const DEFAULT_QUEUE_HEARTBEAT_STALE_MS = 2 * 60_000;
  * the worst *honest* case rather than the typical one: a task holds its slot
  * from the moment it is reserved, but its container does not exist until
  * `createWorkspaceContainer` returns — and that call runs `ensureImage` inside
- * itself, so the first task after a Dockerfile.agent change waits out a full
+ * itself, so the first task after an agent Dockerfile change waits out a full
  * agent-image build (apt, gh, a global npm install) on a 2-vCPU box before any
  * container exists to corroborate it. The cost of being wrong is asymmetric:
  * this card tells the operator to restart, which would kill exactly that

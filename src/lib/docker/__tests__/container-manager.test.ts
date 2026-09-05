@@ -32,10 +32,17 @@ vi.mock("@/lib/docker/client", () => ({
     modem: { demuxStream: () => undefined },
   }),
 }));
-vi.mock("@/lib/docker/image-builder", () => ({
-  ensureImage: vi.fn(async () => ({ skillsRef: "v1.2.3" })),
-  getImageName: () => "interlude-agent:test",
+const { ensureImageSpy } = vi.hoisted(() => ({
+  ensureImageSpy: vi.fn<(image: unknown) => Promise<{ skillsRef: string | null }>>(
+    async () => ({ skillsRef: "v1.2.3" })
+  ),
 }));
+vi.mock("@/lib/docker/image-builder", () => ({
+  ensureImage: ensureImageSpy,
+}));
+
+/** The image a test's lane adapter declares (issue #216). */
+const ADAPTER_IMAGE = { name: "interlude-agent-test:latest", dockerfile: "Dockerfile.agent-test" };
 vi.mock("@/lib/orchestrator/capacity", () => ({
   getCapacity: vi.fn(async () => ({
     slots: 2,
@@ -84,7 +91,7 @@ describe("buildSetupScript", () => {
 
   it("runs no `claude plugin` command — skills are pinned into the image (issue #215)", () => {
     // Issue #60 installed the skills here, at every container start, with the
-    // Claude CLI. They now arrive with the image (Dockerfile.agent), so setup
+    // Claude CLI. They now arrive with the image (Dockerfile.agent-base), so setup
     // is harness-neutral and no longer spends wall-clock on a plugin install.
     // Every container kind shares this one script, so one assertion covers all.
     expect(script).not.toContain("claude plugin");
@@ -172,6 +179,7 @@ describe("parseCommitsAhead", () => {
 describe("createWorkspaceContainer", () => {
   beforeEach(() => {
     createContainerSpy.mockClear();
+    ensureImageSpy.mockClear();
   });
 
   // Regression guard for issue #28: agent containers must not bind-mount
@@ -182,13 +190,28 @@ describe("createWorkspaceContainer", () => {
       taskId: "01J000000000000000000TASK",
       gitUrl: "https://github.com/lennons301/interlude.git",
       branch: "agent/issue-28",
+      image: ADAPTER_IMAGE,
     });
     expect(createContainerSpy).toHaveBeenCalledTimes(1);
     return createContainerSpy.mock.calls[0][0] as unknown as {
+      Image?: string;
       Env?: string[];
       HostConfig?: { Binds?: unknown };
     };
   };
+
+  /**
+   * Issue #216: one agent image per harness adapter. The container runs the
+   * image it was handed — the resolved lane's adapter's — and that same image
+   * is what is built or brought current first, so the image ensured and the
+   * image run cannot be two different things.
+   */
+  it("ensures and runs the image the lane's adapter declares", async () => {
+    const opts = await created();
+    expect(opts.Image).toBe(ADAPTER_IMAGE.name);
+    expect(ensureImageSpy).toHaveBeenCalledTimes(1);
+    expect(ensureImageSpy).toHaveBeenCalledWith(ADAPTER_IMAGE);
+  });
 
   it("grants no host bind mount", async () => {
     const opts = await created();
@@ -206,6 +229,7 @@ describe("createWorkspaceContainer", () => {
       taskId: "01J000000000000000000TASK",
       gitUrl: "https://github.com/lennons301/interlude.git",
       branch: "agent/issue-215",
+      image: ADAPTER_IMAGE,
     });
     expect(running.skillsRef).toBe("v1.2.3");
   });

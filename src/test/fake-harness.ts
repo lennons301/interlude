@@ -246,7 +246,12 @@ export function createFakeHarness(
 
   const adapter: HarnessAdapter = {
     id,
-    image: { name: `interlude-agent-${id}:latest`, dockerfile: `Dockerfile.agent.${id}` },
+    // Named as a shipped adapter's would be (issue #216): one image per adapter,
+    // its Dockerfile a layer on the shared base. Nothing under test builds it —
+    // the suites that use the fake stub the container manager — so no such
+    // file exists; `image-builder.test.ts` proves the per-adapter mechanism
+    // with a fixture layer of its own.
+    image: { name: `interlude-agent-${id}:latest`, dockerfile: `Dockerfile.agent-${id}` },
     capabilities: options.capabilities ?? FAKE_HARNESS_CAPABILITIES,
     buildExecEnv(input) {
       pendingEnv = input;

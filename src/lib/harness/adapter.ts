@@ -14,8 +14,10 @@
  * session artefacts, its own effort dial, and — the load-bearing one — its
  * own way of saying how a turn ended. So an adapter now also declares:
  *
- * - `image`: which agent image its containers run. Image selection is the
- *   adapter's fact; the container manager is handed it (issue #216).
+ * - `image`: which agent image its containers run — a thin layer on the shared
+ *   agent base, built and kept current by the image builder. Image selection
+ *   is the adapter's fact; the turn manager reads it off the resolved lane's
+ *   adapter and hands it to container creation (issue #216).
  * - `capabilities`: static booleans — skills, quota telemetry, cost
  *   reporting, session resume — read by the lane parser, the router and the
  *   dashboard. Declared once, and pinned to the descriptor table the parser
@@ -132,13 +134,18 @@ export interface HarnessOutputHandler {
 
 /**
  * The agent image an adapter's containers run: the tag to run and the
- * Dockerfile it is built from, both relative to the repo root. One image per
- * adapter is issue #216's; today the one adapter declares the one image.
+ * Dockerfile it is built from. One image per adapter (issue #216): the
+ * Dockerfile is the adapter's *layer* — `FROM` the shared agent base
+ * (`Dockerfile.agent-base`, which carries git, gh, yq, jq, pnpm, the workspace
+ * user and the pinned skills), installing one harness and pre-accepting its
+ * headless mode. The image builder builds the base first, stamps the adapter
+ * image with a hash over both files, and rebuilds it when either changes.
  */
 export interface HarnessImage {
   /** The image reference, as `docker run` takes it (`name:tag`). */
   name: string;
-  /** The Dockerfile at the repo root the image is built from. */
+  /** The Dockerfile the image is built from, as a path relative to the repo
+   * root — by convention `Dockerfile.agent-<adapter id>` at the root. */
   dockerfile: string;
 }
 

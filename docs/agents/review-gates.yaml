@@ -28,7 +28,7 @@ human_signoff:
   # the blast-radius controls for every agent that runs here.
   agent-sandbox:
     - "Dockerfile"
-    - "Dockerfile.agent"
+    - "Dockerfile.agent-*"
     - "src/lib/docker/**"
 
   # Credential handling: GitHub App JWT/installation tokens, the git credential
