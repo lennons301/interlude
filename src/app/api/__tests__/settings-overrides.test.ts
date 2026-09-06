@@ -232,8 +232,9 @@ describe("execution lanes on /api/settings/overrides", () => {
     for (const lane of state.lanes.lanes) {
       expect(lane.capabilities).toEqual(describeHarnessAdapter(lane.adapter)!.capabilities);
     }
+    // Codex's skills are on since its proof (issue #224), so the row says so.
     expect(state.lanes.lanes.find((l: { id: string }) => l.id === "codex-subscription").capabilities).toEqual({
-      userInvokedSkills: false,
+      userInvokedSkills: true,
       quotaTelemetry: false,
       reportsCost: false,
       sessionResume: true,
