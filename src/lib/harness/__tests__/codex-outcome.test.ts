@@ -9,7 +9,7 @@ import {
 /**
  * The one place the Codex CLI's turn-ending sentence is read (issue #221):
  * `turn.completed` or `turn.failed { error: { message } }` becomes one of the
- * fleet's outcomes. The three refusal sentences are the ones the real CLI
+ * fleet's outcomes. The four refusal sentences are the ones the real CLI
  * (0.153.4) emitted in the recorded fixtures; the boundary cases pin what must
  * *not* read as a quota wall, since a wrong pause parks live work on a clock
  * and a missed one spends an attempt on the account's quota.
@@ -30,6 +30,11 @@ const BAD_KEY =
 const NO_BEARER =
   "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: " +
   "https://api.openai.com/v1/responses";
+/** An organisation out of prepaid credits, as the CLI relays it (recorded on
+ * #224 against the real API, where it is a 429 `credit_balance_exhausted`). */
+const NO_CREDITS =
+  "stream disconnected before completion: You have no credits remaining. Add credits to continue " +
+  "using the API at https://platform.openai.com/settings/organization/billing/.";
 
 const failed = (message: string) => ({ type: "turn.failed", error: { message } });
 
@@ -52,6 +57,18 @@ describe("classifyCodexExit", () => {
       kind: "refused",
       refusal: { kind: "quota", resumeAfter: null, limitType: null },
     });
+  });
+
+  it("reads an organisation out of credits as a quota refusal with no clock — never the harness's own failure", () => {
+    // The sentence carries no status word and no error code, only the
+    // provider's words; read as `failed` it would spend an attempt on a lane
+    // that cannot serve anything until money is added.
+    expect(classifyCodexExit(failed(NO_CREDITS), NOW)).toEqual({
+      kind: "refused",
+      refusal: { kind: "quota", resumeAfter: null, limitType: null },
+    });
+    expect(readCodexRefusal("insufficient credits", NOW)?.kind).toBe("quota");
+    expect(readCodexRefusal("{\"error\":{\"code\":\"credit_balance_exhausted\"}}", NOW)?.kind).toBe("quota");
   });
 
   it("reads a ChatGPT-plan usage wall as a quota refusal, with the clock time it names", () => {

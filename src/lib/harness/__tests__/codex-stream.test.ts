@@ -38,6 +38,9 @@ const SUCCESS = fixture("codex-stream-fixture.ndjson");
 const RESUME = fixture("codex-resume-fixture.ndjson");
 const RATE_LIMITED = fixture("codex-rate-limit-fixture.ndjson");
 const USAGE_WALL = fixture("codex-usage-limit-fixture.ndjson");
+/** Recorded against the real API on the proof ticket (#224): an organisation
+ * with no prepaid credits, the CLI's ten retries and transport fallback included. */
+const NO_CREDITS = fixture("codex-credits-fixture.ndjson");
 
 /** The thread the success and resume recordings share. */
 const THREAD_ID = "01a07292-348f-7fa1-9864-bc896b72144e";
@@ -336,6 +339,27 @@ describe("a recorded refusal", () => {
       kind: "refused",
       refusal: { kind: "quota", resumeAfter: new Date(2026, 8, 5, 21, 16, 0), limitType: null },
     });
+  });
+
+  it("parses an organisation out of credits to refused { quota } with no clock, after the CLI's retries", () => {
+    const { handler, recorder } = handlerFor();
+    const result = play(handler, NO_CREDITS);
+    expect(result.outcome).toEqual({
+      kind: "refused",
+      refusal: { kind: "quota", resumeAfter: null, limitType: null },
+    });
+    expect(result.sessionId).toBe("01a0765b-fc20-7ba0-b644-183842cf3319");
+    expect(result.usage).toBeNull();
+    expect(result.finalMessage).toBeNull();
+    // Every retry the CLI narrated is on the feed, the final sentence once,
+    // and nothing in the stream was new to the parser.
+    const notes = messagesOf(TASK_ID, "system").map(contentOf).map((n) => String(n.text));
+    expect(notes.filter((t) => t.startsWith("Error: Reconnecting..."))).toHaveLength(9);
+    expect(notes.filter((t) => t.startsWith("Error: Falling back from WebSockets"))).toHaveLength(1);
+    expect(
+      notes.filter((t) => t === "Error: stream disconnected before completion: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.")
+    ).toHaveLength(1);
+    expect(recorder.events).toEqual([]);
   });
 
   it("notes the CLI's sentence on the feed once, though the stream says it twice", () => {
