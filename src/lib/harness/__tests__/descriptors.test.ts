@@ -50,10 +50,10 @@ describe("the adapter descriptor table and the registry (issue #214)", () => {
   it("looks a descriptor up by id, and answers null for one it does not hold", () => {
     expect(describeHarnessAdapter("claude-code")?.capabilities.quotaTelemetry).toBe(true);
     // Codex (issue #221) and OpenCode (issue #222) ship and declare what they
-    // cannot do. OpenCode's user-invoked skills are on since its proof (issue
-    // #225); Codex's wait on its own (#224).
+    // cannot do. Both invoke user-named skills since their proofs (issues
+    // #224 and #225).
     expect(describeHarnessAdapter("codex")?.capabilities).toEqual({
-      userInvokedSkills: false,
+      userInvokedSkills: true,
       quotaTelemetry: false,
       reportsCost: false,
       sessionResume: true,

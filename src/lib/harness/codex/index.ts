@@ -243,10 +243,13 @@ export function buildCodexTurnCommand(input: HarnessCommandInput): string {
 /**
  * How Codex is asked to run a skill: the `$skill-name` mention the CLI
  * documents for explicit invocation, with the agenda after it — the shape the
- * spec (#213) chose. Whether `codex exec` honours the mention is the proof
- * ticket's to check (#224), which is why this adapter declares
- * `userInvokedSkills: false` until it does: no generation session is routed
- * here, so this text reaches no agent yet.
+ * spec (#213) chose. `codex exec` honours it (measured on 0.153.4, issue
+ * #224): the CLI expands the mention into the prompt itself before the model
+ * is called, so the skill's SKILL.md reaches the model without a tool call
+ * and nothing about the load appears on the stream — a probe skill's sentinel
+ * came back verbatim in one 4 s turn. The mention must be the skill's exact
+ * folder name under `~/.agents/skills`; the adapter declares
+ * `userInvokedSkills` on that evidence, so generation sessions route here.
  */
 export function composeCodexSkillInvocation(skill: string, agenda: string | null): string {
   const trimmed = agenda?.trim();

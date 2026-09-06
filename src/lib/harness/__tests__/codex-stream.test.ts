@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describeTurnTokens } from "../turn-usage-prose";
 import fs from "fs";
 import path from "path";
 import { and, eq } from "drizzle-orm";
@@ -38,6 +39,9 @@ const SUCCESS = fixture("codex-stream-fixture.ndjson");
 const RESUME = fixture("codex-resume-fixture.ndjson");
 const RATE_LIMITED = fixture("codex-rate-limit-fixture.ndjson");
 const USAGE_WALL = fixture("codex-usage-limit-fixture.ndjson");
+/** Recorded against the real API on the proof ticket (#224): an organisation
+ * with no prepaid credits, the CLI's ten retries and transport fallback included. */
+const NO_CREDITS = fixture("codex-credits-fixture.ndjson");
 
 /** The thread the success and resume recordings share. */
 const THREAD_ID = "01a07292-348f-7fa1-9864-bc896b72144e";
@@ -189,7 +193,10 @@ describe("a recorded codex exec --json run", () => {
     play(handlerFor().handler, SUCCESS);
     const notes = messagesOf(TASK_ID, "system").map(contentOf);
     const complete = notes.find((n) => typeof n.text === "string" && n.text.startsWith("Turn complete"));
-    expect(complete?.text).toBe("Turn complete (4100 input tokens, 130 output tokens)");
+    // The input total as the wire counts it, with the cached share broken out
+    // (issue #224) — the split is what lets the booked charge be checked
+    // against the lane's rate card off the feed.
+    expect(complete?.text).toBe("Turn complete (4100 input tokens, of which 3500 cache reads, 130 output tokens)");
     expect(complete?.[THREAD_USAGE_KEY]).toEqual({
       input_tokens: 4100,
       cached_input_tokens: 3500,
@@ -289,7 +296,26 @@ describe("usage is the thread's running total on the wire, and the turn's in the
         { input_tokens: 900, cached_input_tokens: 300, cache_write_input_tokens: 10, output_tokens: 70, reasoning_output_tokens: 9 },
         BEFORE
       )
-    ).toEqual({ inputTokens: 600, outputTokens: 70, cacheReadTokens: 300, cacheWriteTokens: 10 });
+    ).toEqual({ inputTokens: 590, outputTokens: 70, cacheReadTokens: 300, cacheWriteTokens: 10 });
+  });
+
+  it("counts a cache-written token once — as a cache write, never also as input (issue #224)", () => {
+    // Measured on the proof ticket: the wire's `input_tokens` is the sum of
+    // the cached, the cache-written and the plain tokens, to the token. Before
+    // this only the cached share was subtracted, so a cold turn's writes were
+    // booked twice (once at the input rate, once at the cache-write rate).
+    const turn = turnUsageFromThread(
+      { input_tokens: 71076, cached_input_tokens: 56233, cache_write_input_tokens: 14828, output_tokens: 869, reasoning_output_tokens: 245 },
+      null
+    );
+    expect(turn).toEqual({ inputTokens: 15, outputTokens: 869, cacheReadTokens: 56233, cacheWriteTokens: 14828 });
+    expect(describeTurnTokens(turn)).toBe(
+      "71076 input tokens, of which 56233 cache reads and 14828 cache writes, 869 output tokens"
+    );
+    // A turn that touched no cache says nothing about one.
+    expect(describeTurnTokens({ inputTokens: 100, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 })).toBe(
+      "100 input tokens, 5 output tokens"
+    );
   });
 
   it("charges the whole total off the feed too when the recorded total is the larger — the ledger cannot zero a turn", () => {
@@ -336,6 +362,27 @@ describe("a recorded refusal", () => {
       kind: "refused",
       refusal: { kind: "quota", resumeAfter: new Date(2026, 8, 5, 21, 16, 0), limitType: null },
     });
+  });
+
+  it("parses an organisation out of credits to refused { quota } with no clock, after the CLI's retries", () => {
+    const { handler, recorder } = handlerFor();
+    const result = play(handler, NO_CREDITS);
+    expect(result.outcome).toEqual({
+      kind: "refused",
+      refusal: { kind: "quota", resumeAfter: null, limitType: null },
+    });
+    expect(result.sessionId).toBe("01a0765b-fc20-7ba0-b644-183842cf3319");
+    expect(result.usage).toBeNull();
+    expect(result.finalMessage).toBeNull();
+    // Every retry the CLI narrated is on the feed, the final sentence once,
+    // and nothing in the stream was new to the parser.
+    const notes = messagesOf(TASK_ID, "system").map(contentOf).map((n) => String(n.text));
+    expect(notes.filter((t) => t.startsWith("Error: Reconnecting..."))).toHaveLength(9);
+    expect(notes.filter((t) => t.startsWith("Error: Falling back from WebSockets"))).toHaveLength(1);
+    expect(
+      notes.filter((t) => t === "Error: stream disconnected before completion: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.")
+    ).toHaveLength(1);
+    expect(recorder.events).toEqual([]);
   });
 
   it("notes the CLI's sentence on the feed once, though the stream says it twice", () => {

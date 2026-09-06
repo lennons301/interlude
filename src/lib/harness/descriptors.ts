@@ -53,10 +53,13 @@ export interface HarnessAdapterDescriptor {
  * Codex's row is a capability statement, not a judgement (the spec's rule):
  * its exec stream carries no quota telemetry and no dollar figure, so a
  * metered Codex lane must declare prices and the quota tile says "cannot
- * report"; it resumes a thread by id from one rollout file; and user-invoked
- * skills stay **off** until the proof ticket (#224) shows `$skill` mentions
- * honoured under `codex exec` — until then no generation session routes to a
- * Codex lane.
+ * report"; it resumes a thread by id from one rollout file; and it **can**
+ * invoke user-named skills (on since the proof ticket, #224): under `codex
+ * exec` a `$skill` mention is expanded by the CLI itself before the model is
+ * called — an unguessable sentinel in a probe skill came back verbatim on the
+ * first try with no tool call on the stream, and a `to-tickets` session
+ * through the orchestrator followed the skill to its publish step — so a
+ * generation session may route to a Codex lane.
  *
  * OpenCode's row is the same kind of statement:
  * its `run --format json` stream carries no quota telemetry, and the dollar
@@ -84,7 +87,7 @@ export const HARNESS_ADAPTER_DESCRIPTORS = [
   {
     id: "codex",
     capabilities: {
-      userInvokedSkills: false,
+      userInvokedSkills: true,
       quotaTelemetry: false,
       reportsCost: false,
       sessionResume: true,

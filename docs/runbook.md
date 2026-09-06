@@ -682,8 +682,9 @@ not.
   quota tile says "cannot report" for their lanes. Only the two Anthropic-direct
   lanes are in `primary`: the other five are never defaulted onto and become
   routing candidates the moment their credential is provisioned — until then
-  each is one line in the boot report, which for the two Codex lanes is the
-  expected state while #224 is open. A further adapter is a new directory under
+  each is one line in the boot report — for `codex-subscription` the expected
+  state until a ChatGPT-plan credential is provisioned (the Codex proof, #224,
+  ran on `openai-api` only). A further adapter is a new directory under
   `src/lib/harness/` plus lanes that name it — the rules above do not change
   with the vendor.
 

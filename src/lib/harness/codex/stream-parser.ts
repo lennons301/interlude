@@ -7,6 +7,7 @@ import {
   type StreamRecorder,
 } from "../../orchestrator/stream-recorder";
 import type { TurnTokenUsage } from "../../lanes/lane-cost";
+import { describeTurnTokens } from "../turn-usage-prose";
 import type { HarnessOutputHandler } from "../adapter";
 import type { TurnResult } from "../turn-result";
 import {
@@ -115,7 +116,11 @@ const LEDGER_SCAN_LIMIT = 200;
  * total at the moment it was reported (see the module note). `input_tokens`
  * includes the cached tokens, as the Responses API counts them: measured, three
  * API calls of 1200/1400/1500 input with 1000/1200/1300 cached summed to
- * `input_tokens: 4100, cached_input_tokens: 3500`.
+ * `input_tokens: 4100, cached_input_tokens: 3500`. It includes the
+ * cache-*written* tokens too — the two cache counts are the Responses API's
+ * `input_tokens_details`, a breakdown of `input_tokens`, not additions to it
+ * (measured on the proof ticket, #224: a turn reported `input_tokens: 71076`
+ * = 56233 cached + 14828 cache-written + 15 plain, to the token).
  */
 export interface CodexThreadUsage {
   input_tokens: number;
@@ -169,9 +174,14 @@ export function readThreadUsage(value: unknown): CodexThreadUsage | null {
  * the prior total says nothing about this turn, and the new total is charged
  * whole. Charging the whole total is the over-stating side; a difference
  * floored at zero would be the under-reporting one (see the module note).
- * `inputTokens` is the *uncached* input: the wire's `input_tokens` includes
- * the cached tokens, and the fleet's shape counts them apart. Output tokens
- * include reasoning tokens, as the wire's do.
+ * `inputTokens` is the *plain* input: the wire's `input_tokens` includes both
+ * the cache-read and the cache-written tokens (see `CodexThreadUsage`), and
+ * the fleet's shape counts each apart so a lane's rate card charges every
+ * token once, at its own rate. Before the proof ticket (#224) only the reads
+ * were subtracted, so a cold turn's cache-written tokens were charged twice —
+ * once as input and again as cache writes, 2.25x the input rate on the
+ * shipped lane; measured, a 71k-token turn was booked $0.0884 where the rate
+ * card says $0.0588. Output tokens include reasoning tokens, as the wire's do.
  */
 export function turnUsageFromThread(
   after: CodexThreadUsage,
@@ -182,11 +192,12 @@ export function turnUsageFromThread(
   const delta = (key: keyof CodexThreadUsage) => after[key] - (prior?.[key] ?? 0);
   const input = delta("input_tokens");
   const cached = delta("cached_input_tokens");
+  const written = delta("cache_write_input_tokens");
   return {
-    inputTokens: Math.max(0, input - cached),
+    inputTokens: Math.max(0, input - cached - written),
     outputTokens: delta("output_tokens"),
     cacheReadTokens: cached,
-    cacheWriteTokens: delta("cache_write_input_tokens"),
+    cacheWriteTokens: written,
   };
 }
 
@@ -435,8 +446,9 @@ export function createOutputHandler(
         if (total !== null) {
           usage = turnUsageFromThread(total, usageBefore);
           systemNote(
-            `Turn complete (${usage.inputTokens + usage.cacheReadTokens} input tokens, ` +
-              `${usage.outputTokens} output tokens)`,
+            // The tokens clause is the fleet's one shape (`turn-usage-prose.ts`),
+            // so this feed cannot drift from another harness's by copy.
+            `Turn complete (${describeTurnTokens(usage)})`,
             // The thread's running total, for the next turn's difference — see
             // the module note.
             { [THREAD_USAGE_KEY]: total }
