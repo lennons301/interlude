@@ -18,6 +18,7 @@ import {
   createOutputHandler,
   readThreadUsageBefore,
   turnUsageFromThread,
+  describeTurnUsage,
   THREAD_USAGE_KEY,
 } from "../codex/stream-parser";
 import { toChatView } from "@/lib/chat/chat-view";
@@ -192,7 +193,10 @@ describe("a recorded codex exec --json run", () => {
     play(handlerFor().handler, SUCCESS);
     const notes = messagesOf(TASK_ID, "system").map(contentOf);
     const complete = notes.find((n) => typeof n.text === "string" && n.text.startsWith("Turn complete"));
-    expect(complete?.text).toBe("Turn complete (4100 input tokens, 130 output tokens)");
+    // The input total as the wire counts it, with the cached share broken out
+    // (issue #224) — the split is what lets the booked charge be checked
+    // against the lane's rate card off the feed.
+    expect(complete?.text).toBe("Turn complete (4100 input tokens, of which 3500 cache reads, 130 output tokens)");
     expect(complete?.[THREAD_USAGE_KEY]).toEqual({
       input_tokens: 4100,
       cached_input_tokens: 3500,
@@ -292,7 +296,26 @@ describe("usage is the thread's running total on the wire, and the turn's in the
         { input_tokens: 900, cached_input_tokens: 300, cache_write_input_tokens: 10, output_tokens: 70, reasoning_output_tokens: 9 },
         BEFORE
       )
-    ).toEqual({ inputTokens: 600, outputTokens: 70, cacheReadTokens: 300, cacheWriteTokens: 10 });
+    ).toEqual({ inputTokens: 590, outputTokens: 70, cacheReadTokens: 300, cacheWriteTokens: 10 });
+  });
+
+  it("counts a cache-written token once — as a cache write, never also as input (issue #224)", () => {
+    // Measured on the proof ticket: the wire's `input_tokens` is the sum of
+    // the cached, the cache-written and the plain tokens, to the token. Before
+    // this only the cached share was subtracted, so a cold turn's writes were
+    // booked twice (once at the input rate, once at the cache-write rate).
+    const turn = turnUsageFromThread(
+      { input_tokens: 71076, cached_input_tokens: 56233, cache_write_input_tokens: 14828, output_tokens: 869, reasoning_output_tokens: 245 },
+      null
+    );
+    expect(turn).toEqual({ inputTokens: 15, outputTokens: 869, cacheReadTokens: 56233, cacheWriteTokens: 14828 });
+    expect(describeTurnUsage(turn)).toBe(
+      "71076 input tokens, of which 56233 cache reads and 14828 cache writes, 869 output tokens"
+    );
+    // A turn that touched no cache says nothing about one.
+    expect(describeTurnUsage({ inputTokens: 100, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 })).toBe(
+      "100 input tokens, 5 output tokens"
+    );
   });
 
   it("charges the whole total off the feed too when the recorded total is the larger — the ledger cannot zero a turn", () => {
