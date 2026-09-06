@@ -73,6 +73,11 @@ function RunCard({ card, now }: { card: RunningCard; now: number }) {
               from before the stamp says "unknown harness" rather than reading
               one off the lane file. */}
           <span className="text-fl-ink-3"> · {harnessLabel(card.harness)}</span>
+          {/* An operator pinned this work to a lane (issue #241): said beside the
+              harness so nobody reads a pinned run as the fleet's own routing. */}
+          {card.lanePin && (
+            <span className="text-fl-ink-3"> · pinned to {card.lanePin}</span>
+          )}
         </span>
         {/* A paused run says so where it sits, in place of its mode (issue
             #168): "afk" over a run waiting on a quota window would claim the

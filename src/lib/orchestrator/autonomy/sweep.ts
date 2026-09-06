@@ -72,6 +72,7 @@ import {
 } from "../../fleet/health";
 import { recordFleetHealth } from "../../fleet/health-store";
 import { readMoneyGuards } from "../../lanes/money-state";
+import { takeLanePin } from "../../lanes/lane-pins";
 import { getCapacity } from "../capacity";
 import { getQueueLastProgress, isQueueRunning, occupiedSlots } from "../queue";
 import { startOfLocalDay, todayAutonomousSpendUsd } from "../spend";
@@ -3122,6 +3123,11 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
       failure = err instanceof Error ? err.message : String(err);
     }
 
+    // An operator's pin for this ticket (issue #241), spent by this claim: the
+    // lane this run — every pass of it — treats as the operator's explicit
+    // choice, where the fleet's own primary would otherwise stand. Read before
+    // the row is written so a pin never outlives the claim it was set for.
+    const lanePin = takeLanePin(action.projectId, action.issueNumber);
     db.insert(runs)
       .values({
         id: runId,
@@ -3130,6 +3136,7 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
         attempt: action.attempt,
         mode: action.mode,
         status: failure ? "failed" : "claimed",
+        lanePin,
         budgetUsd: action.budgetUsd,
         checkpoint: action.checkpoint,
         maxTurns: action.maxTurns,
@@ -3229,10 +3236,15 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
       }
     }
 
+    // An operator pin is a decision about money, so it is said where the
+    // attempt is announced (issue #241) — and the pin is spent by this claim.
+    const laneNote = lanePin
+      ? `\n\nLane: \`${lanePin}\` — pinned by the operator for this attempt; the fleet's routing is unchanged for everything else.`
+      : "";
     const domain = process.env.DOMAIN ?? "interludes.co.uk";
     await commentOnIssue(
       action.issueRef,
-      `Claimed by Interlude — attempt ${action.attempt}/${MAX_ATTEMPTS}.${modelNote}${effortNote}\n\n` +
+      `Claimed by Interlude — attempt ${action.attempt}/${MAX_ATTEMPTS}.${modelNote}${effortNote}${laneNote}\n\n` +
         `[View task](https://${domain}/tasks/${taskId})`
     );
   } finally {

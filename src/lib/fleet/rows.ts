@@ -165,6 +165,7 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
       pullRequestNumber: t.pullRequestNumber,
       pullRequestUrl: t.pullRequestUrl,
       harness: t.harness,
+      lanePin: t.lanePin,
       createdAt: t.createdAt,
       updatedAt: t.updatedAt,
     })),

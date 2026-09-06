@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { SESSION_SKILLS, tasks, type SessionSkill } from "@/db/schema";
 import { readLaneCrossing } from "@/lib/lanes/overflow-state";
+import { getLaneCatalog } from "@/lib/lanes/catalog";
+import { checkLanePin } from "@/lib/lanes/lane-pin";
+import { getFleetSettings } from "@/lib/settings";
 import { newId } from "@/lib/ulid";
 import {
   TASK_CHIPS,
@@ -76,7 +79,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   const body = await request.json();
-  const { title, description, projectId, sessionSkill, sessionIssue } = body as {
+  const { title, description, projectId, sessionSkill, sessionIssue, lane } = body as {
     title: string;
     description?: string;
     projectId: string;
@@ -84,6 +87,9 @@ export async function POST(request: Request) {
     sessionSkill?: string;
     // Optional issue anchor (owner/repo#n) passed through to the session.
     sessionIssue?: string;
+    // An operator's lane pin for this task alone (issue #241); omitted to
+    // route as the fleet does.
+    lane?: string;
   };
 
   if (!title?.trim()) {
@@ -106,6 +112,23 @@ export async function POST(request: Request) {
   // Validated above, so the one narrowing every read below shares.
   const skill = (sessionSkill as SessionSkill | undefined) ?? null;
 
+  // A lane pin (issue #241) is the operator's explicit lane for this one task,
+  // judged at entry the way the resolver judges the fleet's primary: a lane
+  // nobody declared is an input error, a declared lane the environment cannot
+  // run is a conflict naming the variable — refused before a row exists rather
+  // than dying at the first turn. Never read from a ticket body: this is the
+  // attended entry surface, and a pin only ever comes from it or the operator
+  // API.
+  let lanePin: string | null = null;
+  if (lane !== undefined && lane !== null && lane !== "") {
+    const catalog = getLaneCatalog();
+    const check = checkLanePin(lane, catalog.ok ? catalog.catalog : null, process.env);
+    if (!check.ok) {
+      return NextResponse.json({ error: check.error }, { status: check.status });
+    }
+    lanePin = check.laneId;
+  }
+
   // A generation session is refused at entry when no lane can host it (issue
   // #218) — before the row exists, so before a container is anywhere near
   // being provisioned. The judgement is the crossing's, the same one the queue
@@ -117,7 +140,17 @@ export async function POST(request: Request) {
   // walled frees itself at its reset — so a session held for either is still
   // created and held on its feed, exactly as an ordinary chat is.
   if (skill !== null) {
-    const crossing = readLaneCrossing("interactive", null, skill);
+    // Judged against the pin (issue #241), so a session pinned to a lane whose
+    // harness cannot invoke its skill is refused here, naming that lane, instead
+    // of being routed somewhere the operator did not choose.
+    const crossing = readLaneCrossing(
+      "interactive",
+      null,
+      skill,
+      new Date(),
+      getFleetSettings(),
+      lanePin
+    );
     if (crossing.refusal?.reason === "no-skill-capable-lane") {
       return NextResponse.json(
         { error: crossing.refusal.message, reason: crossing.refusal.reason },
@@ -137,6 +170,7 @@ export async function POST(request: Request) {
     githubIssue: null,
     sessionSkill: skill,
     sessionIssue: sessionIssue?.trim() || null,
+    lanePin,
     createdAt: now,
     updatedAt: now,
   };

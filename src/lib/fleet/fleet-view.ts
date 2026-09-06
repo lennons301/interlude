@@ -215,6 +215,8 @@ export interface FleetRunRow {
    * whose pass has not started: read as "unknown harness", never looked up
    * from the lane id. */
   harness: string | null;
+  /** The operator's lane pin for this run (issue #241), or null. */
+  lanePin: string | null;
   claimedAt: Date;
   startedAt: Date | null;
   finishedAt: Date | null;
@@ -254,6 +256,8 @@ export interface FleetTaskRow {
    * that moved across adapters owns a pass on each. Null before the pass
    * starts and on a row from before the column existed. */
   harness: string | null;
+  /** The operator's lane pin for this task (issue #241), or null. */
+  lanePin: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -429,6 +433,9 @@ export interface RunningCard {
    * Rendered as "unknown harness", and never inferred from the lane.
    */
   harness: string | null;
+  /** The lane the operator pinned this work to (issue #241) — a decision to
+   * show beside the harness, so a pinned run is never mistaken for routing. */
+  lanePin: string | null;
 }
 
 export interface RecentItem {
@@ -1604,6 +1611,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
         // a continuation not yet started has not overwritten. Both null reads
         // as unknown: the lane is resolved as the pass starts, not before.
         harness: pass?.harness ?? run.harness,
+        lanePin: run.lanePin ?? pass?.lanePin ?? null,
       };
     });
 
@@ -1640,6 +1648,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
       paused: null,
       degraded: null,
       harness: task.harness,
+      lanePin: task.lanePin,
     });
   }
 

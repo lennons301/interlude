@@ -239,6 +239,13 @@
       "when": 1789243253826,
       "tag": "0033_harness_stamp",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1789329653826,
+      "tag": "0034_lane_pin",
+      "breakpoints": true
     }
   ]
 }
