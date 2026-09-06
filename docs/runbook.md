@@ -687,6 +687,36 @@ not.
   `src/lib/harness/` plus lanes that name it — the rules above do not change
   with the vendor.
 
+### Pinning one task or run to a lane (issue #241)
+
+Sometimes one piece of work should run on a lane the fleet is *not* on — a
+proof of a new harness, a ticket you want on a paid lane while the fleet stays
+on the subscription — without moving everything else. A **lane pin** does
+that: the operator's explicit lane choice, scoped to one task or one run.
+
+- **An interactive or generation session:** pick the lane in the *lane* field
+  of the new-task form, or send `lane: "<lane id>"` with `POST /api/tasks`.
+  Entry judges the lane exactly as the resolver judges the primary — a lane
+  the file does not declare is a `400` naming the declared ones; a declared
+  lane whose variable is unset is a `409` naming the variable; a generation
+  session pinned to a lane whose harness cannot invoke its skill is a `409`
+  naming that lane. Nothing is created on a refusal.
+- **A ticket-loop run:** before the ticket is claimed,
+  `PUT /api/projects/<project id>/issues/<n>/lane` with `{ "lane": "<lane id>" }`
+  (`GET` reads it, `DELETE` withdraws it). The claim spends the pin — it is
+  copied onto the run and the row removed — and the claim comment on the issue
+  says so. A later attempt after `ready-for-human` routes as the fleet does
+  unless you pin it again.
+- **What a pin does and does not change.** Every pass of the pinned task or run
+  treats the pin as the lane in force, so cost routing never moves it for
+  cheapness. Everything else holds as for a fleet-wide pin: a walled pinned
+  lane still fails over (a pin is a preference, not a refusal to move), a
+  metered pin still needs the day's real-money confirmation and stays under the
+  cap, and no other task's routing changes. The fleet card shows
+  `pinned to <lane>` beside the harness.
+- **Never from an issue body.** There is no `lane:` directive; a ticket says
+  how hard its work is, never who pays.
+
 ### Spending real money (metered lanes)
 
 An execution lane declares who pays: a `subscription` lane draws on a plan, a

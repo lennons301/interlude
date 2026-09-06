@@ -9,6 +9,15 @@ import { Eyebrow, FIELD, PRIMARY_BUTTON } from "@/components/fleet/fleet-bits";
 // two surfaces describe a session the same way.
 import { SESSION_BLURBS, SESSION_ORDER } from "@/lib/sessions/skills";
 
+/** One lane as the settings screen lists it (issue #241) — names only. */
+interface LaneOption {
+  id: string;
+  label: string;
+  billing: "subscription" | "metered";
+  available: boolean;
+  missingEnvVars: string[];
+}
+
 // A new task is either a plain chat task (the default, unchanged) or a
 // generation session running one of the estate's generation skills (issue #64).
 type TaskType = "chat" | SessionSkill;
@@ -22,11 +31,36 @@ export function NewTaskForm() {
   const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // An operator's lane pin for this task alone (issue #241): "" = route as the
+  // fleet does. The lane list comes from the settings screen's own read, so the
+  // picker names exactly the lanes that screen shows and nothing else; when it
+  // cannot be read the picker is simply absent and the task routes as before.
+  const [lane, setLane] = useState("");
+  const [lanes, setLanes] = useState<LaneOption[] | null>(null);
 
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   // null = the current project's issues aren't loaded yet (a session picker
   // renders "loading…"); an array = the loaded list ([] means none open).
   const [issues, setIssues] = useState<OpenIssue[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/settings/overrides");
+        if (!res.ok) return;
+        const body = (await res.json()) as {
+          lanes: { lanes: LaneOption[] } | null;
+        };
+        if (!cancelled && body.lanes) setLanes(body.lanes.lanes);
+      } catch {
+        // No lane list, no picker — the task routes as the fleet does.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // The project the loaded issues belong to, so toggling chat↔session for the
   // same project doesn't re-hit GitHub.
   const loadedFor = useRef<string | null>(null);
@@ -100,6 +134,10 @@ export function NewTaskForm() {
         payload.sessionIssue = issueRef;
       }
     }
+
+    // A chosen lane pins this task and nothing else (issue #241); "" sends no
+    // field, so an unpinned task's request is byte-identical to before.
+    if (lane) payload.lane = lane;
 
     try {
       const res = await fetch("/api/tasks", {
@@ -184,6 +222,25 @@ export function NewTaskForm() {
           )}
           <p className="text-[13px] text-fl-ink-3">
             Anchor to an issue to open the session with it as context, or leave freeform.
+          </p>
+        </div>
+      )}
+
+      {lanes !== null && lanes.length > 0 && (
+        <div className="space-y-2">
+          <Eyebrow>lane</Eyebrow>
+          <SelectField value={lane} onChange={setLane} aria-label="Execution lane">
+            <option value="">Fleet default — routed like everything else</option>
+            {lanes.map((l) => (
+              <option key={l.id} value={l.id} disabled={!l.available}>
+                {l.label} · {l.billing}
+                {l.available ? "" : ` — needs ${l.missingEnvVars.join(", ")}`}
+              </option>
+            ))}
+          </SelectField>
+          <p className="text-[13px] text-fl-ink-3">
+            Pin this task to one lane without moving the fleet. A metered lane still
+            needs the day&apos;s real-money confirmation and stays under the cap.
           </p>
         </div>
       )}

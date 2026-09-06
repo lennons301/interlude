@@ -34,6 +34,7 @@ const WORKING: RunningCard = {
   paused: null,
   degraded: null,
   harness: "claude-code",
+  lanePin: null,
 };
 
 const PAUSED: RunningCard = {
@@ -54,6 +55,12 @@ function render(cards: RunningCard[]): string {
 }
 
 describe("running list", () => {
+  it("says where an operator pinned the work, beside the harness (issue #241)", () => {
+    const pinned = { ...PAUSED, paused: null, lanePin: "openai-api" };
+    expect(render([pinned])).toContain("pinned to openai-api");
+    expect(render([{ ...PAUSED, paused: null }])).not.toContain("pinned to");
+  });
+
   it("says a paused run is paused, and when it comes back", () => {
     const html = render([PAUSED]);
 
