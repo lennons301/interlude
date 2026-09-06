@@ -1,8 +1,8 @@
 /**
- * Which adapters exist (issues #172, #214, #222). Its own module rather than a
- * table inside one adapter: registering a harness is an edit here, not an edit
- * to `claude-code/` or `opencode/`, neither of which has any business knowing
- * what else the fleet can run.
+ * Which adapters exist (issues #172, #214, #221, #222). Its own module rather
+ * than a table inside one adapter: registering a harness is an edit here, not
+ * an edit to `claude-code/`, `codex/` or `opencode/`, none of which has any
+ * business knowing what else the fleet can run.
  *
  * Two registries would drift, so there is one table of *descriptors*
  * (`descriptors.ts` — ids and capabilities, a leaf the pure lane parser can
@@ -31,10 +31,12 @@
 import type { HarnessAdapter } from "./adapter";
 import type { HarnessAdapterId } from "./descriptors";
 import { claudeCodeAdapter } from "./claude-code";
+import { codexAdapter } from "./codex";
 import { opencodeAdapter } from "./opencode";
 
 const PRODUCTION_ADAPTERS: Readonly<Record<HarnessAdapterId, HarnessAdapter>> = {
   "claude-code": claudeCodeAdapter,
+  codex: codexAdapter,
   opencode: opencodeAdapter,
 };
 

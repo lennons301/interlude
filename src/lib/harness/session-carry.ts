@@ -11,8 +11,8 @@
  * is the same one: the artefacts are one adapter's format, and the id names a
  * conversation only that harness has heard of. The lanes on the first adapter
  * all run that one harness, which is why every move between them is lossless;
- * a second adapter (#222) runs a lane of its own, and this is what keeps that
- * true.
+ * the lanes added by #221 and #222 run other adapters, and this is what keeps
+ * that true.
  *
  * The decision is made where both ends are known — as the pass starts, with
  * the lane it is starting on resolved — rather than when the continuation was

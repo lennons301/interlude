@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { SESSION_SKILLS } from "@/db/schema";
 import { CLAUDE_CODE_IMAGE } from "@/lib/harness/claude-code/image";
+import { CODEX_IMAGE } from "@/lib/harness/codex/image";
 import { OPENCODE_IMAGE } from "@/lib/harness/opencode/image";
 import { OPENCODE_DB_PATH } from "@/lib/harness/opencode";
 import type { HarnessImage } from "@/lib/harness/adapter";
@@ -102,7 +103,12 @@ describe("the base and the layers", () => {
     expect(DOCKERFILE_HASH_LABEL).toBe(HASH_LABEL);
     // Each layer's `ARG BASE_IMAGE=` default is the tag the builder passes, so
     // a manual `docker build` after a base build lands on the same base.
-    for (const layer of [CLAUDE_CODE_IMAGE.dockerfile, OPENCODE_IMAGE.dockerfile, FIXTURE_IMAGE.dockerfile]) {
+    for (const layer of [
+      CLAUDE_CODE_IMAGE.dockerfile,
+      CODEX_IMAGE.dockerfile,
+      OPENCODE_IMAGE.dockerfile,
+      FIXTURE_IMAGE.dockerfile,
+    ]) {
       const text = readFileSync(path.join(process.cwd(), layer), "utf8");
       expect(text).toContain(`ARG ${BASE_IMAGE_BUILD_ARG}=${BASE_IMAGE_NAME}`);
       expect(text).toContain(`FROM \${${BASE_IMAGE_BUILD_ARG}}`);
@@ -376,6 +382,62 @@ describe("the base and the Claude Code layer (issue #216)", () => {
     expect(layerInstructions).not.toContain("apt-get");
     expect(layerInstructions).not.toContain("skills");
     expect(layerInstructions).not.toContain("WORKDIR");
+  });
+});
+
+/**
+ * Issue #221: the Codex layer installs one harness — the Codex CLI — and the
+ * persistent sessions directory its turn script links every per-exec Codex
+ * home to. Nothing else, and nothing of Claude Code's.
+ */
+describe("the Codex layer (issue #221)", () => {
+  const codexLayer = readFileSync(path.join(process.cwd(), CODEX_IMAGE.dockerfile), "utf8");
+  const layerInstructions = instructionsOf(codexLayer);
+
+  it("builds on the base image the builder names, as the Claude Code layer does", () => {
+    expect(CODEX_IMAGE.dockerfile).toBe("Dockerfile.agent-codex");
+    expect(layerInstructions).toContain(`ARG ${BASE_IMAGE_BUILD_ARG}=${AGENT_BASE_IMAGE.name}`);
+    expect(layerInstructions).toContain(`FROM \${${BASE_IMAGE_BUILD_ARG}}`);
+    // Nothing the base already did is repeated in the layer.
+    expect(layerInstructions).not.toContain("apt-get");
+    expect(layerInstructions).not.toContain("skills");
+    expect(layerInstructions).not.toContain("WORKDIR");
+  });
+
+  it("installs the Codex CLI and creates the persistent sessions directory, and nothing of Claude Code", () => {
+    expect(layerInstructions).toContain("RUN npm install -g @openai/codex");
+    expect(layerInstructions).toContain(
+      "RUN mkdir -p /home/node/.codex-sessions/interlude && chown -R node:node /home/node/.codex-sessions"
+    );
+    expect(layerInstructions).not.toContain("@anthropic-ai");
+    expect(layerInstructions).not.toContain(".claude");
+    expect(layerInstructions).not.toContain("bypassPermissionsModeAccepted");
+    expect(codexLayer).not.toContain(SKILLS_REF_LABEL);
+  });
+
+  it("takes root only for the install and ends as the workspace user", () => {
+    const root = layerInstructions.indexOf("USER root");
+    const install = layerInstructions.indexOf("npm install -g");
+    const node = layerInstructions.lastIndexOf("USER node");
+    expect(root).toBeGreaterThan(-1);
+    expect(install).toBeGreaterThan(root);
+    expect(node).toBeGreaterThan(install);
+    expect(layerInstructions.trim().endsWith("USER node")).toBe(true);
+  });
+
+  it("is stamped and rebuilt by the same mechanism as every other layer", async () => {
+    const codexStamp = imageStamp(baseHash, hashOf(CODEX_IMAGE.dockerfile));
+    expect(codexStamp).not.toBe(claudeStamp);
+    state.inspect = imagesOnDaemon({
+      [BASE_IMAGE_NAME]: { [HASH_LABEL]: baseHash },
+      [CLAUDE_CODE_IMAGE.name]: { [HASH_LABEL]: claudeStamp },
+    });
+    await ensureImage(CODEX_IMAGE);
+    // The base is current and the Claude image is left alone: one build.
+    expect(builds().map((b) => b.t)).toEqual([CODEX_IMAGE.name]);
+    expect(builds()[0].dockerfile).toBe(CODEX_IMAGE.dockerfile);
+    expect(builds()[0].labels[HASH_LABEL]).toBe(codexStamp);
+    expect(builds()[0].buildargs).toEqual({ [BASE_IMAGE_BUILD_ARG]: BASE_IMAGE_NAME });
   });
 });
 

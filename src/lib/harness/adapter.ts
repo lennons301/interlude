@@ -63,8 +63,8 @@
  * them can continue the same conversation on another (#176's failover, #199's
  * early resume of a paused run): the artefacts `session-transcript.ts` copies
  * out of the refused container are one harness's format, replayed under a
- * session id only that harness has heard of. A second adapter (#222) now runs
- * a lane of its own, and two members keep that true across the two.
+ * session id only that harness has heard of. Two members make that stay true
+ * now that the lanes added by #221 and #222 name further adapters.
  * `sessionArtifactPaths` makes the artefacts the adapter's rather than a fixed
  * path — the store copies exactly what the adapter names, and nothing at all
  * for an adapter whose `sessionResume` is false. And `restoreSessionTranscript`
