@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describeTurnTokens } from "../turn-usage-prose";
 import fs from "fs";
 import path from "path";
 import { and, eq } from "drizzle-orm";
@@ -18,7 +19,6 @@ import {
   createOutputHandler,
   readThreadUsageBefore,
   turnUsageFromThread,
-  describeTurnUsage,
   THREAD_USAGE_KEY,
 } from "../codex/stream-parser";
 import { toChatView } from "@/lib/chat/chat-view";
@@ -309,11 +309,11 @@ describe("usage is the thread's running total on the wire, and the turn's in the
       null
     );
     expect(turn).toEqual({ inputTokens: 15, outputTokens: 869, cacheReadTokens: 56233, cacheWriteTokens: 14828 });
-    expect(describeTurnUsage(turn)).toBe(
+    expect(describeTurnTokens(turn)).toBe(
       "71076 input tokens, of which 56233 cache reads and 14828 cache writes, 869 output tokens"
     );
     // A turn that touched no cache says nothing about one.
-    expect(describeTurnUsage({ inputTokens: 100, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 })).toBe(
+    expect(describeTurnTokens({ inputTokens: 100, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 })).toBe(
       "100 input tokens, 5 output tokens"
     );
   });

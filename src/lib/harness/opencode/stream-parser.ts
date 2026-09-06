@@ -6,6 +6,7 @@ import {
   type StreamRecorder,
 } from "../../orchestrator/stream-recorder";
 import type { TurnTokenUsage } from "../../lanes/lane-cost";
+import { cacheDetail, describeTurnTokens } from "../turn-usage-prose";
 import type { HarnessOutputHandler } from "../adapter";
 import type { TurnResult } from "../turn-result";
 import {
@@ -114,17 +115,11 @@ function readCount(value: unknown): number | null {
 
 /**
  * The cached share of a turn's input, as the clause the turn-complete note
- * adds after the input total: `, of which N cache reads` — and the writes
- * too when the provider reports any (the wire carries both counts; the
- * shipped lane's provider reports no writes). Empty when neither happened,
- * so the note says nothing it cannot back.
+ * adds after the input total — the fleet's one shape (`turn-usage-prose.ts`,
+ * shared with the Codex parser since #224), re-exported here for the tests
+ * that pinned it when it was this adapter's own (#225).
  */
-export function cacheDetail(usage: TurnTokenUsage): string {
-  const parts: string[] = [];
-  if (usage.cacheReadTokens > 0) parts.push(`${usage.cacheReadTokens} cache reads`);
-  if (usage.cacheWriteTokens > 0) parts.push(`${usage.cacheWriteTokens} cache writes`);
-  return parts.length === 0 ? "" : `, of which ${parts.join(" and ")}`;
-}
+export { cacheDetail };
 
 /** The transcript's verb for one of OpenCode's tool names. */
 export function toolVerb(tool: string): string {
@@ -315,9 +310,7 @@ export function createOutputHandler(
         const tokens =
           usage === null
             ? "no token usage reported"
-            : `${usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens} input tokens` +
-              cacheDetail(usage) +
-              `, ${usage.outputTokens} output tokens`;
+            : describeTurnTokens(usage);
         // The CLI's own estimate, which on a lane that declares prices is not
         // what the turn is charged (issue #175) — `runTurn` adds the lane's
         // number beside this line when the two differ.

@@ -7,6 +7,7 @@ import {
   type StreamRecorder,
 } from "../../orchestrator/stream-recorder";
 import type { TurnTokenUsage } from "../../lanes/lane-cost";
+import { describeTurnTokens } from "../turn-usage-prose";
 import type { HarnessOutputHandler } from "../adapter";
 import type { TurnResult } from "../turn-result";
 import {
@@ -198,22 +199,6 @@ export function turnUsageFromThread(
     cacheReadTokens: cached,
     cacheWriteTokens: written,
   };
-}
-
-/**
- * The turn-complete note's figures: the input total as the wire counts it,
- * with the cached share broken out the way OpenCode's note does since #225 —
- * a lane prices cache reads and writes at their own rates, so the split is
- * what lets a booked charge be checked against the rate card off the feed.
- * The clause is omitted when the turn touched no cache.
- */
-export function describeTurnUsage(usage: TurnTokenUsage): string {
-  const input = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
-  const cached: string[] = [];
-  if (usage.cacheReadTokens > 0) cached.push(`${usage.cacheReadTokens} cache reads`);
-  if (usage.cacheWriteTokens > 0) cached.push(`${usage.cacheWriteTokens} cache writes`);
-  const split = cached.length > 0 ? `, of which ${cached.join(" and ")}` : "";
-  return `${input} input tokens${split}, ${usage.outputTokens} output tokens`;
 }
 
 /** The scalar a thread's totals are ordered by: they only ever grow. */
@@ -461,7 +446,9 @@ export function createOutputHandler(
         if (total !== null) {
           usage = turnUsageFromThread(total, usageBefore);
           systemNote(
-            `Turn complete (${describeTurnUsage(usage)})`,
+            // The tokens clause is the fleet's one shape (`turn-usage-prose.ts`),
+            // so this feed cannot drift from another harness's by copy.
+            `Turn complete (${describeTurnTokens(usage)})`,
             // The thread's running total, for the next turn's difference — see
             // the module note.
             { [THREAD_USAGE_KEY]: total }
