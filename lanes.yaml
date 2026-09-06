@@ -23,18 +23,21 @@
 #      settings screen (and falls through to `AGENT_LANE`, then to the
 #      preference order below).
 #
-# Because several providers expose Anthropic-compatible endpoints, every lane
-# here runs the SAME adapter — Claude Code — and differs only in base URL,
-# auth variable and model identifiers. That is the point: one adapter ships.
+# Because several providers expose Anthropic-compatible endpoints, the Claude
+# lanes here all run the SAME adapter — Claude Code — and differ only in base
+# URL, auth variable and model identifiers. The last lane runs a second
+# adapter, OpenCode (issue #222), against OpenRouter natively, with the same
+# credential and the same GLM models as its Claude Code neighbour — so the two
+# paths to one provider can be compared.
 #
-# It is also what lets a lane move carry the conversation (issues #176, #199):
-# a pass refused on one lane — or parked on its window and resumed early on
-# another — continues the same Claude Code session on the new lane, because
-# the session transcript is a Claude Code artefact and both ends run Claude
-# Code. A lane declaring a DIFFERENT `adapter` is still a legal move target,
-# but a move onto it cannot carry the session: the pass starts again on the
-# branch with the work already pushed, and its feed says so (issue #217,
-# enforced at `restoreSessionTranscript` — see the limit at the foot of
+# Running one adapter is what lets a lane move carry the conversation (issues
+# #176, #199): a pass refused on one lane — or parked on its window and
+# resumed early on another — continues the same session on the new lane,
+# because the session artefacts are that harness's and both ends run it. A
+# lane declaring a DIFFERENT `adapter` is still a legal move target, but a
+# move onto it cannot carry the session: the pass starts again on the branch
+# with the work already pushed, and its feed says so (issue #217, enforced at
+# `restoreSessionTranscript` — see the limit at the foot of
 # `src/lib/harness/adapter.ts`). It costs the conversation, not the attempt.
 
 # The default primary, in preference order: the first lane whose named
@@ -225,6 +228,56 @@ lanes:
     # `cache_write` is deliberately absent across the family: OpenRouter
     # publishes no cache-write price for these models, and the cost calculation
     # reads an absent cache price as the input rate rather than as free.
+    prices:
+      heavy: { input: 1.4, output: 4.4, cache_read: 0.26 }
+      standard: { input: 0.075, output: 0.25, cache_read: 0.015 }
+      light: { input: 0.06, output: 0.4, cache_read: 0.01 }
+    caps:
+      # Enforced as above (issue #174, #173) — the lower of this and the
+      # operator's own real-money cap binds.
+      daily_budget_usd: 20
+
+  # The same credential and the same GLM models as the lane above, on a
+  # different HARNESS (issue #222): OpenCode speaks to OpenRouter natively
+  # through its own `openrouter` provider, where the lane above reaches it
+  # through OpenRouter's Anthropic-compatible skin under Claude Code. Two
+  # lanes to one provider, differing only in adapter, so the harness's share
+  # of a result can be told from the model's. Not in `primary`: nothing
+  # routes here until an operator picks it or the ranking does.
+  #
+  # Two facts about the shape, both the adapter's (src/lib/harness/opencode):
+  #
+  #   - `auth` is the variable under its own name. OpenCode enables its
+  #     OpenRouter provider from OPENROUTER_API_KEY as-is (measured on
+  #     1.18.29), so the harness variable and the orchestrator variable
+  #     coincide — the mapping form still says which is which.
+  #   - `models` are in OpenCode's own `provider/model` form, because the CLI
+  #     addresses a model through the provider that serves it: the prefix
+  #     names its `openrouter` provider and the rest is OpenRouter's slug. No
+  #     `base_url`: OpenCode's OpenRouter provider already points at
+  #     https://openrouter.ai/api/v1. A base_url declared here would reach the
+  #     CLI as a per-exec provider override for that same provider.
+  #
+  # Verified on 2026-09-05 in the built image against OpenRouter, on
+  # `standard`: a turn ran shell commands and finished; the session resumed by
+  # id from the copied database in a fresh container; an invalid key surfaced
+  # as a 401. `prices` are required here by the parser — OpenCode's descriptor
+  # declares no `reportsCost` (its step events carry an estimate from the
+  # models.dev catalogue, not the provider's bill), and a metered lane on such
+  # a harness must price every tier or the file is refused (issue #219).
+  - id: opencode-openrouter-glm
+    label: OpenRouter (GLM open weights) via OpenCode
+    adapter: opencode
+    billing: metered
+    auth:
+      OPENROUTER_API_KEY: OPENROUTER_API_KEY
+    models:
+      heavy: openrouter/z-ai/glm-5.3
+      standard: openrouter/z-ai/glm-5.3-flash
+      light: openrouter/z-ai/glm-4.7-flash
+    # USD per million tokens, from OpenRouter's model listing on 2026-09-05 —
+    # the same table as the Claude Code lane above, because it is the same
+    # model on the same provider. `cache_write` absent for the same reason.
     prices:
       heavy: { input: 1.4, output: 4.4, cache_read: 0.26 }
       standard: { input: 0.075, output: 0.25, cache_read: 0.015 }

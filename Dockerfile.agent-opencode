@@ -1,0 +1,30 @@
+# The OpenCode layer of the agent image (issues #216, #222): one harness on the
+# shared base (Dockerfile.agent-base), which carries everything else — git, gh,
+# yq, jq, pnpm, the workspace user and the pinned skills, including the
+# `~/.agents/skills` canonical folders this harness reads natively.
+#
+# The image builder (src/lib/docker/image-builder.ts) builds the base first and
+# hands its tag in as BASE_IMAGE; the default below is that same tag, so a
+# manual `docker build -f Dockerfile.agent-opencode .` after a base build works
+# too. The resulting image is stamped with a hash over BOTH files, so a base
+# change rebuilds this image and a change here rebuilds only this one.
+ARG BASE_IMAGE=interlude-agent-base:latest
+FROM ${BASE_IMAGE}
+
+# The base leaves the image running as `node`; the global install needs root.
+# The package is a launcher with a per-platform optional dependency
+# (opencode-linux-x64 / opencode-linux-arm64), so one install line serves both
+# hosts the estate runs on.
+USER root
+RUN npm install -g opencode-ai
+
+# Where the CLI keeps its state — sessions included — for the workspace user
+# (src/lib/harness/opencode/index.ts names the paths a pause copies out).
+# Created here, owned by `node`, so the first turn does not race to make it.
+#
+# Nothing to pre-accept: headless OpenCode takes its permissions from the
+# per-exec config the turn script writes (`permission: { "*": "allow" }`), and
+# the container is the sandbox.
+RUN mkdir -p /home/node/.local/share/opencode && chown -R node:node /home/node/.local
+
+USER node

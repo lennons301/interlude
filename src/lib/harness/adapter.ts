@@ -57,17 +57,18 @@
  *   inputs and agree between themselves.
  *
  * **A limit, now enforced (issues #199, #217): a lane move carries the
- * session only between lanes on the same adapter.** Every lane declared today
- * runs one adapter, differing only in endpoint, credential variable and model
- * identifiers — which is *why* a pass refused on one lane
- * can continue the same conversation on another (#176's failover, #199's
+ * session only between lanes on the same adapter.** The lanes on the first
+ * adapter all run that one harness, differing only in endpoint, credential
+ * variable and model identifiers — which is *why* a pass refused on one of
+ * them can continue the same conversation on another (#176's failover, #199's
  * early resume of a paused run): the artefacts `session-transcript.ts` copies
  * out of the refused container are one harness's format, replayed under a
- * session id only that harness has heard of. Two members make that stay true
- * once a lane names a different adapter. `sessionArtifactPaths` makes the
- * artefacts the adapter's rather than a fixed path — the store copies exactly
- * what the adapter names, and nothing at all for an adapter whose
- * `sessionResume` is false. And `restoreSessionTranscript` in the turn manager
+ * session id only that harness has heard of. A second adapter (#222) now runs
+ * a lane of its own, and two members keep that true across the two.
+ * `sessionArtifactPaths` makes the artefacts the adapter's rather than a fixed
+ * path — the store copies exactly what the adapter names, and nothing at all
+ * for an adapter whose `sessionResume` is false. And `restoreSessionTranscript`
+ * in the turn manager
  * — the one seam that knows both the lane the pass is starting on and the pass
  * it continues (`tasks.resumedFromTaskId` -> its `lane` -> its adapter) —
  * decides through the pure `decideSessionCarry` (`session-carry.ts`) whether

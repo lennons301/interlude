@@ -327,7 +327,7 @@ describe("buildClaudeTurnCommand", () => {
 });
 
 describe("the adapter registry (issue #172)", () => {
-  it("resolves the one adapter that ships", () => {
+  it("resolves a shipped adapter", () => {
     expect(getHarnessAdapter("claude-code")).toBe(claudeCodeAdapter);
   });
 
@@ -335,7 +335,7 @@ describe("the adapter registry (issue #172)", () => {
     // A lane naming an unknown adapter is a config error the parser already
     // refuses; reaching here means the two drifted, and guessing would run the
     // pass on a harness nobody chose.
-    expect(() => getHarnessAdapter("opencode")).toThrow(/no harness adapter/);
+    expect(() => getHarnessAdapter("codex")).toThrow(/no harness adapter/);
   });
 
   it("exposes the three functions a second adapter would have to replace", () => {

@@ -46,9 +46,20 @@ export interface HarnessAdapterDescriptor {
 /**
  * The adapters that ship. Order is immaterial; ids are unique.
  *
- * Exactly one today. The Codex and OpenCode rows land with their adapters
- * (issues #221, #222) — a row here without a registry entry, or the reverse,
- * fails the pin test rather than a pass.
+ * Two today: Claude Code, and OpenCode (issue #222). The Codex row lands with
+ * its adapter (issue #221) — a row here without a registry entry, or the
+ * reverse, fails the pin test rather than a pass.
+ *
+ * OpenCode's row is a capability statement, not a judgement (the spec's rule):
+ * its `run --format json` stream carries no quota telemetry, and the dollar
+ * figure on its step events is the CLI's own estimate from the models.dev
+ * catalogue rather than a provider's bill, so the fleet does not rely on it —
+ * a metered OpenCode lane must declare prices and the quota tile says "cannot
+ * report"; it resumes a session by id from its one SQLite database; and
+ * user-invoked skills stay **off** until the proof ticket (#225) shows the
+ * adapter's invocation text actually makes the model load the named SKILL.md
+ * through its `skill` tool — until then no generation session routes to an
+ * OpenCode lane.
  */
 export const HARNESS_ADAPTER_DESCRIPTORS = [
   {
@@ -57,6 +68,15 @@ export const HARNESS_ADAPTER_DESCRIPTORS = [
       userInvokedSkills: true,
       quotaTelemetry: true,
       reportsCost: true,
+      sessionResume: true,
+    },
+  },
+  {
+    id: "opencode",
+    capabilities: {
+      userInvokedSkills: false,
+      quotaTelemetry: false,
+      reportsCost: false,
       sessionResume: true,
     },
   },
@@ -78,4 +98,17 @@ export function describeHarnessAdapter(
   descriptors: readonly HarnessAdapterDescriptor[] = HARNESS_ADAPTER_DESCRIPTORS
 ): HarnessAdapterDescriptor | null {
   return descriptors.find((d) => d.id === id) ?? null;
+}
+
+/**
+ * The descriptor a shipped adapter reads its capabilities from at load, so the
+ * adapter cannot disagree with what the lane parser was told about it. Throws
+ * rather than defaulting: unreachable while the table names the adapter, and a
+ * throw at load rather than a silent default is what "cannot be registered
+ * without a descriptor" means at runtime, ahead of the test that pins it.
+ */
+export function requireHarnessDescriptor(id: string): HarnessAdapterDescriptor {
+  const descriptor = describeHarnessAdapter(id);
+  if (descriptor === null) throw new Error(`harness adapter "${id}" has no descriptor`);
+  return descriptor;
 }

@@ -18,6 +18,7 @@ import {
 } from "../seed";
 import { SESSION_SKILLS } from "@/db/schema";
 import { claudeCodeAdapter } from "@/lib/harness/claude-code";
+import { opencodeAdapter } from "@/lib/harness/opencode";
 import { createFakeHarness } from "@/test/fake-harness";
 
 /**
@@ -30,6 +31,7 @@ import { createFakeHarness } from "@/test/fake-harness";
  */
 const claude: SkillInvoker = claudeCodeAdapter;
 const fake: SkillInvoker = createFakeHarness().adapter;
+const opencode: SkillInvoker = opencodeAdapter;
 
 describe("composeSeed — slash passthrough on Claude Code (spike #59)", () => {
   it("emits the bare skill slash for a freeform session with no agenda", () => {
@@ -205,6 +207,36 @@ describe("seed building blocks — exact literal content (spec #50/#63)", () => 
       "This session is anchored to GitHub issue owner/repo#1. Fetch it yourself " +
         "with the `gh` CLI before you begin — you have a GitHub App token in this " +
         "container, and the orchestrator passed only this reference, not the issue body."
+    );
+  });
+});
+
+describe("composeSeed on OpenCode (issue #222)", () => {
+  it("puts the adapter's load-the-skill instruction where the slash would go, framing intact", () => {
+    // No slash on this harness: skills reach the model through a tool it
+    // calls itself, so the line is an instruction naming the skill and the
+    // agenda. Everything around it is exactly what a Claude seed carries.
+    const seed = composeSeed(
+      { sessionSkill: "grill-me", sessionIssue: "lennons301/interlude#42", agenda: "the new billing model" },
+      opencode
+    );
+    const claudeSeed = composeSeed(
+      { sessionSkill: "grill-me", sessionIssue: "lennons301/interlude#42", agenda: "the new billing model" },
+      claude
+    );
+    const [head, ...framing] = seed.split("\n\n");
+    const [claudeHead, ...claudeFraming] = claudeSeed.split("\n\n");
+    expect(head).toBe(
+      'Load the skill named "grill-me" with the skill tool and follow it, taking this as its argument: the new billing model'
+    );
+    expect(claudeHead).toBe("/grill-me the new billing model");
+    expect(framing).toEqual(claudeFraming);
+    expect(seed).not.toContain("/grill-me");
+  });
+
+  it("names the skill alone for a freeform session with no agenda", () => {
+    expect(composeSeed({ sessionSkill: "wayfinder" }, opencode)).toBe(
+      'Load the skill named "wayfinder" with the skill tool and follow it.'
     );
   });
 });
