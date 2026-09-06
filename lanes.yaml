@@ -324,8 +324,18 @@ lanes:
   # Model identifiers: the GPT-5.6 family as the CLI (0.153.4) and OpenAI's
   # pricing page name it on 2026-09-05 — three sizes that map onto the three
   # tiers. The same three on both lanes, so a move between them changes who
-  # bills and not what runs the work; retune here without touching code, and
-  # expect #224 to confirm which identifiers the ChatGPT plan actually serves.
+  # bills and not what runs the work; retune here without touching code. The
+  # API key's `GET /v1/models` lists all three on 2026-09-06 (#224), so the
+  # metered lane's identifiers are confirmed served; which the ChatGPT plan
+  # serves is still #224's to confirm once that credential exists.
+  #
+  # Proof status (#224, 2026-09-06): the adapter's turn command reached the
+  # API on `openai-api` in the built image, and the organisation behind the
+  # key answered every request 429 `credit_balance_exhausted` — no prepaid
+  # credits — which the CLI relays as one sentence, `You have no credits
+  # remaining. Add credits …`, naming neither the status nor the code. The
+  # classifier reads that sentence as a quota refusal (a fail-over-or-park,
+  # never a spent attempt); the end-to-end run waits on credits.
   - id: codex-subscription
     label: Codex (ChatGPT plan)
     adapter: codex
