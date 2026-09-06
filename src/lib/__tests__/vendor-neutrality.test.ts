@@ -37,8 +37,9 @@ import { HARNESS_ADAPTER_DESCRIPTORS } from "@/lib/harness/descriptors";
  * because a comment that says "the CLI" or "Claude" is how the next reader
  * learns the wrong shape. Say "the harness", "the adapter", "a first-party
  * lane". `scripts/` is not scanned either: the operational one-offs there
- * (the rate-limit stub, the endpoint check) exercise one provider's wire by
- * design and are not part of the fleet.
+ * (the rate-limit stub, the endpoint check, the Responses stub the Codex
+ * fixtures are recorded against) exercise one provider's wire by design and
+ * are not part of the fleet.
  */
 
 const VENDOR_NAMES = /claude|anthropic|codex|openai|opencode/i;

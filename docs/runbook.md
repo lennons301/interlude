@@ -492,7 +492,8 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   enforced by the orchestrator around the exec on every harness — a second bound
   beside a harness's own turn and budget flags where it has them (Claude Code's
   `--max-turns`/`--max-budget-usd`), and the only in-turn bound on a harness
-  with no such flags. Past it the turn's own processes are
+  with no such flags — Codex and OpenCode, in the shipped file. Past it the
+  turn's own processes are
   stopped (TERM, then KILL after 10s) and the turn ends as a **turn limit**: an
   implement attempt fails with "turn limit reached" exactly as it does at a
   harness's own turn ceiling, a review or triage pass reads as unparseable and takes its
@@ -661,22 +662,38 @@ not.
   is asked to load one — so a generation session (`/grill-me`, `/to-spec`,
   `/to-tickets`) is offered only lanes whose harness can invoke a skill, and is
   refused with the reason otherwise.
-- **The shipped file, as a worked example.** Every lane today runs the Claude
-  Code adapter: `claude-subscription` (billing `subscription`; reads
+- **The shipped file, as a worked example.** Seven lanes on three adapters,
+  each lane naming its harness under `adapter:`. On the **Claude Code** adapter
+  (`claude-code`): `claude-subscription` (billing `subscription`; reads
   `CLAUDE_CODE_OAUTH_TOKEN`, a token minted with `claude setup-token`) is the
-  preferred default; `anthropic-api` (metered; `ANTHROPIC_API_KEY`) and the two
-  `openrouter*` lanes (metered; `OPENROUTER_API_KEY`, with prices declared
-  because that harness's own cost figure is only right on its own provider's
-  endpoint) are the paid ones. A second adapter is a new directory under
-  `src/lib/harness/` plus lanes that name it — the runbook's rules above do not
-  change with the vendor.
+  preferred default; `anthropic-api` (metered; `ANTHROPIC_API_KEY`; no prices
+  declared, because on its own provider's endpoint the harness's cost figure is
+  right) and the two `openrouter*` lanes (metered; `OPENROUTER_API_KEY`; prices
+  declared, because off that endpoint the same figure is fiction) are its paid
+  lanes. On the **OpenCode** adapter (`opencode`): `opencode-openrouter-glm`
+  (metered; the same `OPENROUTER_API_KEY` and the same GLM models as
+  `openrouter-glm`, reached natively rather than through OpenRouter's
+  Anthropic-compatible skin, so the harness's share of a result can be told
+  from the model's). On the **Codex CLI** adapter (`codex`): `codex-subscription`
+  (subscription; `CODEX_AUTH_JSON`, the contents of the file `codex login`
+  writes) and `openai-api` (metered; `OPENAI_API_KEY`). Neither Codex nor
+  OpenCode reports its own cost, so their metered lanes *must* declare prices
+  (the file is refused at parse otherwise), and neither reports quota, so the
+  quota tile says "cannot report" for their lanes. Only the two Anthropic-direct
+  lanes are in `primary`: the other five are never defaulted onto and become
+  routing candidates the moment their credential is provisioned — until then
+  each is one line in the boot report, which for the two Codex lanes is the
+  expected state while #224 is open. A further adapter is a new directory under
+  `src/lib/harness/` plus lanes that name it — the rules above do not change
+  with the vendor.
 
 ### Spending real money (metered lanes)
 
 An execution lane declares who pays: a `subscription` lane draws on a plan, a
 `metered` lane bills per token — real money. In the shipped file
-`claude-subscription` is the former; `anthropic-api` and the `openrouter*`
-lanes are the latter. Everything below
+`claude-subscription` and `codex-subscription` are the former; `anthropic-api`,
+`openrouter`, `openrouter-glm`, `opencode-openrouter-glm` and `openai-api` are
+the latter, each with its own `caps.daily_budget_usd`. Everything below
 applies whenever the lane **in force** is metered, whether you made it primary,
 it was reached as overflow, or it was failed over to. Autonomous work on a
 metered lane is allowed on purpose: it is bounded, not forbidden.
@@ -768,8 +785,9 @@ What you will see, on the session's own screen and in its transcript:
   midnight, so none is offered. Raise the cap in Settings → Real money, or
   carry on tomorrow. The session is not failed; it waits.
 - **"...no paid lane to overflow onto"** — naming the variable that would fix
-  it, as the lane file names it (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` in
-  the shipped file). Set it in Doppler and the session starts on the next poll.
+  it, as the lane file names it (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` or
+  `OPENAI_API_KEY` in the shipped file). Set it in Doppler and the session
+  starts on the next poll.
 
 Two things follow from this that are easy to be surprised by:
 
@@ -798,12 +816,13 @@ for the implement/repair/interactive passes, the other half of the cost/quality
 dial alongside `AGENT_MODEL`; `AGENT_EFFORT_REVIEW` / `AGENT_EFFORT_TRIAGE` give
 the read-heavy passes a lower level. What a level *means* is the lane's
 harness adapter's to say (`mapEffort`): Claude Code maps the five one to one
-onto its own effort flag; a harness with a coarser dial collapses the top
-levels together; one with no equivalent passes no flag and runs at its own
-default. Leave the variables unset and each
-harness keeps its own default. A value outside the five is refused at boot
-with the list, and the level stays unset — the warning names the fleet's
-vocabulary, not any harness's flag.
+onto its own effort flag; Codex maps them onto its reasoning-effort setting,
+whose top is `xhigh`, so `max` collapses onto it; OpenCode passes the level as
+a model variant, which a model that defines no such variant silently ignores;
+a harness with no equivalent passes no flag and runs at its own default. Leave
+the variables unset and each harness keeps its own default. A value outside the
+five is refused at boot with the list, and the level stays unset — the warning
+names the fleet's vocabulary, not any harness's flag.
 
 A ticket's `effort: <level>` directive in the Workflow section raises (or lowers)
 a single run's work-pass effort — a hard ticket can ask for `max`, a trivial one
@@ -830,6 +849,7 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 | `DISCORD_FLEET_CHANNEL_ID` | Channel for fleet events + fallback for blocked questions when a project has no linked channel. |
 | `MAX_BUDGET_USD` | Per-attempt default budget ($20). |
 | `METERED_DAILY_CAP_USD` | Real money the fleet may spend in one local day through a metered lane ($20). Overridable in Settings → Real money up to a hard $100 ceiling, and bound down by the lane's own declared cap. Subscription work never counts against it. |
+| `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `CODEX_AUTH_JSON`, `OPENAI_API_KEY` | Execution-lane credentials, exactly as `lanes.yaml` names them under each lane's `auth:` (these five are the shipped file's). Set the ones for the lanes you want available; an unset one makes its lanes unavailable — one boot-log line per lane, the same on Settings → Execution lane, and a pass sent there is refused at start naming the variable. Each reaches a container exec-scoped only, carried in by the lane's adapter. |
 | `AGENT_LANE` | The deployment's default execution lane (an id from `lanes.yaml`). Unset, cost routing picks the cheapest lane that can serve each pass and the file's preference order only breaks ties; **set** (here or on the settings screen), it pins the fleet and turns cost routing off. |
 | `AGENT_MIN_LANE` | The weakest lane cost routing may send any pass onto (an id from `lanes.yaml`) — a capability floor, so routing may still pick anything at or above it. Unset means no floor. The fall-through for the four Settings → Execution lane rows left on `environment`. |
 | `AGENT_MODEL`, `AGENT_MODEL_REVIEW`, `AGENT_MODEL_TRIAGE` | Default model per pass kind, as a tier (`heavy`/`standard`/`light`, or the `opus`/`sonnet`/`haiku` aliases) or a raw model id. The fall-through for a Settings → Models row left on `environment`; unset means no model is named and the lane's harness resolves its own default (a lane that declares prices resolves it to `standard`). What a tier means as a model is the lane's `models` map — there is no fleet-wide default map. `AGENT_MODEL` is the tier itself for implement, interactive and repair (a repair runs at the run's own tier, issue #211). For review (issue #201) a tier in `AGENT_MODEL_REVIEW` is a **ceiling** on the derived tier — one rung above the run's implement tier — not the tier itself; unset, the derivation runs free. |
