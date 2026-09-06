@@ -314,9 +314,11 @@ which is what you leave behind whenever you answer twice.
 
 ### 5. Find PRs waiting for sign-off
 
-A PR gets the **`human-signoff`** label (and auto-merge is left disarmed) when it
-touches a gated path, when the ticket carried a `checkpoint:` directive, or when
-the reviewer escalated. It then waits for you.
+A PR gets the **`human-signoff`** label (and auto-merge is disarmed — or left so,
+if no earlier head had armed it) when it touches a gated path, when the ticket
+carried a `checkpoint:` directive, or when the reviewer escalated. Gates are
+re-decided on every head, so a repair that pushes onto a gated path gates a PR
+that was armed a moment before. It then waits for you.
 
 - **Dashboard:** the *needs you* panel's sign-off items link straight to each PR.
 - **From the CLI:** `gh pr list --label human-signoff --state open -R <owner>/<repo>`
