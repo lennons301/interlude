@@ -113,14 +113,14 @@ export interface RecordedPassExit extends Omit<PassExit, "terminalResult"> {
   terminalResultTruncated?: true;
 }
 
-/** Event types the Claude Code stream parser already understands, whether it
- * acts on them (`assistant`, `user`, `result`, `error`) or deliberately drops
- * them (`system`, which carries init/hook/thinking-token chatter). Anything
- * outside this set is unrecognised and gets written down verbatim. The Codex
- * parser (issue #221) and the OpenCode parser (issue #222) each apply their
- * own understanding before forwarding — see their module notes — so this set
- * stays one harness's (Codex's items nest a second type a flat set of event
- * types cannot express).
+/** Event types the first harness's stream parser already understands, whether
+ * it acts on them (`assistant`, `user`, `result`, `error`) or deliberately
+ * drops them (`system`, which carries init/hook/thinking-token chatter).
+ * Anything outside this set is unrecognised and gets written down verbatim.
+ * The later adapters' parsers (issues #221, #222) each apply their own
+ * understanding before forwarding — see their module notes — so this set
+ * stays one harness's (one of them nests a second type inside its items,
+ * which a flat set of event types cannot express).
  *
  * `rate_limit_event` is deliberately *absent* despite being understood: see
  * {@link ALWAYS_RECORDED_EVENT_TYPES}. */

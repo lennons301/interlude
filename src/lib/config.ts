@@ -84,34 +84,44 @@ function positiveEnvNumber(
 }
 
 /**
- * Validate an `AGENT_EFFORT*` env value against the CLI's level set. Effort,
- * unlike the model (an open-ended id/alias space), is a closed enum, so a bad
- * value is both catastrophic — it reaches `--effort` on *every* turn fleet-wide
- * — and cheap to catch. An unset var stays null (CLI default); a set-but-bad
- * one warns and falls back to null rather than shipping a typo like
- * `AGENT_EFFORT=hihg` to the CLI. The ticket-directive path clamps to the same
- * set for the same reason.
+ * Validate an `AGENT_EFFORT*` env value against the fleet's effort vocabulary
+ * (`ALLOWED_TICKET_EFFORTS`, issue #81). Effort, unlike the model (an
+ * open-ended id/alias space), is a closed set, so a bad value is both
+ * catastrophic — it reaches *every* turn fleet-wide, on whichever harness maps
+ * it onto its own dial — and cheap to catch. An unset var stays null (each
+ * harness runs its own default); a set-but-bad one warns and falls back to
+ * null rather than handing a typo like `AGENT_EFFORT=hihg` to an adapter. The
+ * ticket-directive path clamps to the same set for the same reason. The
+ * vocabulary is the fleet's, not any one harness's: what a level *means* on a
+ * given harness is that adapter's `mapEffort` (issue #214).
  */
 function normalizeEffort(raw: string | undefined): string | null {
   if (raw == null || raw === "") return null;
   if ((ALLOWED_TICKET_EFFORTS as readonly string[]).includes(raw)) return raw;
   console.warn(
-    `Warning: ignoring unrecognised effort "${raw}" — expected one of ` +
-      `${ALLOWED_TICKET_EFFORTS.join(", ")}. Falling back to the CLI default.`
+    `Warning: ignoring unrecognised effort "${raw}" — expected one of the ` +
+      `fleet's effort levels (${ALLOWED_TICKET_EFFORTS.join(", ")}). ` +
+      "Leaving it unset, so each harness runs its own default."
   );
   return null;
 }
 
+/**
+ * Env config, fixed at boot. Deliberately **no model-provider credential
+ * lives here** (issue #226): which variables a pass needs is a fact about the
+ * execution lane it runs on, declared by name in `lanes.yaml` and read by the
+ * lane resolver at pass start (issue #172), and each harness adapter carries
+ * them into one exec's environment. Whether the deployment holds them is the
+ * boot-time lane-availability report's to say (`src/lib/lanes/availability.ts`),
+ * lane by lane — not a warning about one vendor's two variables.
+ */
 export interface AppConfig {
-  /** Anthropic API key (optional if using CLAUDE_CODE_OAUTH_TOKEN) */
-  anthropicApiKey: string | null;
-  /** Long-lived OAuth token from `claude setup-token`, injected into agent containers at exec — the sole subscription-auth path (#28) */
-  claudeCodeOauthToken: string | null;
   /**
-   * Model the CLI runs for an implement pass — and the base every other pass
-   * falls back to (issue #74). Null = pass no `--model`, letting the CLI
-   * resolve the account default (the pre-#74 behaviour), so leaving it unset
-   * changes nothing. Set it to pin the tier and record it on the run row.
+   * Model tier an implement pass runs at — and the base every other pass
+   * falls back to (issue #74). Null = name no model, letting the lane's harness
+   * resolve its own default (the pre-#74 behaviour; a priced lane resolves it
+   * to `standard` instead, issue #175), so leaving it unset changes nothing.
+   * Set it to pin the tier and record it on the run row.
    */
   agentModel: string | null;
   /** Optional cheaper-tier override for review passes; falls back to `agentModel` */
@@ -134,12 +144,14 @@ export interface AppConfig {
    */
   agentMinLane: string | null;
   /**
-   * Reasoning-effort level the CLI runs an implement pass at — and the base
-   * every other pass falls back to (issue #81). The headless CLI exposes this
-   * as a first-class `--effort` flag (levels low | medium | high | xhigh |
-   * max), orthogonal to `--model`. Null = pass no `--effort`, letting the CLI
-   * resolve its own default (the pre-#81 behaviour), so leaving it unset
-   * changes nothing. Set it to pin the depth and record it on the run row.
+   * Reasoning-effort level an implement pass runs at — and the base every
+   * other pass falls back to (issue #81). One of the fleet's five levels
+   * (`ALLOWED_TICKET_EFFORTS`: low | medium | high | xhigh | max), orthogonal
+   * to the model tier; each harness adapter maps the level onto its own dial
+   * through `mapEffort`, or omits it where it has no equivalent (issue #214).
+   * Null = no level named, letting the harness resolve its own
+   * default (the pre-#81 behaviour), so leaving it unset changes nothing. Set
+   * it to pin the depth and record it on the run row.
    */
   agentEffort: string | null;
   /** Optional lower-effort override for review passes; falls back to `agentEffort` */
@@ -222,7 +234,7 @@ export interface AppConfig {
    * ends it as a turn limit (issue #220), in ms — `DEFAULT_TURN_WALL_CLOCK_MS`
    * unless TURN_WALL_CLOCK_MINUTES says otherwise. Adapter-agnostic: a
    * harness with no turn or budget flag of its own is bounded by this alone,
-   * and the Claude lane by this beside its flags.
+   * and a harness with such flags by this beside them.
    */
   turnWallClockMs: number;
   /**
@@ -244,29 +256,11 @@ let _config: AppConfig | null = null;
 export function getConfig(): AppConfig {
   if (_config) return _config;
 
-  const anthropicApiKey = process.env.ANTHROPIC_API_KEY ?? null;
-  const claudeCodeOauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null;
-
-  // Agent-container Claude auth is exec-scoped: CLAUDE_CODE_OAUTH_TOKEN (from
-  // `claude setup-token`), with ANTHROPIC_API_KEY as an alternative. The old
-  // mounted-credentials-file path was retired with the host `~/.claude` mount
-  // (#28), so there is nothing to detect on disk here.
-  //
-  // These two variables are the ones the default lane preference reads (issue
-  // #172) — with neither set, both Anthropic-direct lanes are unavailable and
-  // no pass can start. Which lane a pass actually runs on, and which variables
-  // that lane names, is `lanes.yaml`'s answer, not this one; the warning stays
-  // here because it is the boot-time "you have configured nothing" case.
-  if (!anthropicApiKey && !claudeCodeOauthToken) {
-    console.warn(
-      "Warning: No agent Claude auth configured. Set CLAUDE_CODE_OAUTH_TOKEN " +
-        "(from `claude setup-token`) or ANTHROPIC_API_KEY."
-    );
-  }
-
+  // No model-provider credential is read here (issue #226). Which variables a
+  // pass needs is each lane's declaration in `lanes.yaml`, read by name at pass
+  // start (issue #172); whether the deployment holds them is reported at boot,
+  // lane by lane, by the orchestrator's lane-availability report.
   _config = {
-    anthropicApiKey,
-    claudeCodeOauthToken,
     agentModel: process.env.AGENT_MODEL ?? null,
     agentModelReview: process.env.AGENT_MODEL_REVIEW ?? null,
     agentModelTriage: process.env.AGENT_MODEL_TRIAGE ?? null,
@@ -354,7 +348,7 @@ export function resetConfig(): void {
   _config = null;
 }
 
-/** The pass kinds a Claude turn can run as (mirrors `tasks.kind`). Declared as
+/** The pass kinds an agent turn can run as (mirrors `tasks.kind`). Declared as
  * a list so a caller that has to iterate them — the settings screen showing
  * what each kind would be routed onto (issue #176) — cannot fall out of step
  * with the union derived from it. */
@@ -448,9 +442,9 @@ function choiceFromSetting(
  * execution lane the pass is about to run on (issue #172), not of this module
  * — see `resolveLane`, the only caller. `pinnedModel` is the escape hatch that
  * must keep working: an environment naming a raw model id rather than a tier
- * (`AGENT_MODEL=claude-opus-4-8`) has no tier to map, so the id passes through
- * verbatim. Both null means "pass no model flag": the harness resolves its own
- * default, exactly as before any of this was configurable.
+ * (`AGENT_MODEL=<a provider's own model id>`) has no tier to map, so the id
+ * passes through verbatim. Both null means "name no model": the harness
+ * resolves its own default, exactly as before any of this was configurable.
  *
  * `overrides` is explicit rather than fetched here, and has no default, so a
  * new call site has to decide where it reads them from — the answer is
@@ -468,7 +462,9 @@ export function resolveAgentModelChoice(
   // model id previously recorded on the run row, say — names no tier and
   // falls through to the configured default rather than reaching `--model`.
   const runTier = normalizeModelTier(ticketModel);
-  const resolved = resolveModelTier(kind, config, overrides);
+  // No tier map: this function stops at the tier, and what the tier means is
+  // the lane's answer (`resolveLane`), so no model identifier is read here.
+  const resolved = resolveModelTier(kind, config, overrides, null);
 
   if (isDerivedTierKind(kind)) {
     // Nothing to derive from: the field alone decides, as before.
@@ -494,9 +490,10 @@ export function resolveAgentModelChoice(
  * is the base — implement, repair and interactive passes all use it; the
  * read-heavy review and triage passes may name a lower level via
  * `AGENT_EFFORT_REVIEW` / `AGENT_EFFORT_TRIAGE` and otherwise fall back to it.
- * Null means "pass no `--effort`": the CLI resolves its own default, exactly
+ * Null means "name no level": the harness resolves its own default, exactly
  * as before this was configurable — issue #81 deliberately ships no default
- * other than the CLI's own.
+ * other than each harness's own. The level is the fleet's vocabulary; the
+ * adapter maps it onto its harness's dial (`mapEffort`, issue #214).
  *
  * `ticketEffort` is a per-ticket `effort:` directive, already clamped to the
  * allowlist by the directive parser. When present it overrides the base for

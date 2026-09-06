@@ -9,12 +9,13 @@ export interface SeedInput {
 
 /**
  * The one thing the composer needs of a harness (issue #218): how *this*
- * harness is asked to load a skill. Claude Code expands a slash natively (the
- * #59 spike); Codex mentions a `$skill`; a harness that loads skills through a
- * tool is told to. The composer used to write the slash itself, which made
- * every generation session Claude-only by construction — so it asks the lane's
- * adapter now, and the framing around the line (issue anchor, arming
- * convention) is the same on every harness while the line itself differs.
+ * harness is asked to load a skill. One harness expands a slash natively (the
+ * #59 spike); another mentions the skill by name; a harness that loads skills
+ * through a tool is told to. The composer used to write the slash itself,
+ * which made every generation session one harness's by construction — so it
+ * asks the lane's adapter now, and the framing around the line (issue anchor,
+ * arming convention) is the same on every harness while the line itself
+ * differs.
  *
  * A structural pick rather than the whole adapter, so a test can hand in a
  * two-line double and the turn manager can hand in the real thing.
@@ -76,9 +77,9 @@ export function ISSUE_ANCHOR_HINT(ref: string): string {
  * The invocation line is the adapter's (issue #218) and the framing is the
  * fleet's: the same seed carries the same anchor and the same convention on
  * every harness, and only the first line says how that harness loads a skill.
- * On Claude Code the line is the slash the composer always emitted, so a seed
- * composed for a Claude lane is byte-identical to what it was before the
- * adapter was asked.
+ * On a harness that expands a slash the line is the slash the composer always
+ * emitted, so a seed composed for a lane on the first adapter is
+ * byte-identical to what it was before the adapter was asked.
  */
 export function composeSeed(
   { sessionSkill, sessionIssue, agenda }: SeedInput,
@@ -106,8 +107,8 @@ export function composeSeed(
  *
  * The slash is the *composer's* vocabulary — what the owner types, and what
  * the live composer's menu offers (issue #122) — on every harness. What
- * reaches the agent is the adapter's invocation (issue #218): on Claude Code
- * the same slash, which the #59 spike found expands natively at every turn
+ * reaches the agent is the adapter's invocation (issue #218): on a harness
+ * that expands a slash, the same slash, which the #59 spike found expands natively at every turn
  * position, so there this adds framing rather than rescuing expansion; on a
  * harness that does not expand a slash, the text that makes it load the skill.
  * A follow-on turn has no separate issue anchor — the session's anchor was set

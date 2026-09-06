@@ -246,9 +246,9 @@ chat/preview is never affected.
   the window reopens the fleet claims one ticket, observes the quota again, and
   re-closes the gate within seconds if the wall is still there.
 
-  A fleet on API-key auth is **never** gated: the unified-window telemetry is
-  subscription-only, so such an install reports no quota at all, and silence it
-  cannot break must not read as a wall.
+  A fleet on a **metered** lane is **never** gated: the unified-window telemetry
+  is a subscription-plan construct, so such a lane reports no quota at all, and
+  silence it cannot break must not read as a wall.
 
   Nor is a lane whose **harness** declares no quota telemetry (issue #219): its
   quota row is not even read, so the gate cannot hold on it, the tier ladder
@@ -259,8 +259,8 @@ chat/preview is never affected.
 
   Raise or lower the threshold in **Settings → Quota** (100 = only ever gate on
   an outright rejection), or set `QUOTA_PICKUP_THRESHOLD_PERCENT`. There is
-  deliberately **no headroom reserved** for your own Claude Code sessions: the
-  fleet and you draw on one pool and the fleet takes what it takes.
+  deliberately **no headroom reserved** for your own sessions on the same plan:
+  the fleet and you draw on one pool and the fleet takes what it takes.
 - **Globally, hard off (boot master):** set `AUTONOMY_ENABLED=false` in Doppler
   `interlude/prd` and restart. Sweeps never start at all. Use this to stand the
   fleet down for a while; use the kill switch to stop it now.
@@ -397,7 +397,8 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
     lanes and then waits rather than thrashing.
   Either way the attempt and interruption counters stay where they were. An
   **account-wide** rejection that carried *no* reset time — every refusal from
-  a harness with no rate-limit event, and some Claude ones — still steps down
+  a harness with no rate-limit event, and some from a harness that has one —
+  still steps down
   or moves lanes first, and with nowhere to go parks on the **default backoff**
   (issue #220, `DEFAULT_REFUSAL_BACKOFF_MS`, **1 hour**) rather than spending
   the attempt as it used to. The issue comment says the provider named no
@@ -469,8 +470,8 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
       `ready-for-human` — and because the pauses spent no attempts, re-arming it
       once there is quota picks the work back up with the attempts it never used.
 - **A refused credential is a lane failure, not a wall** (issue #220). A pass
-  whose provider rejected the lane's credential (a 401/403 on Claude Code, the
-  equivalent on any other harness) never reached the model, so it spends no
+  whose provider rejected the lane's credential (a 401/403, as each adapter
+  reads its own harness's signal for one) never reached the model, so it spends no
   attempt and is **not retried on that lane** — no step down, no pause, no lane
   move, because routing around a misconfiguration by spending at another
   provider is what an unavailable lane never gets. An implement pass ends the
@@ -489,11 +490,13 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
 - **Every turn has a wall-clock ceiling** (issue #220): **3 hours** per exec by
   default (`DEFAULT_TURN_WALL_CLOCK_MS`; `TURN_WALL_CLOCK_MINUTES` to change it),
   enforced by the orchestrator around the exec on every harness — a second bound
-  beside Claude Code's `--max-turns`/`--max-budget-usd`, and the only in-turn
-  bound on a harness with no such flags. Past it the turn's own processes are
+  beside a harness's own turn and budget flags where it has them (Claude Code's
+  `--max-turns`/`--max-budget-usd`), and the only in-turn bound on a harness
+  with no such flags — Codex and OpenCode, in the shipped file. Past it the
+  turn's own processes are
   stopped (TERM, then KILL after 10s) and the turn ends as a **turn limit**: an
-  implement attempt fails with "turn limit reached" exactly as it does at the
-  CLI's turn ceiling, a review or triage pass reads as unparseable and takes its
+  implement attempt fails with "turn limit reached" exactly as it does at a
+  harness's own turn ceiling, a review or triage pass reads as unparseable and takes its
   usual retry-then-human path, an interactive turn just ends. The pass's feed
   says the ceiling ended it, so a "turn limit reached" from the ceiling can be
   told from one the harness counted itself. This is also what bounds a harness
@@ -629,10 +632,68 @@ claim comment then records which of the two the run actually took. Triage still 
 anything — the tier is advice about the work, never authority over the
 ticket, and there is no line it could write that names a lane.
 
+### Execution lanes, harnesses and credentials (Settings → Execution lane)
+
+A pass runs on an **execution lane**, and a lane is a named bundle in the
+checked-in `lanes.yaml`: which **harness adapter** runs it (`adapter:`), which
+orchestrator variables that harness needs (`auth:`, names only — the values
+live in Doppler `interlude/prd` under exactly those names), which endpoint,
+what each tier means as a model there (`models:`), what it charges (`prices:`)
+and who pays (`billing:`). Nothing about a vendor is in the app config: the
+orchestrator has no "Claude auth" setting, only lanes that are available or
+not.
+
+- **Credentials, per lane.** A lane whose named variables are all set is
+  *available*. One that lacks any is *unavailable*: the boot log says so, one
+  line per lane naming the variables (`[lanes] execution lane "anthropic-api"
+  is unavailable: ANTHROPIC_API_KEY is not set in the orchestrator's
+  environment`) and stays silent when every lane is available; this screen
+  shows the same per lane; and a pass sent there refuses to start naming them
+  rather than dying inside the harness with "Not logged in". Cost routing never
+  sends work onto an unavailable lane, and never routes *around* one you chose
+  explicitly — fix the variable. A credential reaches a container only for one
+  exec, carried in by the lane's adapter; nothing is mounted from the host and
+  nothing persists in a parked or idle container.
+- **Images and skills, per adapter.** Each harness has its own agent image, a
+  thin layer on a shared base (`Dockerfile.agent-<adapter>` on
+  `Dockerfile.agent-base`), rebuilt when either file changes; this screen shows
+  whether each harness's image is built. The estate's skills are baked into the
+  base image at build, pinned to one ref, and each adapter says how its harness
+  is asked to load one — so a generation session (`/grill-me`, `/to-spec`,
+  `/to-tickets`) is offered only lanes whose harness can invoke a skill, and is
+  refused with the reason otherwise.
+- **The shipped file, as a worked example.** Seven lanes on three adapters,
+  each lane naming its harness under `adapter:`. On the **Claude Code** adapter
+  (`claude-code`): `claude-subscription` (billing `subscription`; reads
+  `CLAUDE_CODE_OAUTH_TOKEN`, a token minted with `claude setup-token`) is the
+  preferred default; `anthropic-api` (metered; `ANTHROPIC_API_KEY`; no prices
+  declared, because on its own provider's endpoint the harness's cost figure is
+  right) and the two `openrouter*` lanes (metered; `OPENROUTER_API_KEY`; prices
+  declared, because off that endpoint the same figure is fiction) are its paid
+  lanes. On the **OpenCode** adapter (`opencode`): `opencode-openrouter-glm`
+  (metered; the same `OPENROUTER_API_KEY` and the same GLM models as
+  `openrouter-glm`, reached natively rather than through OpenRouter's
+  Anthropic-compatible skin, so the harness's share of a result can be told
+  from the model's). On the **Codex CLI** adapter (`codex`): `codex-subscription`
+  (subscription; `CODEX_AUTH_JSON`, the contents of the file `codex login`
+  writes) and `openai-api` (metered; `OPENAI_API_KEY`). Neither Codex nor
+  OpenCode reports its own cost, so their metered lanes *must* declare prices
+  (the file is refused at parse otherwise), and neither reports quota, so the
+  quota tile says "cannot report" for their lanes. Only the two Anthropic-direct
+  lanes are in `primary`: the other five are never defaulted onto and become
+  routing candidates the moment their credential is provisioned — until then
+  each is one line in the boot report, which for the two Codex lanes is the
+  expected state while #224 is open. A further adapter is a new directory under
+  `src/lib/harness/` plus lanes that name it — the rules above do not change
+  with the vendor.
+
 ### Spending real money (metered lanes)
 
-An execution lane declares who pays. `claude-subscription` draws on the plan;
-`anthropic-api` and `openrouter` bill per token — real money. Everything below
+An execution lane declares who pays: a `subscription` lane draws on a plan, a
+`metered` lane bills per token — real money. In the shipped file
+`claude-subscription` and `codex-subscription` are the former; `anthropic-api`,
+`openrouter`, `openrouter-glm`, `opencode-openrouter-glm` and `openai-api` are
+the latter, each with its own `caps.daily_budget_usd`. Everything below
 applies whenever the lane **in force** is metered, whether you made it primary,
 it was reached as overflow, or it was failed over to. Autonomous work on a
 metered lane is allowed on purpose: it is bounded, not forbidden.
@@ -679,9 +740,11 @@ Three practical consequences:
   starts charging the card, or when the primary lane bills per token anyway.
 - **A minimum lane is a floor, not a choice.** Set one per pass kind on
   **Settings → Execution lane** (or deployment-wide with `AGENT_MIN_LANE`), and
-  routing may pick anything *at or above* it. Naming a paid Anthropic-direct
-  lane therefore reads as "first-party Claude only" for that kind, while
-  leaving it unset lets triage and review run on the cheapest lane declared.
+  routing may pick anything *at or above* it. Naming a paid **first-party**
+  lane — one on the harness's own provider, which declares no prices because
+  the harness's figure is right there (`anthropic-api` in the shipped file) —
+  therefore reads as "first-party models only" for that kind, while leaving it
+  unset lets triage and review run on the cheapest lane declared.
   Each row also reports the lane it would be routed onto right now and what
   that lane charges per million tokens, so a surprising choice is readable
   rather than guessable.
@@ -702,7 +765,7 @@ lane that is merely **unavailable** — a missing credential still fails the pas
 naming the variable, rather than being papered over by spending at another
 provider.
 
-### When the subscription window walls (interactive overflow)
+### When a subscription lane's window walls (interactive overflow)
 
 A walled subscription window used to stop autonomous work dead — the run parked
 on the window's clock and resumed itself when it reset. It now **moves lanes
@@ -722,8 +785,9 @@ What you will see, on the session's own screen and in its transcript:
   midnight, so none is offered. Raise the cap in Settings → Real money, or
   carry on tomorrow. The session is not failed; it waits.
 - **"...no paid lane to overflow onto"** — naming the variable that would fix
-  it (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`). Set it in Doppler and the
-  session starts on the next poll.
+  it, as the lane file names it (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` or
+  `OPENAI_API_KEY` in the shipped file). Set it in Doppler and the session
+  starts on the next poll.
 
 Two things follow from this that are easy to be surprised by:
 
@@ -746,11 +810,19 @@ work already paid for — keep starting.
 
 ### Reasoning effort (`effort:`)
 
-`AGENT_EFFORT` pins the CLI's reasoning depth (the `--effort` flag) for the
-implement/repair/interactive passes, the other half of the cost/quality dial
-alongside `AGENT_MODEL`; `AGENT_EFFORT_REVIEW` / `AGENT_EFFORT_TRIAGE` give the
-read-heavy passes a lower level. Valid levels: `low`, `medium`, `high`, `xhigh`,
-`max`. Leave them unset and the CLI keeps its own default (no `--effort`).
+Effort is **fleet vocabulary**: five levels — `low`, `medium`, `high`, `xhigh`,
+`max` — that mean the same thing on every lane. `AGENT_EFFORT` pins the level
+for the implement/repair/interactive passes, the other half of the cost/quality
+dial alongside `AGENT_MODEL`; `AGENT_EFFORT_REVIEW` / `AGENT_EFFORT_TRIAGE` give
+the read-heavy passes a lower level. What a level *means* is the lane's
+harness adapter's to say (`mapEffort`): Claude Code maps the five one to one
+onto its own effort flag; Codex maps them onto its reasoning-effort setting,
+whose top is `xhigh`, so `max` collapses onto it; OpenCode passes the level as
+a model variant, which a model that defines no such variant silently ignores;
+a harness with no equivalent passes no flag and runs at its own default. Leave
+the variables unset and each harness keeps its own default. A value outside the
+five is refused at boot with the list, and the level stays unset — the warning
+names the fleet's vocabulary, not any harness's flag.
 
 A ticket's `effort: <level>` directive in the Workflow section raises (or lowers)
 a single run's work-pass effort — a hard ticket can ask for `max`, a trivial one
@@ -777,15 +849,16 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 | `DISCORD_FLEET_CHANNEL_ID` | Channel for fleet events + fallback for blocked questions when a project has no linked channel. |
 | `MAX_BUDGET_USD` | Per-attempt default budget ($20). |
 | `METERED_DAILY_CAP_USD` | Real money the fleet may spend in one local day through a metered lane ($20). Overridable in Settings → Real money up to a hard $100 ceiling, and bound down by the lane's own declared cap. Subscription work never counts against it. |
+| `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `CODEX_AUTH_JSON`, `OPENAI_API_KEY` | Execution-lane credentials, exactly as `lanes.yaml` names them under each lane's `auth:` (these five are the shipped file's). Set the ones for the lanes you want available; an unset one makes its lanes unavailable — one boot-log line per lane, the same on Settings → Execution lane, and a pass sent there is refused at start naming the variable. Each reaches a container exec-scoped only, carried in by the lane's adapter. |
 | `AGENT_LANE` | The deployment's default execution lane (an id from `lanes.yaml`). Unset, cost routing picks the cheapest lane that can serve each pass and the file's preference order only breaks ties; **set** (here or on the settings screen), it pins the fleet and turns cost routing off. |
 | `AGENT_MIN_LANE` | The weakest lane cost routing may send any pass onto (an id from `lanes.yaml`) — a capability floor, so routing may still pick anything at or above it. Unset means no floor. The fall-through for the four Settings → Execution lane rows left on `environment`. |
-| `AGENT_MODEL`, `AGENT_MODEL_REVIEW`, `AGENT_MODEL_TRIAGE` | Default model per pass kind, as a tier (`heavy`/`standard`/`light`, or the `opus`/`sonnet`/`haiku` aliases) or a raw model id. The fall-through for a Settings → Models row left on `environment`; unset means no `--model` and the CLI resolves the account default. `AGENT_MODEL` is the tier itself for implement, interactive and repair (a repair runs at the run's own tier, issue #211). For review (issue #201) a tier in `AGENT_MODEL_REVIEW` is a **ceiling** on the derived tier — one rung above the run's implement tier — not the tier itself; unset, the derivation runs free. |
+| `AGENT_MODEL`, `AGENT_MODEL_REVIEW`, `AGENT_MODEL_TRIAGE` | Default model per pass kind, as a tier (`heavy`/`standard`/`light`, or the `opus`/`sonnet`/`haiku` aliases) or a raw model id. The fall-through for a Settings → Models row left on `environment`; unset means no model is named and the lane's harness resolves its own default (a lane that declares prices resolves it to `standard`). What a tier means as a model is the lane's `models` map — there is no fleet-wide default map. `AGENT_MODEL` is the tier itself for implement, interactive and repair (a repair runs at the run's own tier, issue #211). For review (issue #201) a tier in `AGENT_MODEL_REVIEW` is a **ceiling** on the derived tier — one rung above the run's implement tier — not the tier itself; unset, the derivation runs free. |
 | `CAPACITY_SLOTS`, `AGENT_MEMORY_MB` | Override derived capacity — only when the derivation is wrong. |
 | `OWED_REVIEW_STALL_MINUTES`, `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES` | Fleet-health watchdog thresholds in minutes (issue #126). Defaults 30 / 3 / 2. |
 | `QUOTA_PICKUP_THRESHOLD_PERCENT` | Quota utilization at or above which no new ticket is claimed (issue #171). One of 50/70/80/85/90/95/100; default 90. The fall-through for Settings → Quota when that row is left on `environment`. |
 | `UNDELIVERED_ANSWER_MINUTES` | How long an answer you gave may sit undelivered before the fleet says so (issue #136). Default 10 — delivery is one 2s poll away, so this cannot fire on a healthy resume. It catches a parked session that is not resuming (memory admission deferring it repeatedly), which from your side looks exactly like an agent still thinking. |
 | `OCCUPANCY_DIVERGED_MINUTES` | How long occupancy may go uncorroborated by real agent containers before it reads as a phantom slot (issue #152). Default 20 — far longer than the pickup debounce because a task provisioning its container is legitimately uncorroborated until the container exists, and a cold agent-image build happens inside that window. The card's remedy is a restart, so a false positive is expensive. |
-| `TURN_WALL_CLOCK_MINUTES` | The most wall-clock time one agent exec may run before the orchestrator stops it and ends the turn as a turn limit (issue #220). Default 180. Adapter-agnostic — the only in-turn bound on a harness with no turn or budget flag, and a second bound beside Claude Code's. An implement attempt that hits it fails as a turn-limited one does, so set it generously. |
+| `TURN_WALL_CLOCK_MINUTES` | The most wall-clock time one agent exec may run before the orchestrator stops it and ends the turn as a turn limit (issue #220). Default 180. Adapter-agnostic — the only in-turn bound on a harness with no turn or budget flag, and a second bound beside the flags of a harness that has them. An implement attempt that hits it fails as a turn-limited one does, so set it generously. |
 
 ### Labels
 

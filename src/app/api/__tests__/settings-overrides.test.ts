@@ -50,7 +50,7 @@ const savedEnv = { ...process.env };
 describe("GET/PATCH /api/settings/overrides", () => {
   beforeEach(() => {
     testDb = createTestDb().db;
-    process.env.ANTHROPIC_API_KEY = "test-key"; // silence the no-auth warning
+    process.env.ANTHROPIC_API_KEY = "test-key"; // makes the metered lane available
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-test";
     process.env.AGENT_MODEL = "claude-opus-4-8";
     delete process.env.AGENT_MODEL_REVIEW;

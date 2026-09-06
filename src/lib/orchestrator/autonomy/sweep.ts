@@ -1926,7 +1926,7 @@ async function executeApplyTriage(
  * implement pass makes at start unless routing has moved it off a walled
  * lane (#173/#176), the same boundary #171's gate reads at — rather than the
  * model-choice step alone, because the lane has the last word on an unset
- * tier: a priced lane resolves it to `standard` where Anthropic-direct lets
+ * tier: a priced lane resolves it to `standard` where a first-party lane lets
  * the harness choose (#175), and naming the step's answer would name a tier
  * the run does not use. A lane that cannot resolve (a missing credential)
  * names nothing: that run fails before it starts, and #172 reports why. The

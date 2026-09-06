@@ -53,13 +53,13 @@ const PRICED_LANE_DEFAULT_TIER: ModelTier = "standard";
  * what a fresh deployment and a one-press lane switch both leave behind, and
  * not merely the pinned-model escape hatch it looks like.
  *
- * On an Anthropic-direct lane the answer is null and means what it has always
- * meant: pass no `--model`, let the harness resolve its own default. A lane
+ * On a first-party lane the answer is null and means what it has always
+ * meant: name no model, let the harness resolve its own default. A lane
  * that declares its own model map and its own prices cannot mean that — the
  * identifier the harness would pick belongs to *another* provider's catalogue,
- * so the endpoint either refuses it or quietly serves a Claude model at a
- * price this lane's table does not hold, and the fleet would charge the CLI's
- * fiction for it.
+ * so the endpoint either refuses it or quietly serves a first-party model at a
+ * price this lane's table does not hold, and the fleet would charge the
+ * harness's fiction for it.
  *
  * Exported because the settings screen resolves the same rows the pass does
  * (issue #172), so it must reach the same answer here or a tier row would read
@@ -208,6 +208,19 @@ export function laneUnavailableReason(laneId: string, why: string): string {
   return `execution lane "${laneId}" is unavailable: ${why}`;
 }
 
+/**
+ * The `why` for a lane whose named variables the environment does not supply
+ * — shared by the resolver refusing a pass and the boot-time availability
+ * report (issue #226), so the line an operator reads in the boot log is the
+ * line the pass would fail with.
+ */
+export function missingEnvReason(missing: readonly string[]): string {
+  return (
+    `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not set in the ` +
+    "orchestrator's environment"
+  );
+}
+
 export interface ResolvedLane {
   id: string;
   label: string;
@@ -235,7 +248,7 @@ export interface ResolvedLane {
   /**
    * What this lane charges for the tier this pass runs at (issue #175), or
    * null to take the harness's own reported cost — see `lane-cost.ts` for why
-   * that figure cannot be trusted off an Anthropic-direct endpoint.
+   * that figure cannot be trusted off a third-party endpoint.
    *
    * Null also covers the pinned-model escape hatch below: a raw model id
    * naming no tier has no priced tier to read, and inventing one would be a
@@ -288,7 +301,7 @@ export interface ResolveLaneInput extends LaneSettingsInput {
  * moved the vocabulary to tiers before this ticket existed.
  *
  * One deliberate exception: an environment that pins a raw model id naming no
- * tier (`AGENT_MODEL=claude-opus-4-8`) still passes through verbatim. Such a
+ * tier (`AGENT_MODEL=<a provider's model id>`) still passes through verbatim. Such a
  * deployment is pinning an identifier it knows its endpoint accepts, and
  * translating it through a lane map we do not have a tier for would be a
  * guess.
@@ -320,11 +333,7 @@ export function resolveLane({
     return {
       ok: false,
       choice,
-      reason: laneUnavailableReason(
-        lane.id,
-        `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not set in the ` +
-          "orchestrator's environment"
-      ),
+      reason: laneUnavailableReason(lane.id, missingEnvReason(missing)),
     };
   }
 

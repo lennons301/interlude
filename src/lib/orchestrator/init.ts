@@ -20,6 +20,7 @@ import { pruneTranscripts } from "../quota/session-transcript";
 import { startPreflightRefresh } from "./autonomy/preflight";
 import { startDailyDigest } from "./digest-schedule";
 import { getConfig } from "../config";
+import { reportLaneAvailability } from "../lanes/availability-report";
 import { isGlobalAutonomyPaused } from "../settings";
 import { isGitHubConfigured } from "../github/client";
 import { isDiscordConfigured, startDiscordBot } from "../discord/client";
@@ -487,6 +488,13 @@ async function reapStaleContainers(): Promise<void> {
 export async function initOrchestrator(): Promise<void> {
   if (initialized) return;
   initialized = true;
+
+  // Which execution lanes cannot run and why (issue #226) — one line per
+  // unavailable lane naming the variables it lacks, nothing when every lane is
+  // available. Read off the lane catalog, because the lane file is the one
+  // statement of which variables the fleet needs; this replaced a warning that
+  // named one vendor's two variables and could say nothing about any other lane.
+  reportLaneAvailability();
 
   const dockerAvailable = await isDockerAvailable();
   if (dockerAvailable) {

@@ -244,7 +244,7 @@ export interface FleetTaskRow {
   status: "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled";
   containerStatus: "setup" | "running" | "idle" | "completing" | null;
   totalCostUsd: number;
-  /** Claude turns run so far — counted by the caller from delivered messages */
+  /** Agent turns run so far — counted by the caller from delivered messages */
   turns: number;
   githubIssue: string | null;
   pullRequestNumber: number | null;
@@ -540,7 +540,7 @@ export interface TierView {
  * harness that ran passes on attempts that ended elsewhere.
  */
 export interface HarnessOutcome {
-  /** The adapter id as stamped (`claude-code`, ...); null for attempts and
+  /** The adapter id as stamped (a registered adapter's id); null for attempts and
    * passes that recorded none — a row from before the column existed, or a
    * claim whose pass has not started — shown as "unknown harness", never
    * attributed to an adapter by way of the lane file. */
@@ -713,10 +713,11 @@ function quotaGlance(observation: QuotaObservation | null): QuotaGlance | null {
  * on the row rather than derived from the billing kind as it was under #175.
  * Billing was the wrong discriminator the moment a second harness existed: a
  * subscription lane on a harness that emits no rate-limit event is
- * subscription-billed and still cannot report, while a metered lane on Claude
- * Code *could* — the provider behind it merely does not (the unified-window
- * machinery is an Anthropic-subscription construct, #165's finding 6,
- * re-confirmed against OpenRouter on 2026-09-02). The tile says which.
+ * subscription-billed and still cannot report, while a metered lane on a
+ * harness with telemetry *could* — the provider behind it merely does not
+ * (the unified-window machinery is a subscription-plan construct, #165's
+ * finding 6, re-confirmed against OpenRouter on 2026-09-02). The tile says
+ * which.
  */
 function quotaLaneGlance(lane: FleetLaneRow | null): QuotaLaneGlance | null {
   if (!lane) return null;

@@ -21,7 +21,7 @@ import { Chip, Gauge, TONES, formatCountdown, formatElapsed } from "./fleet-bits
  *  - **Nothing observed.** A lane whose harness could report one and has not.
  *    Said plainly rather than drawn as an empty gauge, which would read as
  *    "0% used". On a metered lane the tile adds that the lane is bounded by
- *    spend: the unified-window machinery is an Anthropic-subscription construct
+ *    spend: the unified-window machinery is a subscription-plan construct
  *    (#165, finding 6; re-confirmed against OpenRouter on 2026-09-02), so a
  *    metered provider is unlikely ever to emit one — but that is a fact about
  *    the provider, not the harness, and this tile only vouches for the harness.

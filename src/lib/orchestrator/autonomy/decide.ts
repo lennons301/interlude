@@ -1244,7 +1244,7 @@ export function describeRunTier(tier: RunTierChoice): string {
  * (`tier: null`, `model` set — the legal escape hatch `resolveLane` keeps),
  * so the sentence says a model was pinned rather than printing a model id
  * under a "Tier:" label as if it were one. No resolution at all — no catalog,
- * an unavailable lane, or Anthropic-direct letting the harness choose — falls
+ * an unavailable lane, or a first-party lane letting the harness choose — falls
  * back to the reducer's own words, so the embed never says more than it knows.
  */
 export function describeDefaultTier(

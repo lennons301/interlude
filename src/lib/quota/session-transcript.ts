@@ -9,7 +9,7 @@
  * adapter names the container paths that hold a session's replayable state
  * (`sessionArtifactPaths` on the contract), a pause copies exactly those out,
  * and a resume copies them back. Nothing in this module names a vendor path
- * (issue #217); before that ticket it hardcoded Claude Code's transcript
+ * (issue #217); before that ticket it hardcoded one harness's transcript
  * location, which was fine while every lane ran that one adapter and wrong the
  * moment a second one could.
  *
@@ -18,9 +18,9 @@
  * wrote them, which session they belong to and where each one came from. The
  * manifest is what lets a restore put every file back where it was read from
  * rather than re-deriving the paths, and what lets it refuse to hand one
- * harness's artefacts to another. For Claude Code the set is one file — the
- * #165 spike measured it: the JSONL transcript the CLI finds by session id
- * under `--resume`, which a pass killed mid-tool-call resumes from knowing how
+ * harness's artefacts to another. For the first adapter the set is one file —
+ * the #165 spike measured it: the JSONL transcript its harness finds by session
+ * id on resume, which a pass killed mid-tool-call resumes from knowing how
  * far it got, and which a resume *appends* to, so pausing repeatedly grows one
  * artefact rather than a chain to reassemble.
  *
@@ -271,8 +271,8 @@ export interface StoreEntry {
  * A transcript is a directory named for its run, and only a directory whose
  * name has a run id's shape is the store's to remove — a save that was
  * interrupted leaves its in-progress directory behind, and that is stale too.
- * A `.jsonl` *file* is the store's pre-#217 shape (one Claude Code transcript
- * per run, named for it), which nothing reads any more, so it is stale whatever
+ * A `.jsonl` *file* is the store's pre-#217 shape (one transcript file per
+ * run, named for it), which nothing reads any more, so it is stale whatever
  * run it names. Anything else is not the store's and is left alone.
  */
 export function staleTranscriptEntries(

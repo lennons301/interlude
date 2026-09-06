@@ -3,11 +3,12 @@ import type { AppConfig } from "../config";
 import { DEFAULT_QUOTA_PICKUP_THRESHOLD_PERCENT } from "../quota/quota-gate";
 import {
   MODEL_TIERS,
-  TIER_MODEL_IDS,
   normalizeModelTier,
   tierAbove,
   weakerTier,
+  type ModelTier,
 } from "../model-tiers";
+import type { AgentPassKind } from "../config";
 import {
   FIXED_CEILINGS,
   MIN_LANE_ENV_VAR,
@@ -19,17 +20,19 @@ import {
   SETTABLE_KEYS,
   applySettingsPatch,
   describeMinLaneSettings,
-  describeModelTierSettings,
+  describeModelTierSettings as describeModelTierSettingsWithMap,
   parseSettingsPatch,
   resolveMinLane,
-  resolveModelTier,
+  resolveModelTier as resolveModelTierWithMap,
   resolveQuotaThreshold,
   resolveResumeBound,
   sanitizeOverrides,
+  type ModelTierSettingKey,
   type SettingsOverrides,
+  type TierModelIds,
   DERIVED_TIER_KINDS,
   tierCeiling,
-  resolveModelTierField,
+  resolveModelTierField as resolveModelTierFieldWithMap,
   tierDerivation,
   isWorkPassKind,
 } from "../settings-resolver";
@@ -37,6 +40,44 @@ import {
   DEFAULT_MAX_RESUMES_PER_ATTEMPT,
   MAX_RESUMES_CEILING,
 } from "../orchestrator/autonomy/budgets";
+
+/**
+ * The tier map the resolver is handed. Since issue #226 there is no fleet-wide
+ * default map: a caller passes the lane's own `models` (the settings screen,
+ * the primary lane's) or null to resolve a tier and no model. These wrappers
+ * hand every call below the shipped subscription lane's map as a fixture, so
+ * the precedence assertions stay readable as "which model would this run" —
+ * a call that wants a different map, or none, still passes its own.
+ */
+const LANE_MODELS: TierModelIds = { heavy: "opus", standard: "sonnet", light: "haiku" };
+
+function resolveModelTier(
+  kind: AgentPassKind,
+  config: AppConfig,
+  overrides: SettingsOverrides,
+  tierModels: TierModelIds | null = LANE_MODELS
+) {
+  return resolveModelTierWithMap(kind, config, overrides, tierModels);
+}
+
+function resolveModelTierField(
+  key: ModelTierSettingKey,
+  config: AppConfig,
+  overrides: SettingsOverrides,
+  tierModels: TierModelIds | null = LANE_MODELS,
+  fallbackTier: ModelTier | null = null
+) {
+  return resolveModelTierFieldWithMap(key, config, overrides, tierModels, fallbackTier);
+}
+
+function describeModelTierSettings(
+  config: AppConfig,
+  overrides: SettingsOverrides,
+  tierModels: TierModelIds | null = LANE_MODELS,
+  fallbackTier: ModelTier | null = null
+) {
+  return describeModelTierSettingsWithMap(config, overrides, tierModels, fallbackTier);
+}
 
 /**
  * The settings resolver (issue #166) — the layer that lets a UI override sit
@@ -83,12 +124,16 @@ describe("model tier vocabulary", () => {
     expect(normalizeModelTier(null)).toBeNull();
   });
 
-  it("maps every tier to a model id the CLI accepts", () => {
-    expect(MODEL_TIERS.map((tier) => TIER_MODEL_IDS[tier])).toEqual([
-      "opus",
-      "sonnet",
-      "haiku",
-    ]);
+  it("ships no fleet-wide tier→model map: what a tier means is the lane's (issue #226)", async () => {
+    // The pre-lane default map was one harness's aliases; a caller with no
+    // lane in hand is handed the primary lane's map instead, and one that
+    // stops at the tier passes null and gets a tier with no model beside it.
+    const tiers = await import("../model-tiers");
+    expect(tiers).not.toHaveProperty("TIER_MODEL_IDS");
+    for (const tier of MODEL_TIERS) {
+      const resolved = resolveModelTier("implement", cfg({ agentModel: tier }), NONE, null);
+      expect(resolved).toMatchObject({ tier, model: null });
+    }
   });
 });
 
@@ -830,7 +875,7 @@ describe("the derived review tier — the rungs and the ceiling (issue #201)", (
       "modelTierReview",
       cfg({ agentModel: null, agentModelReview: null }),
       NONE,
-      TIER_MODEL_IDS,
+      LANE_MODELS,
       "standard"
     );
     expect(resolved.tier).toBe("standard");

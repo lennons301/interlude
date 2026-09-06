@@ -1,8 +1,10 @@
 /**
- * The `rate_limit_event` the Claude Code CLI puts on its stream, read into one
- * observation of the fleet's quota (issue #167).
+ * The `rate_limit_event` a harness with quota telemetry puts on its stream,
+ * read into one observation of a lane's quota (issue #167). The shape is the
+ * first adapter's wire format, held verbatim (see below); an adapter that
+ * emits it is what a `quotaTelemetry` capability declares (issue #219).
  *
- * The event is derived from the `anthropic-ratelimit-unified-*` response
+ * The event is derived from the provider's unified rate-limit response
  * headers, and the spike on #165 established three things this module is
  * shaped by:
  *

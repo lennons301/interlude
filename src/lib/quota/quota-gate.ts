@@ -49,7 +49,7 @@ import type { QuotaObservation } from "./rate-limit-event";
  * cut off mid-PR.
  *
  * **A single threshold, with no headroom reserved for the owner.** The fleet
- * and the owner's own Claude Code sessions draw on one pool and the fleet takes
+ * and the owner's own sessions on the same plan draw on one pool and the fleet takes
  * what it takes; reserving a slice for interactive use was considered and
  * rejected in #171 as a second number to keep true.
  */

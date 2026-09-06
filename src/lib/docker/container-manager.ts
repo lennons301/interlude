@@ -54,8 +54,8 @@ function checkoutCommand(mode: BranchCheckoutMode): string {
  * baked into the agent image at build, pinned, so a `workflow:<skill>` label
  * or a `/grill-me` session names a skill the image asserted it has — and
  * setup no longer spends ~9s per container (8.7s measured on the pre-#215
- * image, warm, live network) on `claude plugin` commands that only Claude
- * Code could run (issue #60's mechanism).
+ * image, warm, live network) on plugin-install commands that only one
+ * harness could run (issue #60's mechanism).
  */
 export function buildSetupScript(
   platformRepoUrl: string,
@@ -74,9 +74,9 @@ export function buildSetupScript(
 }
 
 /**
- * How a Claude turn's exec environment and command are built moved to the
- * harness adapter with issue #172 — see `src/lib/harness/claude-code.ts`. This
- * module owns the Docker mechanics (create, setup, exec, push, reap) and is
+ * How a turn's exec environment and command are built moved to the harness
+ * adapter with issue #172 — see `src/lib/harness/`, one directory per adapter.
+ * This module owns the Docker mechanics (create, setup, exec, push, reap) and is
  * deliberately harness-agnostic now: `execAgentTurn` below runs whatever
  * command the adapter produced, with whatever environment the resolved lane
  * supplied.
@@ -185,8 +185,8 @@ export async function createWorkspaceContainer(
   // whichever variables the resolved lane names — reaches the harness only in
   // an exec's environment, so no long-lived credential sits in the persistent
   // container environment where a parked or idle container would keep it
-  // readable. ANTHROPIC_API_KEY used to be set here and is not any more; the
-  // `anthropic-api` lane supplies it per exec instead.
+  // readable. The first-party API key used to be set here and is not any
+  // more; the lane that needs it supplies it per exec instead.
   if (options.dopplerToken) {
     env.push(`DOPPLER_TOKEN=${options.dopplerToken}`);
   }
@@ -196,14 +196,19 @@ export async function createWorkspaceContainer(
   //   - the `interlude` Docker network (for preview routing), and
   //   - a fresh, short-lived GitHub App token per exec (GIT_AUTH_TOKEN).
   // Model-provider auth arrives the same exec-scoped way, as whichever
-  // variables the resolved execution lane names (issue #172) — for the default
-  // subscription lane that is CLAUDE_CODE_OAUTH_TOKEN, the VPS-verified live
-  // path (#48) — built by the harness adapter. There is NO
-  // bind mount: the container never sees the host's `~/.claude`, so it cannot
-  // read or write the host user's Claude config, history, project state or
-  // credentials, and whatever the image installs under /home/node/.claude
-  // (the skill links, #215) is no longer shadowed at runtime. Before adding any Bind
-  // here, weigh it against that: a mount is host reach that outlives the run.
+  // variables the resolved execution lane's `auth` maps name (issue #172; the
+  // shipped subscription lane's token is the VPS-verified live path, #48),
+  // carried into the exec by the lane's harness adapter, which is the only
+  // thing that knows how its harness reads a credential. Today that is a
+  // variable in the exec's environment; the seam's rule for a harness that
+  // wants a file (#213) is that the adapter materialises it per exec and
+  // removes it when the turn ends. There is NO bind mount of any kind: the
+  // container never sees the host user's harness home directory, so it cannot
+  // read or write the host's harness configuration, history, project state or
+  // credentials for any harness, and whatever the image installs into its own
+  // harness home directories (the skill links, #215) is no longer shadowed at
+  // runtime. Before adding any Bind here, weigh it against that: a mount is
+  // host reach that outlives the run.
   const containerName = `${AGENT_CONTAINER_NAME_PREFIX}${options.taskId}-${Date.now()}`;
   // DNS-safe subdomain derived from task ID (last 8 chars of ULID, lowercased)
   const previewSubdomain = `task-${options.taskId.slice(-8).toLowerCase()}`;
@@ -335,7 +340,7 @@ export async function execAgentTurn(options: {
   const stderr = new PassThrough();
   docker.modem.demuxStream(rawStream, stdout, stderr);
 
-  // Merge stderr into stdout (Claude writes to both)
+  // Merge stderr into stdout (a harness may write to both)
   const merged = new PassThrough();
   stdout.pipe(merged, { end: false });
   stderr.pipe(merged, { end: false });

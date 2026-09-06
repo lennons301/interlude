@@ -9,7 +9,7 @@
  * parking and resuming — is the orchestrator's and does not vary by vendor.
  *
  * Issue #214 widened it to what a **second** harness actually needs, in an
- * expand step that changes nothing about the Claude lane. A second harness
+ * expand step that changes nothing about the lanes already declared. A second harness
  * has its own image, its own way of being asked to load a skill, its own
  * session artefacts, its own effort dial, and — the load-bearing one — its
  * own way of saying how a turn ended. So an adapter now also declares:
@@ -23,8 +23,8 @@
  *   dashboard. Declared once, and pinned to the descriptor table the parser
  *   reads (`descriptors.ts`), so the two cannot drift.
  * - `composeSkillInvocation`: the text that makes this harness load a named
- *   skill with an agenda. Claude Code keeps its slash; Codex mentions a
- *   `$skill`; a harness that loads skills through a tool is told to.
+ *   skill with an agenda. One harness expands a slash; another mentions the
+ *   skill by name; a harness that loads skills through a tool is told to.
  * - `sessionArtifactPaths`: the container paths that hold a session's
  *   replayable state — what a pause copies out and a resume copies back.
  * - `mapEffort`: the harness's own name for a fleet effort level, or null for
@@ -42,29 +42,29 @@
  *   harness's fact and which secret goes in it is the lane's; a second adapter
  *   changes the former without touching `lanes.yaml`'s shape.
  * - A lane's `baseUrl` is handed over as a *value*, not as a variable name: a
- *   lane knows *which endpoint*, and how a harness is told about it — Claude
- *   Code's `ANTHROPIC_BASE_URL`, some other harness's flag or config file — is
+ *   lane knows *which endpoint*, and how a harness is told about it — one
+ *   harness's environment variable, another's flag or config file — is
  *   the adapter's own business, settled inside `buildExecEnv`.
  * - `createOutputHandler` is part of the interface rather than a shared
  *   utility because a different harness emits a different stream format. It
  *   is the member most likely to be mistaken for orchestrator code, which is
- *   why the Claude Code stream parser lives under its adapter
- *   (`claude-code/stream-parser.ts`) and the orchestrator does not import it.
+ *   why each harness's stream parser lives under its adapter
+ *   (`<adapter id>/stream-parser.ts`) and the orchestrator does not import it.
  * - Prompt delivery is deliberately *not* a parameter of the command builder:
- *   Claude Code takes the prompt through an environment variable so it never
- *   lands in a shell command line, and another harness may take a file or
- *   stdin. The env builder and the command builder are handed the same inputs
- *   and agree between themselves.
+ *   the first adapter takes the prompt through an environment variable so it
+ *   never lands in a shell command line, and another harness may take a file
+ *   or stdin. The env builder and the command builder are handed the same
+ *   inputs and agree between themselves.
  *
  * **A limit, now enforced (issues #199, #217): a lane move carries the
- * session only between lanes on the same adapter.** The Claude lanes all run
- * the one Claude Code adapter, differing only in endpoint, credential variable
- * and model identifiers — which is *why* a pass refused on one of them can
- * continue the same conversation on another (#176's failover, #199's early
- * resume of a paused run): the artefacts `session-transcript.ts` copies out of
- * the refused container are one harness's format, replayed under a session id
- * only that harness has heard of. Two members make that stay true now that the
- * Codex lanes (#221) and the OpenCode lane (#222) name further adapters.
+ * session only between lanes on the same adapter.** The lanes on the first
+ * adapter all run that one harness, differing only in endpoint, credential
+ * variable and model identifiers — which is *why* a pass refused on one of
+ * them can continue the same conversation on another (#176's failover, #199's
+ * early resume of a paused run): the artefacts `session-transcript.ts` copies
+ * out of the refused container are one harness's format, replayed under a
+ * session id only that harness has heard of. Two members make that stay true
+ * now that the lanes added by #221 and #222 name further adapters.
  * `sessionArtifactPaths` makes the artefacts the adapter's rather than a fixed
  * path — the store copies exactly what the adapter names, and nothing at all
  * for an adapter whose `sessionResume` is false. And `restoreSessionTranscript`
@@ -180,7 +180,8 @@ export interface HarnessAdapter {
    * The text that makes this harness load the named skill and follow it, with
    * the agenda (if any) as the skill's argument. The seed composer and the
    * follow-on slash router ask this rather than emitting `/skill` text (issue
-   * #218); on Claude Code it is exactly the slash they emit today.
+   * #218); on a harness that expands a slash it is exactly the slash they emit
+   * today.
    */
   composeSkillInvocation(skill: string, agenda: string | null): string;
   /**

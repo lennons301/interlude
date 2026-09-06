@@ -153,7 +153,7 @@ export const runs = sqliteTable("runs", {
   // true when the work ran. Null for a run that predates lanes.
   laneBilling: text("lane_billing", { enum: ["subscription", "metered"] }),
   // The harness adapter the implement pass ran on (issue #223) — the id the
-  // resolved lane named (`claude-code`, ...), stamped when the pass starts and
+  // resolved lane named (the id the registry knows it by), stamped when the pass starts and
   // rewritten by each later implement pass of the attempt (a continuation
   // after a lane move is one), so a run that moved lanes across adapters
   // reads as the harness that did the work last. A repair pass leaves it
@@ -184,8 +184,8 @@ export const runs = sqliteTable("runs", {
   // Reasoning-effort level the implement pass ran at (issue #81) — the other
   // half of the cost/quality dial alongside model. A ticket's `effort:`
   // directive pins it from claim time; otherwise it is set when the implement
-  // pass starts. Null means AGENT_EFFORT was unset (no directive) and the CLI
-  // resolved its own default.
+  // pass starts. Null means AGENT_EFFORT was unset (no directive) and the
+  // harness resolved its own default.
   effort: text("effort"),
   // The tier this run was *asked* for, once the quota degrade ladder has moved
   // it off that tier (issue #170). Null on every run still running at the tier
@@ -419,8 +419,8 @@ export const messages = sqliteTable("messages", {
 
 /**
  * The last observed quota state **per execution lane** (issue #167, made
- * per-lane by #175): what the Claude Code CLI's `rate_limit_event` said, the
- * last time a pass on that lane saw one.
+ * per-lane by #175): what the harness's rate-limit event said, the last time
+ * a pass on that lane saw one.
  *
  * A table rather than a column on `settings` because the two have opposite
  * lifecycles — `settings` is state a human flips and stamps `updatedAt` when
@@ -444,8 +444,8 @@ export const messages = sqliteTable("messages", {
  * Keyed by lane rather than by the fleet (issue #175) because a rate limit is a
  * fact about one account at one provider, and the lanes do not share one. The
  * unified-window machinery is subscription-only (#165's finding 6, re-confirmed
- * against OpenRouter on 2026-09-02: no `anthropic-ratelimit-*` response header,
- * no `rate_limit_event` anywhere on the stream), so a metered lane has *no*
+ * against OpenRouter on 2026-09-02: no unified rate-limit response header,
+ * no rate-limit event anywhere on the stream), so a metered lane has *no*
  * observation, permanently. Under one fleet-wide row, the fleet's last
  * subscription reading would stand as the current state of a lane that cannot
  * produce one — which is exactly how a lane bounded by spend would come to be

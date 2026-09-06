@@ -7,21 +7,29 @@ import {
   type AppConfig,
   type AgentPassKind,
 } from "../config";
-import type { SettingsOverrides } from "../settings-resolver";
-import { TIER_MODEL_IDS } from "../model-tiers";
+import type { SettingsOverrides, TierModelIds } from "../settings-resolver";
+import { ALLOWED_TICKET_EFFORTS } from "../orchestrator/autonomy/budgets";
 
 /** No UI overrides stored — the state a fresh install is in, where every
  * field falls through to the environment. */
 const NO_OVERRIDES: SettingsOverrides = {};
 
 /**
- * What the resolved tier means as a model id on the *pre-lane* map. Since
- * issue #172 that mapping belongs to the execution lane, so the resolver stops
- * at the tier and this helper does the last step — keeping every precedence
- * assertion below readable as "which model would this pass run", which is the
- * question they were written to answer. The lane-specific mapping is tested in
+ * What each tier means on the lane a pass would run on — here, the shipped
+ * subscription lane's own map, stated as a fixture. Since issue #172 that
+ * mapping belongs to the execution lane (and since #226 there is no pre-lane
+ * default map at all), so the resolver stops at the tier and this helper does
+ * the last step — keeping every precedence assertion below readable as "which
+ * model would this pass run", which is the question they were written to
+ * answer. The lane-specific mapping is tested in
  * `src/lib/lanes/__tests__/resolve.test.ts`.
  */
+const LANE_MODELS: TierModelIds = {
+  heavy: "opus",
+  standard: "sonnet",
+  light: "haiku",
+};
+
 function modelOn(
   kind: Parameters<typeof resolveAgentModelChoice>[0],
   config: AppConfig,
@@ -34,7 +42,7 @@ function modelOn(
     ticketModel,
     overrides
   );
-  return tier !== null ? TIER_MODEL_IDS[tier] : pinnedModel;
+  return tier !== null ? LANE_MODELS[tier] : pinnedModel;
 }
 
 /** A config carrying only the fields the model tier reads. */
@@ -64,7 +72,7 @@ function effortCfg(efforts: {
 }
 
 describe("the model tier (issue #74)", () => {
-  it("returns null for every kind when nothing is configured (CLI default)", () => {
+  it("returns null for every kind when nothing is configured (the harness's default)", () => {
     const c = cfg({ agentModel: null });
     for (const kind of [
       "interactive",
@@ -111,7 +119,7 @@ describe("the model tier (issue #74)", () => {
 });
 
 describe("resolveAgentEffort (issue #81)", () => {
-  it("returns null for every kind when nothing is configured (CLI default)", () => {
+  it("returns null for every kind when nothing is configured (the harness's default)", () => {
     const c = effortCfg({ agentEffort: null });
     for (const kind of [
       "interactive",
@@ -173,18 +181,20 @@ describe("resolveAgentEffort (issue #81)", () => {
   });
 });
 
+/**
+ * Effort is validated against the **fleet's** vocabulary (issue #226): the
+ * five levels are the ticket directive's and the settings' words, and what a
+ * level means on a given harness is that adapter's `mapEffort` (issue #214).
+ * The warning therefore names the vocabulary and no harness's flag.
+ */
 describe("getConfig effort env validation (issue #81)", () => {
   const saved = {
     AGENT_EFFORT: process.env.AGENT_EFFORT,
     AGENT_EFFORT_REVIEW: process.env.AGENT_EFFORT_REVIEW,
     AGENT_EFFORT_TRIAGE: process.env.AGENT_EFFORT_TRIAGE,
-    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
   };
 
   beforeEach(() => {
-    // Suppress the unrelated "no Claude auth" warning so the assertions below
-    // observe only the effort-validation warning.
-    process.env.ANTHROPIC_API_KEY = "test-key";
     delete process.env.AGENT_EFFORT;
   });
 
@@ -211,6 +221,21 @@ describe("getConfig effort env validation (issue #81)", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("effort"));
   });
 
+  it("names the fleet's effort vocabulary in the warning, and no harness's flag", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.AGENT_EFFORT = "hihg";
+    resetConfig();
+    getConfig();
+    const messages = warn.mock.calls.map((call) => String(call[0]));
+    const message = messages.find((text) => text.includes("effort"));
+    expect(message).toContain(ALLOWED_TICKET_EFFORTS.join(", "));
+    // The level set is the fleet's, not a CLI's: the message must not describe
+    // it as a flag or a CLI default, since a second harness maps the same
+    // words onto a different dial.
+    expect(message).not.toMatch(/\bCLI\b/);
+    expect(message).not.toContain("--effort");
+  });
+
   it("treats an unset env effort as null without an effort warning", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     resetConfig();
@@ -222,12 +247,7 @@ describe("getConfig effort env validation (issue #81)", () => {
 describe("AGENT_LANE (issue #172)", () => {
   const saved = {
     AGENT_LANE: process.env.AGENT_LANE,
-    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
   };
-
-  beforeEach(() => {
-    process.env.ANTHROPIC_API_KEY = "test-key"; // silence the no-auth warning
-  });
 
   afterEach(() => {
     for (const [k, v] of Object.entries(saved)) {
@@ -255,6 +275,41 @@ describe("AGENT_LANE (issue #172)", () => {
     process.env.AGENT_LANE = "   ";
     resetConfig();
     expect(getConfig().agentLane).toBeNull();
+  });
+});
+
+/**
+ * The app config holds no model-provider credential (issue #226). Which
+ * variables a pass needs is the lane file's declaration, read by name at pass
+ * start; whether the deployment holds them is the boot-time lane-availability
+ * report's business (`src/lib/lanes/availability.ts`), lane by lane. So a
+ * config read with no credential variable set at all warns about nothing —
+ * the warning that used to name one vendor's two variables is gone, and its
+ * fields with it.
+ */
+describe("no vendor credential in the app config (issue #226)", () => {
+  const CREDENTIALS = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"];
+  const saved = Object.fromEntries(CREDENTIALS.map((k) => [k, process.env[k]]));
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    resetConfig();
+    vi.restoreAllMocks();
+  });
+
+  it("carries no credential field and warns about none", () => {
+    for (const k of CREDENTIALS) delete process.env[k];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    resetConfig();
+    const config = getConfig();
+    expect(warn).not.toHaveBeenCalled();
+    // The two retired fields are gone, not merely null: a reader that wanted a
+    // model-provider credential has to ask the lane resolver for it.
+    expect(config).not.toHaveProperty("anthropicApiKey");
+    expect(config).not.toHaveProperty("claudeCodeOauthToken");
   });
 });
 
