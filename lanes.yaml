@@ -312,14 +312,15 @@ lanes:
   # says "cannot report" for both, permanently) and NO dollar figure (so the
   # metered lane below MUST declare prices — the parser refuses it otherwise);
   # a thread resumes by id from one rollout file, so a pause and a same-adapter
-  # move carry the conversation; and user-invoked skills are OFF until the proof
-  # ticket (#224) shows `$skill` mentions honoured under `codex exec`, so no
-  # generation session is routed here yet.
+  # move carry the conversation; and user-invoked skills are ON since the proof
+  # ticket (#224) showed `$skill` mentions honoured under `codex exec` — the
+  # CLI expands the mention into the prompt before the model is called — so a
+  # generation session may route here.
   #
   # Neither lane is in `primary`: a deployment never *defaults* onto them. They
   # become routing candidates (a failover target off a walled Claude window, or
   # the cheapest lane for a pass) the moment their credential is provisioned —
-  # which is why the credentials are provisioned only when #224 has run.
+  # OPENAI_API_KEY is, since the proof (#224); the ChatGPT credential is not.
   #
   # Model identifiers: the GPT-5.6 family as the CLI (0.153.4) and OpenAI's
   # pricing page name it on 2026-09-05 — three sizes that map onto the three
@@ -329,13 +330,27 @@ lanes:
   # metered lane's identifiers are confirmed served; which the ChatGPT plan
   # serves is still #224's to confirm once that credential exists.
   #
-  # Proof status (#224, 2026-09-06): the adapter's turn command reached the
-  # API on `openai-api` in the built image, and the organisation behind the
-  # key answered every request 429 `credit_balance_exhausted` — no prepaid
-  # credits — which the CLI relays as one sentence, `You have no credits
-  # remaining. Add credits …`, naming neither the status nor the code. The
-  # classifier reads that sentence as a quota refusal (a fail-over-or-park,
-  # never a spent attempt); the end-to-end run waits on credits.
+  # Proven end to end on 2026-09-06 (issue #224, CLI 0.153.4) on `openai-api`
+  # through the unchanged orchestrator: real tickets on last-person-standing
+  # (#265, #266) ran their implement passes on this lane to PRs #268 and #269
+  # (`gpt-5.6-sol` and `-terra`), a review pass returned a verdict the fleet
+  # parsed and stored, and a CI-repair pass turned a red rollup green — lane,
+  # harness and tier stamped on every row, spend booked to `metered_spend` from
+  # the prices below (which match OpenAI's pricing page that day, cache-write
+  # column included); a `to-tickets` generation session on this lane loaded its
+  # skill through the `$skill` mention and published its tickets, which is what
+  # the adapter's `userInvokedSkills` rests on. The pass-by-pass record and the
+  # deviations are on the issue. Two facts about this lane's accounting, both
+  # the adapter's: the wire's `input_tokens` includes the cache-read AND the
+  # cache-written tokens, so the parser subtracts both before charging the plain
+  # input (before #224 a cold turn's cache writes were booked twice); and the
+  # key holds no `api.usage.read` scope, so OpenAI's billed figure cannot be
+  # read back through the API — the booked figure is rate-card-checked only.
+  # First met on attempt 1, before credits were added: the organisation
+  # answered every request 429 `credit_balance_exhausted`, which the CLI relays
+  # as one sentence (`You have no credits remaining. Add credits …`) naming
+  # neither the status nor the code; the classifier reads it as a quota refusal
+  # (a fail-over-or-park, never a spent attempt).
   - id: codex-subscription
     label: Codex (ChatGPT plan)
     adapter: codex
@@ -344,10 +359,12 @@ lanes:
     # `codex login` writes). The orchestrator variable holds that file's
     # contents; the adapter's turn script writes them into a Codex home created
     # for the one exec and removes it when the turn ends, so the file never
-    # persists in a container. Known risk for #224 to settle: the CLI refreshes
-    # a ChatGPT token and rewrites auth.json in place, and the fleet deletes
-    # that file with the exec home and re-seeds the original each turn, so a
-    # rotated refresh token may stop working after the first refresh. The CLI
+    # persists in a container. Known risk, still UNSETTLED after #224 because
+    # no ChatGPT-plan credential was provisioned for the proof (this lane is
+    # declared, unavailable and untested): the CLI refreshes a ChatGPT token
+    # and rewrites auth.json in place, and the fleet deletes that file with the
+    # exec home and re-seeds the original each turn, so a rotated refresh token
+    # may stop working after the first refresh. The CLI
     # (0.153.4) also reads a ChatGPT-backed personal access token from
     # `CODEX_ACCESS_TOKEN`; should #224 prefer that path, this mapping becomes
     # `CODEX_ACCESS_TOKEN: CODEX_ACCESS_TOKEN` — a plain pass-through, no code
