@@ -265,10 +265,24 @@ lanes:
   # Verified on 2026-09-05 in the built image against OpenRouter, on
   # `standard`: a turn ran shell commands and finished; the session resumed by
   # id from the copied database in a fresh container; an invalid key surfaced
-  # as a 401. `prices` are required here by the parser — OpenCode's descriptor
-  # declares no `reportsCost` (its step events carry an estimate from the
-  # models.dev catalogue, not the provider's bill), and a metered lane on such
-  # a harness must price every tier or the file is refused (issue #219).
+  # as a 401. Proven end to end on 2026-09-06 (issue #225, CLI 1.18.29):
+  # moontide#121 ran through the unchanged orchestrator on this lane — triage
+  # on `standard`, the implement pass and what followed it on `heavy` (GLM
+  # 5.3) — with lane and harness stamped and spend booked from the prices
+  # below (the pass-by-pass record is on the issue); a `to-tickets`
+  # generation session on it loaded the skill through OpenCode's `skill` tool
+  # from the adapter's instruction and published its tickets — which is what
+  # the adapter's `userInvokedSkills` now rests on, so a generation session
+  # may route here. `prices` are required here by the parser — OpenCode's
+  # descriptor declares no `reportsCost` (its step events carry an estimate
+  # from the models.dev catalogue, not the provider's bill: on GLM 5.3 Flash
+  # that estimate equals this table to the cent, on GLM 5.3 it is 0.7x of it,
+  # and neither is OpenRouter's bill, which the proof measured at ~71% of the
+  # table for one Flash session; see #225), and a metered lane on such a
+  # harness must price every tier or the file is refused (issue #219).
+  # OpenCode exposes no OpenRouter generation ids, so a per-request audit
+  # against `/v1/generation` is not possible for a harness turn; the key's
+  # usage counter is the billed truth.
   - id: opencode-openrouter-glm
     label: OpenRouter (GLM open weights) via OpenCode
     adapter: opencode

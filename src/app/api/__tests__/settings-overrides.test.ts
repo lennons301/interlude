@@ -232,14 +232,19 @@ describe("execution lanes on /api/settings/overrides", () => {
     for (const lane of state.lanes.lanes) {
       expect(lane.capabilities).toEqual(describeHarnessAdapter(lane.adapter)!.capabilities);
     }
-    for (const id of ["opencode-openrouter-glm", "codex-subscription"]) {
-      expect(state.lanes.lanes.find((l: { id: string }) => l.id === id).capabilities).toEqual({
-        userInvokedSkills: false,
-        quotaTelemetry: false,
-        reportsCost: false,
-        sessionResume: true,
-      });
-    }
+    expect(state.lanes.lanes.find((l: { id: string }) => l.id === "codex-subscription").capabilities).toEqual({
+      userInvokedSkills: false,
+      quotaTelemetry: false,
+      reportsCost: false,
+      sessionResume: true,
+    });
+    // OpenCode's skills are on since its proof (issue #225), so the row says so.
+    expect(state.lanes.lanes.find((l: { id: string }) => l.id === "opencode-openrouter-glm").capabilities).toEqual({
+      userInvokedSkills: true,
+      quotaTelemetry: false,
+      reportsCost: false,
+      sessionResume: true,
+    });
   });
 
   it("never serves a lane secret, only the names of the variables", async () => {

@@ -378,10 +378,10 @@ describe("the shipped lanes.yaml", () => {
       }
     });
 
-    it("carries the opencode adapter's capabilities: no quota telemetry, no cost, resume, no skills yet", () => {
+    it("carries the opencode adapter's capabilities: no quota telemetry, no cost, resume, skills (proven on #225)", () => {
       expect(lane.capabilities).toEqual(describeHarnessAdapter("opencode")!.capabilities);
       expect(lane.capabilities).toEqual({
-        userInvokedSkills: false,
+        userInvokedSkills: true,
         quotaTelemetry: false,
         reportsCost: false,
         sessionResume: true,

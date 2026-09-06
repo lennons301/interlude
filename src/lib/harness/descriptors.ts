@@ -63,11 +63,13 @@ export interface HarnessAdapterDescriptor {
  * figure on its step events is the CLI's own estimate from the models.dev
  * catalogue rather than a provider's bill, so the fleet does not rely on it —
  * a metered OpenCode lane must declare prices and the quota tile says "cannot
- * report"; it resumes a session by id from its one SQLite database; and
- * user-invoked skills stay **off** until the proof ticket (#225) shows the
- * adapter's invocation text actually makes the model load the named SKILL.md
- * through its `skill` tool — until then no generation session routes to an
- * OpenCode lane.
+ * report"; it resumes a session by id from its one SQLite database; and it
+ * **can** invoke user-named skills (on since the proof ticket, #225): the
+ * adapter's instruction made the model load the named SKILL.md through its
+ * `skill` tool on every probe — an unguessable sentinel read back verbatim,
+ * `to-spec` followed to a drafted spec, and a `to-tickets` session through
+ * the orchestrator followed to its publish step — so a generation session
+ * may route to an OpenCode lane.
  */
 export const HARNESS_ADAPTER_DESCRIPTORS = [
   {
@@ -91,7 +93,7 @@ export const HARNESS_ADAPTER_DESCRIPTORS = [
   {
     id: "opencode",
     capabilities: {
-      userInvokedSkills: false,
+      userInvokedSkills: true,
       quotaTelemetry: false,
       reportsCost: false,
       sessionResume: true,

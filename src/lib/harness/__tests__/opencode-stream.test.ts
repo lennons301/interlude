@@ -15,6 +15,7 @@ vi.mock("@/db", () => ({
 }));
 
 import {
+  cacheDetail,
   createOutputHandler,
   describeToolPart,
   normaliseToolInput,
@@ -194,7 +195,7 @@ describe("a recorded opencode run --format json turn", () => {
     handler.write(`{"type":"${OPENCODE_TURN_EXIT_EVENT}","exitCode":0}\n`);
     expect(done).toBe(1);
     const notes = messagesOf(TASK_ID, "system").map(contentOf);
-    expect(notes).toEqual([{ text: "Turn complete (29816 input tokens, 220 output tokens; CLI estimate $0.0007)" }]);
+    expect(notes).toEqual([{ text: "Turn complete (29816 input tokens, of which 26624 cache reads, 220 output tokens; CLI estimate $0.0007)" }]);
   });
 
   it("forwards nothing it acted on to the recorder, and records a line that is not JSON on the feed", () => {
@@ -412,5 +413,21 @@ describe("step usage", () => {
   it("is null for a step reporting no counts at all, so an empty report never prices as a free turn", () => {
     expect(readStepUsage({ reason: "stop" })).toBeNull();
     expect(readStepUsage({ tokens: {} })).toBeNull();
+  });
+});
+
+describe("cacheDetail — the cached share the turn-complete note names (issue #225)", () => {
+  it("names reads alone, reads and writes, or nothing", () => {
+    const base = { inputTokens: 100, outputTokens: 5 };
+    expect(cacheDetail({ ...base, cacheReadTokens: 26624, cacheWriteTokens: 0 })).toBe(
+      ", of which 26624 cache reads"
+    );
+    expect(cacheDetail({ ...base, cacheReadTokens: 26624, cacheWriteTokens: 512 })).toBe(
+      ", of which 26624 cache reads and 512 cache writes"
+    );
+    expect(cacheDetail({ ...base, cacheReadTokens: 0, cacheWriteTokens: 512 })).toBe(
+      ", of which 512 cache writes"
+    );
+    expect(cacheDetail({ ...base, cacheReadTokens: 0, cacheWriteTokens: 0 })).toBe("");
   });
 });
