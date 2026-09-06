@@ -493,6 +493,62 @@ describe("a whole turn through the turn manager on the fake adapter (issue #214)
     ]);
   });
 
+  describe("a lane pin on the run (issue #241)", () => {
+    // Two lanes on the fake adapter, the first primary by the file's order. A
+    // pin on the run is the operator's explicit lane for this run alone: the
+    // pass resolves onto it while an unpinned run on the same fleet still takes
+    // the primary — the fleet's own routing is untouched by a pin.
+    function twoLanes() {
+      laneFile.catalog = fakeLaneCatalogOf([
+        { id: FAKE_LANE_ID, adapter: FAKE_HARNESS_ID, label: "Fake harness" },
+        { id: SECOND_LANE_ID, adapter: FAKE_HARNESS_ID, label: "Fake harness (B)" },
+      ]);
+    }
+
+    it("runs a pinned run's pass on the pinned lane, not the primary", async () => {
+      twoLanes();
+      testDb
+        .update(schema.runs)
+        .set({ lanePin: SECOND_LANE_ID })
+        .where(eq(schema.runs.id, runId))
+        .run();
+      fake.script(scriptedTurn({ kind: "completed" }, { sessionId: "fake-sess", costUsd: 0.1 }));
+      await turns.startTask(taskId);
+      expect(task().lane).toBe(SECOND_LANE_ID);
+      expect(run().lane).toBe(SECOND_LANE_ID);
+      expect(fake.execs).toHaveLength(1);
+      expect(fake.execs[0].laneId).toBe(SECOND_LANE_ID);
+      expect(run().status).toBe("implementing");
+    });
+
+    it("leaves an unpinned run on the fleet's primary — the pin moved nothing else", async () => {
+      twoLanes();
+      fake.script(scriptedTurn({ kind: "completed" }, { sessionId: "fake-sess", costUsd: 0.1 }));
+      await turns.startTask(taskId);
+      expect(task().lane).toBe(FAKE_LANE_ID);
+      expect(fake.execs[0].laneId).toBe(FAKE_LANE_ID);
+    });
+
+    it("refuses to start a pass pinned to a lane the file does not declare, naming the pin, and spends nothing", async () => {
+      twoLanes();
+      testDb
+        .update(schema.runs)
+        .set({ lanePin: "no-such-lane" })
+        .where(eq(schema.runs.id, runId))
+        .run();
+      await turns.startTask(taskId);
+      // The pass never reaches a harness: no exec, no lane stamped, and the
+      // feed names the pin so the operator knows what to clear or restore. The
+      // run takes the bounded interruption path an unavailable lane in force
+      // takes (issue #220) rather than being routed somewhere the operator did
+      // not choose.
+      expect(fake.execs).toHaveLength(0);
+      expect(docker.calls).not.toContain("execAgentTurn");
+      expect(task().lane).toBeNull();
+      expect(feed().join("\n")).toContain('pinned execution lane "no-such-lane" is not declared');
+    });
+  });
+
   describe("refusals and turn bounds on a harness with no rate-limit event and no CLI ceiling (issue #220)", () => {
     /** The shape such a harness produces at a wall: it knows the account
      * refused it for quota, and names neither a window nor a reset. */
