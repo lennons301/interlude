@@ -29,7 +29,6 @@ import {
   removeLabelFromIssue,
 } from "../../github/issues";
 import {
-  armAutoMergeSquash,
   disarmAutoMerge,
   dismissStaleReviewsAsReviewer,
   getPrState,
@@ -101,6 +100,7 @@ import {
   executeResumeRunOnLane,
   gatherPausedRuns,
 } from "./paused-runs";
+import { executeArmAutoMerge, executeGatePr } from "./gate-decision";
 import { observeReviewedHead } from "./review-head";
 import {
   ESTATE_GATES_PATH,
@@ -1567,105 +1567,6 @@ async function executeActions(actions: Action[]): Promise<void> {
         break;
     }
   }
-}
-
-/**
- * A gated PR: label it human-signoff, leave auto-merge disarmed, record the
- * matched categories on the run, and say so on the issue. The label goes on
- * first — if it fails, the run stays pending and the next sweep retries.
- * Moving to `gated` clears any previous cycle's verdict: the review pass
- * that follows judges the PR as it now stands. A supervised run's comment
- * leads with the checkpoint — the decision the owner is being waited on —
- * rather than the (possibly empty) gate categories.
- */
-async function executeGatePr(action: Extract<Action, { type: "gatePr" }>): Promise<void> {
-  const ref = parseIssueRef(action.issueRef);
-  if (!ref) return;
-
-  const labeled = await labelPr(ref.owner, ref.repo, action.prNumber, HUMAN_SIGNOFF_LABEL);
-  if (!labeled) return;
-
-  db.update(runs)
-    .set({
-      status: "gated",
-      gateCategories: action.categories,
-      reviewVerdict: null,
-      reviewResult: null,
-      reviewedHeadSha: null,
-    })
-    .where(eq(runs.id, action.runId))
-    .run();
-
-  const gatedBy = [
-    ...(action.checkpoint !== null ? ["checkpoint"] : []),
-    ...action.categories,
-  ];
-  console.log(
-    `[autonomy] Gated ${action.issueRef} PR #${action.prNumber}: ${gatedBy.join(", ")}`
-  );
-
-  if (action.checkpoint !== null) {
-    const lines = [
-      `Checkpoint: this ticket runs supervised — PR #${action.prNumber} is labelled ` +
-        `\`${HUMAN_SIGNOFF_LABEL}\` with auto-merge left disarmed, regardless of gate ` +
-        `matches. A human approves and merges this one.`,
-    ];
-    if (action.checkpoint.trim()) {
-      lines.push(`The decision waiting:\n\n> ${action.checkpoint.trim()}`);
-    }
-    if (action.categories.length > 0) {
-      lines.push(`It also touches **${action.categories.join(", ")}**.`);
-    }
-    await commentOnIssue(action.issueRef, lines.join("\n\n"));
-    return;
-  }
-
-  await commentOnIssue(
-    action.issueRef,
-    `Review gates: PR #${action.prNumber} touches **${action.categories.join(", ")}** — ` +
-      `labelled \`${HUMAN_SIGNOFF_LABEL}\`, auto-merge left disarmed. A human approves and merges this one.`
-  );
-}
-
-/**
- * An ungated PR: arm auto-merge (squash), move the run to `reviewing`, and
- * say so on the issue. The status flip is what hands the run to the review
- * machinery, and it clears any previous cycle's verdict. Arming an
- * already-armed PR (a crash between arm and flip, or a re-gate after a
- * fix-up cycle) is tolerated by re-reading the PR's state. Genuine arming
- * failure (e.g. auto-merge disabled on the repo) leaves the run pending for
- * the next sweep and is already logged by the GitHub helper.
- */
-async function executeArmAutoMerge(
-  action: Extract<Action, { type: "armAutoMerge" }>
-): Promise<void> {
-  const ref = parseIssueRef(action.issueRef);
-  if (!ref) return;
-
-  let armed = await armAutoMergeSquash(ref.owner, ref.repo, action.prNumber);
-  if (!armed) {
-    const pr = await getPrState(ref.owner, ref.repo, action.prNumber);
-    armed = pr?.autoMergeArmed === true;
-  }
-  if (!armed) return;
-
-  db.update(runs)
-    .set({
-      status: "reviewing",
-      gateCategories: [],
-      reviewVerdict: null,
-      reviewResult: null,
-      reviewedHeadSha: null,
-    })
-    .where(eq(runs.id, action.runId))
-    .run();
-
-  console.log(`[autonomy] Armed auto-merge on ${action.issueRef} PR #${action.prNumber}`);
-  await commentOnIssue(
-    action.issueRef,
-    `Review gates: PR #${action.prNumber} matched no gates — auto-merge (squash) armed; ` +
-      `an approving review will land it.`
-  );
 }
 
 /**
