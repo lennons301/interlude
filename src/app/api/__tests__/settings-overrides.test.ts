@@ -35,6 +35,7 @@ import { getConfig, resetConfig, resolveAgentModelChoice } from "@/lib/config";
 import { getSettingsOverrides } from "@/lib/settings";
 import { getLaneCatalog, resetLaneCatalog } from "@/lib/lanes/catalog";
 import { resolveLane } from "@/lib/lanes/resolve";
+import { describeHarnessAdapter } from "@/lib/harness/descriptors";
 
 function patch(body: unknown, raw?: string): Request {
   return new Request("http://test/api/settings/overrides", {
@@ -209,25 +210,33 @@ describe("execution lanes on /api/settings/overrides", () => {
   });
 
   it("reports each harness the file names with its image and whether it is built (issue #219)", async () => {
-    // One entry per adapter, not per lane: every shipped lane runs Claude
-    // Code, so there is one image to ask about, and the daemon is asked once.
+    // One entry per adapter, not per lane: the Claude lanes share one image
+    // and the OpenCode lane (issue #222) another, so the daemon is asked once
+    // per harness — twice — in the order the file first names them.
     imageProbe.asked.length = 0;
     const state = await (await GET()).json();
 
     expect(state.harnesses).toEqual([
       { id: "claude-code", image: "interlude-agent-claude-code:latest", built: true },
+      { id: "opencode", image: "interlude-agent-opencode:latest", built: true },
     ]);
-    expect(imageProbe.asked).toEqual(["interlude-agent-claude-code:latest"]);
-    // Every lane row carries the capabilities the panel shows beside the
-    // harness, and none of them is a secret.
+    expect(imageProbe.asked).toEqual([
+      "interlude-agent-claude-code:latest",
+      "interlude-agent-opencode:latest",
+    ]);
+    // Every lane row carries the capabilities of the harness it names — the
+    // panel shows them beside the harness — and none of them is a secret.
     for (const lane of state.lanes.lanes) {
-      expect(lane.capabilities).toEqual({
-        userInvokedSkills: true,
-        quotaTelemetry: true,
-        reportsCost: true,
-        sessionResume: true,
-      });
+      expect(lane.capabilities).toEqual(describeHarnessAdapter(lane.adapter)!.capabilities);
     }
+    expect(
+      state.lanes.lanes.find((l: { id: string }) => l.id === "opencode-openrouter-glm").capabilities
+    ).toEqual({
+      userInvokedSkills: false,
+      quotaTelemetry: false,
+      reportsCost: false,
+      sessionResume: true,
+    });
   });
 
   it("never serves a lane secret, only the names of the variables", async () => {

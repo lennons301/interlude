@@ -49,6 +49,13 @@ describe("the adapter descriptor table and the registry (issue #214)", () => {
 
   it("looks a descriptor up by id, and answers null for one it does not hold", () => {
     expect(describeHarnessAdapter("claude-code")?.capabilities.quotaTelemetry).toBe(true);
+    // OpenCode ships (issue #222) and declares what it cannot do; Codex is #221's.
+    expect(describeHarnessAdapter("opencode")?.capabilities).toEqual({
+      userInvokedSkills: false,
+      quotaTelemetry: false,
+      reportsCost: false,
+      sessionResume: true,
+    });
     expect(describeHarnessAdapter("codex")).toBeNull();
   });
 

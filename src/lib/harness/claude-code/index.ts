@@ -1,5 +1,5 @@
 /**
- * The Claude Code adapter (issues #172, #214) — the one harness that ships.
+ * The Claude Code adapter (issues #172, #214) — the first harness that shipped.
  *
  * Everything here was already in the container manager and already tested;
  * what issue #172 changed is where the values come from. The exec environment
@@ -35,7 +35,7 @@ import type {
   HarnessCommandInput,
   HarnessExecEnvInput,
 } from "../adapter";
-import { describeHarnessAdapter } from "../descriptors";
+import { requireHarnessDescriptor } from "../descriptors";
 import { CLAUDE_CODE_IMAGE } from "./image";
 import { createOutputHandler } from "./stream-parser";
 
@@ -243,13 +243,7 @@ export function claudeSessionArtifactPaths(sessionId: string, cwd: string): stri
   return [claudeTranscriptPath(sessionId, cwd)];
 }
 
-const descriptor = describeHarnessAdapter(CLAUDE_CODE_ADAPTER_ID);
-if (descriptor === null) {
-  // Unreachable while the table names this adapter; a throw at load rather
-  // than a silent default is what "cannot be registered without a descriptor"
-  // means at runtime, ahead of the test that pins it.
-  throw new Error(`harness adapter "${CLAUDE_CODE_ADAPTER_ID}" has no descriptor`);
-}
+const descriptor = requireHarnessDescriptor(CLAUDE_CODE_ADAPTER_ID);
 
 export const claudeCodeAdapter: HarnessAdapter = {
   id: CLAUDE_CODE_ADAPTER_ID,
