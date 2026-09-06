@@ -77,7 +77,7 @@ export const CODEX_TURN_FAILED = "turn.failed";
  * error codes when the CLI echoes a body.
  */
 const QUOTA_WORDS =
-  /usage limit|rate limit|too many requests|\b429\b|usage_limit_reached|rate_limit_exceeded|insufficient_quota|credit_balance_exhausted|no credits remaining|insufficient credits|\bquota\b/i;
+  /usage limit|rate limit|too many requests|\b429\b|usage_limit_reached|rate_limit_exceeded|insufficient_quota|credit_balance_exhausted|no credits remaining|\bquota\b/i;
 
 /** The credential was refused: the status, or the API's own words for it. */
 const AUTH_WORDS =

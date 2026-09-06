@@ -67,7 +67,6 @@ describe("classifyCodexExit", () => {
       kind: "refused",
       refusal: { kind: "quota", resumeAfter: null, limitType: null },
     });
-    expect(readCodexRefusal("insufficient credits", NOW)?.kind).toBe("quota");
     expect(readCodexRefusal("{\"error\":{\"code\":\"credit_balance_exhausted\"}}", NOW)?.kind).toBe("quota");
   });
 
