@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"01a07292-348f-7fa1-9864-bc896b72144e"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"/bin/bash -lc \"printf 'pong\\\\n' > pong.txt && cat pong.txt\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"/bin/bash -lc \"printf 'pong\\\\n' > pong.txt && cat pong.txt\"","aggregated_output":"pong\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_1","type":"file_change","changes":[{"path":"/tmp/codex-probe/rec-success/notes/pong.md","kind":"add"}],"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"file_change","changes":[{"path":"/tmp/codex-probe/rec-success/notes/pong.md","kind":"add"}],"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Done — `pong.txt` holds `pong` and `notes/pong.md` was added; both are uncommitted on the branch."}}
+{"type":"turn.completed","usage":{"input_tokens":4100,"cached_input_tokens":3500,"cache_write_input_tokens":0,"output_tokens":130,"reasoning_output_tokens":36}}

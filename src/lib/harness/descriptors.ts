@@ -46,11 +46,19 @@ export interface HarnessAdapterDescriptor {
 /**
  * The adapters that ship. Order is immaterial; ids are unique.
  *
- * Two today: Claude Code, and OpenCode (issue #222). The Codex row lands with
- * its adapter (issue #221) — a row here without a registry entry, or the
- * reverse, fails the pin test rather than a pass.
+ * Three today: Claude Code, the Codex CLI (issue #221) and OpenCode (issue
+ * #222) — a row here without a registry entry, or the reverse, fails the pin
+ * test rather than a pass.
  *
- * OpenCode's row is a capability statement, not a judgement (the spec's rule):
+ * Codex's row is a capability statement, not a judgement (the spec's rule):
+ * its exec stream carries no quota telemetry and no dollar figure, so a
+ * metered Codex lane must declare prices and the quota tile says "cannot
+ * report"; it resumes a thread by id from one rollout file; and user-invoked
+ * skills stay **off** until the proof ticket (#224) shows `$skill` mentions
+ * honoured under `codex exec` — until then no generation session routes to a
+ * Codex lane.
+ *
+ * OpenCode's row is the same kind of statement:
  * its `run --format json` stream carries no quota telemetry, and the dollar
  * figure on its step events is the CLI's own estimate from the models.dev
  * catalogue rather than a provider's bill, so the fleet does not rely on it —
@@ -68,6 +76,15 @@ export const HARNESS_ADAPTER_DESCRIPTORS = [
       userInvokedSkills: true,
       quotaTelemetry: true,
       reportsCost: true,
+      sessionResume: true,
+    },
+  },
+  {
+    id: "codex",
+    capabilities: {
+      userInvokedSkills: false,
+      quotaTelemetry: false,
+      reportsCost: false,
       sessionResume: true,
     },
   },

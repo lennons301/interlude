@@ -25,18 +25,22 @@
 #
 # Because several providers expose Anthropic-compatible endpoints, the Claude
 # lanes here all run the SAME adapter — Claude Code — and differ only in base
-# URL, auth variable and model identifiers. The last lane runs a second
-# adapter, OpenCode (issue #222), against OpenRouter natively, with the same
-# credential and the same GLM models as its Claude Code neighbour — so the two
-# paths to one provider can be compared.
+# URL, auth variable and model identifiers. Two further adapters run at the
+# foot of the file: OpenCode (issue #222) against OpenRouter natively, with the
+# same credential and the same GLM models as its Claude Code neighbour — so the
+# two paths to one provider can be compared — and the Codex CLI (issue #221) on
+# two lanes, which are how a ChatGPT plan and an OpenAI API key become lanes at
+# all: which harness runs a pass is a fact about its lane, exactly as the
+# provider is (spec #213).
 #
-# Running one adapter is what lets a lane move carry the conversation (issues
-# #176, #199): a pass refused on one lane — or parked on its window and
-# resumed early on another — continues the same session on the new lane,
-# because the session artefacts are that harness's and both ends run it. A
-# lane declaring a DIFFERENT `adapter` is still a legal move target, but a
-# move onto it cannot carry the session: the pass starts again on the branch
-# with the work already pushed, and its feed says so (issue #217, enforced at
+# A lane move carries the conversation only between lanes on the same adapter
+# (issues #176, #199, #217): a pass refused on one Claude lane — or parked on
+# its window and resumed early on another — continues the same Claude Code
+# session, because the session artefacts are that harness's and both ends run
+# it; a Codex thread likewise continues between the two Codex lanes. A lane
+# declaring a DIFFERENT `adapter` is still a legal move target, but a move onto
+# it cannot carry the session: the pass starts again on the branch with the
+# work already pushed, and its feed says so (enforced at
 # `restoreSessionTranscript` — see the limit at the foot of
 # `src/lib/harness/adapter.ts`). It costs the conversation, not the attempt.
 
@@ -285,4 +289,77 @@ lanes:
     caps:
       # Enforced as above (issue #174, #173) — the lower of this and the
       # operator's own real-money cap binds.
+      daily_budget_usd: 20
+
+  # ---------------------------------------------------------------------------
+  # Codex CLI lanes (issue #221). Both run the `codex` adapter
+  # (src/lib/harness/codex/), whose descriptor declares what these lanes can
+  # and cannot do: the exec stream carries NO quota telemetry (the quota tile
+  # says "cannot report" for both, permanently) and NO dollar figure (so the
+  # metered lane below MUST declare prices — the parser refuses it otherwise);
+  # a thread resumes by id from one rollout file, so a pause and a same-adapter
+  # move carry the conversation; and user-invoked skills are OFF until the proof
+  # ticket (#224) shows `$skill` mentions honoured under `codex exec`, so no
+  # generation session is routed here yet.
+  #
+  # Neither lane is in `primary`: a deployment never *defaults* onto them. They
+  # become routing candidates (a failover target off a walled Claude window, or
+  # the cheapest lane for a pass) the moment their credential is provisioned —
+  # which is why the credentials are provisioned only when #224 has run.
+  #
+  # Model identifiers: the GPT-5.6 family as the CLI (0.153.4) and OpenAI's
+  # pricing page name it on 2026-09-05 — three sizes that map onto the three
+  # tiers. The same three on both lanes, so a move between them changes who
+  # bills and not what runs the work; retune here without touching code, and
+  # expect #224 to confirm which identifiers the ChatGPT plan actually serves.
+  - id: codex-subscription
+    label: Codex (ChatGPT plan)
+    adapter: codex
+    billing: subscription
+    # The documented CI credential is a seeded `~/.codex/auth.json` (the file
+    # `codex login` writes). The orchestrator variable holds that file's
+    # contents; the adapter's turn script writes them into a Codex home created
+    # for the one exec and removes it when the turn ends, so the file never
+    # persists in a container. Known risk for #224 to settle: the CLI refreshes
+    # a ChatGPT token and rewrites auth.json in place, and the fleet deletes
+    # that file with the exec home and re-seeds the original each turn, so a
+    # rotated refresh token may stop working after the first refresh. The CLI
+    # (0.153.4) also reads a ChatGPT-backed personal access token from
+    # `CODEX_ACCESS_TOKEN`; should #224 prefer that path, this mapping becomes
+    # `CODEX_ACCESS_TOKEN: CODEX_ACCESS_TOKEN` — a plain pass-through, no code
+    # change.
+    auth:
+      CODEX_AUTH_JSON: CODEX_AUTH_JSON
+    # No base_url: the CLI's built-in OpenAI provider, the only one a ChatGPT
+    # credential authenticates against.
+    models:
+      heavy: gpt-5.6-sol
+      standard: gpt-5.6-terra
+      light: gpt-5.6-luna
+
+  - id: openai-api
+    label: OpenAI API
+    adapter: codex
+    billing: metered
+    # The variable the CLI reads an API key from is CODEX_API_KEY (measured on
+    # 0.149.1 and 0.153.4: OPENAI_API_KEY alone sends no bearer). The secret is
+    # provisioned under its natural name on the right.
+    auth:
+      CODEX_API_KEY: OPENAI_API_KEY
+    models:
+      heavy: gpt-5.6-sol
+      standard: gpt-5.6-terra
+      light: gpt-5.6-luna
+    # USD per million tokens, from OpenAI's API pricing page on 2026-09-05
+    # (input / cached input / output, plus the page's short-context cache write
+    # price). Required, not optional: Codex reports no cost, so these are the
+    # only figures the fleet has to book this lane's spend from (issue #219's
+    # rule, enforced at parse).
+    prices:
+      heavy: { input: 4.0, output: 20.0, cache_read: 0.4, cache_write: 5.0 }
+      standard: { input: 2.0, output: 12.0, cache_read: 0.2, cache_write: 2.5 }
+      light: { input: 0.2, output: 1.2, cache_read: 0.02, cache_write: 0.25 }
+    caps:
+      # Enforced as above (issue #174) — the lower of this and the operator's
+      # own real-money cap binds.
       daily_budget_usd: 20

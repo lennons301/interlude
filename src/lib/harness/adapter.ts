@@ -58,13 +58,13 @@
  *
  * **A limit, now enforced (issues #199, #217): a lane move carries the
  * session only between lanes on the same adapter.** The Claude lanes all run
- * the one Claude Code adapter, differing only in endpoint, credential
- * variable and model identifiers — which is *why* a pass refused on one of
- * them can continue the same conversation on another (#176's failover, #199's
- * early resume of a paused run): the artefacts `session-transcript.ts` copies
- * out of the refused container are one harness's format, replayed under a
- * session id only that harness has heard of. The OpenCode lane (#222) runs a
- * second adapter, and two members keep that true across the two.
+ * the one Claude Code adapter, differing only in endpoint, credential variable
+ * and model identifiers — which is *why* a pass refused on one of them can
+ * continue the same conversation on another (#176's failover, #199's early
+ * resume of a paused run): the artefacts `session-transcript.ts` copies out of
+ * the refused container are one harness's format, replayed under a session id
+ * only that harness has heard of. Two members make that stay true now that the
+ * Codex lanes (#221) and the OpenCode lane (#222) name further adapters.
  * `sessionArtifactPaths` makes the artefacts the adapter's rather than a fixed
  * path — the store copies exactly what the adapter names, and nothing at all
  * for an adapter whose `sessionResume` is false. And `restoreSessionTranscript`
