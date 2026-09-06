@@ -152,6 +152,13 @@ export const runs = sqliteTable("runs", {
   // billing history of every past run. The ledger's job is to say what was
   // true when the work ran. Null for a run that predates lanes.
   laneBilling: text("lane_billing", { enum: ["subscription", "metered"] }),
+  // An operator's lane pin for this run (issue #241): the lane id the owner
+  // chose for this one ticket at arming time, copied from `lane_pins` when the
+  // run is claimed and honoured by every pass of the run as the lane in force
+  // — cost routing does not move a pinned pass for cheapness, a wall still
+  // follows the wall ordering. Null for a run that routes as the fleet does.
+  // Never set from a ticket body: the directive parser has no lane key.
+  lanePin: text("lane_pin"),
   // The harness adapter the implement pass ran on (issue #223) — the id the
   // resolved lane named (the id the registry knows it by), stamped when the pass starts and
   // rewritten by each later implement pass of the attempt (a continuation
@@ -335,6 +342,11 @@ export const tasks = sqliteTable("tasks", {
   // predates lanes.
   lane: text("lane"),
   laneBilling: text("lane_billing", { enum: ["subscription", "metered"] }),
+  // An operator's lane pin for this task (issue #241): set at creation for an
+  // interactive or generation session (`POST /api/tasks` with `lane`), read
+  // ahead of the fleet's primary lane for this task's turns and no others. A
+  // ticket-loop pass reads its run's pin instead. Null = route as the fleet does.
+  lanePin: text("lane_pin"),
   // The harness adapter this pass ran on (issue #223), stamped from the
   // resolved lane when the pass starts (a follow-up turn re-records it, as it
   // does the lane). Per task as well as per run because the task is the unit
@@ -487,3 +499,23 @@ export const quotaState = sqliteTable("quota_state", {
   observation: text("observation", { mode: "json" }).notNull(),
   observedAt: int("observed_at", { mode: "timestamp_ms" }).notNull(),
 });
+
+/**
+ * Operator lane pins for tickets not yet claimed (issue #241). A row says: when
+ * the ticket-loop claims issue `issueNumber` of `projectId`, run it on lane
+ * `lane` rather than the fleet's primary — one ticket, not the fleet. The row
+ * is consumed at claim (copied onto `runs.lanePin`, then deleted), so a pin is
+ * spent exactly once, by the attempt it was set for. Written only by the
+ * operator API, never from an issue body.
+ */
+export const lanePins = sqliteTable("lane_pins", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id")
+    .notNull()
+    .references(() => projects.id, { onDelete: "cascade" }),
+  issueNumber: int("issue_number").notNull(),
+  lane: text("lane").notNull(),
+  createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+export type LanePin = typeof lanePins.$inferSelect;
