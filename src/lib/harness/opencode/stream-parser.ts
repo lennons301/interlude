@@ -112,6 +112,17 @@ function readCount(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
+/** The cached share of a turn's input, for the turn-complete note: reads,
+ * and writes when the provider reports any (OpenRouter's GLM family reports
+ * none — see the lane's `prices`). Empty when neither happened, so the note
+ * says nothing it cannot back. */
+function cacheDetail(usage: TurnTokenUsage): string {
+  const parts: string[] = [];
+  if (usage.cacheReadTokens > 0) parts.push(`${usage.cacheReadTokens} cache reads`);
+  if (usage.cacheWriteTokens > 0) parts.push(`${usage.cacheWriteTokens} cache writes`);
+  return parts.length === 0 ? "" : ` (${parts.join(", ")})`;
+}
+
 /** The transcript's verb for one of OpenCode's tool names. */
 export function toolVerb(tool: string): string {
   return TOOL_VERBS[tool] ?? tool.charAt(0).toUpperCase() + tool.slice(1);
@@ -293,11 +304,17 @@ export function createOutputHandler(
         // The last error rides with the exit so the recorder's pass-exit
         // record (`runTurn`) keeps the refusal's body verbatim (issue #165).
         terminal = lastErrorEvent === null ? event : { ...event, lastError: lastErrorEvent };
+        // Cache reads are named beside the input total (issue #225): on this
+        // lane a cached token costs a fifth of a fresh one, and "how much of
+        // a pass was cache reads" is the figure that tells the native path
+        // from the Anthropic-skin path on the same model — it was only
+        // readable out of the session database before this line carried it.
         const tokens =
           usage === null
             ? "no token usage reported"
-            : `${usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens} input tokens, ` +
-              `${usage.outputTokens} output tokens`;
+            : `${usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens} input tokens` +
+              cacheDetail(usage) +
+              `, ${usage.outputTokens} output tokens`;
         // The CLI's own estimate, which on a lane that declares prices is not
         // what the turn is charged (issue #175) — `runTurn` adds the lane's
         // number beside this line when the two differ.

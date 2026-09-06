@@ -277,7 +277,7 @@ describe("an implement pass on the shipped OpenCode lane (issue #222)", () => {
     expect(rows.filter((r) => r.type === "tool_use").map((r) => r.content.tool)).toEqual(["Bash", "Bash"]);
     expect(rows.filter((r) => r.type === "text").map((r) => r.content.text)).toEqual(["Done: pong.txt written"]);
     expect(
-      rows.some((r) => r.content.text === "Turn complete (29816 input tokens, 220 output tokens; CLI estimate $0.0007)")
+      rows.some((r) => r.content.text === "Turn complete (29816 input tokens (26624 cache reads), 220 output tokens; CLI estimate $0.0007)")
     ).toBe(true);
 
     // A completed outcome is the ordinary implement path: pushed, PR opened
