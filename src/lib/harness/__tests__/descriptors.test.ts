@@ -50,15 +50,20 @@ describe("the adapter descriptor table and the registry (issue #214)", () => {
   it("looks a descriptor up by id, and answers null for one it does not hold", () => {
     expect(describeHarnessAdapter("claude-code")?.capabilities.quotaTelemetry).toBe(true);
     // Codex (issue #221) and OpenCode (issue #222) ship and declare what they
-    // cannot do.
-    const noTelemetryNoCost = {
+    // cannot do. OpenCode's user-invoked skills are on since its proof (issue
+    // #225); Codex's wait on its own (#224).
+    expect(describeHarnessAdapter("codex")?.capabilities).toEqual({
       userInvokedSkills: false,
       quotaTelemetry: false,
       reportsCost: false,
       sessionResume: true,
-    };
-    expect(describeHarnessAdapter("codex")?.capabilities).toEqual(noTelemetryNoCost);
-    expect(describeHarnessAdapter("opencode")?.capabilities).toEqual(noTelemetryNoCost);
+    });
+    expect(describeHarnessAdapter("opencode")?.capabilities).toEqual({
+      userInvokedSkills: true,
+      quotaTelemetry: false,
+      reportsCost: false,
+      sessionResume: true,
+    });
     expect(describeHarnessAdapter("no-such-harness")).toBeNull();
   });
 

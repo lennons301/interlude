@@ -233,11 +233,15 @@ export function buildOpenCodeTurnCommand(input: HarnessCommandInput): string {
  * calls itself, listing every skill under the `~/.agents/skills` folders the
  * base image installs (#215) — so the invocation names the skill, tells the
  * model to load it with that tool and follow it, and hands the agenda over as
- * the skill's argument. Whether the text actually makes the model load the
- * SKILL.md is the proof ticket's to show (#225, with an unguessable
- * sentinel), which is why this adapter declares `userInvokedSkills: false`
- * until it does: no generation session is routed here, so this text reaches
- * no agent yet.
+ * the skill's argument.
+ *
+ * Proven on the proof ticket (#225, 1.18.29 in the built image, GLM 5.3
+ * Flash on OpenRouter): this exact text, as the first line of a seed, made
+ * the model call the `skill` tool for the named skill on every run — a probe
+ * skill carrying an unguessable sentinel came back verbatim on the first
+ * try, and the estate's `to-spec` and `to-tickets` skills were loaded and
+ * followed to their publish step. That is what `userInvokedSkills: true` in
+ * the descriptor rests on, and why a generation session may route here.
  */
 export function composeOpenCodeSkillInvocation(skill: string, agenda: string | null): string {
   const trimmed = agenda?.trim();

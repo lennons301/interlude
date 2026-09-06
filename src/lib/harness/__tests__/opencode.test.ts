@@ -49,7 +49,7 @@ function lane(overrides: Partial<ResolvedLane> = {}): ResolvedLane {
     label: "OpenRouter (GLM open weights) via OpenCode",
     adapter: OPENCODE_ADAPTER_ID,
     capabilities: {
-      userInvokedSkills: false,
+      userInvokedSkills: true,
       quotaTelemetry: false,
       reportsCost: false,
       sessionResume: true,
@@ -284,9 +284,9 @@ describe("the adapter", () => {
     expect(opencodeAdapter.capabilities).toEqual(describeHarnessAdapter("opencode")!.capabilities);
   });
 
-  it("states what it cannot do: no quota telemetry, no cost reporting, no user-invoked skills yet; it resumes a session", () => {
+  it("states what it can and cannot do: no quota telemetry, no cost reporting; it resumes a session and invokes skills (proven on #225)", () => {
     expect(opencodeAdapter.capabilities).toEqual({
-      userInvokedSkills: false,
+      userInvokedSkills: true,
       quotaTelemetry: false,
       reportsCost: false,
       sessionResume: true,
