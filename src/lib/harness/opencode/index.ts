@@ -239,8 +239,10 @@ export function buildOpenCodeTurnCommand(input: HarnessCommandInput): string {
  * Flash on OpenRouter): this exact text, as the first line of a seed, made
  * the model call the `skill` tool for the named skill on every run — a probe
  * skill carrying an unguessable sentinel came back verbatim on the first
- * try, and the estate's `to-spec` and `to-tickets` skills were loaded and
- * followed to their publish step. That is what `userInvokedSkills: true` in
+ * try, `to-spec` was loaded and followed to a drafted spec, and a
+ * `to-tickets` generation session through the real orchestrator was loaded
+ * and followed to its publish step (two issues published, unlabelled, the
+ * arming confirmation asked for). That is what `userInvokedSkills: true` in
  * the descriptor rests on, and why a generation session may route here.
  */
 export function composeOpenCodeSkillInvocation(skill: string, agenda: string | null): string {

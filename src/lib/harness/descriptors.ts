@@ -67,8 +67,9 @@ export interface HarnessAdapterDescriptor {
  * **can** invoke user-named skills (on since the proof ticket, #225): the
  * adapter's instruction made the model load the named SKILL.md through its
  * `skill` tool on every probe — an unguessable sentinel read back verbatim,
- * and the estate's own session skills followed to their publish step — so a
- * generation session may route to an OpenCode lane.
+ * `to-spec` followed to a drafted spec, and a `to-tickets` session through
+ * the orchestrator followed to its publish step — so a generation session
+ * may route to an OpenCode lane.
  */
 export const HARNESS_ADAPTER_DESCRIPTORS = [
   {
