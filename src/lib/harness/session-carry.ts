@@ -11,7 +11,8 @@
  * is the same one: the artefacts are one adapter's format, and the id names a
  * conversation only that harness has heard of. The Claude lanes all run the
  * one Claude Code adapter, which is why every move between them is lossless;
- * the Codex lanes (#221) run a second, and this is what keeps that true.
+ * the Codex lanes (#221) and the OpenCode lane (#222) run others, and this is
+ * what keeps that true.
  *
  * The decision is made where both ends are known — as the pass starts, with
  * the lane it is starting on resolved — rather than when the continuation was

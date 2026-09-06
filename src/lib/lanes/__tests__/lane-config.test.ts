@@ -4,7 +4,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { describe, expect, it } from "vitest";
 import { parseLaneConfig, laneIds, laneReportsQuota } from "../lane-config";
 import { LANE_CONFIG_FILE } from "../catalog";
-import { choosePrimaryLane, laneMissingEnv } from "../resolve";
+import { choosePrimaryLane, laneIsAvailable, laneMissingEnv } from "../resolve";
 import {
   HARNESS_ADAPTER_DESCRIPTORS,
   describeHarnessAdapter,
@@ -143,7 +143,7 @@ lanes:
     });
 
     it("rejects an unknown harness adapter, naming the described ones", () => {
-      expect(reasonFor(VALID.replace("adapter: claude-code", "adapter: opencode")))
+      expect(reasonFor(VALID.replace("adapter: claude-code", "adapter: no-such-harness")))
         .toContain("claude-code");
     });
 
@@ -255,12 +255,13 @@ describe("the shipped lanes.yaml", () => {
     expect(subscription.label).toBe("Claude subscription (Pro)");
   });
 
-  it("runs every lane on one of the two adapters that ship, and names both", () => {
-    // The Claude lanes all run Claude Code; the Codex lanes (issue #221) run
-    // the second adapter. Every adapter a lane names is a described one — the
-    // parser refused the file otherwise — and both that ship are in use.
+  it("runs every lane on one of the three adapters that ship, and names all three", () => {
+    // The Claude lanes all run Claude Code; the Codex lanes (issue #221) and
+    // the OpenCode lane (issue #222) run the other two. Every adapter a lane
+    // names is a described one — the parser refused the file otherwise — and
+    // every adapter that ships is in use.
     const adapters = new Set(catalog.lanes.map((lane) => lane.adapter));
-    expect([...adapters].sort()).toEqual(["claude-code", "codex"]);
+    expect([...adapters].sort()).toEqual(["claude-code", "codex", "opencode"]);
     for (const lane of catalog.lanes) {
       expect(lane.capabilities).toEqual(describeHarnessAdapter(lane.adapter)!.capabilities);
     }
@@ -354,6 +355,67 @@ describe("the shipped lanes.yaml", () => {
     });
   });
 
+  describe("the OpenCode lane (issue #222)", () => {
+    const lane = catalog.lanes.find((l) => l.id === "opencode-openrouter-glm")!;
+    const sibling = catalog.lanes.find((l) => l.id === "openrouter-glm")!;
+
+    it("runs the opencode adapter, metered, on the same credential as its Claude Code neighbour", () => {
+      expect(lane.adapter).toBe("opencode");
+      expect(lane.billing).toBe("metered");
+      // OpenCode reads OPENROUTER_API_KEY as-is, so the harness variable and
+      // the orchestrator variable coincide — the same secret the Claude Code
+      // lane maps onto ANTHROPIC_AUTH_TOKEN.
+      expect(lane.auth).toEqual([{ harnessVar: "OPENROUTER_API_KEY", fromEnv: "OPENROUTER_API_KEY" }]);
+      expect(sibling.auth.map((ref) => ref.fromEnv)).toEqual(["OPENROUTER_API_KEY"]);
+      // No base_url: OpenCode's own OpenRouter provider is the endpoint.
+      expect(lane.baseUrl).toBeNull();
+      expect(lane.caps.dailyBudgetUsd).toBeGreaterThan(0);
+    });
+
+    it("pins the same GLM models as the Claude Code lane, in OpenCode's provider/model form", () => {
+      for (const tier of ["heavy", "standard", "light"] as const) {
+        expect(lane.models[tier]).toBe(`openrouter/${sibling.models[tier]}`);
+      }
+    });
+
+    it("carries the opencode adapter's capabilities: no quota telemetry, no cost, resume, no skills yet", () => {
+      expect(lane.capabilities).toEqual(describeHarnessAdapter("opencode")!.capabilities);
+      expect(lane.capabilities).toEqual({
+        userInvokedSkills: false,
+        quotaTelemetry: false,
+        reportsCost: false,
+        sessionResume: true,
+      });
+      expect(laneReportsQuota(lane)).toBe(false);
+    });
+
+    it("prices every tier — at the Claude Code lane's prices, since it is the same model on the same provider", () => {
+      expect(lane.prices).toEqual(sibling.prices);
+      for (const tier of ["heavy", "standard", "light"] as const) {
+        expect(lane.prices![tier].inputPerMTok).toBeGreaterThan(0);
+        expect(lane.prices![tier].outputPerMTok).toBeGreaterThan(0);
+      }
+      // The rule, live on this file (issue #219): a metered lane on a harness
+      // that reports no cost is refused without them.
+      const doc = parseYaml(text) as { lanes: Array<{ id: string; prices?: unknown }> };
+      const opencode = doc.lanes.find((l) => l.id === "opencode-openrouter-glm")!;
+      delete opencode.prices;
+      const result = parseLaneConfig(stringifyYaml(doc));
+      expect(result.ok).toBe(false);
+      expect(!result.ok && result.reason).toMatch(/opencode.*reports no cost.*prices/);
+    });
+
+    it("is unavailable when the OpenRouter key is absent, and available when it is set", () => {
+      expect(laneMissingEnv(lane, {})).toEqual(["OPENROUTER_API_KEY"]);
+      expect(laneIsAvailable(lane, { ANTHROPIC_API_KEY: "sk-ant-x" })).toBe(false);
+      expect(laneIsAvailable(lane, { OPENROUTER_API_KEY: "sk-or-x" })).toBe(true);
+    });
+
+    it("is not in the primary preference — nothing routes here until chosen", () => {
+      expect(catalog.preference).not.toContain("opencode-openrouter-glm");
+    });
+  });
+
   it("reproduces the pre-lane model mapping on the subscription lane", () => {
     // "All existing passes run through it unchanged" is a fact about these
     // three values: they are what every pass has run on since issue #74.
@@ -394,12 +456,18 @@ describe("the shipped lanes.yaml", () => {
 
   it("carries the OpenRouter credential on more than one lane, unduplicated", () => {
     // The ticket's own thesis, as a fact about the file: changing *model* on a
-    // third-party provider is a tier-map edit, not a new credential.
+    // third-party provider is a tier-map edit, not a new credential — and
+    // since issue #222 changing *harness* is an adapter edit, not one either.
     const openrouterLanes = catalog.lanes.filter((lane) =>
       lane.auth.some((ref) => ref.fromEnv === "OPENROUTER_API_KEY")
     );
-    expect(openrouterLanes.length).toBeGreaterThan(1);
-    expect(new Set(openrouterLanes.map((lane) => lane.baseUrl)).size).toBe(1);
+    expect(openrouterLanes.length).toBeGreaterThan(2);
+    // The Claude Code lanes share the skin's one base URL; the OpenCode lane
+    // reaches the same provider through the harness's own endpoint.
+    const claude = openrouterLanes.filter((lane) => lane.adapter === "claude-code");
+    expect(claude.length).toBeGreaterThan(1);
+    expect(new Set(claude.map((lane) => lane.baseUrl)).size).toBe(1);
+    expect(openrouterLanes.some((lane) => lane.adapter === "opencode")).toBe(true);
   });
 
   it("contains no value that could be a secret", () => {

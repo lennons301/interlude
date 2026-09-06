@@ -64,10 +64,11 @@
  * resume of a paused run): the artefacts `session-transcript.ts` copies out of
  * the refused container are one harness's format, replayed under a session id
  * only that harness has heard of. Two members make that stay true now that the
- * Codex lanes (#221) name a second adapter. `sessionArtifactPaths` makes the
- * artefacts the adapter's rather than a fixed path — the store copies exactly
- * what the adapter names, and nothing at all for an adapter whose
- * `sessionResume` is false. And `restoreSessionTranscript` in the turn manager
+ * Codex lanes (#221) and the OpenCode lane (#222) name further adapters.
+ * `sessionArtifactPaths` makes the artefacts the adapter's rather than a fixed
+ * path — the store copies exactly what the adapter names, and nothing at all
+ * for an adapter whose `sessionResume` is false. And `restoreSessionTranscript`
+ * in the turn manager
  * — the one seam that knows both the lane the pass is starting on and the pass
  * it continues (`tasks.resumedFromTaskId` -> its `lane` -> its adapter) —
  * decides through the pure `decideSessionCarry` (`session-carry.ts`) whether
