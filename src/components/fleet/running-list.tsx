@@ -85,13 +85,16 @@ function RunCard({ card, now }: { card: RunningCard; now: number }) {
             that is also why it never reaches "needs you".
             A generation session reads as "session · grill-me", not the bare
             "interactive" mode, so grilling is distinct from an agent driving
-            (issue #61). */}
+            (issue #61); a live-preview session reads as "preview" (issue
+            #160), the intent the owner chose at entry. */}
         <Chip tone={card.paused ? "quiet" : MODE_TONE[card.mode]}>
           {card.paused
             ? "paused"
             : card.sessionSkill
               ? `session · ${card.sessionSkill}`
-              : card.mode}
+              : card.livePreview
+                ? "preview"
+                : card.mode}
         </Chip>
       </div>
 

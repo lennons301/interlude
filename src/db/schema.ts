@@ -332,6 +332,15 @@ export const tasks = sqliteTable("tasks", {
   // a `Closes #n` draft PR) that an anchored generation session must not
   // trigger.
   sessionIssue: text("session_issue"),
+  // A live-preview session (issue #160): the owner chose "run the app and let
+  // me watch it" at entry. Kind stays `interactive` and there is no skill —
+  // this is an ordinary chat whose seed carries the preview contract, whose
+  // container is scanned for a dev server mid-turn rather than only at turn
+  // boundaries, and whose task screen shows the preview pane from the start.
+  // A column rather than a session skill because it invokes no skill: adding
+  // it to SESSION_SKILLS would hand it the generation session's `gh` token and
+  // route it only to skill-capable lanes, neither of which it needs.
+  livePreview: int("live_preview", { mode: "boolean" }).notNull().default(false),
   runId: text("run_id").references(() => runs.id),
   // The execution lane this pass ran on, and who paid for it (issues #172,
   // #174). Recorded per task as well as per run because a task is the unit

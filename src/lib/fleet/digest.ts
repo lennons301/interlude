@@ -107,7 +107,11 @@ function runningLine(card: RunningCard): string {
     // A generation session reads as "session grill-me", not "interactive", so
     // the digest distinguishes grilling from a plain chat task (issue #61).
     parts.push(
-      card.sessionSkill ? `session ${card.sessionSkill}` : "interactive",
+      card.sessionSkill
+        ? `session ${card.sessionSkill}`
+        : card.livePreview
+          ? "preview"
+          : "interactive",
       usd(card.spend.usd)
     );
   } else {

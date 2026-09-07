@@ -44,6 +44,7 @@ import {
 } from "./autonomy/budgets";
 import { resolvePassBudget, spendCarriedIntoPass } from "./pass-budget";
 import { scanPorts } from "./port-scanner";
+import { composeChatSeed } from "../sessions/chat-seed";
 import {
   getConfig,
   resolveAgentEffort,
@@ -370,9 +371,13 @@ export async function startTask(taskId: string): Promise<void> {
   // below, once its lane is known (issue #218): the seed's first line is the
   // lane's harness's own way of invoking the session skill, so it cannot be
   // written before the adapter is.
+  // A live-preview session (issue #160) is a plain chat whose seed also
+  // carries the preview contract — detached server, all-interfaces bind,
+  // conventional port, no Docker daemon — so the pane it was started for
+  // actually has something to show.
   const plainPrompt = isAutonomousPass
     ? task.description
-    : `${userPrompt}\n\nWhen you are done with each request, commit all your changes with a descriptive commit message. Stay ready for follow-up instructions.`;
+    : composeChatSeed({ userPrompt, livePreview: task.livePreview });
 
   const run = task.runId
     ? db.select().from(runs).where(eq(runs.id, task.runId)).get()
@@ -798,7 +803,9 @@ export async function startTask(taskId: string): Promise<void> {
       return;
     }
 
-    await scanForDevServer(taskId, running);
+    // A generation session runs no app; only a chat or live-preview session is
+    // worth scanning for one (issue #160).
+    if (!isGenerationSession(task)) await scanForDevServer(taskId, running);
     await postIdleNotification(taskId);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
@@ -1781,7 +1788,9 @@ export async function processQueuedMessages(
       continue;
     }
 
-    if (task.kind === "interactive") await scanForDevServer(taskId, running);
+    if (task.kind === "interactive" && !isGenerationSession(task)) {
+      await scanForDevServer(taskId, running);
+    }
   }
 
   // Re-park (#93): a resumed autonomous pass that ended its turn(s) still idle
@@ -3051,13 +3060,27 @@ export async function cancelTask(taskId: string): Promise<void> {
 }
 
 /**
- * Scan for dev server ports after a turn completes.
- * Retries once after 3s if no ports found (dev server may be starting).
+ * Scan the container for a dev server and point the preview at it (issue
+ * #160). `scanPorts` publishes only a port that speaks HTTP on an address the
+ * proxy can reach, so a port written here is one the pane can actually load.
+ *
+ * At a turn boundary (`retry: true`, the default) a scan that finds nothing
+ * waits 3s and looks once more, since a server the turn started may still be
+ * binding. The queue loop's periodic scan passes `retry: false`: it comes back
+ * every few seconds anyway, and a mid-turn scan must not hold anything up.
+ *
+ * A server that was there and is gone is said so on the feed. It is the
+ * failure it looks like — a server started in the foreground of a tool call
+ * dies with it — not a silent transition back to "no dev server running".
  */
-export async function scanForDevServer(taskId: string, running: RunningContainer): Promise<void> {
+export async function scanForDevServer(
+  taskId: string,
+  running: RunningContainer,
+  { retry = true }: { retry?: boolean } = {}
+): Promise<void> {
   let ports = await scanPorts(running);
 
-  if (ports.length === 0) {
+  if (ports.length === 0 && retry) {
     await new Promise((r) => setTimeout(r, 3000));
     ports = await scanPorts(running);
   }
@@ -3073,7 +3096,10 @@ export async function scanForDevServer(taskId: string, running: RunningContainer
     if (newPort && !currentPort) {
       insertSystemMessage(taskId, `Dev server detected on port ${newPort}`);
     } else if (!newPort && currentPort) {
-      insertSystemMessage(taskId, `Dev server on port ${currentPort} stopped`);
+      insertSystemMessage(
+        taskId,
+        `Dev server on port ${currentPort} stopped — the preview is empty until one is listening again`
+      );
     }
   }
 }

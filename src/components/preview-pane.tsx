@@ -9,6 +9,17 @@ interface PreviewPaneProps {
   previewSubdomain: string | null;
   domain: string | null;
   lastActivityTimestamp?: number;
+  /** A live-preview session (issue #160): the pane is open before a server is
+   * detected, so with no port it says it is waiting rather than that nothing
+   * is running. */
+  expected?: boolean;
+  /** Whether the agent's turn is in progress — the difference between "the
+   * server is on its way" and "the agent is idle and no server is up". */
+  agentWorking?: boolean;
+  /** Whether a port has ever been published for this task: "stopped" is only
+   * true of a server that was there. Latched by the parent from the status
+   * stream, which is where the port arrives. */
+  everHadPort?: boolean;
 }
 
 type PreviewStatus = "loading" | "active" | "stopped" | "error" | "provisioning";
@@ -19,6 +30,9 @@ export function PreviewPane({
   previewSubdomain,
   domain,
   lastActivityTimestamp,
+  expected = false,
+  agentWorking = false,
+  everHadPort = false,
 }: PreviewPaneProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [status, setStatus] = useState<PreviewStatus>(
@@ -114,9 +128,7 @@ export function PreviewPane({
   if (!devPort) {
     return (
       <div className="flex h-full items-center justify-center bg-fl-ground font-plex-mono text-[11px] text-fl-ink-2">
-        {status === "stopped"
-          ? "Dev server stopped"
-          : "No dev server running"}
+        {emptyPaneNote({ expected, agentWorking, everHadPort })}
       </div>
     );
   }
@@ -181,6 +193,34 @@ export function PreviewPane({
       </div>
     </div>
   );
+}
+
+/**
+ * What the empty pane says (issue #160). Pure, so the four readings are a
+ * table: a server that was up and went away is a *stopped* server, whatever
+ * the session type; a live-preview session that has not shown one yet is
+ * *waiting* — for the agent to start it while the turn runs, or for the owner
+ * to ask, once the agent has gone idle without one; an ordinary chat with no
+ * server simply has none running.
+ */
+export function emptyPaneNote({
+  expected,
+  agentWorking,
+  everHadPort,
+}: {
+  expected: boolean;
+  agentWorking: boolean;
+  everHadPort: boolean;
+}): string {
+  if (everHadPort) {
+    return "Dev server stopped — the preview returns when one is listening again";
+  }
+  if (expected) {
+    return agentWorking
+      ? "Waiting for the dev server — the agent starts it as it begins"
+      : "No dev server yet — ask the agent to start it, detached and bound to 0.0.0.0";
+  }
+  return "No dev server running";
 }
 
 /** The pane's chrome controls speak the fleet's quiet lowercase mono voice, the
