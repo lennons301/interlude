@@ -16,6 +16,7 @@ const CAUSE_LABEL: Record<NeedsYouItem["cause"], string> = {
   "pickup-wedged": "pickup wedged",
   "queue-stale": "queue stalled",
   "answer-undelivered": "answer stuck",
+  "discord-deaf": "discord deaf",
 };
 
 const CAUSE_TONE: Record<NeedsYouItem["cause"], "amber" | "red"> = {
@@ -33,6 +34,7 @@ const CAUSE_TONE: Record<NeedsYouItem["cause"], "amber" | "red"> = {
   "pickup-wedged": "red",
   "queue-stale": "red",
   "answer-undelivered": "red",
+  "discord-deaf": "red",
 };
 
 /**

@@ -312,6 +312,19 @@ and one Discord ping, so a stuck answer is never silent. A follow-up queued
 behind a turn that is actually running is ordinary queueing and says nothing —
 which is what you leave behind whenever you answer twice.
 
+**Your reply is collected even if the bot never hears it** (issue #135). Every
+sweep re-reads the channel over REST for replies to the stored question and
+adopts any it has not seen — so a reply that arrived while the gateway was deaf,
+while a handler threw, or while the app was restarting is delivered within ~30 s
+and gets its 👍 then. If your reply gets a ⚠️ instead, the handler failed on it;
+the task page says so too, and replying again (or answering on the task page)
+is the fix. If the gateway itself goes deaf — the bot has posted and heard
+nothing back for `DISCORD_INBOUND_STALE_MINUTES` (5) — a red **discord deaf**
+card and one Discord ping say so; blocked answers still flow over REST, but a
+new task, a `cancel` or a ✅ sent through Discord will not arrive until the
+gateway reconnects (an `invalidated` session re-logs-in by itself; a restart
+forces it).
+
 ### 5. Find PRs waiting for sign-off
 
 A PR gets the **`human-signoff`** label (and auto-merge is disarmed — or left so,
@@ -860,6 +873,7 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 | `OWED_REVIEW_STALL_MINUTES`, `PICKUP_WEDGED_MINUTES`, `QUEUE_HEARTBEAT_STALE_MINUTES` | Fleet-health watchdog thresholds in minutes (issue #126). Defaults 30 / 3 / 2. |
 | `QUOTA_PICKUP_THRESHOLD_PERCENT` | Quota utilization at or above which no new ticket is claimed (issue #171). One of 50/70/80/85/90/95/100; default 90. The fall-through for Settings → Quota when that row is left on `environment`. |
 | `UNDELIVERED_ANSWER_MINUTES` | How long an answer you gave may sit undelivered before the fleet says so (issue #136). Default 10 — delivery is one 2s poll away, so this cannot fire on a healthy resume. It catches a parked session that is not resuming (memory admission deferring it repeatedly), which from your side looks exactly like an agent still thinking. |
+| `DISCORD_INBOUND_STALE_MINUTES` | How long the Discord gateway may deliver nothing after the bot has posted before inbound is declared deaf (issue #135). Default 5 — the bot's own message is echoed back within a second on a healthy session, so this cannot fire on a quiet fleet (nothing sent, no echo owed) and does fire on a zombie session whose heartbeats still ACK. Raises the **discord deaf** card and one ping; blocked-run answers are still collected over REST regardless. |
 | `OCCUPANCY_DIVERGED_MINUTES` | How long occupancy may go uncorroborated by real agent containers before it reads as a phantom slot (issue #152). Default 20 — far longer than the pickup debounce because a task provisioning its container is legitimately uncorroborated until the container exists, and a cold agent-image build happens inside that window. The card's remedy is a restart, so a false positive is expensive. |
 | `TURN_WALL_CLOCK_MINUTES` | The most wall-clock time one agent exec may run before the orchestrator stops it and ends the turn as a turn limit (issue #220). Default 180. Adapter-agnostic — the only in-turn bound on a harness with no turn or budget flag, and a second bound beside the flags of a harness that has them. An implement attempt that hits it fails as a turn-limited one does, so set it generously. |
 

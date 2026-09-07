@@ -2,6 +2,7 @@ import {
   ALLOWED_TICKET_EFFORTS,
   DEFAULT_ATTEMPT_BUDGET_USD,
   DEFAULT_METERED_DAILY_CAP_USD,
+  DEFAULT_DISCORD_INBOUND_STALE_MS,
   DEFAULT_OCCUPANCY_DIVERGED_MS,
   DEFAULT_UNDELIVERED_ANSWER_MS,
   DEFAULT_OWED_REVIEW_STALL_MS,
@@ -330,6 +331,10 @@ export function getConfig(): AppConfig {
       undeliveredAnswerMs: minutesEnvMs(
         process.env.UNDELIVERED_ANSWER_MINUTES,
         DEFAULT_UNDELIVERED_ANSWER_MS
+      ),
+      discordInboundStaleMs: minutesEnvMs(
+        process.env.DISCORD_INBOUND_STALE_MINUTES,
+        DEFAULT_DISCORD_INBOUND_STALE_MS
       ),
     },
     turnWallClockMs: minutesEnvMs(

@@ -4,11 +4,13 @@ import { raceWithTimeout, TIMED_OUT } from "../timeout";
 import { describeRateLimitType } from "../quota/rate-limit-event";
 import {
   formatDuration,
+  type DiscordInboundStale,
   type OwedReviewStall,
   type PickupWedge,
   type QueueStale,
   type UndeliveredAnswer,
 } from "../fleet/health";
+import { recordDiscordOutbound } from "./gateway-health";
 
 // The bot client is set once, in the instrumentation/orchestrator context where
 // the Discord bot connects (client.ts -> setBotClient). But notification helpers
@@ -85,7 +87,11 @@ async function sendWithRetry(
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
-      return await bounded("send", channel.send({ embeds: [embed] }));
+      const sent = await bounded("send", channel.send({ embeds: [embed] }));
+      // The gateway owes this process an echo of what it just posted (issue
+      // #135) — recorded on success only, a failed send is owed nothing.
+      recordDiscordOutbound();
+      return sent;
     } catch (err) {
       lastErr = err;
       if (err instanceof DiscordRestTimeout) break;
@@ -381,6 +387,40 @@ export async function notifyUndeliveredAnswer(
     await sendWithRetry(channel, embed);
   } catch (err) {
     console.error(`[discord] Failed to send undelivered-answer notification:`, err);
+  }
+}
+
+/**
+ * Fleet-health watchdog (issue #135): the bot has posted and the gateway has
+ * delivered nothing back — inbound is deaf, so every reply, arming "yes" and ✅
+ * through Discord is being lost. Outbound still works, which is exactly why
+ * this ping lands. Sent once per spell. No-op when no fleet channel is
+ * configured: the sweep already logged it.
+ */
+export async function notifyDiscordInboundStale(
+  channelId: string | null,
+  payload: DiscordInboundStale
+): Promise<void> {
+  const botClient = getBotClient();
+  if (!botClient || !channelId) return;
+
+  try {
+    const channel = await fetchTextChannel(channelId);
+
+    const embed = new EmbedBuilder()
+      .setTitle("Discord replies are not reaching Interlude")
+      .setDescription(
+        `The bot posted a message ~${formatDuration(payload.silentForMs)} ago and the ` +
+          `gateway has delivered nothing since — replies, arming confirmations and ✅ ` +
+          `reactions are being lost. Answers to blocked questions are still collected ` +
+          `over REST each sweep; for anything else use the web UI until the gateway ` +
+          `reconnects (a restart forces it).`
+      )
+      .setColor(0xef4444);
+
+    await sendWithRetry(channel, embed);
+  } catch (err) {
+    console.error(`[discord] Failed to send deaf-gateway notification:`, err);
   }
 }
 
