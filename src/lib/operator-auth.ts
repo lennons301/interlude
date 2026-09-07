@@ -38,6 +38,8 @@
  * they need no entry here and stay reachable exactly as before.
  */
 
+import { createHash, timingSafeEqual } from "node:crypto";
+
 /** Paths served without the operator credential. Exact matches, after a single
  * trailing slash is dropped. Order is irrelevant; the test pins the set. */
 export const EXEMPT_PATHS: readonly string[] = [
@@ -116,14 +118,12 @@ function normalizePath(pathname: string): string {
   return pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
 }
 
-/** Equality that takes the same time whatever differs, and does not depend on
- * `node:crypto` so the decision stays runtime-agnostic. The lengths are folded
- * into the result rather than compared first. */
+/** Equality that takes the same time whatever differs — including in length.
+ * Both sides are hashed first so the compare is always over two 32-byte
+ * digests: a plain byte-wise loop bounded by the longer input would leak the
+ * password's length to a probe. `proxy.ts` runs on the Node runtime (Next 16),
+ * so `node:crypto` is available here. */
 function constantTimeEqual(a: string, b: string): boolean {
-  const len = Math.max(a.length, b.length);
-  let diff = a.length ^ b.length;
-  for (let i = 0; i < len; i++) {
-    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
-  }
-  return diff === 0;
+  const digest = (value: string) => createHash("sha256").update(value, "utf8").digest();
+  return timingSafeEqual(digest(a), digest(b));
 }
