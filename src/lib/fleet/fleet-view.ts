@@ -240,6 +240,9 @@ export interface FleetTaskRow {
   kind: "interactive" | "implement" | "review" | "triage" | "repair";
   /** Non-null marks an interactive task as a generation session (issue #61) */
   sessionSkill: SessionSkill | null;
+  /** A live-preview session (issue #160) — a chat started to watch the app.
+   * Optional so a row from before the column reads as an ordinary chat. */
+  livePreview?: boolean;
   /** GitHub issue the session is anchored to (owner/repo#n), or null */
   sessionIssue: string | null;
   title: string;
@@ -392,6 +395,10 @@ export interface RunningCard {
    * label it "session · <skill>" to distinguish it from a plain chat task.
    * Always null for afk/supervised/triage cards. */
   sessionSkill: SessionSkill | null;
+  /** True on a live-preview session (issue #160): the dashboard labels it
+   * "preview" so a chat the owner is watching an app through is distinct from
+   * one they are only talking to. Always false for afk/supervised/triage. */
+  livePreview: boolean;
   /** implement ▸ review ▸ merge pipeline; null for standalone interactive
    * sessions and triage passes, which sit outside the ticket pipeline */
   phases: { name: "implement" | "review" | "merge"; state: PhaseState }[] | null;
@@ -1572,6 +1579,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
         title: pass?.title ?? run.githubIssue,
         mode: run.mode === "autonomous" ? ("afk" as const) : ("supervised" as const),
         sessionSkill: null,
+        livePreview: false,
         phases: phasePipeline(reviewing),
         attempt: { current: run.attempt, max: MAX_ATTEMPTS },
         turns: pass?.turns ?? 0,
@@ -1635,6 +1643,7 @@ export function buildFleetView(rows: FleetRows): FleetView {
       // Only an interactive session carries a skill; the autonomous triage pass
       // (kind=triage) is never a generation session.
       sessionSkill: triage ? null : task.sessionSkill,
+      livePreview: !triage && task.livePreview === true,
       phases: null,
       attempt: null,
       turns: task.turns,

@@ -22,6 +22,7 @@ const WORKING: RunningCard = {
   title: "Add pagination to the list",
   mode: "afk",
   sessionSkill: null,
+  livePreview: false,
   phases: [
     { name: "implement", state: "current" },
     { name: "review", state: "todo" },

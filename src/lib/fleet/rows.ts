@@ -154,6 +154,7 @@ export async function loadFleetRows(now: Date): Promise<FleetRows> {
       runId: t.runId,
       kind: t.kind,
       sessionSkill: t.sessionSkill,
+      livePreview: t.livePreview,
       sessionIssue: t.sessionIssue,
       title: t.title,
       status: t.status,

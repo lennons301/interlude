@@ -28,6 +28,11 @@ import {
   checkMemoryAdmission,
   type CapacityProvider,
 } from "./capacity";
+import {
+  CHAT_SCAN_EVERY_POLLS,
+  PREVIEW_SCAN_EVERY_POLLS,
+  devServerScanDue,
+} from "./dev-server-scan";
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let pollCount = 0;
@@ -53,6 +58,19 @@ let lastProgressAt: Date | null = null;
  * provisioned) is how a hung promise came to wedge the whole box.
  */
 const inFlightTasks = new Set<string>();
+
+/** Tasks with a dev-server scan in flight — see queue step 3. */
+const scanningTasks = new Set<string>();
+
+/** The poll ticks on which any scan can fall due: both cadences are multiples
+ * of this, so the per-task profile read happens only on ticks that could use
+ * it. Pinned by construction rather than by a test — a cadence that stopped
+ * dividing would silently never scan. */
+const SCAN_POLL_GRANULARITY = gcd(PREVIEW_SCAN_EVERY_POLLS, CHAT_SCAN_EVERY_POLLS);
+
+function gcd(a: number, b: number): number {
+  return b === 0 ? a : gcd(b, a % b);
+}
 
 /**
  * Pickups that have not registered a container yet — the only reservation
@@ -453,17 +471,31 @@ export function startQueue(): void {
         }
       }
 
-      // 3. Periodic dev server port scan for idle tasks (every ~30s = 15 poll cycles)
-      if (pollCount % 15 === 0) {
+      // 3. Periodic dev-server scans (issue #160). Only interactive sessions
+      // are ever scanned — a parked autonomous container is stopped to free
+      // memory (#93), and no autonomous pass has a preview. Which sessions,
+      // how often, and whether mid-turn is `devServerScanDue`'s table: a
+      // live-preview session every ~10s while running or idle, a plain chat
+      // every ~30s while idle, a generation session never. Deliberately not
+      // gated on `inFlightTasks`: a follow-up turn holds that lock for its
+      // whole duration, and mid-turn is exactly when a preview session wants
+      // to be looked at.
+      if (pollCount % SCAN_POLL_GRANULARITY === 0) {
         for (const [taskId, entry] of activeTasks) {
-          if (entry.state !== "idle") continue;
-          if (inFlightTasks.has(taskId)) continue;
-          // A parked autonomous container is stopped to free memory (#93) —
-          // execing a port scan into it would fail, and its dev server is not
-          // a live preview concern anyway. Only interactive idle sessions are
-          // scanned.
-          if (isParked(entry)) continue;
-          scanForDevServer(taskId, entry.container).catch(console.error);
+          if (entry.kind !== "interactive") continue;
+          if (scanningTasks.has(taskId)) continue;
+          const profile = db
+            .select({ livePreview: tasks.livePreview, sessionSkill: tasks.sessionSkill })
+            .from(tasks)
+            .where(eq(tasks.id, taskId))
+            .get();
+          if (!profile || !devServerScanDue(profile, entry.state, pollCount)) continue;
+          // One scan per task at a time: a daemon that stops answering must not
+          // stack an exec per tick behind the first (the #115/#151 shape).
+          scanningTasks.add(taskId);
+          scanForDevServer(taskId, entry.container, { retry: false })
+            .catch(console.error)
+            .finally(() => scanningTasks.delete(taskId));
         }
       }
 

@@ -1,0 +1,1 @@
+ALTER TABLE `tasks` ADD `live_preview` integer DEFAULT false NOT NULL;

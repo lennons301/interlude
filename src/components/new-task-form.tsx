@@ -18,9 +18,11 @@ interface LaneOption {
   missingEnvVars: string[];
 }
 
-// A new task is either a plain chat task (the default, unchanged) or a
-// generation session running one of the estate's generation skills (issue #64).
-type TaskType = "chat" | SessionSkill;
+// A new task is a plain chat task (the default, unchanged), a live-preview
+// session — a chat whose agent runs the app for the preview pane (issue #160)
+// — or a generation session running one of the estate's generation skills
+// (issue #64).
+type TaskType = "chat" | "preview" | SessionSkill;
 
 export function NewTaskForm() {
   const router = useRouter();
@@ -65,7 +67,8 @@ export function NewTaskForm() {
   // same project doesn't re-hit GitHub.
   const loadedFor = useRef<string | null>(null);
 
-  const isSession = taskType !== "chat";
+  const isSession = taskType !== "chat" && taskType !== "preview";
+  const isPreview = taskType === "preview";
 
   useEffect(() => {
     fetch("/api/projects")
@@ -121,11 +124,14 @@ export function NewTaskForm() {
     // Plain chat sends exactly what it always did — no session fields — so its
     // creation path is unchanged. A session adds the skill and (if anchored)
     // the issue ref; the orchestrator composes the seed from these on run.
-    const payload: Record<string, string> = {
+    const payload: Record<string, string | boolean> = {
       title: title.trim(),
       description: description.trim(),
       projectId,
     };
+    // A live-preview session is the chat payload plus one flag; the seed the
+    // orchestrator composes from it carries the preview contract.
+    if (isPreview) payload.livePreview = true;
     if (isSession) {
       payload.sessionSkill = taskType;
       // Only anchor to an issue still present in the shown list, so a ref the
@@ -182,6 +188,12 @@ export function NewTaskForm() {
           blurb="A plain chat task — the agent works from your prompt"
           selected={taskType === "chat"}
           onSelect={() => setTaskType("chat")}
+        />
+        <TypeOption
+          name="preview"
+          blurb="Build a UI and watch it live — the agent runs the app in the preview pane"
+          selected={isPreview}
+          onSelect={() => setTaskType("preview")}
         />
         <p className="pt-1 font-plex-mono text-[11px] uppercase tracking-[0.14em] text-fl-ink-3">
           or start a session
@@ -252,12 +264,25 @@ export function NewTaskForm() {
           aria-label={isSession ? "Session agenda" : "Task title"}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          placeholder={isSession ? "What should this session focus on?" : "What should the agent do?"}
+          placeholder={
+            isSession
+              ? "What should this session focus on?"
+              : isPreview
+                ? "What should the agent build or show you?"
+                : "What should the agent do?"
+          }
         />
         {isSession && (
           <p className="text-[13px] text-fl-ink-3">
             Becomes the session&apos;s opening prompt, after the{" "}
             <span className="font-plex-mono">{taskType}</span> skill.
+          </p>
+        )}
+        {isPreview && (
+          <p className="text-[13px] text-fl-ink-3">
+            The agent starts the project&apos;s dev server first and keeps it running;
+            the preview pane follows it as the UI changes. Needs a dev loop that runs
+            without Docker.
           </p>
         )}
       </div>
@@ -290,12 +315,14 @@ export function NewTaskForm() {
         className={`w-full ${PRIMARY_BUTTON}`}
       >
         {submitting
-          ? isSession
+          ? isSession || isPreview
             ? "Starting…"
             : "Creating…"
           : isSession
             ? `Start ${taskType} session`
-            : "Create task"}
+            : isPreview
+              ? "Start preview session"
+              : "Create task"}
       </button>
     </form>
   );

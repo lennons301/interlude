@@ -1498,6 +1498,7 @@ describe("buildFleetView — running", () => {
         title: "Add pagination to the list",
         mode: "afk",
         sessionSkill: null,
+        livePreview: false,
         phases: [
           { name: "implement", state: "current" },
           { name: "review", state: "todo" },
@@ -1733,6 +1734,7 @@ describe("buildFleetView — running", () => {
         title: "Polish the header",
         mode: "interactive",
         sessionSkill: null,
+        livePreview: false,
         phases: null,
         attempt: null,
         turns: 3,
@@ -1744,6 +1746,32 @@ describe("buildFleetView — running", () => {
     lanePin: null,
       },
     ]);
+  });
+
+  it("marks a live-preview session so the dashboard can label it 'preview' (issue #160)", () => {
+    const view = buildFleetView(
+      baseRows({
+        projects: [makeProject({ id: "p1", name: "lemons" })],
+        tasks: [
+          makeTask({
+            id: "t1",
+            projectId: "p1",
+            title: "Add a dark mode toggle",
+            livePreview: true,
+            containerStatus: "running",
+            turns: 1,
+            createdAt: TODAY_9AM,
+          }),
+        ],
+      })
+    );
+
+    expect(view.running).toHaveLength(1);
+    expect(view.running[0]).toMatchObject({
+      mode: "interactive",
+      sessionSkill: null,
+      livePreview: true,
+    });
   });
 
   it("labels a generation session with its skill and issue anchor (issue #61)", () => {
@@ -2067,6 +2095,7 @@ describe("buildFleetView — running", () => {
         title: "Triage: Add auth",
         mode: "triage",
         sessionSkill: null,
+        livePreview: false,
         phases: null,
         attempt: null,
         turns: 1,

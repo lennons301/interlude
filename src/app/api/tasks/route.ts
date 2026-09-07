@@ -79,18 +79,22 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   const body = await request.json();
-  const { title, description, projectId, sessionSkill, sessionIssue, lane } = body as {
-    title: string;
-    description?: string;
-    projectId: string;
-    // A generation session's skill (issue #61); omitted for a plain chat task.
-    sessionSkill?: string;
-    // Optional issue anchor (owner/repo#n) passed through to the session.
-    sessionIssue?: string;
-    // An operator's lane pin for this task alone (issue #241); omitted to
-    // route as the fleet does.
-    lane?: string;
-  };
+  const { title, description, projectId, sessionSkill, sessionIssue, lane, livePreview } =
+    body as {
+      title: string;
+      description?: string;
+      projectId: string;
+      // A generation session's skill (issue #61); omitted for a plain chat task.
+      sessionSkill?: string;
+      // Optional issue anchor (owner/repo#n) passed through to the session.
+      sessionIssue?: string;
+      // An operator's lane pin for this task alone (issue #241); omitted to
+      // route as the fleet does.
+      lane?: string;
+      // A live-preview session (issue #160): a chat whose agent runs the app
+      // for the preview pane. Omitted (or false) for a plain chat.
+      livePreview?: boolean;
+    };
 
   if (!title?.trim()) {
     return NextResponse.json({ error: "title is required" }, { status: 400 });
@@ -111,6 +115,19 @@ export async function POST(request: Request) {
   }
   // Validated above, so the one narrowing every read below shares.
   const skill = (sessionSkill as SessionSkill | undefined) ?? null;
+
+  // A live-preview session is a chat, not a generation session: the two are
+  // different session types at entry, and a grilling session that also ran a
+  // dev server is exactly the load #160 keeps off discussive sessions.
+  if (livePreview !== undefined && typeof livePreview !== "boolean") {
+    return NextResponse.json({ error: "livePreview must be a boolean" }, { status: 400 });
+  }
+  if (livePreview === true && skill !== null) {
+    return NextResponse.json(
+      { error: "livePreview cannot be combined with a sessionSkill" },
+      { status: 400 }
+    );
+  }
 
   // A lane pin (issue #241) is the operator's explicit lane for this one task,
   // judged at entry the way the resolver judges the fleet's primary: a lane
@@ -170,6 +187,7 @@ export async function POST(request: Request) {
     githubIssue: null,
     sessionSkill: skill,
     sessionIssue: sessionIssue?.trim() || null,
+    livePreview: livePreview === true,
     lanePin,
     createdAt: now,
     updatedAt: now,

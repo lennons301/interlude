@@ -28,6 +28,10 @@ interface TaskData {
   /** Non-null on a generation session — the composer offers its slash menu
    * only where the orchestrator re-frames a typed skill slash (issue #63). */
   sessionSkill: SessionSkill | null;
+  /** A live-preview session (issue #160): the preview pane is shown from the
+   * start, waiting for the dev server, rather than appearing only once a port
+   * is detected — the owner chose this type to watch the app. */
+  livePreview: boolean;
   /** Which pass this is. Only an interactive session can cross onto a paid
    * lane (issue #173) — an autonomous pass pauses instead — so only one asks
    * the human to confirm. */
@@ -62,6 +66,9 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
     totalCostUsd: initialTask.totalCostUsd,
   });
   const [devPort, setDevPort] = useState<number | null>(null);
+  // Whether a dev server has ever been published for this task, so the pane
+  // can tell "stopped" from "not started yet" (issue #160).
+  const [hadDevPort, setHadDevPort] = useState(false);
   const [previewSubdomain, setPreviewSubdomain] = useState<string | null>(null);
   const [githubIssue, setGithubIssue] = useState<string | null>(initialTask.githubIssue);
   const [pullRequestUrl, setPullRequestUrl] = useState<string | null>(initialTask.pullRequestUrl);
@@ -76,6 +83,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
       setTaskStatus(status);
       if (status.devPort !== undefined) {
         setDevPort(status.devPort);
+        if (status.devPort !== null) setHadDevPort(true);
       }
       if (status.previewSubdomain !== undefined) {
         setPreviewSubdomain(status.previewSubdomain);
@@ -104,6 +112,12 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
     : null;
 
   const isTerminal = isTerminalTaskStatus(taskStatus.status);
+
+  // The pane is shown when there is a server to show, or when the owner asked
+  // for one: a live-preview session holds the pane open (waiting) before the
+  // first scan lands, so the layout the session was started for is there from
+  // the first frame instead of jumping in a minute later.
+  const showPreview = devPort !== null || initialTask.livePreview;
 
   // The slim shell carries the task's identity and live status (issue #117);
   // the row below it carries where the work lives and what it has cost.
@@ -183,7 +197,7 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
           shell nav's hairline because this is a thumb-sized control on a phone,
           not a header link. `aria-current` carries the same state the underline
           does, so it survives without sight of the underline. */}
-      {devPort && (
+      {showPreview && (
         <div className="flex shrink-0 border-b border-fl-line lg:hidden">
           {(["chat", "preview"] as const).map((tab) => (
             <button
@@ -208,8 +222,8 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
         {/* Chat pane */}
         <div
           className={`flex-1 flex flex-col min-h-0 ${
-            devPort && activeTab !== "chat" ? "hidden lg:flex" : ""
-          } ${devPort ? "lg:w-2/5 lg:border-r lg:border-fl-line" : ""}`}
+            showPreview && activeTab !== "chat" ? "hidden lg:flex" : ""
+          } ${showPreview ? "lg:w-2/5 lg:border-r lg:border-fl-line" : ""}`}
         >
           <TaskStream
             taskId={initialTask.id}
@@ -238,11 +252,11 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
         </div>
 
         {/* Preview pane */}
-        {devPort && (
+        {showPreview && (
           <div
             className={`flex-1 min-h-0 ${
               activeTab !== "preview" ? "hidden lg:flex" : "flex"
-            } flex-col ${devPort ? "lg:w-3/5" : ""}`}
+            } flex-col lg:w-3/5`}
           >
             <PreviewPane
               taskId={initialTask.id}
@@ -250,6 +264,9 @@ export function TaskChat({ task: initialTask, domain }: { task: TaskData; domain
               previewSubdomain={previewSubdomain}
               domain={domain}
               lastActivityTimestamp={lastActivity}
+              expected={initialTask.livePreview}
+              agentWorking={taskStatus.containerStatus === "running"}
+              everHadPort={hadDevPort}
             />
           </div>
         )}
