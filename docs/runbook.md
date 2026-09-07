@@ -345,6 +345,42 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
 
 ## Reference
 
+### The operator credential (`OPERATOR_PASSWORD`)
+
+Everything the deployed orchestrator serves — the dashboard, the settings
+screen, every `/api/*` route, the SSE streams — is behind **HTTP Basic auth**
+(issue #242). One credential: user `operator`, password `OPERATOR_PASSWORD`
+from Doppler `interlude/prd`. The check lives in `src/proxy.ts` and runs before
+any page or route handler.
+
+- **Browser:** the first page prompts once; the browser then sends the
+  credential on every same-origin request, including the dashboard's
+  EventSource, so nothing else changes.
+- **Scripts:** `curl -u "operator:$OPERATOR_PASSWORD" https://interludes.co.uk/...`
+  (with `doppler secrets get OPERATOR_PASSWORD --plain --project interlude --config prd`
+  when you need the value). Every production example in this runbook assumes it.
+- **Exempt, and nothing else:** `POST /api/webhooks/github` (verifies its own
+  signature), `/api/internal/validate-subdomain` (Caddy's on-demand TLS ask),
+  `/manifest.webmanifest`, and the `task-*` preview subdomains (which never reach
+  Next). `src/lib/__tests__/operator-auth.test.ts` pins the list.
+- **Fails closed.** A production build with no `OPERATOR_PASSWORD` answers 503
+  on every gated route rather than opening up, and the deploy refuses to run
+  without the value. The deploy's health check then proves both halves: the
+  operator gets a 200 and an anonymous request gets a 401.
+- **Local is open.** `pnpm dev` with the variable unset is ungated, as before.
+  Set it locally to try the gate.
+- **Rotation:** change it in Doppler and restart the app
+  (`docker compose up -d --force-recreate app`); browsers prompt again.
+
+**A local session never reaches production.** That is the point of the gate:
+a local ticket-loop pass, driver or agent has no credential for production
+and cannot change its lane or spend its money by accident — the 2026-09-06
+incident, where a local proof pass pinned production to a metered lane through
+the public settings route. Run proofs against a local dev instance; when a
+ticket must run on a named lane, pin the task (#241) rather than the fleet.
+Never paste `OPERATOR_PASSWORD` into an agent container, a ticket, or a script
+that runs unattended on another machine.
+
 ### Budgets, attempts, caps
 
 - **$20** per attempt (default). A ticket's `budget:` directive can raise a single
@@ -459,8 +495,8 @@ answer it, or leave it; it doesn't need cancelling to free a slot.)
   back there. Headless:
 
   ```bash
-  curl -s https://interludes.co.uk/api/runs/<run-id>/lane-move            # what a press would do
-  curl -s -X POST https://interludes.co.uk/api/runs/<run-id>/lane-move    # do it (409 + reason when refused)
+  curl -s -u "operator:$OPERATOR_PASSWORD" https://interludes.co.uk/api/runs/<run-id>/lane-move            # what a press would do
+  curl -s -u "operator:$OPERATOR_PASSWORD" -X POST https://interludes.co.uk/api/runs/<run-id>/lane-move    # do it (409 + reason when refused)
   ```
   Nothing to do either way — but two things worth knowing:
     - the resume is **not** held by the kill switch, the daily cap or the quota
@@ -846,6 +882,7 @@ Override with `CAPACITY_SLOTS`; per-agent memory with `AGENT_MEMORY_MB` (default
 
 | Var | Meaning |
 | --- | --- |
+| `OPERATOR_PASSWORD` | The operator credential (issue #242): HTTP Basic, user `operator`, checked in `src/proxy.ts` on every page and `/api/*` route. Production fails closed without it (503), and the deploy refuses to run. Local `pnpm dev` is open when it is unset. See "The operator credential" above. |
 | `AUTONOMY_ENABLED` | Boot master for autonomy. Must equal `true` or sweeps never start. Read once at boot — restart to change. The runtime kill switch (`PATCH /api/settings/autonomy`) pauses pickup on top of it, with no restart. |
 | `AUTONOMY_ALLOWED_AUTHORS` | Extra logins (comma-separated) allowed to author claimable issues. The repo owner is always allowed. |
 | `REVIEWER_GH_TOKEN` | Reviewer machine account PAT. Orchestrator-only — **never** enters a container. Canonical home is `platform/prd`, mirrored into `interlude/prd`; rotation updates both. |
