@@ -79,6 +79,7 @@ function makeRun(overrides: Partial<FleetRunRow> = {}): FleetRunRow {
     degradedFrom: null,
     declaredTier: null,
     harness: null,
+    lanePin: null,
     claimedAt: TODAY_9AM,
     startedAt: TODAY_9AM,
     finishedAt: null,
@@ -103,6 +104,7 @@ function makeTask(overrides: Partial<FleetTaskRow> = {}): FleetTaskRow {
     pullRequestNumber: null,
     pullRequestUrl: null,
     harness: null,
+    lanePin: null,
     createdAt: TODAY_9AM,
     updatedAt: TODAY_9AM,
     ...overrides,
@@ -1508,6 +1510,7 @@ describe("buildFleetView — running", () => {
         paused: null,
         degraded: null,
         harness: null,
+    lanePin: null,
       },
     ]);
   });
@@ -1738,6 +1741,7 @@ describe("buildFleetView — running", () => {
         paused: null,
         degraded: null,
         harness: null,
+    lanePin: null,
       },
     ]);
   });
@@ -2071,6 +2075,7 @@ describe("buildFleetView — running", () => {
         paused: null,
         degraded: null,
         harness: null,
+    lanePin: null,
       },
     ]);
   });

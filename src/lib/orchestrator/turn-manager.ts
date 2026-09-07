@@ -55,6 +55,7 @@ import { getLaneCatalog } from "../lanes/catalog";
 import { bookTaskCost } from "./spend";
 import { laneUnavailableReason, resolveLane, type ResolvedLane } from "../lanes/resolve";
 import { readLaneCrossing, readLaneFailover } from "../lanes/overflow-state";
+import { overridesPinnedTo } from "../lanes/lane-pin";
 import { describeLaneCost } from "../lanes/lane-rate";
 import { payerChanged, type LaneCrossing } from "../lanes/overflow";
 import {
@@ -62,6 +63,7 @@ import {
   lanesShareAdapter,
   type LaneBilling,
   type LaneDefinition,
+  laneIds,
 } from "../lanes/lane-config";
 import { noteOnceOnFeed } from "../tasks/feed-note";
 import {
@@ -401,7 +403,17 @@ export async function startTask(taskId: string): Promise<void> {
   // session may only be routed to a lane whose harness can invoke its skill,
   // and with none the crossing refuses it here — held with the reason on its
   // feed, exactly as a money hold is, and never started as freeform chat.
-  const crossing = readLaneCrossing(task.kind, run?.model ?? null, task.sessionSkill);
+  // An operator's pin (issue #241) — the task's own, else its run's — is the
+  // explicit lane for this pass and no other; see `lane-pin.ts`.
+  const lanePin = task.lanePin ?? run?.lanePin ?? null;
+  const crossing = readLaneCrossing(
+    task.kind,
+    run?.model ?? null,
+    task.sessionSkill,
+    new Date(),
+    getFleetSettings(),
+    lanePin
+  );
   if (crossingHoldsPass(taskId, crossing)) return;
 
   // Everything from here is inside the failure path. Lane resolution
@@ -425,7 +437,7 @@ export async function startTask(taskId: string): Promise<void> {
     // Read fresh from the settings row, not from a cached config: a UI-set tier
     // or lane (issues #166, #172) has to reach the next pass without a restart,
     // and `getConfig()` memoises on first read.
-    const pass = requirePassLane(task.kind, run?.model ?? null, crossing);
+    const pass = requirePassLane(task.kind, run?.model ?? null, crossing, lanePin);
     const passLane = pass.lane;
     const passModel = passLane.model;
 
@@ -1141,11 +1153,23 @@ interface PassLane {
 function requirePassLane(
   kind: AgentPassKind,
   ticketModel: string | null,
-  crossing: LaneCrossing
+  crossing: LaneCrossing,
+  lanePin: string | null = null
 ): PassLane {
   const catalog = getLaneCatalog();
   if (!catalog.ok) {
     throw new Error(`No usable execution lanes — ${catalog.reason}`);
+  }
+  // A pin names a lane the operator chose (issue #241); if the file has since
+  // stopped declaring it, the pass must not quietly run somewhere else — the
+  // one thing a pin exists to prevent. Refuse, naming the pin, so the operator
+  // clears it or restores the lane. (Entry validates a pin against the file,
+  // so this is reachable only when lanes.yaml changed underneath a stored pin.)
+  if (lanePin !== null && findLane(catalog.catalog, lanePin) === null) {
+    throw new Error(
+      `pinned execution lane "${lanePin}" is not declared in lanes.yaml — ` +
+        `declared lanes: ${laneIds(catalog.catalog).join(", ")}; clear the pin or declare the lane`
+    );
   }
 
   const resolution = resolveLane({
@@ -1153,7 +1177,9 @@ function requirePassLane(
     kind,
     config: getConfig(),
     ticketModel,
-    overrides: getSettingsOverrides(),
+    // The pin is the operator's explicit lane for this pass (issue #241), so the
+    // resolver reads it where it would read the fleet's own explicit choice.
+    overrides: overridesPinnedTo(getSettingsOverrides(), lanePin),
     env: process.env,
     // Null falls through to the primary, which is every pass that has not
     // crossed onto another lane.
@@ -1245,16 +1271,26 @@ function laneForFollowUp(
   /** The task's session skill (issue #218), so a generation session's next
    * turn is routed only onto a lane that can invoke it — and held, never run
    * as chat, when none can. */
-  sessionSkill: SessionSkill | null
+  sessionSkill: SessionSkill | null,
+  /** The task's or run's operator pin (issue #241), or null to route as the
+   * fleet does. */
+  lanePin: string | null = null
 ): PassLane | null {
   // A crossing the money guards refuse leaves the turn for a later poll with
   // the reason on the feed, exactly as a misconfigured lane does — the queued
   // message is still undelivered, so the owner's turn is not burnt and it runs
   // on the poll after the press (issue #173).
-  const crossing = readLaneCrossing(kind, ticketModel, sessionSkill);
+  const crossing = readLaneCrossing(
+    kind,
+    ticketModel,
+    sessionSkill,
+    new Date(),
+    getFleetSettings(),
+    lanePin
+  );
   if (crossingHoldsPass(taskId, crossing)) return null;
   try {
-    return requirePassLane(kind, ticketModel, crossing);
+    return requirePassLane(kind, ticketModel, crossing, lanePin);
   } catch (err) {
     const text = `Cannot start this turn — ${err instanceof Error ? err.message : String(err)}`;
     if (noteOnceOnFeed(taskId, text)) {
@@ -1568,7 +1604,8 @@ export async function processQueuedMessages(
       taskId,
       task.kind,
       run?.model ?? null,
-      task.sessionSkill
+      task.sessionSkill,
+      task.lanePin ?? run?.lanePin ?? null
     );
     if (pass === null) break;
     const passLane = pass.lane;

@@ -156,6 +156,9 @@ describe("parseTicketDirectives", () => {
       "auto-merge: on",
       "human-signoff: off",
       "attempts: 100",
+      // A lane is fleet policy, never a ticket's (issues #196, #241): the key
+      // does not exist, so a body naming a paid lane is ignored like any other.
+      "lane: openai-api",
       "budget: $30",
     ].join("\n");
     expect(parseTicketDirectives(body)).toEqual({

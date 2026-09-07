@@ -6,6 +6,7 @@ import {
   type CrossingRefusalReason,
 } from "../lanes/overflow";
 import { readLaneCrossing } from "../lanes/overflow-state";
+import { getFleetSettings } from "../settings";
 import { startTask } from "./turn-manager";
 import {
   abandonSessionWithoutContainer,
@@ -263,8 +264,18 @@ function nextQueuedTask(skip: PickupSkip | null) {
 function attendedPickupHold(task: {
   id: string;
   sessionSkill: SessionSkill | null;
+  lanePin: string | null;
 }): CrossingRefusalReason | null {
-  const crossing = readLaneCrossing("interactive", null, task.sessionSkill);
+  // Judged against the task's own pin (issue #241), so a pinned session is held
+  // or started for the lane it will actually run on.
+  const crossing = readLaneCrossing(
+    "interactive",
+    null,
+    task.sessionSkill,
+    new Date(),
+    getFleetSettings(),
+    task.lanePin
+  );
   if (!crossingHoldsPass(task.id, crossing)) return null;
   return crossing.refusal?.reason ?? null;
 }

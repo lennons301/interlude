@@ -38,6 +38,7 @@ import {
 import { actionableObservations } from "./lane-wall";
 import { readMoneyGuards, type MoneyGuards } from "./money-state";
 import { decideLaneCrossing, type LaneCrossing } from "./overflow";
+import { settingsPinnedTo } from "./lane-pin";
 
 /**
  * Everything the pure ranking needs, read fresh.
@@ -190,14 +191,22 @@ export function readLaneFailover(
  * pass is a generation session, which may only be routed to a lane whose
  * harness can invoke its skill and is refused rather than started as chat when
  * none can. Null — an ordinary chat, or any autonomous kind — changes nothing.
+ *
+ * `lanePin` is the task's or run's operator pin (issue #241), or null to route
+ * as the fleet does.
  */
 export function readLaneCrossing(
   kind: AgentPassKind,
   ticketModel: string | null = null,
   sessionSkill: SessionSkill | null = null,
   now: Date = new Date(),
-  settings: FleetSettings = getFleetSettings()
+  fleetSettings: FleetSettings = getFleetSettings(),
+  lanePin: string | null = null
 ): LaneCrossing {
+  // A pinned pass (issue #241) is judged against settings whose explicit lane
+  // is the pin — the fleet's own notion of "the operator chose this lane",
+  // scoped to one pass. See `lane-pin.ts` for why that is the whole mechanism.
+  const settings = settingsPinnedTo(fleetSettings, lanePin);
   // One read of the guards, shared with the ranking below: the lane in force,
   // whether that choice pins the fleet, that lane's quota row and the day's
   // cash all have to describe the same instant, or the wall this crossing
