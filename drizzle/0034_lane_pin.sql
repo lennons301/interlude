@@ -7,5 +7,6 @@ CREATE TABLE `lane_pins` (
 	FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint
+CREATE UNIQUE INDEX `lane_pins_ticket_idx` ON `lane_pins` (`project_id`,`issue_number`);--> statement-breakpoint
 ALTER TABLE `runs` ADD `lane_pin` text;--> statement-breakpoint
 ALTER TABLE `tasks` ADD `lane_pin` text;

@@ -1,4 +1,4 @@
-import { int, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { int, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 import type { SettingsOverrides } from "../lib/settings-resolver";
 import type { StoredTriageResult } from "../lib/orchestrator/autonomy/triage";
@@ -508,14 +508,20 @@ export const quotaState = sqliteTable("quota_state", {
  * spent exactly once, by the attempt it was set for. Written only by the
  * operator API, never from an issue body.
  */
-export const lanePins = sqliteTable("lane_pins", {
-  id: text("id").primaryKey(),
-  projectId: text("project_id")
-    .notNull()
-    .references(() => projects.id, { onDelete: "cascade" }),
-  issueNumber: int("issue_number").notNull(),
-  lane: text("lane").notNull(),
-  createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
-});
+export const lanePins = sqliteTable(
+  "lane_pins",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    issueNumber: int("issue_number").notNull(),
+    lane: text("lane").notNull(),
+    createdAt: int("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  // One pin per ticket is the invariant, stated here rather than left to the
+  // writer's delete-then-insert.
+  (t) => [uniqueIndex("lane_pins_ticket_idx").on(t.projectId, t.issueNumber)]
+);
 
 export type LanePin = typeof lanePins.$inferSelect;

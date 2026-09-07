@@ -714,6 +714,14 @@ that: the operator's explicit lane choice, scoped to one task or one run.
   metered pin still needs the day's real-money confirmation and stays under the
   cap, and no other task's routing changes. The fleet card shows
   `pinned to <lane>` beside the harness.
+- **A run pin survives an interruption.** A restart or a lost container
+  re-claims the ticket (the same attempt, #24) and the re-claim carries the
+  pin; a fresh attempt after a *failed* run does not — pin it again if you
+  still want it there.
+- **Known boundary.** A pinned lane whose harness reports no quota telemetry
+  (Codex, OpenCode) is never observed as walled, so a run refused there fails
+  over and its continuation comes straight back to the pin, cycling until the
+  resume bound parks it. The same happens with a fleet-wide pin on such a lane.
 - **Never from an issue body.** There is no `lane:` directive; a ticket says
   how hard its work is, never who pays.
 

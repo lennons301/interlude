@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "db4a030c-2d46-4547-8cd5-d8d82a5ecb04",
+  "id": "05f1f33e-3282-4a8b-aa6e-89884b16a72e",
   "prevId": "9d56454c-fed4-4b6e-8f85-15d6b144437f",
   "tables": {
     "lane_pins": {
@@ -43,7 +43,16 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "lane_pins_ticket_idx": {
+          "name": "lane_pins_ticket_idx",
+          "columns": [
+            "project_id",
+            "issue_number"
+          ],
+          "isUnique": true
+        }
+      },
       "foreignKeys": {
         "lane_pins_project_id_projects_id_fk": {
           "name": "lane_pins_project_id_projects_id_fk",

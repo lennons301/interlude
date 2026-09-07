@@ -72,7 +72,7 @@ import {
 } from "../../fleet/health";
 import { recordFleetHealth } from "../../fleet/health-store";
 import { readMoneyGuards } from "../../lanes/money-state";
-import { takeLanePin } from "../../lanes/lane-pins";
+import { lanePinForClaim } from "../../lanes/lane-pins";
 import { getCapacity } from "../capacity";
 import { getQueueLastProgress, isQueueRunning, occupiedSlots } from "../queue";
 import { startOfLocalDay, todayAutonomousSpendUsd } from "../spend";
@@ -3123,11 +3123,12 @@ async function executeClaim(action: Extract<Action, { type: "claimIssue" }>): Pr
       failure = err instanceof Error ? err.message : String(err);
     }
 
-    // An operator's pin for this ticket (issue #241), spent by this claim: the
-    // lane this run — every pass of it — treats as the operator's explicit
-    // choice, where the fleet's own primary would otherwise stand. Read before
-    // the row is written so a pin never outlives the claim it was set for.
-    const lanePin = takeLanePin(action.projectId, action.issueNumber);
+    // An operator's pin for this ticket (issue #241): a stored pin, spent by
+    // this claim, or the pin carried forward from an interrupted run this claim
+    // continues (#24: a re-claim is the same attempt, so the operator's lane
+    // comes with it). The lane this run — every pass of it — treats as the
+    // operator's explicit choice, where the fleet's own primary would stand.
+    const lanePin = lanePinForClaim(action.projectId, action.issueNumber, action.issueRef);
     db.insert(runs)
       .values({
         id: runId,

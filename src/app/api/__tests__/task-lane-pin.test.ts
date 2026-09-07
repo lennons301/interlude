@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb } from "@/test/create-test-db";
 import * as schema from "@/db/schema";
+import { newId } from "@/lib/ulid";
 import { HARNESS_ADAPTER_DESCRIPTORS } from "@/lib/harness/descriptors";
 import { parseLaneConfig, type LaneCatalog } from "@/lib/lanes/lane-config";
 import {
@@ -89,7 +90,7 @@ vi.mock("@/lib/lanes/catalog", async (importOriginal) => {
 });
 
 import { resetConfig } from "@/lib/config";
-import { readLanePin, setLanePin, takeLanePin } from "@/lib/lanes/lane-pins";
+import { lanePinForClaim, readLanePin, setLanePin, takeLanePin } from "@/lib/lanes/lane-pins";
 import { POST as postProject } from "@/app/api/projects/route";
 import { POST as postTask } from "@/app/api/tasks/route";
 import {
@@ -256,6 +257,60 @@ describe("the operator pin for an unclaimed ticket (issue #241)", () => {
     expect(takeLanePin(projectId, 9)).toBe("fake-b");
     expect(takeLanePin(projectId, 9)).toBeNull();
     expect(readLanePin(projectId, 9)).toBeNull();
+  });
+
+  describe("the pin a claim runs under (lanePinForClaim)", () => {
+    function seedRun(projectId: string, issueRef: string, status: "interrupted" | "failed" | "merged", lanePin: string | null, claimedAt: Date) {
+      testDb
+        .insert(schema.runs)
+        .values({
+          id: newId(),
+          projectId,
+          githubIssue: issueRef,
+          attempt: 1,
+          mode: "autonomous",
+          status,
+          budgetUsd: 20,
+          lanePin,
+          claimedAt,
+          finishedAt: claimedAt,
+        })
+        .run();
+    }
+    const REF = "lennons301/smoke#9";
+
+    it("takes a stored pin first, and spends it", async () => {
+      const projectId = await seedProject();
+      setLanePin(projectId, 9, "fake-b");
+      seedRun(projectId, REF, "interrupted", "fake-a", new Date("2026-09-06T10:00:00Z"));
+      expect(lanePinForClaim(projectId, 9, REF)).toBe("fake-b");
+      expect(readLanePin(projectId, 9)).toBeNull();
+    });
+
+    it("carries the pin of an interrupted run forward — a re-claim is the same attempt continuing", async () => {
+      const projectId = await seedProject();
+      seedRun(projectId, REF, "interrupted", "fake-b", new Date("2026-09-06T10:00:00Z"));
+      expect(lanePinForClaim(projectId, 9, REF)).toBe("fake-b");
+    });
+
+    it("does not inherit from a failed run — a fresh attempt routes as the fleet does", async () => {
+      const projectId = await seedProject();
+      seedRun(projectId, REF, "failed", "fake-b", new Date("2026-09-06T10:00:00Z"));
+      expect(lanePinForClaim(projectId, 9, REF)).toBeNull();
+    });
+
+    it("reads only the latest run: an older interruption does not pin a later attempt", async () => {
+      const projectId = await seedProject();
+      seedRun(projectId, REF, "interrupted", "fake-b", new Date("2026-09-06T10:00:00Z"));
+      seedRun(projectId, REF, "failed", null, new Date("2026-09-06T11:00:00Z"));
+      expect(lanePinForClaim(projectId, 9, REF)).toBeNull();
+    });
+
+    it("carries nothing when the interrupted run had no pin", async () => {
+      const projectId = await seedProject();
+      seedRun(projectId, REF, "interrupted", null, new Date("2026-09-06T10:00:00Z"));
+      expect(lanePinForClaim(projectId, 9, REF)).toBeNull();
+    });
   });
 
   it("answers 404 for a project that does not exist and 400 for a nonsense issue number", async () => {

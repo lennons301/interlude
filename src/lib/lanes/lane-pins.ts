@@ -16,7 +16,7 @@
 
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
-import { lanePins, type LanePin } from "@/db/schema";
+import { lanePins, runs, type LanePin } from "@/db/schema";
 import { newId } from "../ulid";
 
 export function readLanePin(projectId: string, issueNumber: number): LanePin | null {
@@ -49,6 +49,34 @@ export function clearLanePin(projectId: string, issueNumber: number): boolean {
 export function takeLanePin(projectId: string, issueNumber: number): string | null {
   const existing = readLanePin(projectId, issueNumber);
   if (existing === null) return null;
-  db.delete(lanePins).where(eq(lanePins.id, existing.id)).run();
+  clearLanePin(projectId, issueNumber);
   return existing.lane;
+}
+
+/**
+ * The pin a claim of this ticket runs under: a stored pin, spent by this
+ * read; otherwise the pin of the ticket's most recent run — but only when that
+ * run is `interrupted`, because a re-claim after an interruption is the same
+ * attempt continuing (issue #24) and the operator's lane comes with it. A
+ * fleet pin lives in settings and so survives a re-claim for free; a run pin
+ * lives on the row the re-claim replaces, so it has to be carried by hand. A
+ * fresh attempt after a *failed* run is a new decision and routes as the fleet
+ * does unless the operator pins it again — which is why the latest run's
+ * status, not any interrupted run's, decides.
+ */
+export function lanePinForClaim(
+  projectId: string,
+  issueNumber: number,
+  issueRef: string
+): string | null {
+  const stored = takeLanePin(projectId, issueNumber);
+  if (stored !== null) return stored;
+  const latest = db
+    .select({ status: runs.status, lanePin: runs.lanePin, claimedAt: runs.claimedAt })
+    .from(runs)
+    .where(eq(runs.githubIssue, issueRef))
+    .all()
+    .sort((a, b) => b.claimedAt.getTime() - a.claimedAt.getTime())[0];
+  if (!latest || latest.status !== "interrupted") return null;
+  return latest.lanePin ?? null;
 }
