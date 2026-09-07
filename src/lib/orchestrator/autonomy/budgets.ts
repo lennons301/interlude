@@ -248,6 +248,19 @@ export const DEFAULT_OCCUPANCY_DIVERGED_MS = 20 * 60_000;
 export const DEFAULT_UNDELIVERED_ANSWER_MS = 10 * 60_000;
 
 /**
+ * How long the Discord gateway may deliver nothing after the bot has posted
+ * before inbound is declared deaf (issue #135, `DISCORD_INBOUND_STALE_MINUTES`).
+ *
+ * A healthy session echoes the bot's own message back as a MESSAGE_CREATE
+ * within a second, so five minutes is two orders of magnitude of slack. It
+ * cannot fire on a quiet fleet — nothing sent, no echo owed — and it does fire
+ * on the 2026-08-13 shape: embeds landing for hours while a correct reply to a
+ * blocked run never arrived. The remedy is cheap (a restart re-identifies), so
+ * a short bound is the right trade.
+ */
+export const DEFAULT_DISCORD_INBOUND_STALE_MS = 5 * 60_000;
+
+/**
  * Default real-money daily cap in USD (issue #174) — the ceiling on cash spent
  * through a **metered** lane in one local day, whether that lane is primary,
  * an overflow target or reached by failover. Deliberately a different number

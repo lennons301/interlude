@@ -7,7 +7,10 @@
  *   (b) pickup wedged — a free slot but queued work not dispatching;
  *   (c) stale queue heartbeat — the 2s poll loop stopped making progress.
  *   (d) phantom occupancy — the in-memory slot counter claims more busy slots
- *       than there are agent containers actually running (issue #152).
+ *       than there are agent containers actually running (issue #152);
+ *   (e) an answer the owner gave that never reached the agent (issue #136);
+ *   (f) the Discord gateway gone deaf — the bot has posted and received no
+ *       echo, so every human reply through Discord is being lost (issue #135).
  *
  * (b) and (d) are one signal with two ways in, not two mechanisms: both mean
  * "work will not dispatch", both surface as the same pickup-wedged card and
@@ -56,6 +59,30 @@ export interface FleetHealthThresholds {
    * a blocked run stranded by a restart (nothing holds its container handle
    * any more), or a parked resume that memory admission keeps deferring. */
   undeliveredAnswerMs: number;
+  /** The bot has posted to Discord and the gateway has delivered nothing back
+   * for this long (issue #135, default 5 min): inbound is deaf. The bot's own
+   * message is echoed to it within a second when the session is healthy, so
+   * five minutes is generous and cannot fire on a quiet fleet — nothing sent,
+   * nothing owed. */
+  discordInboundStaleMs: number;
+}
+
+/**
+ * What the Discord gateway has delivered to this process against what the
+ * process has sent (issue #135). Kept by `discord/gateway-health.ts`; null when
+ * the bot has never connected this process, which decides nothing.
+ */
+export interface DiscordGatewayObservation {
+  /** When the bot last successfully posted a message over REST (ms), or null
+   * if it has not this process. The gateway should echo each one back. */
+  lastOutboundMs: number | null;
+  /** When the gateway last delivered any event to this process (ms), or null
+   * if it has not since connecting. */
+  lastInboundMs: number | null;
+  /** When discord.js reported it will no longer reconnect the shard (an
+   * unrecoverable close code), or null while the session is alive. */
+  closedSinceMs: number | null;
+  closeCode: number | null;
 }
 
 /** A run owed a review whose pass has not started — no review container is
@@ -157,6 +184,9 @@ export interface FleetHealthInput {
   queueLastProgressMs: number | null;
   /** Answers queued against a live task and not yet delivered (issue #136). */
   undeliveredAnswers: UndeliveredAnswerObservation[];
+  /** The Discord gateway's two clocks (issue #135), or null when there is no
+   * connected bot — not configured, or not yet logged in — which never alarms. */
+  discordGateway: DiscordGatewayObservation | null;
 }
 
 export interface OwedReviewStall extends OwedReviewObservation {
@@ -191,12 +221,30 @@ export interface QueueStale {
   staleForMs: number;
 }
 
+/** The bot has sent and the gateway has answered nothing since (issue #135):
+ * everything humans send *to* Interlude through Discord is being lost. */
+export interface DiscordInboundStale {
+  /** `closed`: discord.js gave the shard up (unrecoverable close code — bad
+   * token, disallowed intents); only a config fix and a restart bring it back.
+   * `silent`: the session looks alive but the bot's own post was never echoed
+   * back — a zombie session, which a restart re-identifies. */
+  cause: "closed" | "silent";
+  /** How long the gateway has been deaf: since the close, or since the
+   * unanswered send. */
+  silentForMs: number;
+  /** The gateway close code when `cause` is `closed`. */
+  closeCode: number | null;
+  lastOutboundMs: number | null;
+  lastInboundMs: number | null;
+}
+
 /** The currently-active health problems — one dashboard needs-you card each. */
 export interface FleetHealthSignals {
   owedReviewStalls: OwedReviewStall[];
   pickupWedged: PickupWedge | null;
   queueStale: QueueStale | null;
   undeliveredAnswers: UndeliveredAnswer[];
+  discordInboundStale: DiscordInboundStale | null;
 }
 
 /** The subset that just became active this evaluation — one Discord ping each. */
@@ -205,6 +253,9 @@ export interface FleetHealthAnnounce {
   pickupWedged: PickupWedge | null;
   queueStale: QueueStale | null;
   undeliveredAnswers: UndeliveredAnswer[];
+  /** Outbound still works when inbound is dead — which is exactly why this
+   * ping lands (issue #135). */
+  discordInboundStale: DiscordInboundStale | null;
 }
 
 /** Cross-sweep memory: when each condition first became true, and which have
@@ -234,6 +285,9 @@ export interface FleetHealthState {
   /** Task ids whose undelivered answer was already pinged; pruned when the
    * answer is delivered (issue #136). */
   undeliveredAnswerAnnounced: string[];
+  /** Whether the current deaf-gateway spell was already pinged (issue #135);
+   * cleared the moment the gateway delivers again. */
+  discordInboundAnnounced: boolean;
 }
 
 export const EMPTY_FLEET_HEALTH_STATE: FleetHealthState = {
@@ -244,6 +298,7 @@ export const EMPTY_FLEET_HEALTH_STATE: FleetHealthState = {
   pickupWedgedAnnounced: null,
   queueStaleAnnounced: false,
   undeliveredAnswerAnnounced: [],
+  discordInboundAnnounced: false,
 };
 
 export const DEFAULT_FLEET_HEALTH_THRESHOLDS: FleetHealthThresholds = {
@@ -252,6 +307,7 @@ export const DEFAULT_FLEET_HEALTH_THRESHOLDS: FleetHealthThresholds = {
   heartbeatStaleMs: 2 * 60_000,
   occupancyDivergedMs: 20 * 60_000,
   undeliveredAnswerMs: 10 * 60_000,
+  discordInboundStaleMs: 5 * 60_000,
 };
 
 export interface FleetHealthEvaluation {
@@ -410,13 +466,61 @@ export function evaluateFleetHealth(
     }
   }
 
+  // --- (f) The Discord gateway has gone deaf ------------------------------
+  // The clock is the last outbound send, not a since-timer: a healthy session
+  // echoes the bot's own message back within a second, so "sent, and nothing
+  // has arrived since" is the whole observation. A quiet fleet sends nothing
+  // and so is owed nothing; a fresh session starts with inbound = connect time
+  // and is owed nothing for sends that predate it. Announced once per spell,
+  // cleared the moment an event arrives after the send (issue #135).
+  let discordInboundStale: DiscordInboundStale | null = null;
+  let discordInboundAnnounced = false;
+  let announceDiscordInboundStale: DiscordInboundStale | null = null;
+  const gateway = input.discordGateway;
+  if (gateway != null && gateway.closedSinceMs != null) {
+    // The library said it will not reconnect: no threshold, nothing to wait for.
+    discordInboundStale = {
+      cause: "closed",
+      silentForMs: now - gateway.closedSinceMs,
+      closeCode: gateway.closeCode,
+      lastOutboundMs: gateway.lastOutboundMs,
+      lastInboundMs: gateway.lastInboundMs,
+    };
+  } else if (
+    gateway != null &&
+    gateway.lastOutboundMs != null &&
+    (gateway.lastInboundMs == null || gateway.lastInboundMs < gateway.lastOutboundMs)
+  ) {
+    const silentForMs = now - gateway.lastOutboundMs;
+    if (silentForMs >= thresholds.discordInboundStaleMs) {
+      discordInboundStale = {
+        cause: "silent",
+        silentForMs,
+        closeCode: null,
+        lastOutboundMs: gateway.lastOutboundMs,
+        lastInboundMs: gateway.lastInboundMs,
+      };
+    }
+  }
+  if (discordInboundStale) {
+    discordInboundAnnounced = true;
+    if (!prev.discordInboundAnnounced) announceDiscordInboundStale = discordInboundStale;
+  }
+
   return {
-    signals: { owedReviewStalls, pickupWedged, queueStale, undeliveredAnswers },
+    signals: {
+      owedReviewStalls,
+      pickupWedged,
+      queueStale,
+      undeliveredAnswers,
+      discordInboundStale,
+    },
     announce: {
       owedReviewStalls: announcedStalls,
       pickupWedged: announcePickupWedged,
       queueStale: announceQueueStale,
       undeliveredAnswers: announcedAnswers,
+      discordInboundStale: announceDiscordInboundStale,
     },
     state: {
       owedReviewSinceMs,
@@ -426,6 +530,7 @@ export function evaluateFleetHealth(
       pickupWedgedAnnounced,
       queueStaleAnnounced,
       undeliveredAnswerAnnounced,
+      discordInboundAnnounced,
     },
   };
 }

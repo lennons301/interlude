@@ -1236,6 +1236,7 @@ describe("buildFleetView — needs you", () => {
             remedy: "Check the orchestrator.",
           },
           queueStale: { staleForMs: 3 * 60_000 },
+          discordInboundStale: null,
           undeliveredAnswers: [
             {
               taskId: "t-3",
@@ -1313,6 +1314,7 @@ describe("buildFleetView — fleet health (#126)", () => {
           owedReviewStalls: [],
           pickupWedged: null,
           queueStale: { staleForMs: 3 * 60_000 },
+          discordInboundStale: null,
           undeliveredAnswers: [],
         },
       })
@@ -1340,6 +1342,7 @@ describe("buildFleetView — fleet health (#126)", () => {
             remedy: "Check the orchestrator (a hung Docker daemon).",
           },
           queueStale: null,
+          discordInboundStale: null,
           undeliveredAnswers: [],
         },
       })
@@ -1373,6 +1376,7 @@ describe("buildFleetView — fleet health (#126)", () => {
               "The slot count is held in orchestrator memory with nothing behind it — restart the app to clear it.",
           },
           queueStale: null,
+          discordInboundStale: null,
           undeliveredAnswers: [],
         },
       })
@@ -1397,6 +1401,7 @@ describe("buildFleetView — fleet health (#126)", () => {
           ],
           pickupWedged: null,
           queueStale: null,
+          discordInboundStale: null,
           undeliveredAnswers: [],
         },
       })
@@ -1431,6 +1436,7 @@ describe("buildFleetView — fleet health (#126)", () => {
           ],
           pickupWedged: null,
           queueStale: null,
+          discordInboundStale: null,
           undeliveredAnswers: [],
         },
       })
@@ -1452,6 +1458,7 @@ describe("buildFleetView — fleet health (#126)", () => {
           ],
           pickupWedged: null,
           queueStale: null,
+          discordInboundStale: null,
           undeliveredAnswers: [],
         },
       })
@@ -2552,6 +2559,7 @@ describe("the quota's lane (issues #175, #219)", () => {
           owedReviewStalls: [],
           pickupWedged: null,
           queueStale: null,
+          discordInboundStale: null,
           undeliveredAnswers: [
             {
               taskId: "t-62",

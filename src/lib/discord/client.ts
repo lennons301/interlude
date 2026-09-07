@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Message, Partials } from "discord.js";
+import { Client, GatewayCloseCodes, GatewayIntentBits, Message, Partials } from "discord.js";
 import type { MessageReaction, PartialMessageReaction, User, PartialUser } from "discord.js";
 import { db } from "@/db";
 import { projects, tasks, messages } from "@/db/schema";
@@ -7,48 +7,213 @@ import { newId } from "../ulid";
 import { getConfig } from "../config";
 import { isArmingConfirmation } from "../orchestrator/autonomy/triage";
 import { setBotClient, notifyTaskQueued } from "./notifications";
+import {
+  recordDiscordConnected,
+  recordDiscordGatewayClosed,
+  recordDiscordInbound,
+} from "./gateway-health";
+import { existingAnswers, insertDiscordAnswer } from "./blocked-replies";
 
-let client: Client | null = null;
+/**
+ * The gateway is the only way anything reaches Interlude *from* Discord, and
+ * until issue #135 nothing watched it: `clientReady` was the one lifecycle
+ * event handled, a dead session sat deaf, and a handler that threw swallowed
+ * the human's reply into `console.error`. Now every lifecycle event is logged
+ * with its shard and close code, every delivered event advances the inbound
+ * clock the fleet-health watchdog reads (`gateway-health.ts`), a shard the
+ * library has given up on raises the deaf-gateway card at once with the fix
+ * named, and a handler failure leaves a trace the human can see — a ⚠️ on their
+ * message and a system message on the task it was for.
+ *
+ * What the lifecycle events mean is a fact about discord.js 14.26.4, checked
+ * against its source rather than its docs. `@discordjs/ws` handles
+ * INVALID_SESSION and RECONNECT itself (resume, or re-identify), announced as
+ * `shardReconnecting`. `shardDisconnect` is emitted **only** for a close code
+ * in `UNRECOVERABLE_CLOSE_CODES` — 4004 authentication failed, 4010–4014
+ * (invalid shard, sharding required, invalid API version, invalid or
+ * disallowed intents) — every one a configuration error that logging in again
+ * with the same token and intents would only repeat. So nothing here
+ * re-logs-in: a re-login loop on those codes would IDENTIFY toward Discord's
+ * daily limit (which resets the token) and fix nothing. The remedy is a config
+ * change and a restart, and the card says so. `invalidated`, the event the
+ * ticket names, exists in the `Events` enum but is never emitted by this
+ * version; it is logged if it ever arrives.
+ */
+
+/** What `startDiscordBot` needs from the outside world — injectable so the
+ * gateway wiring can be driven by a fake client in tests. */
+export interface DiscordBotDeps {
+  createClient: () => Client;
+}
+
+const DEFAULT_DEPS: DiscordBotDeps = {
+  createClient: () =>
+    new Client({
+      intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMessageReactions,
+      ],
+      partials: [Partials.Message, Partials.Reaction, Partials.Channel],
+    }),
+};
+
+let deps: DiscordBotDeps = DEFAULT_DEPS;
 
 export function isDiscordConfigured(): boolean {
   const config = getConfig();
   return !!(config.discordBotToken && config.discordApplicationId);
 }
 
-export async function startDiscordBot(): Promise<void> {
+export async function startDiscordBot(overrides: Partial<DiscordBotDeps> = {}): Promise<void> {
   const config = getConfig();
   if (!config.discordBotToken) {
     throw new Error("DISCORD_BOT_TOKEN not configured");
   }
+  deps = { ...DEFAULT_DEPS, ...overrides };
+  const c = deps.createClient();
+  wireGateway(c);
+  await c.login(config.discordBotToken);
+}
 
-  client = new Client({
-    intents: [
-      GatewayIntentBits.Guilds,
-      GatewayIntentBits.GuildMessages,
-      GatewayIntentBits.MessageContent,
-      GatewayIntentBits.GuildMessageReactions,
-    ],
-    partials: [Partials.Message, Partials.Reaction, Partials.Channel],
+function wireGateway(c: Client): void {
+  c.on("clientReady", () => {
+    console.log(`[discord] Bot connected as ${c.user?.tag}`);
+    recordDiscordConnected();
+    setBotClient(c);
   });
 
-  client.on("clientReady", () => {
-    console.log(`[discord] Bot connected as ${client!.user?.tag}`);
-    setBotClient(client!);
+  // Lifecycle (issue #135). Each is logged with what discord.js knows, and each
+  // arrival counts as the gateway being alive. A recoverable close is the
+  // library's to handle (`shardReconnecting`, then `shardResume` or a fresh
+  // `shardReady`); an unrecoverable one (`shardDisconnect`) is a configuration
+  // error only a human can fix, so it is recorded for the watchdog, not retried.
+  c.on("shardReady", (shardId, unavailable) => {
+    recordDiscordInbound();
+    console.log(
+      `[discord] Shard ${shardId} ready` +
+        (unavailable?.size ? ` (${unavailable.size} guild(s) unavailable)` : "")
+    );
   });
-
-  client.on("messageCreate", (message) => {
-    handleMessage(message).catch((err) =>
-      console.error("[discord] Message handler error:", err)
+  c.on("shardResume", (shardId, replayedEvents) => {
+    recordDiscordInbound();
+    console.log(`[discord] Shard ${shardId} resumed, ${replayedEvents} event(s) replayed`);
+  });
+  c.on("shardReconnecting", (shardId) => {
+    console.warn(
+      `[discord] Shard ${shardId} reconnecting — a recoverable close; discord.js resumes ` +
+        `or re-identifies by itself`
+    );
+  });
+  c.on("shardDisconnect", (event, shardId) => {
+    // Emitted only when the library will not reconnect this shard (an
+    // unrecoverable close code such as 4004 authentication failed or 4014
+    // disallowed intents): inbound is dead from here. Outbound REST still
+    // works, so the deaf-gateway card and its ping — raised on the next sweep,
+    // no threshold — reach the owner with the code and the fix.
+    recordDiscordGatewayClosed(event.code);
+    console.error(
+      `[discord] Shard ${shardId} disconnected with unrecoverable close code ` +
+        `${event.code} (${closeCodeName(event.code)}) — discord.js will not reconnect it, ` +
+        `and re-logging in with the same token and intents would only repeat it. ` +
+        `Fix the bot's configuration (token, intents) and restart the app.`
+    );
+  });
+  c.on("shardError", (err, shardId) => {
+    console.error(`[discord] Shard ${shardId} error:`, err);
+  });
+  c.on("error", (err) => {
+    console.error("[discord] Client error:", err);
+  });
+  // Not emitted by discord.js 14.26.4 (verified in its WebSocketManager: the
+  // enum entry exists, nothing emits it). Logged in case a future version does,
+  // so the change of behaviour is at least visible.
+  c.on("invalidated", () => {
+    console.error(
+      "[discord] Client reported its session invalidated — not expected from this " +
+        "discord.js version; if replies stop arriving, the fleet-health card says so"
     );
   });
 
-  client.on("messageReactionAdd", (reaction, user) => {
+  c.on("messageCreate", (message) => {
+    recordDiscordInbound();
+    handleMessage(message).catch((err) => reportDiscordHandlerFailure(message, err));
+  });
+
+  c.on("messageReactionAdd", (reaction, user) => {
+    recordDiscordInbound();
     handleReactionAdd(reaction, user).catch((err) =>
       console.error("[discord] Reaction handler error:", err)
     );
   });
+}
 
-  await client.login(config.discordBotToken);
+/** The gateway close code's name, for the log line. */
+function closeCodeName(code: number): string {
+  return GatewayCloseCodes[code] ?? "unknown";
+}
+
+/** What the failure report needs of a message, so a test can hand in a stub. */
+export interface FailedMessage {
+  id: string;
+  reference: { messageId?: string | null } | null;
+  react(emoji: string): Promise<unknown>;
+}
+
+/**
+ * A handler that threw used to swallow the human's message into a log line
+ * they will never read (issue #135). Silence is the one outcome a human cannot
+ * act on, so: a ⚠️ on their message, best-effort, and — when the message was a
+ * reply to a task's embed — a system message on that task saying what happened,
+ * so the task page tells the same story as the channel.
+ *
+ * What happened depends on whether the reply's row exists. A throw before the
+ * insert means nothing was delivered and the human should reply again; a throw
+ * after it (the likeliest is the 👍 REST call — now best-effort in `handleReply`,
+ * but the check stays because this is the last line of defence) means the
+ * answer *is* on its way and telling them to reply again would cost a second
+ * turn. The row is looked up by the Discord message id both paths record.
+ */
+export async function reportDiscordHandlerFailure(
+  message: FailedMessage,
+  err: unknown
+): Promise<void> {
+  console.error(`[discord] Message handler error (message ${message.id}):`, err);
+  try {
+    await message.react("⚠️");
+  } catch (reactErr) {
+    console.error(`[discord] Could not mark failed message ${message.id}:`, reactErr);
+  }
+
+  const repliedToId = message.reference?.messageId;
+  if (!repliedToId) return;
+  try {
+    const task = db
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(eq(tasks.discordMessageId, repliedToId))
+      .get();
+    if (!task) return;
+    const reason = err instanceof Error ? err.message : String(err);
+    const recorded = existingAnswers(task.id).some((a) => a.discordMessageId === message.id);
+    db.insert(messages)
+      .values({
+        id: newId(),
+        taskId: task.id,
+        role: "system",
+        type: "system",
+        content: recorded
+          ? `Your Discord reply was recorded and will be delivered, but marking it in ` +
+            `Discord failed (${reason}) — no need to reply again.`
+          : `A Discord reply to this task was seen but could not be processed (${reason}). ` +
+            `Nothing was delivered to the agent — reply again in Discord, or answer here.`,
+        createdAt: new Date(),
+      })
+      .run();
+  } catch (traceErr) {
+    console.error(`[discord] Could not record the failed reply on its task:`, traceErr);
+  }
 }
 
 async function handleMessage(message: Message): Promise<void> {
@@ -220,20 +385,21 @@ async function handleReply(message: Message): Promise<void> {
     return;
   }
 
-  // Insert as user message — queue will pick it up
-  db.insert(messages)
-    .values({
-      id: newId(),
-      taskId: task.id,
-      role: "user",
-      type: "text",
-      content: JSON.stringify({ text: message.content.trim() }),
-      createdAt: new Date(),
-    })
-    .run();
-
-  await message.react("👍");
-  console.log(`[discord] Follow-up message for task ${task.id} from Discord`);
+  // Insert as user message — queue will pick it up. Through the one helper the
+  // REST reconciliation also uses (issue #135), so the Discord message id is on
+  // the row and neither path can deliver what the other already has.
+  const inserted = insertDiscordAnswer(task.id, message.content, message.id);
+  console.log(
+    `[discord] Follow-up message for task ${task.id} from Discord` +
+      (inserted ? "" : " (already adopted over REST)")
+  );
+  // Best-effort: the row is the delivery, the 👍 is only the receipt. A REST
+  // failure here must not read as "nothing was delivered" (issue #135).
+  try {
+    await message.react("👍");
+  } catch (err) {
+    console.error(`[discord] Could not acknowledge reply ${message.id} for task ${task.id}:`, err);
+  }
 }
 
 async function handleArmingConfirmation(

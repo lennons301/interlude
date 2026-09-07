@@ -15,6 +15,7 @@ const THRESHOLDS: FleetHealthThresholds = {
   heartbeatStaleMs: 2 * 60_000,
   occupancyDivergedMs: 20 * 60_000,
   undeliveredAnswerMs: 10 * 60_000,
+  discordInboundStaleMs: 5 * 60_000,
 };
 
 const T0 = new Date(2026, 7, 1, 12, 0, 0).getTime();
@@ -31,6 +32,7 @@ function baseInput(overrides: Partial<FleetHealthInput> = {}): FleetHealthInput 
     queueRunning: true,
     queueLastProgressMs: T0,
     undeliveredAnswers: [],
+    discordGateway: null,
     ...overrides,
   };
   // Unless a test says otherwise, the daemon corroborates the slot count — so
@@ -613,5 +615,128 @@ describe("undelivered answer (issue #136)", () => {
     );
     expect(working.signals.undeliveredAnswers).toEqual([]);
     expect(working.state.undeliveredAnswerAnnounced).toEqual([]);
+  });
+});
+
+describe("deaf Discord gateway (issue #135)", () => {
+  const gateway = (lastOutboundMs: number | null, lastInboundMs: number | null) =>
+    baseInput({
+      nowMs: T0 + min(10),
+      discordGateway: { lastOutboundMs, lastInboundMs, closedSinceMs: null, closeCode: null },
+    });
+
+  it("never fires when there is no connected bot", () => {
+    const { signals } = evaluate(baseInput({ nowMs: T0 + min(10), discordGateway: null }));
+    expect(signals.discordInboundStale).toBeNull();
+  });
+
+  it("never fires on a quiet fleet — nothing sent, no echo owed", () => {
+    expect(evaluate(gateway(null, T0)).signals.discordInboundStale).toBeNull();
+    expect(evaluate(gateway(null, null)).signals.discordInboundStale).toBeNull();
+  });
+
+  it("is quiet while the gateway has answered since the last send", () => {
+    // Echo arrived a second after the send.
+    expect(evaluate(gateway(T0 + min(2), T0 + min(2) + 1_000)).signals.discordInboundStale).toBeNull();
+    // Or exactly then.
+    expect(evaluate(gateway(T0 + min(2), T0 + min(2))).signals.discordInboundStale).toBeNull();
+  });
+
+  it("waits out the threshold after an unanswered send", () => {
+    // Sent 4 minutes ago, last inbound before that: not yet.
+    expect(evaluate(gateway(T0 + min(6), T0 + min(1))).signals.discordInboundStale).toBeNull();
+  });
+
+  it("fires once the send has gone unanswered past the threshold, and pings once", () => {
+    const s1 = evaluate(gateway(T0 + min(4), T0 + min(1)));
+    expect(s1.signals.discordInboundStale).toEqual({
+      cause: "silent",
+      silentForMs: min(6),
+      closeCode: null,
+      lastOutboundMs: T0 + min(4),
+      lastInboundMs: T0 + min(1),
+    });
+    expect(s1.announce.discordInboundStale).not.toBeNull();
+    expect(s1.state.discordInboundAnnounced).toBe(true);
+
+    // Next sweep, still deaf: card stands, no second ping.
+    const s2 = evaluateFleetHealth(
+      baseInput({
+        nowMs: T0 + min(11),
+        discordGateway: {
+          lastOutboundMs: T0 + min(4),
+          lastInboundMs: T0 + min(1),
+          closedSinceMs: null,
+          closeCode: null,
+        },
+      }),
+      s1.state,
+      THRESHOLDS
+    );
+    expect(s2.signals.discordInboundStale).not.toBeNull();
+    expect(s2.announce.discordInboundStale).toBeNull();
+  });
+
+  it("fires with no inbound at all since connecting, when a send has gone unanswered", () => {
+    const { signals } = evaluate(gateway(T0 + min(4), null));
+    expect(signals.discordInboundStale?.lastInboundMs).toBeNull();
+  });
+
+  it("clears the moment the gateway delivers again, and re-arms for the next spell", () => {
+    const deaf = evaluate(gateway(T0 + min(4), T0 + min(1)));
+    const recovered = evaluateFleetHealth(
+      baseInput({
+        nowMs: T0 + min(12),
+        discordGateway: {
+          lastOutboundMs: T0 + min(4),
+          lastInboundMs: T0 + min(12),
+          closedSinceMs: null,
+          closeCode: null,
+        },
+      }),
+      deaf.state,
+      THRESHOLDS
+    );
+    expect(recovered.signals.discordInboundStale).toBeNull();
+    expect(recovered.state.discordInboundAnnounced).toBe(false);
+
+    const again = evaluateFleetHealth(
+      baseInput({
+        nowMs: T0 + min(30),
+        discordGateway: {
+          lastOutboundMs: T0 + min(20),
+          lastInboundMs: T0 + min(12),
+          closedSinceMs: null,
+          closeCode: null,
+        },
+      }),
+      recovered.state,
+      THRESHOLDS
+    );
+    expect(again.announce.discordInboundStale).not.toBeNull();
+  });
+
+  it("fires at once, without a threshold, when discord.js has given the shard up", () => {
+    // 4014 = disallowed intents: no re-login fixes it, only a config change and a
+    // restart, so there is nothing to wait for — and a quiet fleet must still hear.
+    const { signals, announce } = evaluate(
+      baseInput({
+        nowMs: T0 + min(10),
+        discordGateway: {
+          lastOutboundMs: null,
+          lastInboundMs: T0,
+          closedSinceMs: T0 + min(10) - 20_000,
+          closeCode: 4014,
+        },
+      })
+    );
+    expect(signals.discordInboundStale).toEqual({
+      cause: "closed",
+      silentForMs: 20_000,
+      closeCode: 4014,
+      lastOutboundMs: null,
+      lastInboundMs: T0,
+    });
+    expect(announce.discordInboundStale?.cause).toBe("closed");
   });
 });

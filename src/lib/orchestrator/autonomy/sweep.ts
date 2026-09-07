@@ -48,6 +48,7 @@ import {
   notifyIntegrationEscalation,
   notifyOwedReviewStalled,
   notifyPickupWedged,
+  notifyDiscordInboundStale,
   notifyQueueStale,
   notifyUndeliveredAnswer,
   notifyQuotaGateClosed,
@@ -70,6 +71,8 @@ import {
   type QueuedTaskObservation,
 } from "../../fleet/health";
 import { recordFleetHealth } from "../../fleet/health-store";
+import { observeDiscordGateway } from "../../discord/gateway-health";
+import { reconcileBlockedReplies } from "../../discord/blocked-replies";
 import { readMoneyGuards } from "../../lanes/money-state";
 import { lanePinForClaim } from "../../lanes/lane-pins";
 import { getCapacity } from "../capacity";
@@ -308,6 +311,12 @@ export async function runAutonomySweep(): Promise<void> {
 
   try {
     await reapOrphanedReviewPasses();
+    // A blocked run's answer, collected over REST in case the gateway never
+    // delivered it (issue #135). Before gather, so a row adopted here is what
+    // this sweep's undelivered-answer signal and the queue's next poll see.
+    await reconcileBlockedReplies().catch((err) =>
+      console.error("[autonomy] Blocked-reply reconciliation failed:", err)
+    );
     const snapshot = await gatherSnapshot(new Date());
     const actions = decideNext(snapshot);
     await executeActions(actions);
@@ -399,6 +408,16 @@ async function evaluateFleetHealthSignals(
     );
     await notifyQueueStale(channelId, announce.queueStale);
   }
+  if (announce.discordInboundStale) {
+    const deaf = announce.discordInboundStale;
+    console.warn(
+      `[autonomy] Discord gateway deaf (${deaf.cause}` +
+        (deaf.closeCode != null ? `, close code ${deaf.closeCode}` : "") +
+        `) for ~${Math.round(deaf.silentForMs / 60_000)}m — human replies through Discord ` +
+        `are being lost`
+    );
+    await notifyDiscordInboundStale(channelId, announce.discordInboundStale);
+  }
 }
 
 /**
@@ -473,6 +492,9 @@ async function gatherFleetHealthInput(
     // #136) — the one health signal whose clock is a DB row rather than a
     // since-timer, because the failure it detects is a restart.
     undeliveredAnswers: gatherUndeliveredAnswers(),
+    // The gateway's two clocks (issue #135): null until the bot has connected
+    // this process, which decides nothing.
+    discordGateway: observeDiscordGateway(),
   };
 }
 
