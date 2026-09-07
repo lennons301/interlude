@@ -6,6 +6,7 @@ import {
   parseListeningPorts,
   parseListeningSockets,
   parseProbedPort,
+  PROBE_EXIT_BASE,
 } from "../port-scanner";
 
 /**
@@ -144,17 +145,41 @@ describe("parseListeningPorts — the ranked candidates", () => {
   });
 });
 
-describe("parseProbedPort — the probe script's one line of output", () => {
-  it("returns the port the script printed, ignoring TTY noise around it", () => {
-    expect(parseProbedPort("\r\n3000\r\n", [3000, 8080])).toBe(3000);
+describe("parseProbedPort — the probe script's answer", () => {
+  // What the 2026-09-07 lemons session's orchestrator actually received from a
+  // TTY-created exec started without `Tty`: the daemon's 8-byte multiplex frame
+  // header glued to the only line. Read as text, that line is not a number.
+  const FRAMED_3000 = "\x01\x00\x00\x00\x00\x00\x00\x063000\r\n";
+
+  it("reads the matched candidate off the exit code, whatever stdout carried", () => {
+    expect(parseProbedPort({ stdout: "", exitCode: PROBE_EXIT_BASE }, [3000, 8080])).toBe(3000);
+    expect(parseProbedPort({ stdout: FRAMED_3000, exitCode: PROBE_EXIT_BASE }, [3000, 8080])).toBe(3000);
+    expect(parseProbedPort({ stdout: "", exitCode: PROBE_EXIT_BASE + 1 }, [3000, 8080])).toBe(8080);
   });
 
-  it("returns null when the script printed nothing (no candidate answered HTTP)", () => {
-    expect(parseProbedPort("", [3000])).toBeNull();
-    expect(parseProbedPort("\r\n", [3000])).toBeNull();
+  it("survives the production frame header on the stdout fallback too", () => {
+    expect(parseProbedPort({ stdout: FRAMED_3000, exitCode: null }, [3000])).toBe(3000);
   });
 
-  it("refuses a number that was not among the candidates it was asked to probe", () => {
-    expect(parseProbedPort("curl: (6) Could not resolve host\n22\n", [3000])).toBeNull();
+  it("(kept for the record) the exit-code path is what makes stdout irrelevant", () => {
+    expect(parseProbedPort({ stdout: "", exitCode: PROBE_EXIT_BASE }, [3000, 8080])).toBe(3000);
+    expect(parseProbedPort({ stdout: "", exitCode: PROBE_EXIT_BASE + 1 }, [3000, 8080])).toBe(8080);
+  });
+
+  it("returns null for the script's 'none answered' exit, whatever stdout says", () => {
+    expect(parseProbedPort({ stdout: "3000\n", exitCode: 1 }, [3000])).toBeNull();
+  });
+
+  it("returns null for an exit code naming no candidate — a shell failure is not a port", () => {
+    expect(parseProbedPort({ stdout: "", exitCode: 127 }, [3000])).toBeNull();
+    expect(parseProbedPort({ stdout: "", exitCode: PROBE_EXIT_BASE + 2 }, [3000, 8080])).toBeNull();
+  });
+
+  it("falls back to stdout only when the daemon reported no exit code", () => {
+    expect(parseProbedPort({ stdout: "\r\n3000\r\n", exitCode: null }, [3000, 8080])).toBe(3000);
+    expect(parseProbedPort({ stdout: "", exitCode: null }, [3000])).toBeNull();
+    expect(
+      parseProbedPort({ stdout: "curl: (6) Could not resolve host\n22\n", exitCode: null }, [3000])
+    ).toBeNull();
   });
 });
