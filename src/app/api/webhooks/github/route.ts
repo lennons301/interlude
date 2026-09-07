@@ -6,7 +6,7 @@ import { newId } from "@/lib/ulid";
 import { verifyWebhookSignature } from "@/lib/github/webhooks";
 import { addLabelToIssue, commentOnIssue } from "@/lib/github/issues";
 import { isGitHubConfigured } from "@/lib/github/client";
-import { runAutonomySweep } from "@/lib/orchestrator/autonomy/sweep";
+import { requestAutonomySweep } from "@/lib/orchestrator/autonomy/sweep-nudge";
 import {
   ARMING_LABEL,
   INTERACTIVE_TRIGGER_LABEL,
@@ -34,7 +34,7 @@ export async function POST(request: Request) {
   const payload = JSON.parse(body);
 
   // A new issue on a registered project gets met on arrival (issue #23):
-  // mark it needs-triage — the label is the triage queue — and kick the
+  // mark it needs-triage — the label is the triage queue — and nudge the
   // sweep. The webhook is just latency; the reconciliation sweep picks up
   // strays the same way. An issue arriving already routed (any triage-role
   // label, or the interactive trigger) is left alone.
@@ -64,9 +64,7 @@ export async function POST(request: Request) {
     }
 
     await addLabelToIssue(`${repoFullName}#${issue.number}`, NEEDS_TRIAGE_LABEL);
-    runAutonomySweep().catch((err) =>
-      console.error("[autonomy] Webhook-triggered sweep failed:", err)
-    );
+    requestAutonomySweep(`issues.opened ${repoFullName}#${issue.number}`);
     return NextResponse.json({ ok: true, triggered: "triage" });
   }
 
@@ -74,11 +72,15 @@ export async function POST(request: Request) {
     const label = payload.label?.name;
 
     // ready-for-agent is the launch button, only ever pressed by a human.
-    // The webhook is just latency: it kicks the same sweep -> reducer path
-    // the reconciliation interval uses, so there is one decision path.
+    // The webhook is just latency: it nudges the orchestrator's loop, which
+    // runs the same sweep -> reducer path the reconciliation interval uses, so
+    // there is one decision path — and one module graph sweeping (issue #163).
+    // This route must never call runAutonomySweep itself: that ran the sweep
+    // against the app-router graph's own empty copy of the single-flight flag
+    // and the in-flight claims, and claimed one ticket twice.
     if (label === ARMING_LABEL) {
-      runAutonomySweep().catch((err) =>
-        console.error("[autonomy] Webhook-triggered sweep failed:", err)
+      requestAutonomySweep(
+        `issues.labeled ${ARMING_LABEL} ${payload.repository?.full_name}#${payload.issue?.number}`
       );
       return NextResponse.json({ ok: true, triggered: "autonomy-sweep" });
     }

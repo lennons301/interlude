@@ -32,6 +32,32 @@ const eslintConfig = defineConfig([
       ],
     },
   },
+  {
+    // Only the orchestrator's own loop may run an autonomy sweep (issue #163).
+    // Route handlers are compiled into a separate module graph from
+    // `instrumentation.ts`, so a sweep started from one runs against a second,
+    // empty copy of every flag in sweep.ts — single-flight, in-flight claims,
+    // the fleet-health debounce — which claimed one ticket twice and silenced
+    // a standing needs-you card in production. A route that needs a sweep
+    // records a nudge via `requestAutonomySweep` (sweep-nudge.ts) and the loop
+    // picks it up within a second. Enforced here rather than by a test that
+    // reads source text, like the Octokit rule above.
+    files: ["src/app/**/*.ts", "src/app/**/*.tsx"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["**/orchestrator/autonomy/sweep", "@/lib/orchestrator/autonomy/sweep"],
+              message:
+                "Route handlers run on a separate module graph and must not sweep. Call requestAutonomySweep() from @/lib/orchestrator/autonomy/sweep-nudge instead (issue #163).",
+            },
+          ],
+        },
+      ],
+    },
+  },
 ]);
 
 export default eslintConfig;
