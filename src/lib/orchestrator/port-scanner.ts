@@ -1,4 +1,5 @@
 import type { RunningContainer } from "../docker/container-manager";
+import { getDocker } from "../docker/client";
 
 /**
  * Dev-server detection for the live preview (Phase 2c; hardened in issue #160).
@@ -114,15 +115,50 @@ export function parseListeningPorts(output: string): number[] {
   });
 }
 
+/** What one exec produced: its standard output and how it exited (null when
+ * the daemon reported no code — the exec timed out or could not be inspected). */
+export interface ExecResult {
+  stdout: string;
+  exitCode: number | null;
+}
+
 /**
- * Which of the probe script's outputs names a confirmed port. The script
- * prints exactly one line — the first candidate that answered HTTP — or
- * nothing; anything else on a TTY stream (a `\r`, a stray warning) is not a
- * port. Pure, so the contract with the script is pinned by a test.
+ * The probe script's exit code for a match: `PROBE_EXIT_BASE + i` names the
+ * i-th candidate it was handed, in order. The answer rides on the exit code
+ * rather than on stdout because stdout is what failed in production. On every
+ * scan of the 2026-09-07 lemons session the script matched `3000` (Docker's
+ * own exec records show the match exit), and the orchestrator parsed nothing:
+ * the exec had been created with a TTY but *started* without saying so, and
+ * the daemon frames such a stream with its 8-byte stdout/stderr multiplex
+ * header — `\x01\x00\x00\x00\x00\x00\x00\x06` glued to the front of `3000` —
+ * which the parser read as part of the only line. An exit code has no framing
+ * to fall foul of. Base 100 keeps clear of the codes bash and curl use for
+ * their own failures (1, 2, 126–128).
  */
-export function parseProbedPort(output: string, candidates: readonly number[]): number | null {
-  for (const line of output.split("\n")) {
-    const port = parseInt(line.trim(), 10);
+export const PROBE_EXIT_BASE = 100;
+
+/**
+ * Which candidate the probe confirmed. The exit code is authoritative; stdout
+ * is the fallback for a daemon that reported no code, and must name one of
+ * the candidates on a line of its own to count — control bytes are stripped
+ * first, so a stray frame header can never again hide the number. Pure, so
+ * the contract with the script is pinned by a test.
+ */
+export function parseProbedPort(
+  result: ExecResult,
+  candidates: readonly number[]
+): number | null {
+  const { exitCode, stdout } = result;
+  if (exitCode !== null) {
+    const index = exitCode - PROBE_EXIT_BASE;
+    if (index >= 0 && index < candidates.length) return candidates[index];
+    // A code the script did not assign a match to: a genuine "none answered"
+    // (1), or a failure of the shell itself. Neither is a port.
+    return null;
+  }
+  for (const line of stdout.split("\n")) {
+    // Control bytes stripped: a frame header is exactly that (see PROBE_EXIT_BASE).
+    const port = parseInt(line.replace(/[\x00-\x1f\x7f]/g, "").trim(), 10);
     if (Number.isInteger(port) && candidates.includes(port)) return port;
   }
   return null;
@@ -137,6 +173,10 @@ const PROBE_TIMEOUT_S = 2;
 /** A scan that the daemon does not answer is a scan that found nothing. */
 const EXEC_TIMEOUT_MS = 10_000;
 
+/** How often the exec is asked whether it has exited, for a stream the daemon
+ * closes late or never — the same shape as the container manager's file reads. */
+const EXIT_POLL_MS = 250;
+
 /**
  * The in-container HTTP probe. Requests are made against the container's own
  * network address — the same address the proxy reaches it by — so a server
@@ -146,40 +186,94 @@ const EXEC_TIMEOUT_MS = 10_000;
  * HTTP. Candidates arrive in the environment, not on the command line, so
  * nothing here is shell syntax. Falls back to loopback only when the address
  * cannot be read at all, and loopback-only binds were already dropped upstream.
+ *
+ * The match is reported twice: as `PROBE_EXIT_BASE + index` on the exit code
+ * (authoritative — see `parseProbedPort`) and as the port on stdout.
  */
 const PROBE_SCRIPT = [
   "addr=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)",
   '[ -n "$addr" ] || addr=$(hostname -i 2>/dev/null | awk \'{print $1}\')',
   '[ -n "$addr" ] || addr=127.0.0.1',
+  "i=0",
   "for p in $INTERLUDE_PORTS; do",
   `  code=$(curl -s -o /dev/null -m ${PROBE_TIMEOUT_S} -w '%{http_code}' "http://$addr:$p/" 2>/dev/null)`,
-  '  case "$code" in [1-5][0-9][0-9]) echo "$p"; exit 0;; esac',
+  `  case "$code" in [1-5][0-9][0-9]) echo "$p"; exit $((${PROBE_EXIT_BASE} + i));; esac`,
+  "  i=$((i + 1))",
   "done",
   "exit 1",
 ].join("\n");
 
+/**
+ * Run one command in the container and return its stdout and exit code.
+ *
+ * Deliberately not a TTY, and deliberately demultiplexed. The daemon decides
+ * how to frame an exec's output from the *start* request's `Tty`, not the
+ * create request's: the previous scanner created its execs with a TTY and
+ * started them with `{}`, so every stream came back multiplexed — an 8-byte
+ * header per frame — and was then read as plain text. `ss` survived because
+ * the header fell on the column-heading row the parser ignores; the probe's
+ * one line did not. Asking for no TTY and running the stream through
+ * `demuxStream` (as `execAgentTurn` does) makes the framing explicit and
+ * strips it. The exit code is read off the exec once the stream has ended, or
+ * once the exec reports it is no longer running, so a daemon that closes the
+ * stream late cannot hold the scan past `EXEC_TIMEOUT_MS`.
+ */
 async function execCapture(
   running: RunningContainer,
   cmd: string[],
   env: string[] = []
-): Promise<string> {
+): Promise<ExecResult> {
   const exec = await running.container.exec({
     Cmd: cmd,
     Env: env,
     AttachStdout: true,
     AttachStderr: true,
-    Tty: true,
+    Tty: false,
   });
-  const stream = await exec.start({});
-  const chunks: Buffer[] = [];
+  const raw = await exec.start({});
+
+  const { Writable } = await import("stream");
+  const out: Buffer[] = [];
+  const collect = (into: Buffer[] | null) =>
+    new Writable({
+      write(chunk: Buffer, _encoding, callback) {
+        if (into) into.push(chunk);
+        callback();
+      },
+    });
+  getDocker().modem.demuxStream(raw, collect(out), collect(null));
+
   await new Promise<void>((resolve) => {
-    stream.on("data", (chunk: Buffer) => chunks.push(chunk));
-    stream.on("end", resolve);
-    stream.on("close", resolve);
-    stream.on("error", () => resolve());
-    setTimeout(resolve, EXEC_TIMEOUT_MS);
+    let settled = false;
+    let poll: ReturnType<typeof setInterval> | null = null;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      if (poll) clearInterval(poll);
+      resolve();
+    };
+    raw.on("end", done);
+    raw.on("close", done);
+    raw.on("error", done);
+    poll = setInterval(async () => {
+      try {
+        const info = await exec.inspect();
+        // A moment for the last multiplexed frame to be delivered and demuxed.
+        if (!info.Running) setTimeout(done, 200);
+      } catch {
+        done();
+      }
+    }, EXIT_POLL_MS);
+    setTimeout(done, EXEC_TIMEOUT_MS);
   });
-  return Buffer.concat(chunks).toString();
+
+  let exitCode: number | null = null;
+  try {
+    exitCode = (await exec.inspect()).ExitCode ?? null;
+  } catch {
+    // The stream was read; the code is simply unknown.
+  }
+  return { stdout: Buffer.concat(out).toString(), exitCode };
 }
 
 /** The routable, plausible listeners in the container, ranked. Exposed apart
@@ -187,7 +281,8 @@ async function execCapture(
  * listening can ask without paying for a curl per candidate. */
 export async function listCandidatePorts(running: RunningContainer): Promise<number[]> {
   try {
-    return parseListeningPorts(await execCapture(running, ["ss", "-tlnp"]));
+    const { stdout } = await execCapture(running, ["ss", "-tlnp"]);
+    return parseListeningPorts(stdout);
   } catch {
     return [];
   }
@@ -202,10 +297,10 @@ export async function probeHttpPort(
   const probed = candidates.slice(0, MAX_PROBED_CANDIDATES);
   if (probed.length === 0) return null;
   try {
-    const output = await execCapture(running, ["bash", "-c", PROBE_SCRIPT], [
+    const result = await execCapture(running, ["bash", "-c", PROBE_SCRIPT], [
       `INTERLUDE_PORTS=${probed.join(" ")}`,
     ]);
-    return parseProbedPort(output, probed);
+    return parseProbedPort(result, probed);
   } catch {
     return null;
   }
