@@ -85,9 +85,9 @@ describe("the Codex adapter in the registry and the descriptor table (issue #221
     expect(codexAdapter.capabilities).toEqual(describeHarnessAdapter("codex")!.capabilities);
   });
 
-  it("declares what it cannot do: no quota telemetry, no cost, skills off until #224; and that it resumes", () => {
+  it("declares what it cannot do: no quota telemetry, no cost; and that it resumes and invokes skills (#224)", () => {
     expect(codexAdapter.capabilities).toEqual({
-      userInvokedSkills: false,
+      userInvokedSkills: true,
       quotaTelemetry: false,
       reportsCost: false,
       sessionResume: true,

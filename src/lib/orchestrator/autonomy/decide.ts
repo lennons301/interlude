@@ -1957,6 +1957,13 @@ export function decideNext(snapshot: AutonomySnapshot): Action[] {
     // human-signoff whatever the globs said — the matched categories are
     // still recorded, but auto-merge is never armed. Supervised is a mode,
     // not a status: the outcome is the ordinary gated path.
+    //
+    // A gate is re-decided on every head — a repair's push brings the run
+    // back through here — so the PR may already be armed from an earlier
+    // ungated head. No fact about that is carried: the gated executor disarms
+    // unconditionally and idempotently before it labels (issue #238), because
+    // a fact read at gather time can be stale by execution and a stale
+    // "unarmed" would re-open the hole this closed.
     if (categories.length > 0 || pending.checkpoint !== null) {
       actions.push({
         type: "gatePr",

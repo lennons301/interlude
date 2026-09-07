@@ -314,9 +314,11 @@ which is what you leave behind whenever you answer twice.
 
 ### 5. Find PRs waiting for sign-off
 
-A PR gets the **`human-signoff`** label (and auto-merge is left disarmed) when it
-touches a gated path, when the ticket carried a `checkpoint:` directive, or when
-the reviewer escalated. It then waits for you.
+A PR gets the **`human-signoff`** label (and auto-merge is disarmed — or left so,
+if no earlier head had armed it) when it touches a gated path, when the ticket
+carried a `checkpoint:` directive, or when the reviewer escalated. Gates are
+re-decided on every head, so a repair that pushes onto a gated path gates a PR
+that was armed a moment before. It then waits for you.
 
 - **Dashboard:** the *needs you* panel's sign-off items link straight to each PR.
 - **From the CLI:** `gh pr list --label human-signoff --state open -R <owner>/<repo>`
@@ -682,8 +684,9 @@ not.
   quota tile says "cannot report" for their lanes. Only the two Anthropic-direct
   lanes are in `primary`: the other five are never defaulted onto and become
   routing candidates the moment their credential is provisioned — until then
-  each is one line in the boot report, which for the two Codex lanes is the
-  expected state while #224 is open. A further adapter is a new directory under
+  each is one line in the boot report — for `codex-subscription` the expected
+  state until a ChatGPT-plan credential is provisioned (the Codex proof, #224,
+  ran on `openai-api` only). A further adapter is a new directory under
   `src/lib/harness/` plus lanes that name it — the rules above do not change
   with the vendor.
 

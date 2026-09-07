@@ -437,17 +437,24 @@ export async function armAutoMergeSquash(
   }
 }
 
+/** What a disarm found: an arm it removed, or none to remove. */
+export type DisarmOutcome = "disarmed" | "already-disarmed";
+
 /**
  * Disarm auto-merge on a PR. Only ever moves toward more human oversight:
  * a request-changes or escalate verdict (and an unparseable one) disarms
- * before anything else happens, so nothing can land mid-decision.
+ * before anything else happens, so nothing can land mid-decision. Idempotent
+ * — a PR with no arm is left alone — and it reports which it found (issue
+ * #238), so a caller that says what happened to auto-merge can say what it
+ * did rather than what it assumed. Both outcomes are truthy; a failure is
+ * `null`, so `if (!disarmed)` reads a failure and nothing else.
  */
 export async function disarmAutoMerge(
   owner: string,
   repo: string,
   prNumber: number
-): Promise<boolean> {
-  if (!isGitHubConfigured()) return false;
+): Promise<DisarmOutcome | null> {
+  if (!isGitHubConfigured()) return null;
 
   try {
     const octokit = await getOctokit();
@@ -458,7 +465,7 @@ export async function disarmAutoMerge(
     });
 
     // Already disarmed (or landed by someone else's hand) — nothing to do.
-    if (pr.auto_merge == null) return true;
+    if (pr.auto_merge == null) return "already-disarmed";
 
     await octokit.graphql(
       `
@@ -470,10 +477,10 @@ export async function disarmAutoMerge(
     `,
       { id: pr.node_id }
     );
-    return true;
+    return "disarmed";
   } catch (err) {
     console.error(`[github] Failed to disarm auto-merge on PR #${prNumber}:`, err);
-    return false;
+    return null;
   }
 }
 

@@ -294,12 +294,12 @@ describe("the shipped lanes.yaml", () => {
       expect(api.caps.dailyBudgetUsd).toBeGreaterThan(0);
     });
 
-    it("carries the codex adapter's capabilities: no quota telemetry, no cost, resume, no skills yet", () => {
+    it("carries the codex adapter's capabilities: no quota telemetry, no cost, resume, skills (#224)", () => {
       for (const id of ["codex-subscription", "openai-api"]) {
         expect(lane(id).capabilities).toEqual(codex);
       }
       expect(codex).toEqual({
-        userInvokedSkills: false,
+        userInvokedSkills: true,
         quotaTelemetry: false,
         reportsCost: false,
         sessionResume: true,

@@ -10,8 +10,9 @@
  * leaf is the one place it is read. Nothing outside `src/lib/harness/codex/`
  * sees the sentence; the rest of the fleet branches on what this returns.
  *
- * Three shapes were recorded against the real CLI (0.153.4; the fixtures sit
- * beside the tests, recorded through `scripts/codex-responses-stub.mjs`):
+ * Four shapes were recorded against the real CLI (0.153.4; the fixtures sit
+ * beside the tests — the first three recorded through
+ * `scripts/codex-responses-stub.mjs`, the fourth against the real API):
  *
  *  - A 429 from an API-key provider, after the CLI's own retries:
  *    `exceeded retry limit, last status: 429 Too Many Requests`.
@@ -20,6 +21,17 @@
  *    reset stated as a clock time in the process's local zone, with no date.
  *  - A rejected credential: `unexpected status 401 Unauthorized: Incorrect API
  *    key provided: …, auth error code: invalid_api_key`.
+ *  - An organisation with no prepaid credits (recorded on the proof ticket,
+ *    #224, against the real API): `stream disconnected before completion: You
+ *    have no credits remaining. Add credits to continue using the API at …`.
+ *    On the wire that is a 429 with `type: insufficient_quota` and `code:
+ *    credit_balance_exhausted`, but the CLI's sentence carries neither the
+ *    status nor the code — only the words — after retrying over WebSockets,
+ *    falling back to HTTPS and retrying again (nine reconnects narrated as
+ *    `error` events, ~26 s in all). It is a
+ *    quota refusal for the same reason OpenRouter's 402 is one on the OpenCode
+ *    adapter: the lane cannot serve the request until money is added, so the
+ *    fleet fails over or parks rather than spending an attempt on it.
  *
  * The classifier reads the *kind* of refusal off those words — quota first,
  * because a quota sentence also carries a status word; then a credential
@@ -59,10 +71,13 @@ export const CODEX_TURN_FAILED = "turn.failed";
 /**
  * The account's allowance is spent — in the CLI's own words for a ChatGPT-plan
  * wall ("usage limit"), in HTTP's for an API-key one ("429", "Too Many
- * Requests"), and in the API's error codes when the CLI echoes a body.
+ * Requests"), in the provider's for an organisation out of prepaid credits
+ * ("no credits remaining", the one sentence the CLI relays for a
+ * `credit_balance_exhausted` 429 — see the module note), and in the API's
+ * error codes when the CLI echoes a body.
  */
 const QUOTA_WORDS =
-  /usage limit|rate limit|too many requests|\b429\b|usage_limit_reached|rate_limit_exceeded|insufficient_quota|\bquota\b/i;
+  /usage limit|rate limit|too many requests|\b429\b|usage_limit_reached|rate_limit_exceeded|insufficient_quota|credit_balance_exhausted|no credits remaining|\bquota\b/i;
 
 /** The credential was refused: the status, or the API's own words for it. */
 const AUTH_WORDS =
@@ -123,7 +138,7 @@ export function classifyCodexExit(
 
 /**
  * Which provider refusal, if any, a `turn.failed` sentence describes — see the
- * module note for the three recorded shapes and the order of the readings.
+ * module note for the four recorded shapes and the order of the readings.
  */
 export function readCodexRefusal(message: string | null, now: Date): TurnRefusal | null {
   if (message === null) return null;
