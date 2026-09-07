@@ -6,7 +6,15 @@ import { desc } from "drizzle-orm";
 
 export async function GET() {
   const rows = await db.select().from(projects).orderBy(desc(projects.createdAt));
-  return NextResponse.json(rows);
+  // A stored secret is never served, only whether one is set (issue #242) —
+  // the same mask GET /api/projects/[id] has always applied. The settings UI
+  // only tests the field against null, so the mask keeps it truthful.
+  return NextResponse.json(
+    rows.map((row) => ({
+      ...row,
+      dopplerToken: row.dopplerToken ? "••••••••" : null,
+    }))
+  );
 }
 
 export async function POST(request: Request) {
