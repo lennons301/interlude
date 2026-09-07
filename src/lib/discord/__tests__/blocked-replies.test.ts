@@ -68,6 +68,19 @@ describe("selectRepliesToAdopt", () => {
     ).toEqual([]);
   });
 
+  it("lets a same-worded reply to a later question through when the earlier row carries its id", () => {
+    // The run asked twice; the owner answered "yes" both times. The first "yes"
+    // has its id on the row, so it identifies exactly one reply and must not
+    // shadow the second.
+    expect(
+      selectRepliesToAdopt({
+        questionMessageId: "q2",
+        channelMessages: [msg({ id: "r2", content: "yes", referencedMessageId: "q2" })],
+        existingAnswers: [{ discordMessageId: "r1", text: "yes" }],
+      })
+    ).toHaveLength(1);
+  });
+
   it("skips an unrelated channel message — not a reply, or a reply to something else", () => {
     expect(
       selectRepliesToAdopt({

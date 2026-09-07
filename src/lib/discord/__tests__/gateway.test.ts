@@ -23,6 +23,7 @@ vi.mock("@/db", () => ({
 
 import { reportDiscordHandlerFailure, startDiscordBot } from "../client";
 import { observeDiscordGateway, resetDiscordGatewayHealth } from "../gateway-health";
+import { insertDiscordAnswer } from "../blocked-replies";
 
 class FakeClient extends EventEmitter {
   login = vi.fn(async () => "ok");
@@ -94,21 +95,40 @@ describe("Discord gateway instrumentation", () => {
     expect(observeDiscordGateway()?.lastInboundMs).toBe(Date.parse("2026-09-07T10:04:00Z"));
   });
 
-  it("re-logs-in with a fresh client when the session is invalidated", async () => {
+  it("re-logs-in with a fresh client when discord.js gives the shard up (shardDisconnect)", async () => {
+    // In discord.js 14.26 `shardDisconnect` is emitted only for an unrecoverable
+    // close code — the library will not reconnect. 4004 = authentication failed.
     const first = await start();
     first.emit("clientReady");
 
-    first.emit("invalidated");
+    first.emit("shardDisconnect", { code: 4004, reason: "", wasClean: true }, 0);
     await flush();
     await flush();
 
     expect(first.destroy).toHaveBeenCalledTimes(1);
     expect(clients).toHaveLength(2);
     expect(clients[1].login).toHaveBeenCalledWith("token-1");
-    // A stale client's second `invalidated` is ignored — it was already replaced.
-    first.emit("invalidated");
+    // A stale client's second terminal event is ignored — it was already replaced.
+    first.emit("shardDisconnect", { code: 4004, reason: "", wasClean: true }, 0);
     await flush();
     expect(clients).toHaveLength(2);
+  });
+
+  it("takes the same path on `invalidated`, should a future discord.js emit it", async () => {
+    const first = await start();
+    first.emit("invalidated");
+    await flush();
+    await flush();
+    expect(clients).toHaveLength(2);
+    expect(clients[1].login).toHaveBeenCalledWith("token-1");
+  });
+
+  it("a recoverable close is logged and left to the library — no re-login", async () => {
+    const first = await start();
+    first.emit("shardReconnecting", 0);
+    await flush();
+    expect(first.destroy).not.toHaveBeenCalled();
+    expect(clients).toHaveLength(1);
   });
 
   it("marks a reply whose handler threw and records the failure on its task", async () => {
@@ -143,6 +163,87 @@ describe("Discord gateway instrumentation", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].role).toBe("system");
     expect(rows[0].content).toContain("could not be processed (SQLITE_BUSY)");
+  });
+
+  it("says the reply was recorded when its row exists, rather than asking for it again", async () => {
+    const now = new Date();
+    testDb.insert(projects).values({ id: "01PROJ", name: "p", createdAt: now }).run();
+    testDb
+      .insert(tasks)
+      .values({
+        id: "01TASK",
+        projectId: "01PROJ",
+        title: "t",
+        description: "",
+        status: "blocked",
+        discordMessageId: "question-1",
+        createdAt: now,
+        updatedAt: now,
+      })
+      .run();
+    // The row landed; then the 👍 (or anything after) threw.
+    insertDiscordAnswer("01TASK", "Use option B", "reply-1");
+
+    await reportDiscordHandlerFailure(
+      { id: "reply-1", reference: { messageId: "question-1" }, react: vi.fn(async () => {}) },
+      new Error("Missing Permissions")
+    );
+
+    const system = testDb
+      .select({ content: messages.content })
+      .from(messages)
+      .where(eq(messages.taskId, "01TASK"))
+      .all()
+      .map((r) => r.content)
+      .filter((c) => !c.startsWith("{"));
+    expect(system).toHaveLength(1);
+    expect(system[0]).toContain("was recorded and will be delivered");
+    expect(system[0]).not.toContain("Nothing was delivered");
+  });
+
+  it("a failed 👍 after the row is written is not a handler failure", async () => {
+    const now = new Date();
+    testDb.insert(projects).values({ id: "01PROJ", name: "p", createdAt: now }).run();
+    testDb
+      .insert(tasks)
+      .values({
+        id: "01TASK",
+        projectId: "01PROJ",
+        title: "t",
+        description: "",
+        status: "blocked",
+        kind: "implement",
+        discordMessageId: "question-1",
+        createdAt: now,
+        updatedAt: now,
+      })
+      .run();
+    const client = await start();
+    const react = vi.fn(async () => {
+      throw new Error("Missing Permissions");
+    });
+    client.emit("messageCreate", {
+      id: "reply-1",
+      author: { bot: false },
+      content: "Use option B",
+      reference: { messageId: "question-1" },
+      channelId: "chan",
+      react,
+    });
+    await flush();
+
+    // The row is the delivery — it is there, once, with its id.
+    const rows = testDb
+      .select({ role: messages.role, content: messages.content })
+      .from(messages)
+      .where(eq(messages.taskId, "01TASK"))
+      .all();
+    expect(rows).toEqual([
+      { role: "user", content: JSON.stringify({ text: "Use option B", discordMessageId: "reply-1" }) },
+    ]);
+    // Only the receipt was attempted; no ⚠️, no "reply again".
+    expect(react).toHaveBeenCalledTimes(1);
+    expect(react).toHaveBeenCalledWith("👍");
   });
 
   it("wires the failure report into messageCreate", async () => {

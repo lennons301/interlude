@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Message, Partials } from "discord.js";
+import { Client, GatewayCloseCodes, GatewayIntentBits, Message, Partials } from "discord.js";
 import type { MessageReaction, PartialMessageReaction, User, PartialUser } from "discord.js";
 import { db } from "@/db";
 import { projects, tasks, messages } from "@/db/schema";
@@ -9,29 +9,39 @@ import { isArmingConfirmation } from "../orchestrator/autonomy/triage";
 import { setBotClient, notifyTaskQueued } from "./notifications";
 import {
   recordDiscordConnected,
-  recordDiscordDisconnected,
   recordDiscordInbound,
   recordDiscordRelogin,
 } from "./gateway-health";
-import { insertDiscordAnswer } from "./blocked-replies";
+import { existingAnswers, insertDiscordAnswer } from "./blocked-replies";
 
 /**
  * The gateway is the only way anything reaches Interlude *from* Discord, and
  * until issue #135 nothing watched it: `clientReady` was the one lifecycle
- * event handled, a dropped or invalidated session sat deaf, and a handler that
- * threw swallowed the human's reply into `console.error`. Now every lifecycle
- * event is logged with its shard and close code, every delivered event advances
- * the inbound clock the fleet-health watchdog reads (`gateway-health.ts`), an
- * `invalidated` session is re-established (discord.js does not do this), and a
- * handler failure leaves a trace the human can see — a ⚠️ on their message and
- * a system message on the task it was for.
+ * event handled, a dead session sat deaf, and a handler that threw swallowed
+ * the human's reply into `console.error`. Now every lifecycle event is logged
+ * with its shard and close code, every delivered event advances the inbound
+ * clock the fleet-health watchdog reads (`gateway-health.ts`), a shard the
+ * library has given up on is re-established with a fresh client, and a handler
+ * failure leaves a trace the human can see — a ⚠️ on their message and a system
+ * message on the task it was for.
+ *
+ * Which event means "given up" is a fact about discord.js 14.26.4, checked
+ * against its source rather than its docs: `@discordjs/ws` handles
+ * INVALID_SESSION and RECONNECT itself (resume, or re-identify), and the client
+ * emits `shardReconnecting` while it does. `shardDisconnect` is emitted **only**
+ * for a close code in `UNRECOVERABLE_CLOSE_CODES` — "will no longer reconnect"
+ * — so that is the terminal signal and the one that triggers a re-login here.
+ * `invalidated`, the event the ticket names, exists in the `Events` enum but is
+ * never emitted by this version; it is wired to the same path so that a future
+ * version which does emit it needs no change.
  */
 
 /** What `startDiscordBot` needs from the outside world — injectable so the
  * gateway wiring can be driven by a fake client in tests. */
 export interface DiscordBotDeps {
   createClient: () => Client;
-  /** How long to wait before re-logging in after `invalidated` (ms). */
+  /** How long to wait before re-logging in after the library gives a shard up
+   * (ms). */
   reloginDelayMs: number;
 }
 
@@ -83,9 +93,9 @@ function wireGateway(c: Client, token: string): void {
   });
 
   // Lifecycle (issue #135). Each is logged with what discord.js knows, and each
-  // arrival counts as the gateway being alive. `shardDisconnect` with a
-  // resumable close code is followed by discord.js's own reconnect; only
-  // `invalidated` needs us to act.
+  // arrival counts as the gateway being alive. A recoverable close is the
+  // library's to handle (`shardReconnecting`, then `shardResume` or a fresh
+  // `shardReady`); an unrecoverable one (`shardDisconnect`) is ours.
   c.on("shardReady", (shardId, unavailable) => {
     recordDiscordInbound();
     console.log(
@@ -97,14 +107,22 @@ function wireGateway(c: Client, token: string): void {
     recordDiscordInbound();
     console.log(`[discord] Shard ${shardId} resumed, ${replayedEvents} event(s) replayed`);
   });
-  c.on("shardDisconnect", (event, shardId) => {
-    recordDiscordDisconnected(event.code);
+  c.on("shardReconnecting", (shardId) => {
     console.warn(
-      `[discord] Shard ${shardId} disconnected (close code ${event.code}` +
-        (event.reason ? `: ${event.reason}` : "") +
-        `) — discord.js will try to resume; if replies stop arriving the fleet-health ` +
-        `card says so`
+      `[discord] Shard ${shardId} reconnecting — a recoverable close; discord.js resumes ` +
+        `or re-identifies by itself`
     );
+  });
+  c.on("shardDisconnect", (event, shardId) => {
+    // Emitted only when the library will not reconnect this shard (an
+    // unrecoverable close code such as 4004 authentication failed or 4014
+    // disallowed intents): the bot is deaf from here until something logs in.
+    console.error(
+      `[discord] Shard ${shardId} disconnected with unrecoverable close code ` +
+        `${event.code} (${closeCodeName(event.code)}) — discord.js will not reconnect it; ` +
+        `re-logging in`
+    );
+    void reloginWithFreshClient(c, token, `close code ${event.code}`);
   });
   c.on("shardError", (err, shardId) => {
     console.error(`[discord] Shard ${shardId} error:`, err);
@@ -112,8 +130,11 @@ function wireGateway(c: Client, token: string): void {
   c.on("error", (err) => {
     console.error("[discord] Client error:", err);
   });
+  // Not emitted by discord.js 14.26.4 (verified in its WebSocketManager: the
+  // enum entry exists, nothing emits it) — wired anyway, to the same path, so
+  // a version that does emit it recovers the same way.
   c.on("invalidated", () => {
-    void reloginAfterInvalidation(c, token);
+    void reloginWithFreshClient(c, token, "session invalidated");
   });
 
   c.on("messageCreate", (message) => {
@@ -129,20 +150,24 @@ function wireGateway(c: Client, token: string): void {
   });
 }
 
+/** The gateway close code's name, for the log line. */
+function closeCodeName(code: number): string {
+  return GatewayCloseCodes[code] ?? "unknown";
+}
+
 /**
- * discord.js emits `invalidated` when the gateway refuses to resume the
- * session and will not re-identify on its own — the client is dead from here
- * and stays so until something logs in again. Destroy it and build a fresh
- * one, backing off on failure; the bot is meant to be connected, so this does
- * not give up. The stale client is compared by identity so a second
- * `invalidated` from an already-replaced client is ignored.
+ * The library has given the connection up, so the client is dead from here and
+ * stays so until something logs in again. Destroy it and build a fresh one,
+ * backing off on failure; the bot is meant to be connected, so this does not
+ * give up. The stale client is compared by identity so a second terminal event
+ * from an already-replaced client is ignored.
  */
-async function reloginAfterInvalidation(stale: Client, token: string): Promise<void> {
+async function reloginWithFreshClient(stale: Client, token: string, why: string): Promise<void> {
   if (client !== stale) return;
   const attempt = recordDiscordRelogin();
   console.error(
-    `[discord] Gateway session invalidated — discord.js does not recover this; ` +
-      `re-logging in (re-login #${attempt}) in ${deps.reloginDelayMs}ms`
+    `[discord] Gateway connection lost (${why}) — re-logging in with a fresh client ` +
+      `(re-login #${attempt}) in ${deps.reloginDelayMs}ms`
   );
   client = null;
   try {
@@ -156,7 +181,7 @@ async function reloginAfterInvalidation(stale: Client, token: string): Promise<v
     await new Promise((r) => setTimeout(r, delay));
     try {
       await connect(token);
-      console.log("[discord] Re-logged in after an invalidated session");
+      console.log("[discord] Re-logged in with a fresh client");
       return;
     } catch (err) {
       delay = Math.min(Math.max(1_000, delay * 2), MAX_RELOGIN_DELAY_MS);
@@ -176,8 +201,15 @@ export interface FailedMessage {
  * A handler that threw used to swallow the human's message into a log line
  * they will never read (issue #135). Silence is the one outcome a human cannot
  * act on, so: a ⚠️ on their message, best-effort, and — when the message was a
- * reply to a task's embed — a system message on that task saying the reply was
- * seen and failed, so the task page tells the same story as the channel.
+ * reply to a task's embed — a system message on that task saying what happened,
+ * so the task page tells the same story as the channel.
+ *
+ * What happened depends on whether the reply's row exists. A throw before the
+ * insert means nothing was delivered and the human should reply again; a throw
+ * after it (the likeliest is the 👍 REST call — now best-effort in `handleReply`,
+ * but the check stays because this is the last line of defence) means the
+ * answer *is* on its way and telling them to reply again would cost a second
+ * turn. The row is looked up by the Discord message id both paths record.
  */
 export async function reportDiscordHandlerFailure(
   message: FailedMessage,
@@ -200,15 +232,18 @@ export async function reportDiscordHandlerFailure(
       .get();
     if (!task) return;
     const reason = err instanceof Error ? err.message : String(err);
+    const recorded = existingAnswers(task.id).some((a) => a.discordMessageId === message.id);
     db.insert(messages)
       .values({
         id: newId(),
         taskId: task.id,
         role: "system",
         type: "system",
-        content:
-          `A Discord reply to this task was seen but could not be processed (${reason}). ` +
-          `Nothing was delivered to the agent — reply again in Discord, or answer here.`,
+        content: recorded
+          ? `Your Discord reply was recorded and will be delivered, but marking it in ` +
+            `Discord failed (${reason}) — no need to reply again.`
+          : `A Discord reply to this task was seen but could not be processed (${reason}). ` +
+            `Nothing was delivered to the agent — reply again in Discord, or answer here.`,
         createdAt: new Date(),
       })
       .run();
@@ -390,11 +425,17 @@ async function handleReply(message: Message): Promise<void> {
   // REST reconciliation also uses (issue #135), so the Discord message id is on
   // the row and neither path can deliver what the other already has.
   const inserted = insertDiscordAnswer(task.id, message.content, message.id);
-  await message.react("👍");
   console.log(
     `[discord] Follow-up message for task ${task.id} from Discord` +
       (inserted ? "" : " (already adopted over REST)")
   );
+  // Best-effort: the row is the delivery, the 👍 is only the receipt. A REST
+  // failure here must not read as "nothing was delivered" (issue #135).
+  try {
+    await message.react("👍");
+  } catch (err) {
+    console.error(`[discord] Could not acknowledge reply ${message.id} for task ${task.id}:`, err);
+  }
 }
 
 async function handleArmingConfirmation(

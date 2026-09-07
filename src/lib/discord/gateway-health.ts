@@ -35,8 +35,7 @@ interface GatewayHealth {
    * connected once this process — and so also the "is this bot meant to be
    * receiving at all" switch the watchdog reads. */
   connectedSinceMs: number | null;
-  lastDisconnect: { code: number; atMs: number } | null;
-  /** Sessions re-established after `invalidated`, for the log line. */
+  /** Fresh clients logged in after the library gave a shard up, for the log line. */
   relogins: number;
 }
 
@@ -44,7 +43,6 @@ const state = processSingleton<GatewayHealth>("discord.gatewayHealth", () => ({
   lastInboundMs: null,
   lastOutboundMs: null,
   connectedSinceMs: null,
-  lastDisconnect: null,
   relogins: 0,
 }));
 
@@ -66,10 +64,6 @@ export function recordDiscordConnected(nowMs: number = Date.now()): void {
   state.lastInboundMs = nowMs;
 }
 
-export function recordDiscordDisconnected(code: number, nowMs: number = Date.now()): void {
-  state.lastDisconnect = { code, atMs: nowMs };
-}
-
 export function recordDiscordRelogin(): number {
   return ++state.relogins;
 }
@@ -86,6 +80,5 @@ export function resetDiscordGatewayHealth(): void {
   state.lastInboundMs = null;
   state.lastOutboundMs = null;
   state.connectedSinceMs = null;
-  state.lastDisconnect = null;
   state.relogins = 0;
 }

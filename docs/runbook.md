@@ -322,8 +322,8 @@ is the fix. If the gateway itself goes deaf — the bot has posted and heard
 nothing back for `DISCORD_INBOUND_STALE_MINUTES` (5) — a red **discord deaf**
 card and one Discord ping say so; blocked answers still flow over REST, but a
 new task, a `cancel` or a ✅ sent through Discord will not arrive until the
-gateway reconnects (an `invalidated` session re-logs-in by itself; a restart
-forces it).
+gateway reconnects (a recoverable drop is resumed by discord.js; a shard it
+gives up on is re-logged-in with a fresh client; a restart forces either).
 
 ### 5. Find PRs waiting for sign-off
 

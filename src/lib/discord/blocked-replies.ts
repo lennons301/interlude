@@ -57,8 +57,9 @@ export interface ExistingAnswer {
  * they were given.
  *
  * Idempotency is by Discord message id, with an exact-text fallback for rows
- * written before the id was recorded (a reply the gateway delivered under the
- * previous build, on a run still blocked across the deploy).
+ * that have none — written before the id was recorded (a reply the gateway
+ * delivered under the previous build, on a run still blocked across the
+ * deploy). The fallback never applies to a row that has an id.
  */
 export function selectRepliesToAdopt(input: {
   questionMessageId: string;
@@ -70,7 +71,12 @@ export function selectRepliesToAdopt(input: {
       .map((a) => a.discordMessageId)
       .filter((id): id is string => id != null)
   );
-  const knownTexts = new Set(input.existingAnswers.map((a) => a.text.trim()));
+  // The text fallback is for rows that carry no id — written by the gateway
+  // path before it recorded one. A row *with* an id already proves which reply
+  // it was, so it must not shadow a later, same-worded reply to a new question.
+  const knownTexts = new Set(
+    input.existingAnswers.filter((a) => a.discordMessageId == null).map((a) => a.text.trim())
+  );
 
   const seen = new Set<string>();
   return input.channelMessages
