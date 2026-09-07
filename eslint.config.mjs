@@ -56,6 +56,18 @@ const eslintConfig = defineConfig([
           ],
         },
       ],
+      // `no-restricted-imports` only sees static imports; a dynamic
+      // `await import("…/autonomy/sweep")` — the shape client.ts already uses
+      // to dodge a cycle — would slip past it. Close that door too.
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            "ImportExpression > Literal[value=/(^|\\/)orchestrator\\/autonomy\\/sweep$/]",
+          message:
+            "Route handlers run on a separate module graph and must not sweep, dynamically or otherwise. Call requestAutonomySweep() from @/lib/orchestrator/autonomy/sweep-nudge instead (issue #163).",
+        },
+      ],
     },
   },
 ]);
