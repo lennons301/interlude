@@ -115,8 +115,9 @@ lemons and last-person-standing are already on the ticket-loop and validate the
 Apply the **`ready-for-agent`** label to a fully-specified issue. That's it — see
 *The one rule* above.
 
-- **Fast path:** the `issues.labeled` webhook (`POST /api/webhooks/github`) kicks
-  a sweep immediately.
+- **Fast path:** the `issues.labeled` webhook (`POST /api/webhooks/github`) nudges
+  the orchestrator's loop, which sweeps within ~1s (issue #163 — the route never
+  sweeps itself: it runs on a separate module graph from the loop).
 - **Backbone:** a reconciliation sweep runs every 30s (and on boot) and lists
   open `ready-for-agent` issues per enabled project, so a missed webhook is at
   most 30s of latency.

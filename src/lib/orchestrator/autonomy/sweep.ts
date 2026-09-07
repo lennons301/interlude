@@ -148,8 +148,18 @@ import {
   RESUME_JITTER_WINDOW_MS,
 } from "./budgets";
 import { ACTIVE_RUN_STATUSES } from "../run-status";
+import {
+  isSweepRequested,
+  requestAutonomySweep,
+  shouldSweepNow,
+  takeSweepNudge,
+} from "./sweep-nudge";
 
 const SWEEP_INTERVAL_MS = 30_000;
+/** How often the loop asks whether a sweep is due — the reconciliation
+ * interval above, or a nudge from a route handler (issue #163). A webhook's
+ * latency is at most one of these. */
+const SWEEP_TICK_MS = 1_000;
 
 /** How deep a retry's prompt reaches into an issue's most-recent comments for
  * context (issue #73) — enough for the prior attempts' reports without
@@ -161,6 +171,7 @@ const ACTIVE_RUN_STATUS_SET = new Set<string>(ACTIVE_RUN_STATUSES);
 
 let sweepInterval: ReturnType<typeof setInterval> | null = null;
 let sweeping = false;
+let lastSweepStartedAtMs = 0;
 let saturationAnnounced = false;
 // Fleet-health watchdog memory (issue #126): per-signal since-timers plus which
 // signals were already pinged, carried across sweeps so each stall fires one
@@ -181,17 +192,13 @@ let meteredConfirmationAnnouncedDay: number | null = null;
 // #171) — one Discord ping per transition, not one per 30s sweep, cleared the
 // moment the gate opens so the *next* wall is audible again.
 //
-// On `globalThis` rather than beside the saturation and cap flags above, even
-// though it plays the same role, because a webhook-triggered sweep runs on the
-// app-router module graph (#159) where a plain module-level flag is that
+// On `globalThis`, from when a webhook-triggered sweep still ran on the
+// app-router module graph (#159), where a plain module-level flag was that
 // graph's own, freshly false — so one webhook arriving under a standing wall
-// would double-post the embed. A Discord call is the one thing this codebase
-// says must never be repeated on a maybe (#151: an abandoned call is never
-// retried, because the attempt may still have landed). The older two flags are
-// deliberately left as they are: they are part of the same known split, and
-// moving one at a time without the sweep's other cross-graph state
-// (`fleetHealthState`, `sweeping`, `inFlightClaims`) would imply a fix that is
-// not there.
+// double-posted the embed. Since #163 only the orchestrator's loop sweeps
+// (route handlers record a nudge in sweep-nudge.ts instead), so every flag in
+// this module has one home again and this one could be a plain `let` like its
+// neighbours; it is left where it is because moving it buys nothing.
 const quotaGateAnnouncement = processSingleton(
   "autonomy.quotaGateAnnounced",
   () => ({ announced: false })
@@ -235,14 +242,36 @@ const announcedTriageErrors = new Set<string>();
 const consecutiveTransientReads = new Map<string, number>();
 const TRANSIENT_READ_ESCALATION_SWEEPS = 10;
 
+/**
+ * The one place a sweep is ever started (issue #163). A boot sweep, then a
+ * ticker that runs one whenever the reconciliation interval is due *or* a route
+ * handler has asked for one via `requestAutonomySweep` — the GitHub webhook,
+ * Discord arming. Route handlers run on a separate module graph and must never
+ * call `runAutonomySweep` themselves: that ran the sweep against a second,
+ * empty copy of every flag in this module, which is how one ticket was claimed
+ * twice and a standing fleet-health card was silenced by an inbound webhook.
+ */
 export function startAutonomySweeps(): void {
   if (sweepInterval) return;
-  console.log(`[autonomy] Reconciliation sweep every ${SWEEP_INTERVAL_MS / 1000}s`);
-  runAutonomySweep().catch((err) => console.error("[autonomy] Boot sweep failed:", err));
-  sweepInterval = setInterval(
-    () => runAutonomySweep().catch((err) => console.error("[autonomy] Sweep failed:", err)),
-    SWEEP_INTERVAL_MS
+  console.log(
+    `[autonomy] Reconciliation sweep every ${SWEEP_INTERVAL_MS / 1000}s ` +
+      `(nudges checked every ${SWEEP_TICK_MS / 1000}s)`
   );
+  runAutonomySweep().catch((err) => console.error("[autonomy] Boot sweep failed:", err));
+  sweepInterval = setInterval(() => {
+    if (
+      !shouldSweepNow({
+        nowMs: Date.now(),
+        lastSweepStartedAtMs,
+        intervalMs: SWEEP_INTERVAL_MS,
+        sweeping,
+        nudged: isSweepRequested(),
+      })
+    ) {
+      return;
+    }
+    runAutonomySweep().catch((err) => console.error("[autonomy] Sweep failed:", err));
+  }, SWEEP_TICK_MS);
 }
 
 export function stopAutonomySweeps(): void {
@@ -253,19 +282,29 @@ export function stopAutonomySweeps(): void {
 }
 
 /**
- * One pass of gather → decide → execute. Single-flight: a webhook trigger
- * arriving mid-sweep is a no-op, the running sweep already sees the world.
+ * One pass of gather → decide → execute. Single-flight within this module
+ * graph — and since #163 this module is only ever driven from the
+ * orchestrator's graph (see `startAutonomySweeps`), so that is the only graph
+ * there is. A nudge that lands mid-sweep is not dropped: it stays pending and
+ * the ticker starts a follow-up sweep as soon as this one ends.
  */
 export async function runAutonomySweep(): Promise<void> {
   const config = getConfig();
-  // The env boot master — off means no sweep runs at all, webhook-triggered or
-  // interval. The runtime kill switch (issue #118) is decided inside the
-  // reducer instead, so a paused fleet still gathers and still drives
-  // everything already in flight.
+  // The env boot master — off means no sweep runs at all, nudged or interval.
+  // The runtime kill switch (issue #118) is decided inside the reducer
+  // instead, so a paused fleet still gathers and still drives everything
+  // already in flight.
   if (!config.autonomyEnabled) return;
   if (!isGitHubConfigured()) return;
   if (sweeping) return;
   sweeping = true;
+  lastSweepStartedAtMs = Date.now();
+  const nudge = takeSweepNudge(lastSweepStartedAtMs);
+  if (nudge) {
+    console.log(
+      `[autonomy] Sweep nudged (${nudge.reasons.join(", ")}; waited ${nudge.waitedMs}ms)`
+    );
+  }
 
   try {
     await reapOrphanedReviewPasses();
@@ -1964,9 +2003,7 @@ export async function armIssueFromDiscord(
     if (!(await addLabelToIssue(issueRef, ARMING_LABEL))) return false;
 
     console.log(`[autonomy] ${issueRef} armed via Discord confirmation by ${confirmedBy}`);
-    runAutonomySweep().catch((err) =>
-      console.error("[autonomy] Post-arming sweep failed:", err)
-    );
+    requestAutonomySweep(`armed ${issueRef} via Discord`);
     return true;
   } catch (err) {
     console.error(`[autonomy] Discord arming of ${issueRef} failed:`, err);
