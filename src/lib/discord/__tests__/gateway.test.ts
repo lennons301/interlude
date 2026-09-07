@@ -9,8 +9,9 @@ import { resetConfig } from "@/lib/config";
 /**
  * The gateway instrumentation (issue #135, layers 1 and 2), driven through a
  * fake client: a delivered event advances the inbound clock the watchdog reads,
- * `invalidated` re-logs-in with a fresh client, and a handler failure leaves
- * the human a trace — ⚠️ on their message and a system message on the task.
+ * an unrecoverable close is recorded for the watchdog rather than retried, and
+ * a handler failure leaves the human a trace — ⚠️ on their message and a system
+ * message on the task.
  */
 
 let testDb: ReturnType<typeof createTestDb>["db"];
@@ -65,7 +66,6 @@ describe("Discord gateway instrumentation", () => {
         clients.push(c);
         return c as unknown as Client;
       },
-      reloginDelayMs: 0,
     });
     return clients[0];
   }
@@ -82,6 +82,8 @@ describe("Discord gateway instrumentation", () => {
     expect(observeDiscordGateway()).toEqual({
       lastOutboundMs: null,
       lastInboundMs: Date.parse("2026-09-07T10:00:00Z"),
+      closedSinceMs: null,
+      closeCode: null,
     });
 
     // The bot's own message echoed back is inbound like any other.
@@ -95,40 +97,50 @@ describe("Discord gateway instrumentation", () => {
     expect(observeDiscordGateway()?.lastInboundMs).toBe(Date.parse("2026-09-07T10:04:00Z"));
   });
 
-  it("re-logs-in with a fresh client when discord.js gives the shard up (shardDisconnect)", async () => {
+  it("records an unrecoverable close for the watchdog and does not try to log in again", async () => {
     // In discord.js 14.26 `shardDisconnect` is emitted only for an unrecoverable
-    // close code — the library will not reconnect. 4004 = authentication failed.
-    const first = await start();
-    first.emit("clientReady");
+    // close code — a configuration error (4014 = disallowed intents) that a
+    // re-login with the same token and intents would only repeat, IDENTIFYing
+    // toward Discord's daily limit. So: record it, say so, and stop.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-07T10:00:00Z"));
+    const client = await start();
+    client.emit("clientReady");
 
-    first.emit("shardDisconnect", { code: 4004, reason: "", wasClean: true }, 0);
-    await flush();
+    vi.setSystemTime(new Date("2026-09-07T10:05:00Z"));
+    client.emit("shardDisconnect", { code: 4014, reason: "", wasClean: true }, 0);
     await flush();
 
-    expect(first.destroy).toHaveBeenCalledTimes(1);
-    expect(clients).toHaveLength(2);
-    expect(clients[1].login).toHaveBeenCalledWith("token-1");
-    // A stale client's second terminal event is ignored — it was already replaced.
-    first.emit("shardDisconnect", { code: 4004, reason: "", wasClean: true }, 0);
-    await flush();
-    expect(clients).toHaveLength(2);
-  });
-
-  it("takes the same path on `invalidated`, should a future discord.js emit it", async () => {
-    const first = await start();
-    first.emit("invalidated");
-    await flush();
-    await flush();
-    expect(clients).toHaveLength(2);
-    expect(clients[1].login).toHaveBeenCalledWith("token-1");
-  });
-
-  it("a recoverable close is logged and left to the library — no re-login", async () => {
-    const first = await start();
-    first.emit("shardReconnecting", 0);
-    await flush();
-    expect(first.destroy).not.toHaveBeenCalled();
+    expect(observeDiscordGateway()).toMatchObject({
+      closedSinceMs: Date.parse("2026-09-07T10:05:00Z"),
+      closeCode: 4014,
+    });
+    expect(client.destroy).not.toHaveBeenCalled();
     expect(clients).toHaveLength(1);
+    expect(client.login).toHaveBeenCalledTimes(1);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining("4014 (DisallowedIntents)")
+    );
+
+    // A fresh session (after the human fixes the config and restarts) clears it.
+    client.emit("clientReady");
+    expect(observeDiscordGateway()).toMatchObject({ closedSinceMs: null, closeCode: null });
+  });
+
+  it("a recoverable close is logged and left to the library", async () => {
+    const client = await start();
+    client.emit("shardReconnecting", 0);
+    await flush();
+    expect(client.destroy).not.toHaveBeenCalled();
+    expect(observeDiscordGateway()).toBeNull(); // never became ready; nothing to observe
+  });
+
+  it("`invalidated` — never emitted by this discord.js — is logged, not acted on", async () => {
+    const client = await start();
+    client.emit("invalidated");
+    await flush();
+    expect(clients).toHaveLength(1);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("session invalidated"));
   });
 
   it("marks a reply whose handler threw and records the failure on its task", async () => {

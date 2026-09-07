@@ -407,14 +407,19 @@ export async function notifyDiscordInboundStale(
   try {
     const channel = await fetchTextChannel(channelId);
 
+    const since = formatDuration(payload.silentForMs);
     const embed = new EmbedBuilder()
       .setTitle("Discord replies are not reaching Interlude")
       .setDescription(
-        `The bot posted a message ~${formatDuration(payload.silentForMs)} ago and the ` +
-          `gateway has delivered nothing since — replies, arming confirmations and ✅ ` +
-          `reactions are being lost. Answers to blocked questions are still collected ` +
-          `over REST each sweep; for anything else use the web UI until the gateway ` +
-          `reconnects (a restart forces it).`
+        (payload.cause === "closed"
+          ? `Discord closed the bot's gateway connection ~${since} ago with unrecoverable ` +
+            `code ${payload.closeCode} and discord.js will not reconnect it — a bad token or ` +
+            `disallowed intents. Fix the bot's configuration and restart the app. `
+          : `The bot posted a message ~${since} ago and the gateway has delivered nothing ` +
+            `since — the session is alive but deaf; a restart re-identifies it. `) +
+          `Replies, arming confirmations and ✅ reactions are being lost meanwhile. Answers ` +
+          `to blocked questions are still collected over REST each sweep; for anything else ` +
+          `use the web UI.`
       )
       .setColor(0xef4444);
 

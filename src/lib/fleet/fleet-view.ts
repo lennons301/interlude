@@ -1353,17 +1353,21 @@ export function buildFleetView(rows: FleetRows): FleetView {
   // Discord is falling on the floor while the fleet looks healthy. Red and up
   // here with the machinery cards: the whole human-in-the-loop channel is down.
   if (health?.discordInboundStale) {
+    const deaf = health.discordInboundStale;
+    const since = formatDuration(deaf.silentForMs);
     needsYou.push({
       cause: "discord-deaf",
       severity: "red",
       context: "discord gateway",
       body:
-        `The bot posted to Discord ${formatDuration(
-          health.discordInboundStale.silentForMs
-        )} ago and has received nothing back since — replies, arming confirmations ` +
-        "and ✅ reactions are being lost. Answers to blocked questions are still collected " +
-        "over REST each sweep; for anything else use this UI until the gateway reconnects " +
-        "(a restart forces it).",
+        (deaf.cause === "closed"
+          ? `Discord closed the bot's gateway connection ${since} ago with unrecoverable code ` +
+            `${deaf.closeCode} and discord.js will not reconnect it — a bad token or disallowed ` +
+            `intents; fix the bot's configuration and restart the app. `
+          : `The bot posted to Discord ${since} ago and has received nothing back since — ` +
+            `the session is alive but deaf; a restart re-identifies it. `) +
+        "Replies, arming confirmations and ✅ reactions are being lost meanwhile. Answers to " +
+        "blocked questions are still collected over REST each sweep; for anything else use this UI.",
       action: null,
     });
   }

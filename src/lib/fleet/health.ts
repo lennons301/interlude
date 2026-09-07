@@ -79,6 +79,10 @@ export interface DiscordGatewayObservation {
   /** When the gateway last delivered any event to this process (ms), or null
    * if it has not since connecting. */
   lastInboundMs: number | null;
+  /** When discord.js reported it will no longer reconnect the shard (an
+   * unrecoverable close code), or null while the session is alive. */
+  closedSinceMs: number | null;
+  closeCode: number | null;
 }
 
 /** A run owed a review whose pass has not started — no review container is
@@ -220,9 +224,17 @@ export interface QueueStale {
 /** The bot has sent and the gateway has answered nothing since (issue #135):
  * everything humans send *to* Interlude through Discord is being lost. */
 export interface DiscordInboundStale {
-  /** How long since the unanswered outbound send. */
+  /** `closed`: discord.js gave the shard up (unrecoverable close code — bad
+   * token, disallowed intents); only a config fix and a restart bring it back.
+   * `silent`: the session looks alive but the bot's own post was never echoed
+   * back — a zombie session, which a restart re-identifies. */
+  cause: "closed" | "silent";
+  /** How long the gateway has been deaf: since the close, or since the
+   * unanswered send. */
   silentForMs: number;
-  lastOutboundMs: number;
+  /** The gateway close code when `cause` is `closed`. */
+  closeCode: number | null;
+  lastOutboundMs: number | null;
   lastInboundMs: number | null;
 }
 
@@ -465,7 +477,16 @@ export function evaluateFleetHealth(
   let discordInboundAnnounced = false;
   let announceDiscordInboundStale: DiscordInboundStale | null = null;
   const gateway = input.discordGateway;
-  if (
+  if (gateway != null && gateway.closedSinceMs != null) {
+    // The library said it will not reconnect: no threshold, nothing to wait for.
+    discordInboundStale = {
+      cause: "closed",
+      silentForMs: now - gateway.closedSinceMs,
+      closeCode: gateway.closeCode,
+      lastOutboundMs: gateway.lastOutboundMs,
+      lastInboundMs: gateway.lastInboundMs,
+    };
+  } else if (
     gateway != null &&
     gateway.lastOutboundMs != null &&
     (gateway.lastInboundMs == null || gateway.lastInboundMs < gateway.lastOutboundMs)
@@ -473,13 +494,17 @@ export function evaluateFleetHealth(
     const silentForMs = now - gateway.lastOutboundMs;
     if (silentForMs >= thresholds.discordInboundStaleMs) {
       discordInboundStale = {
+        cause: "silent",
         silentForMs,
+        closeCode: null,
         lastOutboundMs: gateway.lastOutboundMs,
         lastInboundMs: gateway.lastInboundMs,
       };
-      discordInboundAnnounced = true;
-      if (!prev.discordInboundAnnounced) announceDiscordInboundStale = discordInboundStale;
     }
+  }
+  if (discordInboundStale) {
+    discordInboundAnnounced = true;
+    if (!prev.discordInboundAnnounced) announceDiscordInboundStale = discordInboundStale;
   }
 
   return {

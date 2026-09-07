@@ -369,10 +369,12 @@ async function evaluateFleetHealthSignals(
     await notifyQueueStale(channelId, announce.queueStale);
   }
   if (announce.discordInboundStale) {
+    const deaf = announce.discordInboundStale;
     console.warn(
-      `[autonomy] Discord gateway deaf: the bot posted ` +
-        `~${Math.round(announce.discordInboundStale.silentForMs / 60_000)}m ago and has ` +
-        `received nothing since — human replies through Discord are being lost`
+      `[autonomy] Discord gateway deaf (${deaf.cause}` +
+        (deaf.closeCode != null ? `, close code ${deaf.closeCode}` : "") +
+        `) for ~${Math.round(deaf.silentForMs / 60_000)}m — human replies through Discord ` +
+        `are being lost`
     );
     await notifyDiscordInboundStale(channelId, announce.discordInboundStale);
   }

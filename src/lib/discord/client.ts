@@ -9,8 +9,8 @@ import { isArmingConfirmation } from "../orchestrator/autonomy/triage";
 import { setBotClient, notifyTaskQueued } from "./notifications";
 import {
   recordDiscordConnected,
+  recordDiscordGatewayClosed,
   recordDiscordInbound,
-  recordDiscordRelogin,
 } from "./gateway-health";
 import { existingAnswers, insertDiscordAnswer } from "./blocked-replies";
 
@@ -21,31 +21,30 @@ import { existingAnswers, insertDiscordAnswer } from "./blocked-replies";
  * the human's reply into `console.error`. Now every lifecycle event is logged
  * with its shard and close code, every delivered event advances the inbound
  * clock the fleet-health watchdog reads (`gateway-health.ts`), a shard the
- * library has given up on is re-established with a fresh client, and a handler
- * failure leaves a trace the human can see — a ⚠️ on their message and a system
- * message on the task it was for.
+ * library has given up on raises the deaf-gateway card at once with the fix
+ * named, and a handler failure leaves a trace the human can see — a ⚠️ on their
+ * message and a system message on the task it was for.
  *
- * Which event means "given up" is a fact about discord.js 14.26.4, checked
- * against its source rather than its docs: `@discordjs/ws` handles
- * INVALID_SESSION and RECONNECT itself (resume, or re-identify), and the client
- * emits `shardReconnecting` while it does. `shardDisconnect` is emitted **only**
- * for a close code in `UNRECOVERABLE_CLOSE_CODES` — "will no longer reconnect"
- * — so that is the terminal signal and the one that triggers a re-login here.
- * `invalidated`, the event the ticket names, exists in the `Events` enum but is
- * never emitted by this version; it is wired to the same path so that a future
- * version which does emit it needs no change.
+ * What the lifecycle events mean is a fact about discord.js 14.26.4, checked
+ * against its source rather than its docs. `@discordjs/ws` handles
+ * INVALID_SESSION and RECONNECT itself (resume, or re-identify), announced as
+ * `shardReconnecting`. `shardDisconnect` is emitted **only** for a close code
+ * in `UNRECOVERABLE_CLOSE_CODES` — 4004 authentication failed, 4010–4014
+ * (invalid shard, sharding required, invalid API version, invalid or
+ * disallowed intents) — every one a configuration error that logging in again
+ * with the same token and intents would only repeat. So nothing here
+ * re-logs-in: a re-login loop on those codes would IDENTIFY toward Discord's
+ * daily limit (which resets the token) and fix nothing. The remedy is a config
+ * change and a restart, and the card says so. `invalidated`, the event the
+ * ticket names, exists in the `Events` enum but is never emitted by this
+ * version; it is logged if it ever arrives.
  */
 
 /** What `startDiscordBot` needs from the outside world — injectable so the
  * gateway wiring can be driven by a fake client in tests. */
 export interface DiscordBotDeps {
   createClient: () => Client;
-  /** How long to wait before re-logging in after the library gives a shard up
-   * (ms). */
-  reloginDelayMs: number;
 }
-
-const MAX_RELOGIN_DELAY_MS = 5 * 60_000;
 
 const DEFAULT_DEPS: DiscordBotDeps = {
   createClient: () =>
@@ -58,10 +57,8 @@ const DEFAULT_DEPS: DiscordBotDeps = {
       ],
       partials: [Partials.Message, Partials.Reaction, Partials.Channel],
     }),
-  reloginDelayMs: 5_000,
 };
 
-let client: Client | null = null;
 let deps: DiscordBotDeps = DEFAULT_DEPS;
 
 export function isDiscordConfigured(): boolean {
@@ -75,17 +72,12 @@ export async function startDiscordBot(overrides: Partial<DiscordBotDeps> = {}): 
     throw new Error("DISCORD_BOT_TOKEN not configured");
   }
   deps = { ...DEFAULT_DEPS, ...overrides };
-  await connect(config.discordBotToken);
-}
-
-async function connect(token: string): Promise<void> {
   const c = deps.createClient();
-  client = c;
-  wireGateway(c, token);
-  await c.login(token);
+  wireGateway(c);
+  await c.login(config.discordBotToken);
 }
 
-function wireGateway(c: Client, token: string): void {
+function wireGateway(c: Client): void {
   c.on("clientReady", () => {
     console.log(`[discord] Bot connected as ${c.user?.tag}`);
     recordDiscordConnected();
@@ -95,7 +87,8 @@ function wireGateway(c: Client, token: string): void {
   // Lifecycle (issue #135). Each is logged with what discord.js knows, and each
   // arrival counts as the gateway being alive. A recoverable close is the
   // library's to handle (`shardReconnecting`, then `shardResume` or a fresh
-  // `shardReady`); an unrecoverable one (`shardDisconnect`) is ours.
+  // `shardReady`); an unrecoverable one (`shardDisconnect`) is a configuration
+  // error only a human can fix, so it is recorded for the watchdog, not retried.
   c.on("shardReady", (shardId, unavailable) => {
     recordDiscordInbound();
     console.log(
@@ -116,13 +109,16 @@ function wireGateway(c: Client, token: string): void {
   c.on("shardDisconnect", (event, shardId) => {
     // Emitted only when the library will not reconnect this shard (an
     // unrecoverable close code such as 4004 authentication failed or 4014
-    // disallowed intents): the bot is deaf from here until something logs in.
+    // disallowed intents): inbound is dead from here. Outbound REST still
+    // works, so the deaf-gateway card and its ping — raised on the next sweep,
+    // no threshold — reach the owner with the code and the fix.
+    recordDiscordGatewayClosed(event.code);
     console.error(
       `[discord] Shard ${shardId} disconnected with unrecoverable close code ` +
-        `${event.code} (${closeCodeName(event.code)}) — discord.js will not reconnect it; ` +
-        `re-logging in`
+        `${event.code} (${closeCodeName(event.code)}) — discord.js will not reconnect it, ` +
+        `and re-logging in with the same token and intents would only repeat it. ` +
+        `Fix the bot's configuration (token, intents) and restart the app.`
     );
-    void reloginWithFreshClient(c, token, `close code ${event.code}`);
   });
   c.on("shardError", (err, shardId) => {
     console.error(`[discord] Shard ${shardId} error:`, err);
@@ -131,10 +127,13 @@ function wireGateway(c: Client, token: string): void {
     console.error("[discord] Client error:", err);
   });
   // Not emitted by discord.js 14.26.4 (verified in its WebSocketManager: the
-  // enum entry exists, nothing emits it) — wired anyway, to the same path, so
-  // a version that does emit it recovers the same way.
+  // enum entry exists, nothing emits it). Logged in case a future version does,
+  // so the change of behaviour is at least visible.
   c.on("invalidated", () => {
-    void reloginWithFreshClient(c, token, "session invalidated");
+    console.error(
+      "[discord] Client reported its session invalidated — not expected from this " +
+        "discord.js version; if replies stop arriving, the fleet-health card says so"
+    );
   });
 
   c.on("messageCreate", (message) => {
@@ -153,41 +152,6 @@ function wireGateway(c: Client, token: string): void {
 /** The gateway close code's name, for the log line. */
 function closeCodeName(code: number): string {
   return GatewayCloseCodes[code] ?? "unknown";
-}
-
-/**
- * The library has given the connection up, so the client is dead from here and
- * stays so until something logs in again. Destroy it and build a fresh one,
- * backing off on failure; the bot is meant to be connected, so this does not
- * give up. The stale client is compared by identity so a second terminal event
- * from an already-replaced client is ignored.
- */
-async function reloginWithFreshClient(stale: Client, token: string, why: string): Promise<void> {
-  if (client !== stale) return;
-  const attempt = recordDiscordRelogin();
-  console.error(
-    `[discord] Gateway connection lost (${why}) — re-logging in with a fresh client ` +
-      `(re-login #${attempt}) in ${deps.reloginDelayMs}ms`
-  );
-  client = null;
-  try {
-    await stale.destroy();
-  } catch (err) {
-    console.error("[discord] Destroying the invalidated client failed:", err);
-  }
-
-  let delay = deps.reloginDelayMs;
-  for (;;) {
-    await new Promise((r) => setTimeout(r, delay));
-    try {
-      await connect(token);
-      console.log("[discord] Re-logged in with a fresh client");
-      return;
-    } catch (err) {
-      delay = Math.min(Math.max(1_000, delay * 2), MAX_RELOGIN_DELAY_MS);
-      console.error(`[discord] Re-login failed, retrying in ${delay}ms:`, err);
-    }
-  }
 }
 
 /** What the failure report needs of a message, so a test can hand in a stub. */

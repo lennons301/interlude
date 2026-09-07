@@ -35,15 +35,18 @@ interface GatewayHealth {
    * connected once this process — and so also the "is this bot meant to be
    * receiving at all" switch the watchdog reads. */
   connectedSinceMs: number | null;
-  /** Fresh clients logged in after the library gave a shard up, for the log line. */
-  relogins: number;
+  /** When discord.js reported it will no longer reconnect the shard (ms), and
+   * the close code it gave; null while the session is alive. */
+  closedSinceMs: number | null;
+  closeCode: number | null;
 }
 
 const state = processSingleton<GatewayHealth>("discord.gatewayHealth", () => ({
   lastInboundMs: null,
   lastOutboundMs: null,
   connectedSinceMs: null,
-  relogins: 0,
+  closedSinceMs: null,
+  closeCode: null,
 }));
 
 /** Any event the gateway delivered — a message, a reaction, a resume. */
@@ -62,17 +65,28 @@ export function recordDiscordConnected(nowMs: number = Date.now()): void {
   // A fresh session is a fresh gateway: it has delivered nothing yet, and an
   // outbound that predates it is not owed an echo by it.
   state.lastInboundMs = nowMs;
+  state.closedSinceMs = null;
+  state.closeCode = null;
 }
 
-export function recordDiscordRelogin(): number {
-  return ++state.relogins;
+/** discord.js has given the shard up — an unrecoverable close code, which it
+ * will not reconnect. The strongest possible statement that inbound is dead,
+ * and one the watchdog acts on at once rather than waiting for a missed echo. */
+export function recordDiscordGatewayClosed(code: number, nowMs: number = Date.now()): void {
+  state.closedSinceMs = nowMs;
+  state.closeCode = code;
 }
 
-/** The two clocks for the watchdog, or null while the bot has never connected
- * this process (not configured, or still logging in) — null decides nothing. */
+/** The clocks for the watchdog, or null while the bot has never connected this
+ * process (not configured, or still logging in) — null decides nothing. */
 export function observeDiscordGateway(): DiscordGatewayObservation | null {
   if (state.connectedSinceMs == null) return null;
-  return { lastOutboundMs: state.lastOutboundMs, lastInboundMs: state.lastInboundMs };
+  return {
+    lastOutboundMs: state.lastOutboundMs,
+    lastInboundMs: state.lastInboundMs,
+    closedSinceMs: state.closedSinceMs,
+    closeCode: state.closeCode,
+  };
 }
 
 /** For tests. */
@@ -80,5 +94,6 @@ export function resetDiscordGatewayHealth(): void {
   state.lastInboundMs = null;
   state.lastOutboundMs = null;
   state.connectedSinceMs = null;
-  state.relogins = 0;
+  state.closedSinceMs = null;
+  state.closeCode = null;
 }

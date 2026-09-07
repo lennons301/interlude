@@ -620,7 +620,10 @@ describe("undelivered answer (issue #136)", () => {
 
 describe("deaf Discord gateway (issue #135)", () => {
   const gateway = (lastOutboundMs: number | null, lastInboundMs: number | null) =>
-    baseInput({ nowMs: T0 + min(10), discordGateway: { lastOutboundMs, lastInboundMs } });
+    baseInput({
+      nowMs: T0 + min(10),
+      discordGateway: { lastOutboundMs, lastInboundMs, closedSinceMs: null, closeCode: null },
+    });
 
   it("never fires when there is no connected bot", () => {
     const { signals } = evaluate(baseInput({ nowMs: T0 + min(10), discordGateway: null }));
@@ -647,7 +650,9 @@ describe("deaf Discord gateway (issue #135)", () => {
   it("fires once the send has gone unanswered past the threshold, and pings once", () => {
     const s1 = evaluate(gateway(T0 + min(4), T0 + min(1)));
     expect(s1.signals.discordInboundStale).toEqual({
+      cause: "silent",
       silentForMs: min(6),
+      closeCode: null,
       lastOutboundMs: T0 + min(4),
       lastInboundMs: T0 + min(1),
     });
@@ -658,7 +663,12 @@ describe("deaf Discord gateway (issue #135)", () => {
     const s2 = evaluateFleetHealth(
       baseInput({
         nowMs: T0 + min(11),
-        discordGateway: { lastOutboundMs: T0 + min(4), lastInboundMs: T0 + min(1) },
+        discordGateway: {
+          lastOutboundMs: T0 + min(4),
+          lastInboundMs: T0 + min(1),
+          closedSinceMs: null,
+          closeCode: null,
+        },
       }),
       s1.state,
       THRESHOLDS
@@ -677,7 +687,12 @@ describe("deaf Discord gateway (issue #135)", () => {
     const recovered = evaluateFleetHealth(
       baseInput({
         nowMs: T0 + min(12),
-        discordGateway: { lastOutboundMs: T0 + min(4), lastInboundMs: T0 + min(12) },
+        discordGateway: {
+          lastOutboundMs: T0 + min(4),
+          lastInboundMs: T0 + min(12),
+          closedSinceMs: null,
+          closeCode: null,
+        },
       }),
       deaf.state,
       THRESHOLDS
@@ -688,11 +703,40 @@ describe("deaf Discord gateway (issue #135)", () => {
     const again = evaluateFleetHealth(
       baseInput({
         nowMs: T0 + min(30),
-        discordGateway: { lastOutboundMs: T0 + min(20), lastInboundMs: T0 + min(12) },
+        discordGateway: {
+          lastOutboundMs: T0 + min(20),
+          lastInboundMs: T0 + min(12),
+          closedSinceMs: null,
+          closeCode: null,
+        },
       }),
       recovered.state,
       THRESHOLDS
     );
     expect(again.announce.discordInboundStale).not.toBeNull();
+  });
+
+  it("fires at once, without a threshold, when discord.js has given the shard up", () => {
+    // 4014 = disallowed intents: no re-login fixes it, only a config change and a
+    // restart, so there is nothing to wait for — and a quiet fleet must still hear.
+    const { signals, announce } = evaluate(
+      baseInput({
+        nowMs: T0 + min(10),
+        discordGateway: {
+          lastOutboundMs: null,
+          lastInboundMs: T0,
+          closedSinceMs: T0 + min(10) - 20_000,
+          closeCode: 4014,
+        },
+      })
+    );
+    expect(signals.discordInboundStale).toEqual({
+      cause: "closed",
+      silentForMs: 20_000,
+      closeCode: 4014,
+      lastOutboundMs: null,
+      lastInboundMs: T0,
+    });
+    expect(announce.discordInboundStale?.cause).toBe("closed");
   });
 });

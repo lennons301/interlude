@@ -318,12 +318,16 @@ adopts any it has not seen — so a reply that arrived while the gateway was dea
 while a handler threw, or while the app was restarting is delivered within ~30 s
 and gets its 👍 then. If your reply gets a ⚠️ instead, the handler failed on it;
 the task page says so too, and replying again (or answering on the task page)
-is the fix. If the gateway itself goes deaf — the bot has posted and heard
-nothing back for `DISCORD_INBOUND_STALE_MINUTES` (5) — a red **discord deaf**
-card and one Discord ping say so; blocked answers still flow over REST, but a
-new task, a `cancel` or a ✅ sent through Discord will not arrive until the
-gateway reconnects (a recoverable drop is resumed by discord.js; a shard it
-gives up on is re-logged-in with a fresh client; a restart forces either).
+is the fix. If the gateway itself goes deaf, a red **discord deaf** card
+and one Discord ping say so, naming the cause: **closed** — Discord shut the
+connection with an unrecoverable code (a bad token, disallowed intents) and
+discord.js will not reconnect; fix the bot's configuration and restart — or
+**silent** — the bot has posted and heard nothing back for
+`DISCORD_INBOUND_STALE_MINUTES` (5), a session alive but deaf; a restart
+re-identifies it. Either way blocked answers still flow over REST, but a new
+task, a `cancel` or a ✅ sent through Discord will not arrive until the
+gateway is back. (A recoverable drop is resumed by discord.js on its own and
+needs nothing from you.)
 
 ### 5. Find PRs waiting for sign-off
 
