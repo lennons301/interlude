@@ -12,21 +12,17 @@
  * read (`./outcome.ts`) — and the orchestrator sees a `TurnResult` in the
  * fleet's vocabulary and nothing else.
  *
- * **Credentials are exec-scoped, and where the CLI wants a file, the file is
- * exec-scoped too.** The lane's `auth` values pass through into the exec
- * environment exactly as Claude Code's do: an API key as `CODEX_API_KEY`, which
- * the CLI reads natively (measured on 0.149.1 and 0.153.4: `OPENAI_API_KEY`
- * alone sends no bearer at all). The ChatGPT-plan credential is the documented
- * CI path — a seeded `auth.json` in the Codex home — so the turn script points
- * `CODEX_HOME` at a directory it creates for this one exec, writes
- * `auth.json` there from the `CODEX_AUTH_JSON` variable (mode 0600), and
- * removes the whole directory when the turn ends, on every exit path bash sees
- * (an EXIT trap, armed before the write). A turn killed outright — an OOM, a
- * `docker kill` of the exec — runs no trap, so the script also sweeps any such
- * home left by an earlier turn before it starts: nothing persists in the
- * container past the next turn, and a parked or idle container holds no
- * credential file. Reading the file back out of a running turn's exec is the
- * one window, as it is for a Claude turn's environment.
+ * **Credentials are exec-scoped.** API keys pass through as CODEX_API_KEY.
+ * A managed ChatGPT login uses the optional withTurnAuth lifecycle in auth.ts:
+ * one serialized writer per account loads the latest credential from the
+ * private orchestrator store, supplies it to one exec, and saves the CLI's
+ * refreshed auth.json before removing that exec's home. The seed in Doppler
+ * is used only for bootstrap or an independently minted replacement login.
+ * A failed write-back holds the next turn instead of replaying a stale token.
+ * No host harness directory is mounted and no credential enters the feed.
+ * A managed home survives command exit only until the orchestrator confirms
+ * write-back; a process crash can leave it for operator recovery. Unmanaged
+ * command invocations still remove their home in the EXIT trap.
  *
  * **Sessions outlive the per-exec home.** The CLI keeps a thread's replayable
  * state as one rollout file under `$CODEX_HOME/sessions/<y>/<m>/<d>/rollout-
@@ -215,7 +211,12 @@ export function buildCodexTurnCommand(input: HarnessCommandInput): string {
     // goes now, before this turn's is made.
     `rm -rf -- ${CODEX_EXEC_HOME_GLOB}`,
     `mkdir -p ${CODEX_ROLLOUT_DIR}`,
-    `CODEX_HOME="$(mktemp -d ${CODEX_EXEC_HOME_TEMPLATE})" || exit 1`,
+    `if [ -n "\${INTERLUDE_CODEX_AUTH_HOME:-}" ]; then`,
+    '  CODEX_HOME="$INTERLUDE_CODEX_AUTH_HOME"',
+    '  (umask 077 && mkdir -- "$CODEX_HOME") || exit 1',
+    'else',
+    `  CODEX_HOME="$(mktemp -d ${CODEX_EXEC_HOME_TEMPLATE})" || exit 1`,
+    'fi',
     "export CODEX_HOME",
     "interlude_codex_cleanup() {",
     // Every rollout the CLI wrote under its dated tree moves onto the
@@ -227,7 +228,7 @@ export function buildCodexTurnCommand(input: HarnessCommandInput): string {
     "  done",
     // The credential file, the provider config and the CLI's state go with
     // the per-exec home; the sessions symlink goes, its target stays.
-    '  rm -rf -- "$CODEX_HOME"',
+    '  if [ -z "${INTERLUDE_CODEX_AUTH_HOME:-}" ]; then rm -rf -- "$CODEX_HOME"; fi',
     "}",
     "trap interlude_codex_cleanup EXIT",
     `ln -s ${CODEX_SESSIONS_DIR} "$CODEX_HOME/sessions"`,
@@ -273,6 +274,10 @@ export function codexSessionArtifactPaths(sessionId: string): string[] {
 const descriptor = requireHarnessDescriptor(CODEX_ADAPTER_ID);
 
 export const codexAdapter: HarnessAdapter = {
+  withTurnAuth: async (lane, io, run) => {
+    const { withCodexTurnAuth } = await import("./auth");
+    return withCodexTurnAuth(lane, io, run);
+  },
   id: CODEX_ADAPTER_ID,
   image: CODEX_IMAGE,
   // Read from the table rather than restated, so the adapter cannot disagree

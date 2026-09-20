@@ -996,3 +996,88 @@ trigger) · `workflow:<skill>` (per-ticket workflow selector).
   now asserts the checked-out SHA against `github.sha` and fails instead.
 - **A gated PR never merges.** That's by design — `human-signoff` means it waits
   for you. Merge it yourself.
+
+### Codex subscription production setup
+
+The `codex-subscription` lane uses a ChatGPT plan login. Use a **dedicated
+production login on your account**, not the auth cache actively used by your
+laptop or another runner: concurrent refreshes of one login can invalidate it.
+A ChatGPT Plus subscription is not an OpenAI API credit balance; keep this lane
+subscription-billed and use its ChatGPT login, not `OPENAI_API_KEY`.
+
+1. Mint a dedicated login on your own machine (no VPS browser is needed):
+
+   ```bash
+   CODEX_HOME="$HOME/.codex-interlude" codex login --device-auth
+   ```
+
+   Enable device-code login in your ChatGPT security settings first. Open the
+   displayed link on your own computer or phone and enter the one-time code.
+   The same command can run in a dedicated setup container on the VPS. Never
+   paste the resulting auth.json into chat, issues or logs.
+2. Provision that file as `CODEX_AUTH_JSON` in Doppler `interlude/prd` using a
+   secret input/file transfer, not a literal argument containing the secret.
+   Remove the setup container after provisioning. Deploy the credential
+   lifecycle fix **before** enabling the credential: configured lanes become
+   routing candidates immediately, even if not listed in `primary`.
+
+   ```bash
+   doppler secrets set CODEX_AUTH_JSON --project interlude --config prd \
+     < "$HOME/.codex-interlude/auth.json" > /dev/null
+   ```
+3. Recreate the app so its Doppler environment is refreshed. Settings →
+   Execution lane should show the credential present. That checks presence,
+   not validity: run an attended smoke test on `codex-subscription`, covering
+   all three configured tiers and a follow-up in the same conversation.
+4. Verify the task/run is stamped `codex-subscription`, the harness is `codex`,
+   the turn completes, the follow-up resumes, and metered spend stays zero.
+   Test an actual refresh using only the dedicated test login before claiming
+   refresh verified. Never age or mutate another active client's auth cache.
+
+The orchestrator persists updated credentials under `harness-auth/codex`
+beside `DATABASE_URL` (`/data/harness-auth/codex` in production). Directories
+are private and files are mode 0600. Include this store in private encrypted
+backups of `/data`; never publish it or copy it into the agent image. The
+original Doppler secret is only a seed. Formatting the same seed differently
+cannot overwrite refreshed tokens; an independently minted refresh token
+explicitly reseeds the account. Removing the lane credential still disables
+new work even while a saved cache exists.
+
+Turns sharing an account serialize through one writer, including across lane
+ids. A cross-process lock refuses concurrent orchestrators. The CLI's temporary
+credential home is removed **after** the refreshed file has been fsynced and
+atomically saved, before the task container is parked or removed. API-key lanes
+retain their existing environment-only credential delivery. No host bind mount
+or API response carries the auth cache.
+
+A crash, an unconfirmed process exit, unreadable output, failed persistence or
+failed cleanup leaves an in-flight marker and holds later turns on that seed.
+This is deliberate: the old refresh token may no longer work. Recovery requires
+stopping any surviving exec first, creating a fresh dedicated production login,
+and replacing `CODEX_AUTH_JSON`. If a process died while holding a `.lock`
+directory, confirm there is no surviving writer before removing that account's
+lock directory. Clean up the interrupted container's `.codex-exec.*` home (or
+remove that stopped container) as part of recovery. Never delete a live lock to
+force concurrent turns. This does not promise that a revoked session can recover
+without another login.
+
+References: [Codex authentication](https://learn.chatgpt.com/docs/auth) and
+[managed account auth on private runners](https://learn.chatgpt.com/docs/auth/ci-cd-auth).
+
+Attended standalone verification (uses the tier map in `lanes.yaml`):
+
+```bash
+node scripts/codex-subscription-check.mjs --home "$HOME/.codex-interlude" --exercise-refresh
+```
+
+Run it before provisioning, then upload the **updated** file. The refresh
+option uses app-server's documented `account/read` with `refreshToken: true`;
+changing `last_refresh` alone did not force a refresh on CLI 0.155.1.
+
+Verified 2026-09-20 with a dedicated Plus login: all three configured models,
+conversation resume, a real refresh-token rotation, and a successful subsequent
+turn. An isolated VPS container built from the deployed agent Dockerfiles also
+passed all tiers and resume using the staged Doppler `interlude/prd` credential
+and the new adapter lifecycle: the refreshed token reached the next turn and
+every credential home was removed after write-back. This is separate from the
+final live-app activation check.

@@ -17,6 +17,7 @@ import {
   execAgentTurn,
   execFallbackCommitAndPush,
   readContainerFile,
+  removeContainerDirectory,
   removeContainer,
   stopAgentTurn,
   stopContainer,
@@ -1361,7 +1362,19 @@ async function observeExecExitCode(exec: {
  * for it, and a second cost on this type would only invite a caller to charge
  * the wrong one.
  */
-async function runTurn(
+async function runTurn(...args: Parameters<typeof runTurnWithCredentials>): Promise<TurnResult> {
+  const [taskId, running, prompt, sessionId, opts] = args;
+  const adapter = getHarnessAdapter(opts.lane.adapter);
+  if (!adapter.withTurnAuth) return runTurnWithCredentials(...args);
+  return adapter.withTurnAuth(opts.lane, {
+    readFile: (file, maxBytes) => readContainerFile(running.container, file, maxBytes),
+    removeDirectory: directory => removeContainerDirectory(running.container, directory),
+  }, lane => runTurnWithCredentials(taskId, running, prompt, sessionId, {
+    ...opts, lane, waitForCredentialExit: true,
+  }));
+}
+
+async function runTurnWithCredentials(
   taskId: string,
   running: RunningContainer,
   prompt: string,
@@ -1372,6 +1385,7 @@ async function runTurn(
     maxTurns?: number;
     effort?: string | null;
     isGenerationSession?: boolean;
+    waitForCredentialExit?: boolean;
   }
 ): Promise<TurnResult> {
   const adapter = getHarnessAdapter(opts.lane.adapter);
@@ -1462,6 +1476,17 @@ async function runTurn(
 
   const charge = chargeForTurn(opts.lane, result);
   noteLaneCharge(taskId, opts.lane, charge);
+  // A terminal event can precede process exit. A rotating credential must not
+  // be copied out while the harness can still rewrite it during shutdown.
+  if (opts.waitForCredentialExit) {
+    const until = Date.now() + 10_000;
+    while (true) {
+      const info = await runBoundedProbe(() => exec.inspect(), 1000);
+      if (info.ok && !info.value.Running) break;
+      if (Date.now() >= until) throw new Error("Harness credential handoff did not finish");
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
   return { ...result, costUsd: charge.usd };
 }
 

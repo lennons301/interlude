@@ -622,6 +622,19 @@ export async function readContainerFile(
   return bytes;
 }
 
+/** Delete a credential handoff directory only after its durable write-back.
+ * Path is conveyed as data, and output never enters the task's stream. */
+export async function removeContainerDirectory(container: Docker.Container, directory: string): Promise<void> {
+  const exec = await container.exec({
+    Cmd: ["bash", "-c", 'rm -rf -- "$INTERLUDE_DIRECTORY"'],
+    Env: [`INTERLUDE_DIRECTORY=${directory}`],
+    AttachStdout: true, AttachStderr: true,
+  });
+  const stream = await exec.start({});
+  const status = await raceWithTimeout(awaitExecExit(exec, stream), FILE_TRANSFER_TIMEOUT_MS);
+  if (status !== 0) throw new Error("Credential directory cleanup failed");
+}
+
 /**
  * Write one file into a container, creating its directory (issue #169).
  *
