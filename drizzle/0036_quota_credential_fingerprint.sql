@@ -1,0 +1,1 @@
+ALTER TABLE `quota_state` ADD `credential_fingerprint` text;

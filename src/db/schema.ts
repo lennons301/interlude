@@ -507,6 +507,16 @@ export const quotaState = sqliteTable("quota_state", {
   lane: text("lane").primaryKey(),
   observation: text("observation", { mode: "json" }).notNull(),
   observedAt: int("observed_at", { mode: "timestamp_ms" }).notNull(),
+  /** A non-secret fingerprint of the credential(s) the lane authenticated with
+   * when this observation was made (never the credential itself — see
+   * `credential-fingerprint.ts`). A rejection is a fact about one account, and
+   * rotating a lane's credential to a different account — including across
+   * plan tiers with unrelated reset schedules — must not leave the new
+   * account gated by the old one's wall until a date that was never about it.
+   * Null on a row written before this column existed; read as "unknown
+   * provenance," which is treated exactly like a mismatch rather than trusted
+   * indefinitely. */
+  credentialFingerprint: text("credential_fingerprint"),
 });
 
 /**

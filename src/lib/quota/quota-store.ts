@@ -30,12 +30,39 @@
  * Writes swallow their own errors, for the passive recorder's reason: this sits
  * on the stream-parse path of every turn the fleet runs, and telemetry that can
  * fail the pass it describes is worse than no telemetry.
+ *
+ * **A row also carries the fingerprint of the credential it was observed
+ * under** (issue #251). A rejection is a fact about one account, not about a
+ * lane id — `lanes.yaml` names a lane once but nothing stops its credential
+ * from later pointing at a different account, and a stored `resetsAt` from
+ * the old one describes a wall the new account never built. Every read
+ * compares the row's fingerprint against the lane's *current* one and drops
+ * the row — reads as never-observed, same as a fresh install — the moment
+ * they differ, so a rotated credential opens the gate immediately rather than
+ * waiting out a date that was never about it.
  */
 
 import { db } from "@/db";
 import { quotaState } from "@/db/schema";
 import { eq } from "drizzle-orm";
+import { getLaneCatalog } from "../lanes/catalog";
+import { laneCredentialFingerprint } from "./credential-fingerprint";
 import { parseRateLimitEvent, type QuotaObservation } from "./rate-limit-event";
+
+/**
+ * The fingerprint a fresh observation on `lane` would carry right now, or
+ * null when the lane is unknown, its catalog can't be read, or it has no
+ * credential configured — every one of those already reads as "nothing to
+ * compare" everywhere else in this module, so a mismatch is only ever
+ * reported against a lane this build can actually identify.
+ */
+function currentFingerprint(lane: string): string | null {
+  const catalog = getLaneCatalog();
+  if (!catalog.ok) return null;
+  const definition = catalog.catalog.lanes.find((l) => l.id === lane);
+  if (!definition) return null;
+  return laneCredentialFingerprint(definition.auth, process.env);
+}
 
 /** Back to the wire's encoding: the CLI sends reset times as unix seconds, and
  * a row that speaks JSON's own date dialect instead would need its own reader. */
@@ -68,15 +95,17 @@ export function recordQuotaObservation(
 ): void {
   try {
     const info = toStoredInfo(observation);
+    const credentialFingerprint = currentFingerprint(lane);
     db.insert(quotaState)
       .values({
         lane,
         observation: info,
         observedAt: observation.observedAt,
+        credentialFingerprint,
       })
       .onConflictDoUpdate({
         target: quotaState.lane,
-        set: { observation: info, observedAt: observation.observedAt },
+        set: { observation: info, observedAt: observation.observedAt, credentialFingerprint },
       })
       .run();
   } catch (err) {
@@ -97,6 +126,11 @@ export function recordQuotaObservation(
  *
  * `lane` may be null (nothing resolved as primary), which is null in, null out:
  * there is no lane to have a quota.
+ *
+ * A row whose stored credential fingerprint no longer matches the lane's
+ * current one reads as null too — a fourth cause alongside the three above,
+ * and the one issue #251 exists for: the account behind the lane changed, so
+ * the observation is about a wall the account reading it now never hit.
  */
 export function getQuotaObservation(
   lane: string | null
@@ -109,6 +143,7 @@ export function getQuotaObservation(
       .where(eq(quotaState.lane, lane))
       .get();
     if (!row) return null;
+    if (row.credentialFingerprint !== currentFingerprint(lane)) return null;
 
     return parseRateLimitEvent(
       { type: "rate_limit_event", rate_limit_info: row.observation },
@@ -130,12 +165,15 @@ export function getQuotaObservation(
  * caller and is the truth: it has reported nothing, which is the permanent
  * state of a metered lane and must never read as a closed door (#171's rule).
  * One query rather than one per lane, and a row this build cannot parse is
- * dropped exactly as the single-lane read drops it.
+ * dropped exactly as the single-lane read drops it — as is one whose
+ * credential fingerprint no longer matches the lane's current one (issue
+ * #251), the same rotated-account case `getQuotaObservation` drops.
  */
 export function getQuotaObservations(): Record<string, QuotaObservation> {
   const observations: Record<string, QuotaObservation> = {};
   try {
     for (const row of db.select().from(quotaState).all()) {
+      if (row.credentialFingerprint !== currentFingerprint(row.lane)) continue;
       const parsed = parseRateLimitEvent(
         { type: "rate_limit_event", rate_limit_info: row.observation },
         row.observedAt
