@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb } from "@/test/create-test-db";
 import { quotaState } from "@/db/schema";
 import type { QuotaObservation } from "../rate-limit-event";
@@ -6,9 +6,15 @@ import type { QuotaObservation } from "../rate-limit-event";
 /**
  * The durable half (issue #167): one row **per lane** since #175, latest
  * observation wins, and a read that cannot throw whatever is in the column.
+ *
+ * Run against the real checked-in `lanes.yaml`, deliberately, for the same
+ * reason `per-lane-gate.test.ts` does: the credential-fingerprint check
+ * (issue #251) reads each lane's real `auth` entries, and a fixture catalog
+ * would pass while the shipped file named a lane with a different variable.
  */
 
 const SUBSCRIPTION = "claude-subscription";
+const ANTHROPIC_API = "anthropic-api";
 
 let testDb: ReturnType<typeof createTestDb>["db"];
 
@@ -18,12 +24,25 @@ vi.mock("@/db", () => ({
   },
 }));
 
-const { recordQuotaObservation, getQuotaObservation } = await import(
-  "../quota-store"
-);
+const { recordQuotaObservation, getQuotaObservation, getQuotaObservations } =
+  await import("../quota-store");
+const { resetLaneCatalog } = await import("@/lib/lanes/catalog");
+
+const ORIGINAL_ENV = { ...process.env };
 
 beforeEach(() => {
   testDb = createTestDb().db;
+  // A credential on every lane these tests touch, so an observation recorded
+  // and then read back in the same test — the ordinary case every test but
+  // the rotation ones exercises — sees a stable fingerprint throughout.
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-test-account";
+  process.env.ANTHROPIC_API_KEY = "sk-ant-api-test-key";
+  resetLaneCatalog();
+});
+
+afterEach(() => {
+  process.env = { ...ORIGINAL_ENV };
+  resetLaneCatalog();
 });
 
 function observation(overrides: Partial<QuotaObservation> = {}): QuotaObservation {
@@ -159,5 +178,99 @@ describe("quota state", () => {
     ).not.toThrow();
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
+  });
+
+  describe("a rotated credential (issue #251)", () => {
+    // The incident this guards: a lane's credential is repointed at a
+    // different account — including, as happened on 2026-09-20, across plan
+    // tiers with unrelated reset schedules — and the *old* account's
+    // rejection must stop describing the new one immediately, not wait out a
+    // `resetsAt` that was never about it.
+
+    it("survives an unchanged credential across a restart", () => {
+      recordQuotaObservation(SUBSCRIPTION, observation({ status: "rejected" }));
+      // A restart re-reads the same env into a fresh process; nothing about
+      // the credential changed, so the fingerprint recomputes identically.
+      resetLaneCatalog();
+
+      expect(getQuotaObservation(SUBSCRIPTION)?.status).toBe("rejected");
+    });
+
+    it("reads a rejection as unobserved once the lane's credential changes", () => {
+      recordQuotaObservation(
+        SUBSCRIPTION,
+        observation({
+          status: "rejected",
+          // A wall dated weeks out, as an Enterprise seat's monthly reset
+          // would be — the exact shape that made the live incident wedge
+          // rather than merely delay.
+          resetsAt: new Date("2026-10-01T00:00:00.000Z"),
+        })
+      );
+
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-a-different-account";
+
+      expect(getQuotaObservation(SUBSCRIPTION)).toBeNull();
+    });
+
+    it("does not let one lane's rotation affect another's observation", () => {
+      recordQuotaObservation(SUBSCRIPTION, observation({ status: "rejected" }));
+      recordQuotaObservation(ANTHROPIC_API, observation({ status: "allowed" }));
+
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-rotated";
+
+      expect(getQuotaObservation(SUBSCRIPTION)).toBeNull();
+      expect(getQuotaObservation(ANTHROPIC_API)?.status).toBe("allowed");
+    });
+
+    it("drops a rotated lane from getQuotaObservations() but keeps the rest", () => {
+      recordQuotaObservation(SUBSCRIPTION, observation({ status: "rejected" }));
+      recordQuotaObservation(ANTHROPIC_API, observation({ status: "allowed" }));
+
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-rotated";
+
+      const all = getQuotaObservations();
+      expect(all[SUBSCRIPTION]).toBeUndefined();
+      expect(all[ANTHROPIC_API]?.status).toBe("allowed");
+    });
+
+    it("treats a pre-migration row (no stored fingerprint) as unobserved rather than trusting it forever", () => {
+      // A row written before this column existed reads back with a null
+      // `credentialFingerprint`. Trusting that indefinitely would mean this
+      // fix protects nothing on the deploy that most needs it — the very
+      // rows already gating the fleet when it ships.
+      testDb
+        .insert(quotaState)
+        .values({
+          lane: SUBSCRIPTION,
+          observation: {
+            status: "rejected",
+            rateLimitType: null,
+            utilization: null,
+            resetsAt: Math.floor(Date.parse("2026-10-01T00:00:00.000Z") / 1000),
+            overageStatus: null,
+            overageResetsAt: null,
+            isUsingOverage: false,
+            overageInUse: null,
+          },
+          observedAt: new Date("2026-09-20T07:22:00.000Z"),
+          // credentialFingerprint intentionally omitted — a legacy row.
+        })
+        .run();
+
+      expect(getQuotaObservation(SUBSCRIPTION)).toBeNull();
+    });
+
+    it("records a fresh, unrejected observation once the new credential is actually exercised", () => {
+      // The self-healing path: the incident's real fix. A rejected
+      // observation under the old credential is superseded the moment the
+      // fleet makes one real call on the new one.
+      recordQuotaObservation(SUBSCRIPTION, observation({ status: "rejected" }));
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-new-account";
+      expect(getQuotaObservation(SUBSCRIPTION)).toBeNull();
+
+      recordQuotaObservation(SUBSCRIPTION, observation({ status: "allowed" }));
+      expect(getQuotaObservation(SUBSCRIPTION)?.status).toBe("allowed");
+    });
   });
 });
