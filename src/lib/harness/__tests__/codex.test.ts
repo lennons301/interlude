@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { ResolvedLane } from "@/lib/lanes/resolve";
 
 // The adapters' output handlers write into the feed; nothing here exercises
@@ -70,6 +73,26 @@ const subscriptionLane = () =>
     declaresPrices: false,
     caps: { dailyBudgetUsd: null },
   });
+
+it("keeps a rotated credential private until the orchestrator acknowledges write-back", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "interlude-auth-shell-"));
+  try {
+    fs.mkdirSync(`${root}/bin`);
+    fs.mkdirSync(`${root}/repo`);
+    fs.writeFileSync(`${root}/bin/codex`, '#!/bin/bash\nprintf "%s" "rotated-secret" > "$CODEX_HOME/auth.json"\nprintf \'{"type":"turn.completed"}\\n\'\n', { mode: 0o700 });
+    const command = buildCodexTurnCommand({ lane: subscriptionLane() })
+      .replaceAll("/home/node", root).replaceAll("/workspace/repo", `${root}/repo`);
+    const managed = `${root}/.codex-exec.managed`;
+    const result = spawnSync("bash", ["-c", command], {
+      encoding: "utf8", env: { ...process.env, PATH: `${root}/bin:${process.env.PATH}`,
+        CODEX_AUTH_JSON: AUTH_JSON, CODEX_PROMPT: "test", INTERLUDE_CODEX_AUTH_HOME: managed },
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout + result.stderr).not.toContain("secret");
+    expect(fs.readFileSync(`${managed}/auth.json`, "utf8")).toBe("rotated-secret");
+    expect(fs.statSync(`${managed}/auth.json`).mode & 0o777).toBe(0o600);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 
 /** Does bash accept the script as syntax? The generated command runs under
  * `bash -c`, so a quoting slip is a pass that never starts. */

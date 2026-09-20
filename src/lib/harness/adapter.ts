@@ -151,6 +151,13 @@ export interface HarnessImage {
 }
 
 export interface HarnessAdapter {
+  /** Optional credential lifecycle. The adapter can serialize a rotating login
+   * and round-trip its updated file outside the agent's transcript/feed. */
+  withTurnAuth?(
+    lane: ResolvedLane,
+    io: HarnessAuthIO,
+    run: (lane: ResolvedLane) => Promise<TurnResult>
+  ): Promise<TurnResult>;
   /**
    * The id a lane names in `lanes.yaml`. A string rather than the production
    * table's literal union, because the registry accepts a test double
@@ -197,4 +204,9 @@ export interface HarnessAdapter {
    * issues #221, #222), never approximated silently.
    */
   mapEffort(level: string): string | null;
+}
+
+export interface HarnessAuthIO {
+  readFile(path: string, maxBytes: number): Promise<Buffer | null>;
+  removeDirectory(path: string): Promise<void>;
 }

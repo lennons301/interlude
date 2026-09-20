@@ -354,20 +354,13 @@ lanes:
     label: Codex (ChatGPT plan)
     adapter: codex
     billing: subscription
-    # The documented CI credential is a seeded `~/.codex/auth.json` (the file
-    # `codex login` writes). The orchestrator variable holds that file's
-    # contents; the adapter's turn script writes them into a Codex home created
-    # for the one exec and removes it when the turn ends, so the file never
-    # persists in a container. Known risk, still UNSETTLED after #224 because
-    # the proof had no ChatGPT-plan credential to run (this lane is declared
-    # and untested): the CLI refreshes a ChatGPT token
-    # and rewrites auth.json in place, and the fleet deletes that file with the
-    # exec home and re-seeds the original each turn, so a rotated refresh token
-    # may stop working after the first refresh. The CLI
-    # (0.153.4) also reads a ChatGPT-backed personal access token from
-    # `CODEX_ACCESS_TOKEN`; should #224 prefer that path, this mapping becomes
-    # `CODEX_ACCESS_TOKEN: CODEX_ACCESS_TOKEN` — a plain pass-through, no code
-    # change.
+    # A dedicated production ChatGPT login, created with codex login. Do not
+    # reuse a desktop/CLI login that another machine can refresh concurrently.
+    # The adapter treats this as a seed: it stores refreshed credentials in
+    # /data/harness-auth/codex (beside DATABASE_URL), serializes turns for the
+    # same account, and removes the exec's credential after durable write-back.
+    # See docs/runbook.md, "Codex subscription production setup", for bootstrap,
+    # verification and recovery after an interrupted credential write-back.
     auth:
       CODEX_AUTH_JSON: CODEX_AUTH_JSON
     # No base_url: the CLI's built-in OpenAI provider, the only one a ChatGPT

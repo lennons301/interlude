@@ -56,6 +56,7 @@ stream-observations.jsonl.1
 # Paused passes' session transcripts (issue #169) — beside the database too, so
 # a local dev pause leaves a directory here rather than in the diff.
 session-transcripts/
+harness-auth/
 
 # Docker
 .docker/

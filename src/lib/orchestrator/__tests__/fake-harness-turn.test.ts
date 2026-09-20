@@ -387,6 +387,21 @@ describe("a whole turn through the turn manager on the fake adapter (issue #214)
     expect(fake.pending()).toBe(0);
   });
 
+  it("round-trips rotating credentials before the completed container is parked", async () => {
+    fake.adapter.withTurnAuth = async (lane, _io, execute) => {
+      docker.calls.push("loadCredential");
+      const result = await execute({ ...lane, auth: { [FAKE_LANE_AUTH_VAR]: "refreshed-token" } });
+      docker.calls.push("saveCredential");
+      return result;
+    };
+    fake.script(scriptedTurn({ kind: "completed" }));
+    await turns.startTask(taskId);
+    expect(fake.execs[0].env.lane.auth).toEqual({ [FAKE_LANE_AUTH_VAR]: "refreshed-token" });
+    expect(docker.calls.indexOf("loadCredential")).toBeLessThan(docker.calls.indexOf("execAgentTurn"));
+    expect(docker.calls.indexOf("saveCredential")).toBeGreaterThan(docker.calls.indexOf("execAgentTurn"));
+    expect(docker.calls.indexOf("saveCredential")).toBeLessThan(docker.calls.indexOf("stopContainer"));
+  });
+
   it("parks the run on a scripted refused { quota } — the refusal reaches the reducer as a refusal", async () => {
     fake.script(
       scriptedTurn(
