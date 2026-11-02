@@ -21,6 +21,22 @@ function fixture(name: string): PassTurn {
   );
 }
 
+/** A clean turn whose final message is `text` — for exits whose shape is the
+ * point of the test, where a fixture file would only hide it. */
+function turnWithFinal(text: string): PassTurn {
+  return turnFromClaudeStream(
+    JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: text,
+      stop_reason: "end_turn",
+      session_id: "tri-inline",
+      total_cost_usd: 0.1,
+    })
+  );
+}
+
 describe("parseTriageExit", () => {
   it("parses a recommend exit with the assessment as the body", () => {
     expect(parseTriageExit(fixture("triage-recommend.ndjson"))).toEqual({
@@ -108,6 +124,53 @@ describe("parseTriageExit", () => {
     });
   });
 
+  // "Narrate, then exit" is common model behaviour — the same slip #107 fixed
+  // for BLOCKED:. Over prod's history every triage pass that failed on shape
+  // had a well-formed marker line after a one-line lead-in.
+  describe("a lead-in before the marker", () => {
+    it("parses the exit after a preamble, dropping the preamble from the body", () => {
+      expect(
+        parseTriageExit(
+          turnWithFinal(
+            "No PHP anywhere in the repo — nothing to assess from the text as written.\n\n" +
+              "TRIAGE: needs-info\nTIER: light\n\n1. **Which vulnerability specifically?**"
+          )
+        )
+      ).toEqual({
+        kind: "needs-info",
+        body: "1. **Which vulnerability specifically?**",
+        tier: "light",
+      });
+    });
+
+    it("ignores a marker quoted inside a fenced code block", () => {
+      expect(
+        parseTriageExit(
+          turnWithFinal(
+            "The protocol looks like:\n```\nTRIAGE: recommend\n```\n\n" +
+              "TRIAGE: ready-for-human\n\nNeeds a grilling first."
+          )
+        )
+      ).toEqual({ kind: "ready-for-human", body: "Needs a grilling first.", tier: null });
+    });
+
+    it("rejects two marker lines that disagree", () => {
+      expect(
+        parseTriageExit(
+          turnWithFinal("TRIAGE: recommend\n\nLooks fine.\n\nTRIAGE: needs-info\n\nActually, unclear.")
+        )
+      ).toMatchObject({ kind: "unparseable" });
+    });
+
+    it("rejects a pass that tries the arming exit on any line, even beside a valid one", () => {
+      expect(
+        parseTriageExit(
+          turnWithFinal("Ready.\n\nTRIAGE: ready-for-agent\n\nTRIAGE: recommend\n\nArm it.")
+        )
+      ).toMatchObject({ kind: "unparseable" });
+    });
+  });
+
   // The unparseable cases are the safety property: triage's exit vocabulary
   // is exactly three, and nothing a pass emits can widen it. In particular a
   // pass claiming the arming exit itself must come out unparseable, never as
@@ -119,7 +182,7 @@ describe("parseTriageExit", () => {
       });
     });
 
-    it("rejects an exit mentioned mid-message rather than on the first line", () => {
+    it("rejects an exit mentioned mid-line in prose rather than on a line of its own", () => {
       expect(parseTriageExit(fixture("triage-malformed.ndjson"))).toMatchObject({
         kind: "unparseable",
       });

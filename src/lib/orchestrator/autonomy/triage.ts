@@ -7,11 +7,15 @@
  * unparseable), and `decideNext` maps each exit to a fixed advisory label
  * set that never contains `ready-for-agent`.
  *
- * The contract with the pass prompt: the turn's final message begins, on its
- * first line, with `TRIAGE: recommend | needs-info | ready-for-human`; an
+ * The contract with the pass prompt: the turn's final message carries, on a
+ * line of its own, `TRIAGE: recommend | needs-info | ready-for-human`; an
  * optional `TIER: light | standard | heavy` line follows it (issue #200);
  * and the rest of the message is the exit's body — the assessment, the
- * specific questions, or the suggested grilling agenda.
+ * specific questions, or the suggested grilling agenda. The prompt asks for
+ * the marker first, but a short lead-in above it is tolerated and dropped:
+ * "narrate, then exit" is common model behaviour (the BLOCKED: marker hit
+ * the same slip, #107), and first-line-only parsing threw away every exit
+ * that came after one.
  */
 
 import { normalizeModelTier, type ModelTier } from "@/lib/model-tiers";
@@ -60,6 +64,24 @@ const TRIAGE_LINE = /^TRIAGE:[ \t]*(recommend|needs-info|ready-for-human)[ \t]*$
  */
 const TIER_LINE = /^TIER:[ \t]*(.*?)[ \t]*$/;
 
+/** Indices of the lines that open with the exit marker, skipping fenced code
+ * blocks so a pass quoting the protocol as an example states no exit. The
+ * marker must begin its line — "my exit is TRIAGE: recommend" in prose is
+ * not one. */
+function triageMarkerLines(lines: string[]): number[] {
+  const found: number[] = [];
+  let inFence = false;
+  lines.forEach((line, i) => {
+    const t = line.trim();
+    if (t.startsWith("```")) {
+      inFence = !inFence;
+      return;
+    }
+    if (!inFence && /^TRIAGE:/i.test(t)) found.push(i);
+  });
+  return found;
+}
+
 /**
  * Parse a triage pass's turn result into an exit. Every exit needs a
  * non-empty body — an assessment, questions or an agenda are the pass's
@@ -77,17 +99,31 @@ export function parseTriageExit(turn: PassTurn): TriageResult {
   }
 
   const lines = final.message.trim().split("\n");
-  const match = lines[0].trim().match(TRIAGE_LINE);
-  if (!match) {
+  const markers = triageMarkerLines(lines);
+  if (markers.length === 0) {
     return {
       kind: "unparseable",
-      reason: "final message does not start with a TRIAGE: line",
+      reason: "final message has no TRIAGE: line",
+    };
+  }
+  // Every line that opens with the marker must be a valid exit and agree:
+  // a pass naming two exits, or an out-of-vocabulary one (the arming exit)
+  // beside a valid one, has stated no single decision.
+  const matches = markers.map((i) => lines[i].trim().match(TRIAGE_LINE));
+  const match = matches[0];
+  if (
+    !match ||
+    matches.some((m) => !m || m[1].toLowerCase() !== match[1].toLowerCase())
+  ) {
+    return {
+      kind: "unparseable",
+      reason: "final message's TRIAGE: lines do not name one valid exit",
     };
   }
 
   const kind = match[1].toLowerCase() as TriageExitKind;
 
-  let bodyStart = 1;
+  let bodyStart = markers[0] + 1;
   while (bodyStart < lines.length && lines[bodyStart].trim() === "") bodyStart++;
   let tier: ModelTier | null = null;
   const tierMatch = lines[bodyStart]?.trim().match(TIER_LINE);
