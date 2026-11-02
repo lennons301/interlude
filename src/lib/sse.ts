@@ -10,6 +10,12 @@ export function createSSEStream(
   handler: (send: (data: unknown, event?: string) => void) => () => void
 ): Response {
   const encoder = new TextEncoder();
+  let cleanup: (() => void) | null = null;
+  // Idempotent: abort and cancel can both fire for one disconnect.
+  const stop = () => {
+    cleanup?.();
+    cleanup = null;
+  };
 
   const stream = new ReadableStream({
     start(controller) {
@@ -21,16 +27,22 @@ export function createSSEStream(
         }
       };
 
-      const cleanup = handler(send);
+      cleanup = handler(send);
 
       signal.addEventListener("abort", () => {
-        cleanup();
+        stop();
         try {
           controller.close();
         } catch {
           // Already closed
         }
       });
+    },
+    // The consumer went away. Don't rely on request.signal alone — if a proxy
+    // in front never closes the upstream request, abort never fires and the
+    // handler's poll leaks (prod 2026-11-02).
+    cancel() {
+      stop();
     },
   });
 

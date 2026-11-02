@@ -59,6 +59,17 @@ nextServer.on("exit", (code) => {
   process.exit(code ?? 1);
 });
 
+// Tear the upstream request down when the client goes away. `pipe` never
+// propagates a closed destination back to its source, so without this a
+// long-lived response (an SSE stream) outlives its browser: Next's
+// request.signal never aborts and the route's poll runs forever. 78 such
+// zombies pinned next-server at 100% CPU in prod (2026-11-02).
+function closeUpstreamWithClient(res, proxyReq) {
+  res.on("close", () => {
+    if (!res.writableFinished) proxyReq.destroy();
+  });
+}
+
 // Public HTTP server
 const server = http.createServer((req, res) => {
   // Check for subdomain-based preview routing
@@ -96,6 +107,7 @@ const server = http.createServer((req, res) => {
       }
     });
 
+    closeUpstreamWithClient(res, proxyReq);
     req.pipe(proxyReq);
     return;
   }
@@ -122,6 +134,7 @@ const server = http.createServer((req, res) => {
     }
   });
 
+  closeUpstreamWithClient(res, proxyReq);
   req.pipe(proxyReq);
 });
 
