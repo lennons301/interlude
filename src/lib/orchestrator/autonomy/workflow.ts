@@ -229,8 +229,9 @@ export function buildTriagePrompt(ticket: TriageTicket): string {
     `Deliver your exit as your run's final message, in exactly this shape:`,
     ``,
     `- The first line is exactly one of \`TRIAGE: recommend\`, ` +
-      `\`TRIAGE: needs-info\` or \`TRIAGE: ready-for-human\` — nothing else ` +
-      `on that line, and TRIAGE: appears nowhere else in the message.`,
+      `\`TRIAGE: needs-info\` or \`TRIAGE: ready-for-human\` — on a line ` +
+      `of its own, with nothing else on it, and no other line starts with ` +
+      `TRIAGE:. Put any lead-in after the exit, not above it.`,
     `- The second line is exactly one of ` +
       `${MODEL_TIERS.map((tier) => `\`TIER: ${tier}\``).join(", ")} — the tier ` +
       `the issue's work runs at, chosen against the rubric in *The tier* above. ` +
